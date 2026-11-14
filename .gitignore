@@ -1,0 +1,17 @@
+# Root checkout is a documentation-only seed; implementation lives in fresh linked worktrees.
+/.worktrees/
+/.superpowers/
+/.gradle/
+/.kotlin/
+**/build/
+/local.properties
+/.local-signing/
+/dist/
+*.hprof
+*.jfr
+*.apk
+*.aab
+*.keystore
+*.jks
+__pycache__/
+*.py[cod]

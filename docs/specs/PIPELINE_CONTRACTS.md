@@ -1,0 +1,85 @@
+# Shared image, recipe, geometry and execution contracts
+
+Version 1.0. This file is authoritative for cross-module semantics. Algorithm-specific parameter versions are defined in their domain documents; a provider's source-parity variant and a product adaptation have distinct IDs.
+
+## Image representation
+
+`RgbImage(width:Int,height:Int,rowStride:Int,pixels:ByteArray)` represents opaque encoded sRGB RGB8, positive dimensions, minimum stride 3*width. Widen multiplication to Long and validate all extents before allocation/access. Bytes are unsigned samples 0..255; row padding is not image content. Input is immutable; owned internal buffers use AutoCloseable leases. Native BGR is only an adapter layout and must swap explicitly. Source pixel identity refers to the orientation/color-normalized RGB pixels plus conversion version; byte identity separately hashes the stored original.
+
+EXIF orientation is applied exactly once at decode. Import preserves original bytes separately. SDR input profiles are converted explicitly into sRGB; unsupported HDR/profile/decode cases are rejected or require a separately documented user-approved conversion. Alpha is composited onto white with a documented decoder policy, never discarded unnoticed. Arithmetic is on encoded sRGB byte values unless an algorithm explicitly declares Lab or another domain; this is not physical radiance recovery.
+
+Coordinates are pixel centers with top-left center (0,0), x right, y down; valid centers span [0,W−1]×[0,H−1]. Corner order TL,TR,BR,BL is labeled, not guessed by independent min/max sorting. Rectangles for pixel extraction are integer half-open `[x0,x0+w)×[y0,y0+h)`. Page-space display transforms, EXIF-normalized source, preview, detector/letterbox and final destination are separate named spaces with explicit transforms.
+
+## Numerical reference
+
+`clamp(x,a,b)=min(max(x,a),b)`. For finite nonnegative numbers `roundByte(x)=clamp(floor(x+0.5),0,255)`. Signed rounding where explicitly required is nearest with ties away from zero. Do not accidentally use truncation in a roundByte recipe or signed integer division for floor. Float intermediate buffers use float32; reductions/statistics use float64 or sufficiently wide integer sums as their algorithm requires. Reject nonfinite input fields/results before quantization.
+
+Default half-pixel linear resize maps j→`(j+0.5)*sourceSize/destinationSize−0.5`, interpolating with clamped source indices. Same-size resize is identity. Geometry backward sampling uses source pixel-center coordinates and bilinear interpolation, with constant white outside unless an explicit source-parity variant declares another border. Model corner-aligned grid upsampling is not this half-pixel convention. Default reflected filter indexing for n>1 folds modulo 2(n−1), with −1→1; n=1→0. A source-derived binomial filter may instead explicitly use replicated borders and byte rounding per pass.
+
+An identity stage must return identical bytes without a color-space roundtrip. Full-strength output candidate quantization belongs to the algorithm contract. The adapter applies strength/protection exactly once: `a=strength*(1-protection)`, output=`roundByte((1-a)*stageInput+a*candidate)`, where candidate is already range-clamped and has the recipe's stated byte/float precision. For `paper_gain_v1`, candidate is roundByte(I*gain) before blending: I=200,gain=1.5,a=.5 yields 228, not 250. A generic wrapper must not blend an already blended adapter output again.
+
+The shared composer is an explicit exception to float32 image intermediates: every `strength` is a serialized IEEE-754 binary64 Kotlin `Double`, reconstructed without a float32 cast; protection samples are float32 and promoted exactly to binary64. In round-to-nearest/ties-to-even binary64 arithmetic, evaluate `p=1.0-protection.toDouble()`, `a=strength*p`, `b=1.0-a`, `left=b*input.toDouble()`, `right=a*candidate.toDouble()`, `mixed=left+right`, each as a separate rounded operation in that order, then `roundByte(mixed)`. No FMA, reassociation or float32 composer scratch is permitted in the reference. Candidate float precision/quantization remains algorithm-specific and precedes this composition. Input 3, byte candidate 8, strength Double 0.1, protection Float 0 gives mixed 3.5 and output 4; a separately rounded float32 composer gives 3 and is not this contract. Exact zero-strength/fully protected bypasses remain byte copies.
+
+## Canonical typed contracts
+
+```kotlin
+data class PixelSize(val width: Int, val height: Int)
+data class PointPx(val x: Double, val y: Double)
+data class QuadPx(val tl: PointPx, val tr: PointPx, val br: PointPx, val bl: PointPx)
+data class RectPx(val x: Int, val y: Int, val width: Int, val height: Int)
+enum class GeometryMode { NONE, PERSPECTIVE, MANUAL_CURVE, ROUGH_CROP_DEWARP }
+enum class RenderPurpose { CARD, PREVIEW, DETAIL_CROP, EXPORT }
+enum class FallbackPolicy { FAIL, KEEP_STAGE_INPUT }
+data class OutputSpec(val size: PixelSize, val purpose: RenderPurpose)
+data class ProviderIdentity(val id: String, val contractVersion: Int,
+    val assetSha256: String?, val runtime: String, val precision: String)
+data class Recipe(val schemaVersion: Int, val geometry: GeometryRecipe,
+    val appearance: AppearanceRecipe, val denoise: DenoiseRecipe?,
+    val detail: DetailRecipe?, val binary: BinaryRecipe?)
+data class RenderRequest(val sourceId: String, val sourcePixelHash: String,
+    val pageId: String, val recipeRevision: Long, val recipe: Recipe,
+    val output: OutputSpec, val generation: Long,
+    val protectionMaskId: String?, val fallback: FallbackPolicy)
+enum class RenderStatus { OK, DEGRADED, INVALID_INPUT, UNAVAILABLE,
+    INVALID_MAP, PROCESSING_FAILED, CANCELED, RESOURCE_LIMIT, STORAGE_FAILED }
+data class StageRecord(val stageId: String, val version: Int,
+    val provider: ProviderIdentity?, val outcome: String,
+    val inputSize: PixelSize, val outputSize: PixelSize, val warningCodes: List<String>)
+data class RenderResult(val request: RenderRequest, val status: RenderStatus,
+    val image: RgbImage?, val stages: List<StageRecord>, val warnings: List<String>)
+interface RenderCoordinator {
+    suspend fun render(request: RenderRequest): RenderResult
+}
+```
+
+`GeometryRecipe`, `AppearanceRecipe`, `DenoiseRecipe`, `DetailRecipe` and `BinaryRecipe` are sealed, serializable parameter families enumerated in the domain documents; do not implement them as unvalidated arbitrary maps. Serialized Recipe includes every effective default. `RgbImage` in the signatures is the validated owned-image type described above; implement its storage class and lifecycle tests in T-02. Unknown schema/algorithm versions and unknown serialized fields are rejected for rendering; stored future-version documents remain preserved and show an unsupported-version explanation.
+
+## Ordered execution and sizing
+
+Canonical product order: source decode/orientation/color → selected geometry → appearance → optional luma denoise → optional bounded detail → optional final grayscale/binary conversion. Exactly one appearance algorithm is selected. A combined public model has its own ID and must declare integrated stages so they are not repeated. Binary output disables color/detail controls incompatible with that final representation; it does not silently run an aggressive ink curve first.
+
+`OutputSpec.size` is an **explicit destination size**, never an inferred universal cap. UI first chooses geometry aspect/target from its algorithm, then computes an aspect-preserving size for the chosen purpose. For nongeometric output, aspect equals the oriented source; for supplied-corner perspective/manual-curve it is the declared page target; rough-crop dewarp defaults to accepted crop aspect. When a purpose long-edge limit L applies, use `s=min(1,L/max(targetW,targetH))`, size=(max(1,floor(targetW*s)),max(1,floor(targetH*s))); geometry/model sampling requiring dimensions≥2 rejects smaller sizes. Export never exceeds the selected target solely to manufacture detail.
+
+Geometry maps address the original oriented source or its recorded crop; render them directly at OutputSpec.size. With GeometryMode.NONE and a smaller output, create an explicit source-resize stage first. Appearance input is that destination raster; input size therefore can change model size branches. PREVIEW is not guaranteed equivalent to downsampling a completed full-resolution EXPORT. DETAIL_CROP, by contrast, renders full-target algorithm context then extracts the chosen view, or uses an algorithm-declared equivalent region path with halos/global statistics; it is never a falsely labeled upscaled preview. EXPORTED source-resolution processing uses its actual target dimensions, not the thumbnail tensor size.
+
+GeometryRecipe stores user control points in normalized **oriented-source pixel-center** coordinates x/(W−1),y/(H−1), together with source PixelSize and a schema version. Convert once into PointPx at render. Reject incompatible source identity/dimensions rather than scaling an unrelated recipe. Integer rough-crop rectangles are derived explicitly and persisted with the final accepted bounds. A crop-origin translation is not a substitute for a homography inverse.
+
+**Page rotation:** GeometryRecipe also stores `outputQuarterTurns:Int` in0..3, default0, representing clockwise user rotation after the base geometry but before appearance. This is distinct from EXIF normalization. Persist it in the recipe, not as a second conflicting page/source rotation. For odd turns swap the base target width/height before selecting final OutputSpec. To compose the inverse map, let(u,v) be normalized destination centers after rotation; map to base-geometry coordinates as q0:(u,v),q1:(v,1−u),q2:(1−u,1−v),q3:(1−v,u), then apply the base inverse map. This avoids resampling the image twice. The identical composed map transforms protection/coverage. Corner/curve controls remain in original oriented-source coordinates and are display-transformed for interaction. Rotating/duplicating a page changes only its recipe/revision, not original bytes or another page's recipe.
+
+## Provider interfaces and capabilities
+
+DetectionProvider returns `DetectionProposal(quad:QuadPx?,score:Double?,detected:Boolean,reason:String?)` in oriented-source coordinates. A full-frame fallback is detected=false. Score is not calibrated confidence. Detection never mutates a user's accepted geometry.
+
+GeometryProvider returns either a finite inverse-grid/map with declared source/destination spaces, grid interpolation and source border semantics, or a completed rectified image with an explicit output contract. An image-only provider cannot support geometry-first protection masks unless it supplies the identical paired-mask transform. AppearanceProvider returns an absolute restored image or a typed illumination field whose adapter composes it; these are distinct capabilities. Tensor shapes alone never make two provider roles compatible.
+
+Each provider descriptor includes identity/hash, installed/validated state, supported dimensions/format, mask support, integrated stages, input/output conversion, runtime thread requirements and memory estimate. Missing, unlicensed or unvalidated assets stay GATED; loading must never initiate network access.
+
+## Masks, failures and provenance
+
+Protection is a finite float32 scalar image in [0,1], aligned to the original source; 1 preserves photometric stage-input values. Transform it through the same inverse geometry as the image, bilinearly with outside value1, clamp [0,1]; do not byte-quantize or resize without the actual warp. After transform it matches the appearance raster. Protection does not prevent geometric resampling. A page-coverage mask is a separate object, never passed as a protection mask by accident. For a protected recipe disable unsupported detail/binary/providers during preflight, not halfway through export.
+
+Invalid input, cancellation, allocation/resource rejection and source/storage failures return no newly published image and do not invoke algorithm fallback. A processing/map/provider failure uses FAIL by default. KEEP_STAGE_INPUT returns DEGRADED with the exact complete input of the failed stage, records failure and terminates: downstream stages are skipped. Never recursively fall back or report DEGRADED as OK. An enhancement failure after successful geometry retains the geometry result, not the raw original. A dewarp failure retains its accepted rough crop. Manual-curve failure retains source input. Export rejects degraded pages unless the user explicitly accepts an execution snapshot identifying the omitted stages.
+
+Accepted degraded export reuses a durably pinned lossless raster, never reruns the failure: freeze its RenderId/execution hash, requestedOutput, actual output dimensions and KEEP_STAGE_INPUT policy as specified in DATA_MODEL_AND_STORAGE and CAPTURE_IMPORT_EXPORT. If actual dimensions/orientation differ, renew the export review and resource/physical-placement admission. Ordinary export requests use FAIL. Invalid inputs/resource/storage/cancellation do not gain a fallback exception, and a missing/changed accepted raster cannot be regenerated under the old acceptance.
+
+Check cancellation before/after stages and in long loops; never publish partial buffers. Only RenderStatus.OK plus matching current generation/revision may automatically replace a selected preview. A structured failure can leave the previous completed preview visible, clearly old. Provenance records requested and executed stages, source identities, all effective parameters, model/runtime/precision, raster dimensions, warnings and optional timings; selecting an algorithm is not evidence it actually executed.
