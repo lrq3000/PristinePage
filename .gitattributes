@@ -3,3 +3,8 @@ gradlew text eol=lf
 gradlew.bat text eol=crlf
 gradle/wrapper/*.properties text eol=lf
 *.jar binary
+# Legal snapshots retain upstream bytes and their recorded digests; global newline conversion must not rewrite copyright text or snapshot JSON.
+licenses/build-tools/*.txt -text
+licenses/dependencies/** -text
+# Retain upstream legal whitespace verbatim; authored code/docs still receive the normal diff whitespace check.
+licenses/dependencies/notices/** -whitespace

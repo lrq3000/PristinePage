@@ -1,0 +1,7 @@
+<resources>
+    <string name="app_name">PristinePage</string>
+    <string name="bootstrap_subtitle">Offline document and photo scanning</string>
+    <string name="bootstrap_notice">Development bootstrap. Import, camera, editing and export are not available in this milestone.</string>
+    <string name="import_photos">Import photos</string>
+    <string name="take_photo">Take photo</string>
+</resources>

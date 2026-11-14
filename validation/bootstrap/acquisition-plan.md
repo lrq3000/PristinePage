@@ -2,6 +2,8 @@
 
 Status: **operator approved on 2026-11-14; SETUP-R correction round1 closed before first acquisition**. The operator selected “Approve P-02 acquisition and continue implementation” on the P-02 form. The independent [saved-artifact re-review](../reviews/setup-artifact-review.md) closed R1/R2/exact-coordinate precautions with scoped compliance/quality PASS. Prepared for T-01 attempt T01-20261114-A under approved P-01. This supplements the accepted implementation plan, not product scope. No executable artifact was downloaded while preparing it; inspected release pages and text POM/checksum metadata are not installed dependencies or passing build evidence. The authority reconciliation and reproducibility clarifications below do not change the approved direct roots, versions, repositories or excluded permissions.
 
+Subsequent amendment: after actual resolution exposed conflicts between approved roots and the stable-only/no-video wording, independent T01-DEP-R identified the exact chains and the coordinator verified cached upstream declarations. The operator explicitly approved [P-02A](dependency-scope-amendment.md) on2026-11-14 for those twelve native-transitive exceptions only. Read both bills together; the original wording below is historical where that precise amendment supersedes it. No authority is inferred retroactively from cached files, and no direct root/version/repository changed.
+
 ## Selection and independent review
 
 Selected bootstrap family: AGP8.13.2, Gradle8.13, Kotlin/KGP/serialization/Compose compiler2.3.21 and KSP2.3.14/KSP2. Reuse installed Android Studio JBR21.0.8, SDK36 and Build Tools35.0.0. Compile/target36, minimum26, required arm64-v8a, matching Java/Kotlin bytecode target17. No JDK/SDK/NDK/emulator installation is requested.

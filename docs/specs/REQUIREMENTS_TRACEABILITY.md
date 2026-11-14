@@ -1,6 +1,6 @@
 # Requirement → task → validation coverage
 
-All25 PRD requirements are mapped below. A mapping is not a passed test. Initial implementation evidence is **not run** for every row; update evidence links against actual builds during implementation. V-01–V-07 are independent gates in VALIDATION_PLAN; exact small test vectors are in TEST_FIXTURES and the algorithm documents.
+All25 PRD requirements are mapped below. A mapping is not a passed test. At package creation every row was not run; the scoped bootstrap evidence below is now retained without marking any complete scanner requirement passed. V-01–V-07 are independent gates in VALIDATION_PLAN; exact small test vectors are in TEST_FIXTURES and the algorithm documents. Live PRD amendment U-01 requires multiple actual neural geometry/appearance methods; original all-neural-deferral wording is superseded.
 
 | Requirement | Authoritative specification | Owning tasks | Required acceptance evidence |
 |---|---|---|---|
@@ -49,3 +49,14 @@ All25 PRD requirements are mapped below. A mapping is not a passed test. Initial
 When a contract changes, identify every boundary/row above it affects and reopen that evidence. A changed source hash invalidates prior parity; a different render dimension may enter another model branch; a new backup/manifest/dependency changes privacy review. Preserve a prior result as historical, not current. An unimplemented optional model is recorded as intentionally deferred; unimplemented mandatory behavior is blocked, not silently moved out of scope.
 
 The documentation package's own requirement coverage and review are in SPEC_PACKAGE_VALIDATION. Application completion requires every mandatory row's actual passing evidence, independent current-build review and operator acceptance of visual intent and explicit capability limits.
+
+## Current partial bootstrap evidence — T01-20261114-A
+
+[APK receipt](../../validation/bootstrap/apk-receipt.md) identifies the exact development artifact SHA-256387217986018f31b7854abe153efb0febd0c0d2bd1029d7eb4e5e1b341ec7183 and actual9-test/offline-build/lint/signature/resource/ABI checks. [Toolchain receipt](../../validation/bootstrap/toolchain-receipt.md), [code review](../../validation/reviews/t01-code-review.md), [dependency audit](../../validation/reviews/t01-dependency-audit.md), approved [P-02A](../../validation/bootstrap/dependency-scope-amendment.md) and [notice register](../../validation/reviews/t01-notice-register.md) retain boundary-specific findings and permissions. These support only these portions:
+
+- FR-16/NFR-04: bootstrap configuration, merged debug/release network/backup assertions and actual debug packaged resources; actual fresh-install airplane-mode scanner journeys and OEM transfer behavior remain not run.
+- NFR-06/NFR-08: exact bootstrap build/artifact/tool identities, observed RED→GREEN and retained independent reports; image/recipe/provider provenance and all algorithm/state/device tests remain unimplemented/unverified.
+- NFR-07: acquired583-component register and69 deduplicated embedded legal texts; missing declarations, unknown roles, packaged-notice obligations and all legal/distribution clearance remain open.
+- NFR-09: original24 source/root-seed identities and accepted-plan hash reverified, live relative links checked; this is not final standalone app/release acceptance.
+
+No import/capture/edit/save/reopen/export/share journey, deterministic image algorithm, actual learned model or physical-device/visual gate has passed. The development artifact is intentionally labeled a bootstrap with unavailable actions, not a substitute for mandatory functionality.
