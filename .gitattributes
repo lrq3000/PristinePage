@@ -8,3 +8,7 @@ licenses/build-tools/*.txt -text
 licenses/dependencies/** -text
 # Retain upstream legal whitespace verbatim; authored code/docs still receive the normal diff whitespace check.
 licenses/dependencies/notices/** -whitespace
+# Audit snapshots fingerprint the observed bytes, including Gradle's Windows CRLF output. Preserve those bytes rather than silently normalizing their identity in Git.
+gradle/verification-metadata.xml -text whitespace=cr-at-eol
+**/gradle.lockfile -text whitespace=cr-at-eol
+settings-gradle.lockfile -text whitespace=cr-at-eol
