@@ -6,7 +6,7 @@ User amendment U-01 in live PRD requires multiple actual neural methods, includi
 
 | ID | Task | Depends on | Initial state | Claim / evidence |
 |---|---|---|---|---|
-| T-01 | Reproducible Android bootstrap and capability-free launch | None | Local build/static artifact verified; launch gate open | Owner coordinator `LOCAL_SESSION`; attempt `T01-20261114-A`; local milestone efa7ae6,9 tests green/offline strict build exit0/148tasks; exact APK/privacy/16KiB [receipt](../../validation/bootstrap/apk-receipt.md) and scoped independent artifact PASS; INC-004 byte-preservation follow-up; no installation/launch authorization. |
+| T-01 | Reproducible Android bootstrap and capability-free launch | None | Local verified; P-03 launch blocked on manual unlock | Owner coordinator `LOCAL_SESSION`; attempt `T01-20261114-A`; local efa7ae6/ffce635,9 tests green/offline strict build exit0/148tasks, scoped artifact PASS. Exact P-03 approved; [read-only preflight](../../validation/bootstrap/device-check-receipt.md) found PRIVATE_DEVICE asleep/locked, debug package absent; no installation/launch/device write. |
 | T-02 | Pure contracts, geometry math and deterministic fixtures | T-01 | Not started | Unclaimed. |
 | T-03 | Durable source/document/recipe store and recovery | T-02 | Not started | Unclaimed. |
 | T-04 | Picker import and orientation/color-normalized decode | T-03 | Not started | Unclaimed. |
