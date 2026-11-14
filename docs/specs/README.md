@@ -1,4 +1,6 @@
-# Paperlight — Android scanner implementation package
+# PristinePage — active Android implementation specifications
+
+The original Paperlight v1.0 source package is preserved unchanged outside this repository. This copied package is now the live PristinePage application authority under approved [P-01](OPERATIONAL_PLAN.md). Read [PRD.md](PRD.md), [TODO.md](TODO.md) and [execution progress](../../validation/progress.md) for current implementation status; the historical specification-package receipt does not validate the application.
 
 Package version 1.0. Specification date: 2026-11-14. Paperlight is a working project label, not a cleared trademark. This directory is a standalone engineering brief, not a working application or a claim of measured image quality.
 

@@ -1,0 +1,58 @@
+# NN-PLAN-01 — bounded neural milestone proposal
+
+2026-11-14; proposal only, not T-08 implementation, task claim, acquisition approval or release acceptance. Workspace: `X:\local-workspace\.worktrees\paperlight-v1`; source package v1.0, technical SHA-256 `54f5d3f72134075b40ca178f8e68f39a626352de2632b2e7db4fe598aba263c3` (supplied authority, not recomputed here).
+
+## Conclusion and scope
+
+**Verified requirement:** U-01 makes multiple working neural correction/appearance methods mandatory; registry entries, detector-only processing and classical substitutes do not qualify (`docs/specs/PRD.md:13–17`). Classical import→edit→save→reopen→export remains first (`docs/specs/OPERATIONAL_PLAN.md:54–56`). P-02 excludes neural runtimes/assets (`docs/specs/OPERATIONAL_PLAN.md:35–46`). Historical optional-only wording, including `docs/specs/IMPLEMENTATION_PLAN.md:109–118`, cannot waive U-01; the coordinator must reconcile it without replacing the accepted plan.
+
+Retain complete classical perspective/manual-curve, appearance, denoise/detail and grayscale/Sauvola scope; this milestone supplements it.
+
+**Recommendation, not approved count:** target three genuinely distinct neural algorithms: UVDoc map-based correction, GCDRNet GC illumination-field correction, and DocRes restored-image appearance, with deshadow as a separately tested task profile of the same DocRes algorithm. Do not count prompts, strength settings, source/product variants, UVDoc distributions or a detector as additional independent algorithms. **Feasibility remains uncertain:** the inspected sources do not establish a rights-cleared, handset-fit complete set or faithful standalone-photograph performance. Keep that mandatory outcome open, not “all deferred, app complete.”
+
+## Four bounded candidates
+
+| Candidate | Useful distinction and intended use | Current status / selection consequence |
+|---|---|---|
+| Original UVDoc map | Learned curved-sheet correction, not corner detection. RGB01 input `[1,3,712,488]`; inverse xy grid `[1,2,45,31]` addresses original source/crop. Coarse-map sampling supports arbitrary admitted output and identical protection warp. | **GATED; preferred geometry contract.** Repository announces `model/best_model.pkl`; MIT software grant inspected, distinct checkpoint grant unresolved [S1,S2]. Export/parity/device evidence absent (`docs/specs/MODEL_PROVIDERS.md:185–199`). |
+| Paddle UVDoc ONNX | Alternative distribution of the same geometry family, not a second algorithm. Model card declares Apache-2.0; inspected wrapper samples internally and returns a rectified three-channel image, not its coarse map. | **GATED; rights-evidence alternative, not interchangeable asset.** Card metadata is stronger than code-only permission, not binary/source proof [S3,S4]. Image-only output cannot demonstrate the required map topology or paired protection transform; graph/source correspondence, channels, sizing and supported turns remain unresolved (`docs/specs/MODEL_PROVIDERS.md:201–211`). |
+| GCDRNet GC | Learned per-channel divisor, followed by host correction; bounded `gcdr_gc_mobile_v1` predicts at long-edge512, lifts the field, caps gain3 and samples full-resolution content. Distinct from classical paper estimation and from absolute-image restoration. | **GATED; preferred first appearance experiment.** README links external weights without an explicit checkpoint grant [S5]. Actual wrapper overwrites its512 resize and runs native padded size [S6]; bounded profile is a deliberate adaptation, not upstream equivalence. GC+DR adds an absolute-image DR network but extra assets/native-size cost are unnecessary initially (`docs/specs/MODEL_PROVIDERS.md:107–138`). |
+| DocRes appearance / deshadow | Independent six-channel image+task-prompt network returning absolute restored image; useful comparator for harder document shadows/color. Two tasks share checkpoint and architecture, not two independent models. | **GATED; second appearance family.** External `docres.pkl` terms/content unresolved [S7]. Source uses FP16, stride8 below1600 and exactly1600² at/above1600, then quantized ratio lift [S8]. FP32 CPU is a separately identified adaptation; memory/export risk remains (`docs/specs/MODEL_PROVIDERS.md:140–183`). |
+
+SyntheticDoc is a reserve geometry route, not needed for this minimum; its external rights remain unresolved. FSENet is not a handset shortcut: the specification records explicit mobile/edge limitations (`docs/specs/MODEL_PROVIDERS.md:213–253`). Neither resolves the photograph gap merely by increasing model count.
+
+## Documents versus faithful photograph scanning
+
+“Camera-captured document” does not establish general photographic restoration. White-paper priors can neutralize cream paper, photo colors, embedded images and genuine lighting. Natural lightness retains chromatic axes but does not uniquely recover illumination versus substrate color (`docs/specs/PHOTOMETRIC_ALGORITHMS.md:9–13,119–189`). Preserve original/No enhancement, Natural, white-paper and explicit binary choices; never advertise whiteness as fidelity.
+
+Propose separate acceptance strata: text/colored documents, embedded photographs, and standalone photographed prints with natural color/texture intent. Do not apply sheet dewarping to arbitrary scene depth. Test photograph-only prints for geometric coverage, gradients, skin/neutral/color patches, texture and clipping; these are proposed tests, not demonstrated provider capabilities. If GC/DocRes cannot provide useful faithful photo restoration, request approval for a narrowly bounded photo-provider assessment and replacement/addition. The three-family document milestone alone must not close U-01's photograph requirement.
+
+## Contracts and promotion evidence
+
+1. Freeze exact source/profile/graph/checkpoint hashes, architecture, tensor/color/range contracts and tolerances. Code, weights, converted weights, runtime, training-data statements and example-display rights remain separate; a root software MIT license does not automatically establish rights for an unidentified external checkpoint bundle (`docs/specs/LICENSES_AND_SOURCES.md:11–33`). No complete cleared set exists in this assessment.
+2. Preserve source-reference versus product IDs. GC is BGR, top/left replicated stride32, divisor not RGB output; interpolate fields before reciprocals. GCDRNet DR is not residual. DocRes prompts are not learned fields, deshadow returns background prompt, and ratio lift quantizes prediction first. Do not chain appearance modes or repeat integrated finishing. Candidate clipping precedes exactly one ordered binary64 strength/protection blend (`docs/specs/PIPELINE_CONTRACTS.md:15–21,57–75`; `docs/specs/MODEL_PROVIDERS.md:113–181`).
+3. UVDoc corner-aligned grids are not half-pixel resize; compose crop origin/output turns once, sample source/mask together, use product-white versus reference-black borders. Reject nonfinite/folded/overlapping/out-of-support maps; no clamping to conceal failure. Page coverage is not protection. Paddle image-output must not receive a second warp or fabricated map (`docs/specs/GEOMETRY_ALGORITHMS.md:86–112,136–176`).
+4. Require pinned source→exportCPU→deviceCPU raw and final parity before delegates. Proposed raw image/field tolerances max2e−4/mean1e−5 and map source-coordinate drift≤0.1pixel require review; source FP16 versus product FP32 needs an explicit comparison, not relabeling. Exact host fixtures remain exact. Precision, pruning, working-size or tiling changes reopen gates (`docs/specs/MODEL_PROVIDERS.md:257–269`).
+5. Demonstrate each neural method actually executes through save/reopen/export, including source-sized detail context, branch boundaries, protected/unsupported recipes, absent/corrupt assets, cancellation/stale generations and failures. FAIL is default; DEGRADED is not neural success (`docs/specs/PIPELINE_CONTRACTS.md:77–85`).
+6. No 4–6GB/API26/arm64 fit promise. Admit resident weights, activations, prompts, masks and copies against measured budgets; one expensive session; no silent export shrink or naive attention tiling. Measure cold and ≥20 warm runs, P50/P95, peaks, thermal/repeated-use behavior on approved physical devices. Fresh-install airplane mode must exercise all shipped methods/exports without first-use fetch. Fidelity review must retain faint strokes, colored/photo content and margins, not merely PSNR/OCR/whiteness (`docs/specs/PERFORMANCE_AND_OFFLINE.md:7–21,25–51`; `docs/specs/VALIDATION_PLAN.md:29–56`). All these gates are **not run**.
+
+## Smallest later decisions and acquisition bill
+
+First obtain text-based checkpoint permission covering redistribution/conversion for original UVDoc, GC-only and DocRes, or an explicitly approved alternative; do not download binaries to search for rights. Confirm three-family count and photograph acceptance strata without weakening mandatory scope.
+
+Only then present a separately approved bill: exactly `best_model.pkl`, GC `checkpoint.pkl`, `docres.pkl`; minimal pinned desktop export/reference dependencies; one version-pinned Android CPU ONNX Runtime supporting API26/arm64 and inspected operators; derived hash-bound ONNX graphs and notices. Exact bytes/hashes, runtime/exporter versions, official origins, storage and conversion environment remain to be supplied before acquisition approval. Exclude DR, MBD, second runtime, GPU/delegates, training datasets and bulk repositories initially. A source FP16 oracle environment needs explicit authorization too. Real-photo rights/acquisition, signing and named-device operations require their own approvals. Rights-only clarification or a failed fit gate triggers coordinator decision/replacement, not a fake completion.
+
+## Read coverage and inspected URLs
+
+Complete local reads: `AGENTS.md:1–13`; all following under `docs/specs/`: `AGENTS.md:1–29`, `PRD.md:1–87` (U-01 included), `TODO.md:1–47`, `PIPELINE_CONTRACTS.md:1–85`, `common-mistakes-and-frequently-used-commands.md:1–40`, `OPERATIONAL_PLAN.md:1–79`, `MODEL_PROVIDERS.md:1–303`, `LICENSES_AND_SOURCES.md:1–47`, `PERFORMANCE_AND_OFFLINE.md:1–51`, `VALIDATION_PLAN.md:1–70`, `GEOMETRY_ALGORITHMS.md:1–228`, `PHOTOMETRIC_ALGORITHMS.md:1–277`, `TEST_FIXTURES.md:1–80`, `IMPLEMENTATION_PLAN.md:1–166`. Truncated initial reads were completed. No source-package rehash or complete upstream-repository review claimed.
+
+Eight exact official text pages inspected via svipall on 2026-11-14, HTTP200; no linked artifacts followed. Code extraction loses indentation; expressions were inspected, not executed or syntax-validated. “Thin/not_prose” labels on code/card are not missing-content claims.
+
+- [S1 UVDoc README](https://raw.githubusercontent.com/tanguymagne/UVDoc/4c9b82b537057aff2526e6dd118a847cdd072e82/README.md)
+- [S2 UVDoc MIT software license](https://raw.githubusercontent.com/tanguymagne/UVDoc/4c9b82b537057aff2526e6dd118a847cdd072e82/LICENSE)
+- [S3 Paddle model card](https://huggingface.co/PaddlePaddle/UVDoc_onnx/raw/3bcf535371727d11e783101f79a504c68848aae3/README.md)
+- [S4 Paddle image-output wrapper](https://raw.githubusercontent.com/PaddlePaddle/PaddleX/4c968d30b9d0d4a693d9eaaef0881c20f8d7d0e0/paddlex/inference/models/image_unwarping/modeling/uvdoc.py)
+- [S5 GCDRNet README](https://raw.githubusercontent.com/ZZZHANG-jx/GCDRNet/415c97a9a64d0a796dbbad43485ce2ab102f2a7d/README.md)
+- [S6 GCDRNet inference](https://raw.githubusercontent.com/ZZZHANG-jx/GCDRNet/415c97a9a64d0a796dbbad43485ce2ab102f2a7d/infer.py)
+- [S7 DocRes README](https://raw.githubusercontent.com/ZZZHANG-jx/DocRes/d3e3a18c7c7ad10e4615ca2eb6a10f83128d8560/README.md)
+- [S8 DocRes inference](https://raw.githubusercontent.com/ZZZHANG-jx/DocRes/d3e3a18c7c7ad10e4615ca2eb6a10f83128d8560/inference.py)

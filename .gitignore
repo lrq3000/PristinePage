@@ -3,6 +3,9 @@
 /.superpowers/
 /.gradle/
 /.kotlin/
+/.android-user-home/
+/.android-sdk-home/
+/validation/raw/
 **/build/
 /local.properties
 /.local-signing/

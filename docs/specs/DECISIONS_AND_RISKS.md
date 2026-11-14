@@ -18,6 +18,9 @@ Version1.0,2026-11-14. These are product/engineering decisions, not evidence tha
 | D-10 | Five coarse modules; no generic workflow engine | Extra abstraction/modules increase coordination and build cost without helping the selected small algorithm set. |
 | D-11 | Default API26/arm64 and recorded stable-toolchain bootstrap | Older API/other ABI support is an explicit compatibility expansion, not silently assumed. |
 | D-12 | Rights and performance are per asset/adapter/build, not inferred from paper labels | A code MIT notice does not automatically identify external weights; desktop timings do not establish handset readiness. |
+| D-13 | Operator-approved visible application name PristinePage; requested future full store title `PristinePage: Documents & Photos Scanner`; keep approved workspace/internal namespace unchanged | Branding amendment approved with P-01 launch on 2026-11-14. Do not silently infer a new application ID or publish a listing. |
+| D-14 | Operator-confirmed current app name PristinePage and future store title `PristinePage: Doc & Photo Scan`, exactly30 characters | Explicit branding-form selection on2026-11-14 supersedes prior longer requests/interim spelling. Length compliance is not publication or trademark clearance. |
+| D-15 | U-01 requires multiple actual neural geometry/appearance methods alongside all classical methods before completion | User clarification supersedes all-neural-deferral completion in originalv1.0. Exact provider set/asset/runtime plan remains pending; rights/parity/device/fidelity gates and acquisition permissions are not waived. |
 
 ## External/implementation gates
 
@@ -33,6 +36,7 @@ Version1.0,2026-11-14. These are product/engineering decisions, not evidence tha
 | R-08 | Preview may look better than full export or hide faint-detail/halo damage | T-09/T-12: true target-resolution detail view and identical recipe/provider identities. |
 | R-09 | A stale worker can publish wrong-page/revision output | T-02/T-03/T-09/T-11: complete immutable request identities and publication CAS tests. |
 | R-10 | Telemetry/backup/transitive SDKs can violate local-only intent | T-12: merged-manifest/dependency/backup audit and airplane-mode cold-start tests. |
+| R-11 | Title-length issue resolved by explicit30-character D-14 selection; other listing/trademark requirements unverified | No listing publication is authorized. Retain original length observations as historical; do not mistake length alone for complete store acceptance. |
 
 ## Decisions intentionally left to implementation/release
 
@@ -44,4 +48,8 @@ The PDF writer/backend and its tested document-size limit must follow CAPTURE_IM
 
 Append decision ID/date, exact question, considered alternatives, owner/authority, adopted rule, evidence or DESIGN status, affected requirements/tasks/files and tests reopened. The integration owner edits shared definitions before dependent task text. Preserve earlier rejected/historical decisions as historical; do not relabel a later measurement as proof that the earlier proposal was already tested.
 
-No future implementation risk above is reported as resolved at specification creation. Documentation review may resolve contradictions without resolving model rights, physical-device cost or visual acceptance.
+No future implementation risk above was reported as resolved at specification creation. Documentation review may resolve contradictions without resolving model rights, physical-device cost or visual acceptance.
+
+Implementation amendment 2026-11-14: D-13 records the operator's approved branding change. R-11 is supported by the inspected [Google Play metadata policy](https://support.google.com/googleplay/android-developer/answer/9898842?hl=en), which states that the app title must be 30 characters or less; the exact requested title has 40 characters. Retain the requested wording as an unresolved publication preference, not a license to submit an invalid listing. A shorter title and the full phrase in description/marketing copy are future alternatives, not decisions made for the operator.
+
+Subsequent decision2026-11-14: D-14 closes the length/spelling choice with the exact operator-selected30-character title; the preceding D-13 observation is historical, not the current unresolved title. D-15 records mandatory neural scope; [NN-PLAN-01](../../validation/reviews/neural-scope-proposal.md) proposes UVDoc/GCDRNet/DocRes families, but its three-family count and assets are not yet approved or validated and cannot be reported implemented.

@@ -1,0 +1,5 @@
+# Preserve runnable platform wrappers independently of each contributor's global Git newline settings.
+gradlew text eol=lf
+gradlew.bat text eol=crlf
+gradle/wrapper/*.properties text eol=lf
+*.jar binary

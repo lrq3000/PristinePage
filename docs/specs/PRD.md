@@ -1,6 +1,22 @@
-# Product requirements — Paperlight
+# Product requirements — PristinePage
 
 Version 1.0, 2026-11-14. This is the central product entrypoint. [TODO.md](TODO.md) is the task-state authority; [REQUIREMENTS_TRACEABILITY.md](REQUIREMENTS_TRACEABILITY.md) maps requirements to implementation and acceptance. [SPEC_PACKAGE_VALIDATION.md](SPEC_PACKAGE_VALIDATION.md) concerns this documentation, not app implementation status.
+
+## Active implementation authority and branding
+
+The operator approved [P-01](OPERATIONAL_PLAN.md) and launched local implementation on 2026-11-14. The confirmed visible app name is **PristinePage**; the exact future store title selected through the subsequent branding form is **PristinePage: Doc & Photo Scan**, 30 characters. Earlier40-character and34-character title requests are superseded. Paperlight is the historical specification/working-path label, not the user-facing app name. The selected title meets Google's length constraint, not a claim of complete listing/trademark approval. [Google Play metadata policy, inspected 2026-11-14](https://support.google.com/googleplay/android-developer/answer/9898842?hl=en). Other-store requirements and rights remain unverified; no listing publication is authorized.
+
+The application workspace is `X:\local-workspace\.worktrees\paperlight-v1`, branch `feat/paperlight-v1`; this `docs/specs` copy is the live application authority. The original 24-file v1.0 package at `X:\local-workspace\new-scan-app-specs` remains unchanged. The root checkout is an immutable documentation seed. Reuse [IMPLEMENTATION_PLAN.md](IMPLEMENTATION_PLAN.md); read [validation/progress.md](../../validation/progress.md) for current execution/restart evidence and [the incident register](common-mistakes-and-frequently-used-commands.md) before work.
+
+P-01 authorizes local source/test/record changes, new isolated worktrees and verified local commits, but retains separate dependency-acquisition, signing, device, real-asset, external-publication/sharing and conversation-memory gates. No such permission was added by the launch message. API26+/arm64 and internal namespace `app.paperlight` remain the approved baseline; development application ID is `app.paperlight.debug`. No application acceptance gate has passed at this initial setup checkpoint.
+
+### User amendment U-01 — neural processing is mandatory
+
+On 2026-11-14, after approving P-02's foundation dependency bill, the operator clarified that several genuinely implemented neural methods are central to the requested app, alongside non-neural methods, covering learned geometric correction and appearance/illumination/color restoration for document and photograph scanning. This current explicit requirement supersedes the original v1.0 permission to finish the app with all neural models deferred. Classical import→edit→save→export still comes first; a registry, disabled cards, model loading alone or classical substitutes under neural names cannot satisfy this amended completion condition. Detection alone is not learned curved-page correction.
+
+The exact selected providers/count, rights-cleared assets/runtime, their output contracts and device/quality acceptance are to be specified in an approved neural implementation/acquisition amendment before dependent operations. Existing technical parity, mask, provenance, resource, offline and content-fidelity gates remain binding; this requirement does not authorize downloads outside P-02, unlicensed assets, spending or unsupported quality claims. Original optional-model text below and in linked v1.0 domain documents is historical on this one scope point and must not be used to omit all neural implementations. T-08/T-12 acceptance is blocked pending that reconciled provider plan; independent approved foundation work continues.
+
+Branding decision U-02: after the34-character replacement request, the operator explicitly selected `PristinePage: Doc & Photo Scan` on the branding form, retaining `PristinePage` spelling and a30-character future title. No listing was edited, and no package/workspace rename or publication was authorized.
 
 ## Purpose and users
 

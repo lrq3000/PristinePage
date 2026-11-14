@@ -1,0 +1,47 @@
+# SETUP-R — independent saved-artifact review
+
+Reviewed 2026-11-14 as a build-artifact/supply-chain reviewer. This is preparation review, not T-01 or application acceptance. Coordinator owns integration and all corrections.
+
+## Separate verdicts
+
+- **Preparation-spec-compliance: PASS within inspected scope.** Saved preparation respects P-01's local-only boundary, preserves source/seed identities and keeps acquisition, signing, devices, publication and app acceptance open. Historical absence of unauthorized activity cannot be proved from static artifacts alone.
+- **Artifact-quality: CHANGES REQUIRED — one Medium acquisition-boundary conflict.** Wrapper identities/newlines/notices are sound; reconcile finding R1 before presenting P-02 as an executable approval envelope. R2 is a Low reproducibility precaution.
+
+## Findings and required disposition
+
+### R1 — Medium: contradictory authority for the first wrapper invocation
+
+**Verified conflict:** `docs/specs/OPERATIONAL_PLAN.md:71` prohibits any wrapper invocation until its exact distribution is verified locally available. Conversely, `validation/bootstrap/acquisition-plan.md:55-60` proposes invoking the wrapper to download/unpack that distribution. The approval-record requirement is explicit in `AGENTS.md:11`; P-02 remains pending at `validation/bootstrap/acquisition-plan.md:3`. Supplementary-plan language does not clearly identify an exception to the existing unconditional guard.
+
+Before P-02 approval, choose and document one mechanism: retain the guard and explicitly specify separate ZIP acquisition/hash verification/local availability before wrapper use; or explicitly authorize checksum-gated wrapper bootstrapping as a narrow exception, recording that authority in OPERATIONAL_PLAN when approved. Preserve the later signing/device exclusions. The official [Gradle 8.13 wrapper reference](https://docs.gradle.org/8.13/userguide/gradle_wrapper.html) confirms downloads precede build execution and checksum checking only covers a not-yet-downloaded distribution. Thus `--offline` or a preexisting cache cannot substitute for this boundary. This is a future-envelope defect, not evidence that preparation already downloaded anything.
+
+### R2 — Low: lock persistence needs a successful, explicitly checked stage
+
+`validation/bootstrap/acquisition-plan.md:56` combines `--write-locks` with the deliberately failing policy test; `:core:test` and `:test-fixtures:test` do not recur in the next listed invocation (`validation/bootstrap/acquisition-plan.md:57`). [Gradle 8.13 locking documentation](https://docs.gradle.org/8.13/userguide/dependency_locking.html) states that locking must be activated and failed builds do not persist lock state. Before claiming reproducibility, explicitly enable locking for the relevant configurations, run a successful post-green invocation covering those test configurations, and inspect the resulting locks. This is not a claim that absent bootstrap configuration is already misconfigured, nor permission to run anything now.
+
+## Independently verified artifacts
+
+- Read all mandated startup/domain documents, the accepted implementation plan, the complete frozen diff and actual saved records. Frozen `.superpowers/sdd/IMPLEMENTATION_PLAN/setup-review.diff:1-1260` is 100,911 bytes; SHA-256 `7ec05389d876debc7e267de7081ab8bb38156b5a68c710094b93b2cbbcf987ff`. In-memory reconstruction matched all text hunks against the seed and all 19 new canonical blob identities, including the binary JAR. No index inspection/mutation was performed; this is not an independent attestation of current staging.
+- HEAD/branch match seed `a74c341e780f0ea7466ce6814d998e63afb27d27` / `feat/paperlight-v1`. All 24 original files equal their root/seed copies. Case-insensitive filename/NUL/lowercase-file-SHA/newline aggregation independently reproduces `54f5d3f72134075b40ca178f8e68f39a626352de2632b2e7db4fe598aba263c3`; case-sensitive ordering reproduces INC-001's alternative digest (`docs/specs/common-mistakes-and-frequently-used-commands.md:40`). Original/active implementation-plan SHA-256 matches `791dba54b888ac430cf12c0a4d83a363a24dd570f5305e989c91815fb9be78fa`. Only the five source-document amendments represented in the frozen diff differ; root tracked files match seed canonical blobs.
+- All four working-file SHA-256 values equal `validation/bootstrap/wrapper-receipt.md:21-24` and all four scratch-generated copies. JAR SHA-256 `2db75c40782f5e8ba1fc278a5574bab070adccb2d21ca5a6e5ed840888448046` independently matches the [official 8.12.1 checksum](https://services.gradle.org/distributions/gradle-8.12.1-wrapper.jar.sha256), not an 8.13 identity. Properties pin the separately verified [8.13 ZIP checksum](https://services.gradle.org/distributions/gradle-8.13-bin.zip.sha256). Neither isolated nor default 8.13 distribution-cache directory exists; no whole-machine absence claim is made.
+- `.gitattributes:2-5` agrees with actual LF POSIX/properties, binary JAR and 94 CRLF batch lines. Batch working SHA differs legitimately from canonical LF SHA-256 `2209f919a22528af59a2af2ad97e8d056cca18e39f7d87aa3fd549a73b180150`; canonical Git blob matches frozen `9d21a21`. Notices match both receipt hashes and installed LICENSE/NOTICE bytes (`validation/bootstrap/wrapper-receipt.md:32`). Distribution notices are not APK licensing clearance.
+- Installed metadata confirms JBR21.0.8, SDK API36 and Build Tools35.0.0. Official AGP/KGP tables and the complete Compose BOM support the stated documented intersection/mapping (`validation/bootstrap/acquisition-plan.md:7-11,40`). The five POM coordinate/license claims at `validation/bootstrap/acquisition-plan.md:41` and JUnit EPL1.0 at `validation/bootstrap/acquisition-plan.md:43` also check out; binaries, richer module/AAR metadata and transitives remain unverified. Additional Low precaution: expand Kotlin test-root naming at `validation/bootstrap/acquisition-plan.md:21` to exact coordinates before configuration to avoid widening the direct allowlist.
+- Requested title counts 40 characters; the inspected [official Play policy](https://support.google.com/googleplay/android-developer/answer/9898842?hl=en) says at most 30, consistent with `docs/specs/PRD.md:7`. Internal namespace/development ID remain approved intentions, not an implemented or publishable application.
+
+## Scope, retention and later gates
+
+Used read-only Python byte/hash/diff/metadata checks, Git rev-parse/branch/ls-tree/show and official text retrieval. One locale-decoding check failed and was successfully repeated with explicit UTF-8. No wrapper/build/download/installer/device execution, Git/index mutation, nested agent, conversation recall or shared-file change occurred. Only this report was written.
+
+Scratch build/settings inputs contain no external plugin/repository declarations, supporting—but not independently proving—the historical offline command claim (`validation/bootstrap/wrapper-receipt.md:10-13`). Retain notices, receipts and nonregenerable decisions; ignored scratch/cache remains for manual cleanup (`validation/bootstrap/wrapper-receipt.md:36`). Preserve the actual JAR with its receipt: the frozen diff contains only a binary-change marker (`.superpowers/sdd/IMPLEMENTATION_PLAN/setup-review.diff:176-179`), not reconstructible JAR bytes. No Android project exists; missing implementation, red/green tests, strict verification/locks, manifests, APK/signing, offline/device/visual and release acceptance remain explicit later gates (`validation/progress.md:5,75`).
+
+## Scoped correction verdict — 2026-11-14, round 1
+
+Read `validation/bootstrap/setup-fix-report.md`, the complete correction diff and all five changed files. Independently matched every hunk/new blob and reconstructed old identities against the previously reviewed snapshot without accessing the index. Correction-diff SHA-256: `e0ed49deb611e7d1bb67c6688085ccf43455662a8291055d415db1dc1976e250`.
+
+- **R1: ADDRESSED.** `docs/specs/OPERATIONAL_PLAN.md:37,73` records the operator-approved, exact-bill, checksum-gated first-wrapper exception, rejects unexpected cached state and retains unrelated restrictions. `validation/bootstrap/acquisition-plan.md:3,61` agrees. The original authority contradiction is closed, not retroactively treated as acquisition evidence.
+- **R2: ADDRESSED.** `validation/bootstrap/acquisition-plan.md:58,63` explicitly requires successful post-green core/fixture/app checks, activated locking and inspection of persisted entries; failed red runs do not count.
+- **Exact-Kotlin-coordinate precaution: ADDRESSED** at `validation/bootstrap/acquisition-plan.md:21`; no JUnit5 root or widened version was introduced.
+
+**Scoped preparation compliance: PASS. Scoped artifact quality: PASS. No open SETUP-R correction or new material breakage identified.** U-01 explicitly supersedes all-neural-deferral completion while leaving the provider plan unresolved and neural acquisition/acceptance gated (`docs/specs/PRD.md:15-17`; `docs/specs/TODO.md:5`). It is not implementation evidence. Future title/spelling remains unresolved (`docs/specs/PRD.md:19`); its 34-character count checks out.
+
+Only this dated addendum was written; the original review remains historical. No app tests, builds, wrapper execution, acquisition, signing, device actions, Git mutation or delegation occurred. Actual checksum/lock/build evidence and all application acceptance remain later gates.
