@@ -13,6 +13,7 @@ import app.pristinepage.data.repository.CatalogQueries
     @Query("SELECT * FROM Page WHERE documentId=:documentId AND state='ACTIVE' ORDER BY ordinal") abstract override fun activePages(documentId: String): List<PageRow>
     @Query("SELECT * FROM Page WHERE pageId=:id") abstract override fun page(id: String): PageRow?
     @Query("SELECT * FROM Source WHERE sourceId=:id") abstract override fun source(id: String): SourceRow?
+    @Query("SELECT * FROM SourceBlob WHERE sourceBlobId=:id") abstract override fun sourceBlob(id: String): SourceBlobRow?
     @Query("SELECT * FROM RecipeRevision WHERE pageId=:pageId AND recipeRevision=:revision") abstract override fun recipe(pageId: String, revision: Long): RecipeRevisionRow?
     @Query("SELECT COALESCE(MAX(recipeRevision),0) FROM RecipeRevision WHERE pageId=:pageId") abstract override fun maxRecipeRevision(pageId: String): Long
     @Query("SELECT * FROM RecipeMask WHERE pageId=:pageId AND recipeRevision=:revision ORDER BY maskId") abstract override fun recipeMasks(pageId: String, revision: Long): List<RecipeMaskRow>

@@ -18,6 +18,7 @@ internal class MemoryMetadata : MetadataAccess, CatalogQueries {
     val documents = linkedMapOf<String, DocumentRow>()
     val pages = linkedMapOf<String, PageRow>()
     val sources = linkedMapOf<String, SourceRow>()
+    val blobs = linkedMapOf<String, SourceBlobRow>()
     val recipes = linkedMapOf<Pair<String, Long>, RecipeRevisionRow>()
     val references = linkedMapOf<Triple<String, String, String>, SourceReferenceRow>()
     val undos = linkedMapOf<String, UndoEntryRow>()
@@ -27,18 +28,20 @@ internal class MemoryMetadata : MetadataAccess, CatalogQueries {
     val pendingImports = mutableSetOf<String>()
     var inTransaction = false
     var failRecipeInsertAt: Int? = null
+    var failPageUpdateAt: Int? = null
     private var recipeWrites = 0
+    private var pageWrites = 0
     override val queries: CatalogQueries get() = this
 
     @Synchronized override fun <T> transaction(action: () -> T): T {
         check(!inTransaction)
-        val d = documents.toMap(); val p = pages.toMap(); val s = sources.toMap(); val r = recipes.toMap()
+        val d = documents.toMap(); val p = pages.toMap(); val s = sources.toMap(); val b = blobs.toMap(); val r = recipes.toMap()
         val refs = references.toMap(); val u = undos.toMap(); val m = masks.toMap(); val a = associations.toMap(); val mr = maskReferences.toMap()
         inTransaction = true
         try { return action() }
         catch (failure: Throwable) {
             fun <K, V> restore(target: MutableMap<K, V>, before: Map<K, V>) { target.clear(); target.putAll(before) }
-            restore(documents, d); restore(pages, p); restore(sources, s); restore(recipes, r)
+            restore(documents, d); restore(pages, p); restore(sources, s); restore(blobs, b); restore(recipes, r)
             restore(references, refs); restore(undos, u); restore(masks, m); restore(associations, a); restore(maskReferences, mr)
             throw failure
         } finally { inTransaction = false }
@@ -48,6 +51,7 @@ internal class MemoryMetadata : MetadataAccess, CatalogQueries {
     override fun activePages(documentId: String) = pages.values.filter { it.documentId == documentId && it.state == "ACTIVE" }.sortedBy { it.ordinal }
     override fun page(id: String) = pages[id]
     override fun source(id: String) = sources[id]
+    override fun sourceBlob(id: String) = blobs[id]
     override fun recipe(pageId: String, revision: Long) = recipes[pageId to revision]
     override fun maxRecipeRevision(pageId: String) = recipes.keys.filter { it.first == pageId }.maxOfOrNull { it.second } ?: 0
     override fun recipeMasks(pageId: String, revision: Long) = associations.values.filter { it.pageId == pageId && it.recipeRevision == revision }
@@ -57,7 +61,7 @@ internal class MemoryMetadata : MetadataAccess, CatalogQueries {
     override fun insertDocument(row: DocumentRow) { check(documents.putIfAbsent(row.documentId, row) == null) }
     override fun updateDocument(row: DocumentRow): Int { if (row.documentId !in documents) return 0; documents[row.documentId] = row; return 1 }
     override fun insertPage(row: PageRow) { check(pages.putIfAbsent(row.pageId, row) == null) }
-    override fun updatePage(row: PageRow): Int { if (row.pageId !in pages) return 0; pages[row.pageId] = row; return 1 }
+    override fun updatePage(row: PageRow): Int { if (++pageWrites == failPageUpdateAt) throw IOException("synthetic ordinal update failure"); if (row.pageId !in pages) return 0; pages[row.pageId] = row; return 1 }
     override fun insertRecipe(row: RecipeRevisionRow) {
         if (++recipeWrites == failRecipeInsertAt) throw IOException("synthetic database write failure")
         check(recipes.putIfAbsent(row.pageId to row.recipeRevision, row) == null)
@@ -84,7 +88,9 @@ internal class RepositoryFixture(count: Int = 2, admission: ((Recipe, Boolean) -
 
     init {
         metadata.documents[document.value] = DocumentRow(document.value, "Synthetic", 1, "ACTIVE", 0, 0, null)
-        metadata.sources[source.value] = SourceRow(source.value, UUID.randomUUID().toString(), binding.sourcePixelHash, 3, 2, 1, "srgb-v1", null, count * 2L, "READY", 0)
+        val blob = UUID.randomUUID().toString()
+        metadata.sources[source.value] = SourceRow(source.value, blob, binding.sourcePixelHash, 3, 2, 1, "srgb-v1", null, count * 2L, "READY", 0)
+        metadata.blobs[blob] = SourceBlobRow(blob, "b".repeat(64), 4, "image/png", 3, 2, "sources/$blob/original.bin", "READY", 1, UUID.randomUUID().toString(), 0)
         for ((ordinal, page) in pageIds.withIndex()) {
             metadata.pages[page.value] = PageRow(page.value, document.value, source.value, 1, "ACTIVE", ordinal, null, 0)
             metadata.recipes[page.value to 1L] = RecipeRevisionRow(page.value, 1, source.value, 1, RecipeCodec.encode(initial), RecipeCodec.hash(initial), null, 0)

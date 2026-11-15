@@ -15,6 +15,7 @@ interface CatalogQueries {
     fun activePages(documentId: String): List<PageRow>
     fun page(id: String): PageRow?
     fun source(id: String): SourceRow?
+    fun sourceBlob(id: String): SourceBlobRow?
     fun recipe(pageId: String, revision: Long): RecipeRevisionRow?
     fun maxRecipeRevision(pageId: String): Long
     fun recipeMasks(pageId: String, revision: Long): List<RecipeMaskRow>
@@ -48,5 +49,9 @@ interface DocumentRepository {
     suspend fun saveRecipe(pageId: PageId, expectedRevision: Long, recipe: Recipe): SaveRecipeResult
     suspend fun applyBatchRecipes(documentId: DocumentId, expectedDocumentRevision: Long, changes: List<BatchRecipeChange>): DocumentMutationResult
     suspend fun duplicatePage(pageId: PageId, expectedDocumentRevision: Long): DocumentMutationResult
+    suspend fun renameDocument(documentId: DocumentId, expectedDocumentRevision: Long, title: String): DocumentMutationResult
+    suspend fun reorderPages(documentId: DocumentId, expectedDocumentRevision: Long, pageIds: List<PageId>): DocumentMutationResult
+    suspend fun rotatePage(pageId: PageId, expectedRecipeRevision: Long, clockwiseQuarterTurns: Int): DocumentMutationResult
+    suspend fun removePage(pageId: PageId, expectedDocumentRevision: Long): DocumentMutationResult
     suspend fun undoDocumentEdit(undoId: UndoId, expectedDocumentRevision: Long): DocumentMutationResult
 }

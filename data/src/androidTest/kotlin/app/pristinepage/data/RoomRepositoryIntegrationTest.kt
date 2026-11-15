@@ -103,12 +103,12 @@ class RoomRepositoryIntegrationTest {
         }
     }
 
-    private class Fixture : AutoCloseable {
+    internal class Fixture(count: Int = 2) : AutoCloseable {
         val context: Context = InstrumentationRegistry.getInstrumentation().context
         val name = "t03-room-${UUID.randomUUID()}.db"
         val source = UUID.randomUUID().toString()
         private val blob = UUID.randomUUID().toString()
-        val pages = List(2) { PageId(UUID.randomUUID().toString()) }
+        val pages = List(count) { PageId(UUID.randomUUID().toString()) }
         private val binding = SourceBinding("a".repeat(64), PixelSize(3, 2), "srgb-v1")
         private val initial = Recipe(geometry = GeometryRecipe.None(binding))
         var database = open()
@@ -121,7 +121,7 @@ class RoomRepositoryIntegrationTest {
             database.runInTransaction {
                 val sql = database.openHelper.writableDatabase
                 sql.execSQL("INSERT INTO SourceBlob(sourceBlobId,byteSha256,byteCount,mime,encodedWidth,encodedHeight,relativePath,state,sourceCount,ingestTransactionId,createdAt) VALUES(?,?,?,?,?,?,?,?,?,?,?)", arrayOf<Any>(blob, "b".repeat(64), 4L, "image/png", 3, 2, "sources/$blob/original.bin", "READY", 1L, UUID.randomUUID().toString(), 0L))
-                sql.execSQL("INSERT INTO Source(sourceId,sourceBlobId,pixelSha256,width,height,exifOrientation,conversionFingerprint,profileSha256,refCount,state,createdAt) VALUES(?,?,?,?,?,?,?,?,?,?,?)", arrayOf<Any?>(source, blob, binding.sourcePixelHash, 3, 2, 1, "srgb-v1", null, 4L, "READY", 0L))
+                sql.execSQL("INSERT INTO Source(sourceId,sourceBlobId,pixelSha256,width,height,exifOrientation,conversionFingerprint,profileSha256,refCount,state,createdAt) VALUES(?,?,?,?,?,?,?,?,?,?,?)", arrayOf<Any?>(source, blob, binding.sourcePixelHash, 3, 2, 1, "srgb-v1", null, pages.size * 2L, "READY", 0L))
                 val q = database.catalog()
                 for ((ordinal, page) in pages.withIndex()) {
                     q.insertPage(PageRow(page.value, document.value, source, 1, "ACTIVE", ordinal, null, 0))
