@@ -4,22 +4,28 @@ This checklist is the live PristinePage application task-state authority, not th
 
 User amendment U-01 in live PRD requires multiple actual neural methods, including learned geometry and appearance, before completion. Original optional-model defaults do not authorize finishing with every model deferred. Provider selection/assets/runtime and amended T-08/T-12 acceptance need a separately approved concrete plan; no neural download is included in P-02. This blocks only dependent provider/release acceptance, not the approved foundation/classical slice.
 
+U-04/FR-17 now mandates [cumulative album batch editing](BATCH_EDITING.md), explicitly approved for design/requirement recording2026-11-15. Select all/subsets, preserve independent accumulated turns/settings across selection changes and save all effectively edited pages on one Done, with previews, Undo/Redo, Cancel and one atomic recipe save. This supplements T-02/T-03/T-09/T-10, not a replacement implementation plan or completed feature. [Independent design review](../../validation/reviews/batch-editing-design-review.md) passed its documentation/builder scope; implementation precautions were made explicit. T-02 remains unclaimed/not started.
+
 | ID | Task | Depends on | Initial state | Claim / evidence |
 |---|---|---|---|---|
 | T-01 | Reproducible Android bootstrap and capability-free launch | None | Verified — bounded bootstrap only | Coordinator `LOCAL_SESSION`; T01-20261115-I01 source b3759b2.9 app tests GREEN/offline build148tasks, static review PASS. Reviewed SHA19595f091f69 installed/byte-matched; launcher/UI/PID logs checked on owned index2/API28 ARM64 translation; original player/VM exits verified and usage released. [Runtime receipt](../../validation/bootstrap/ldplayer-receipt.md) and [independent review](../../validation/reviews/t01-runtime-review.md) PASS with retained RT-1/RT-2 Minor limitations. Phone excluded; no full scanner/offline/physical/rights acceptance. |
 | T-02 | Pure contracts, geometry math and deterministic fixtures | T-01 | Not started | Unclaimed. |
-| T-03 | Durable source/document/recipe store and recovery | T-02 | Not started | Unclaimed. |
+| T-03 | Durable source/document/recipe store and recovery | T-02 | Not started | Unclaimed; U-04 adds atomic applyBatchRecipes, full revision validation and one saved-batch Undo; BatchRecipeTest remains future work. |
 | T-04 | Picker import and orientation/color-normalized decode | T-03 | Not started | Unclaimed. |
 | T-05 | Camera capture with manual fallbacks | T-04 | Not started | Unclaimed. |
 | T-06 | Perspective/manual-curve geometry and protected masks | T-02,T-04 | Not started | Unclaimed. |
 | T-07 | Classical appearance, noise/detail and binary rendering | T-02,T-06 | Not started | Unclaimed. |
 | T-08 | Provider registry, exact public adapters and gating | T-06,T-07 | Not started | Unclaimed; U-01 mandates multiple working neural geometry/appearance methods at completion; exact provider/asset/runtime plan remains separately gated. |
-| T-09 | Editor carousel, comparisons, recipe history and cancellation | T-03,T-06,T-07 | Not started | Unclaimed. |
-| T-10 | Local library and multi-page editing | T-03,T-09 | Not started | Unclaimed. |
+| T-09 | Editor carousel, comparisons, recipe history and cancellation | T-03,T-06,T-07 | Not started | Unclaimed; U-04 adds independent per-page batch drafts, changing-selection cumulative turns/settings, Mixed values and Done/Cancel/Undo/Redo; BatchEditSessionTest remains future work. |
+| T-10 | Local library and multi-page editing | T-03,T-09 | Not started | Unclaimed; U-04 adds album overview selection/Select all/clear, previews and integrated batch-save/reopen/Undo/accessibility journey. |
 | T-11 | Snapshot PDF/image export and safe sharing | T-07,T-10 | Not started | Unclaimed. |
 | T-12 | Device/offline/fidelity/accessibility/privacy/release gates | T-05,T-08,T-09,T-10,T-11 | Not started | Unclaimed; no application validation run. |
 
 ## Claim and completion record template
+
+### U-04 documentation-only amendment / U04-20261115-BATCH
+
+Owner coordinator `LOCAL_SESSION`; baseline `34cee75`; explicit current-album choice and “Approve and record requirement” form2026-11-15. Approved paths: `docs/specs/{BATCH_EDITING,PRD,UX_SPECIFICATION,DATA_MODEL_AND_STORAGE,TODO,REQUIREMENTS_TRACEABILITY,OPERATIONAL_PLAN}.md`, `validation/progress.md` and independent report `validation/reviews/batch-editing-design-review.md`. Scope: design/required tests, cross-file integration, independent review and verified local documentation commit only. No product code/schema/dependency/model/emulator/device operation, push or merge. Accepted plan SHA-256 remains `791dba54b888ac430cf12c0a4d83a363a24dd570f5305e989c91815fb9be78fa`; no new production task is claimed. State: approved design recorded; independent compliance/design PASS, no material builder question; pending-Done/conflict/Redo precautions added as future tests. FR-17 feature remains not started/unaccepted.
 
 ### Completed bounded claim T-01 / T01-20261114-A, identity/runtime subattempt T01-20261115-I01
 
@@ -45,3 +51,4 @@ Use `in-progress`, `blocked`, `ready-for-review`, `verified`, or `superseded`; e
 - [ ] T-10 accepted.
 - [ ] T-11 accepted.
 - [ ] T-12 release gate accepted; unresolved failures disclosed.
+- [ ] FR-17 batch-editing feature accepted through current-build T-03/T-09/T-10 evidence; documentation approval alone does not pass it.

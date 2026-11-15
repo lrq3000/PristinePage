@@ -1,6 +1,6 @@
 # Requirement → task → validation coverage
 
-All25 PRD requirements are mapped below. A mapping is not a passed test. At package creation every row was not run; the scoped bootstrap evidence below is now retained without marking any complete scanner requirement passed. V-01–V-07 are independent gates in VALIDATION_PLAN; exact small test vectors are in TEST_FIXTURES and the algorithm documents. Live PRD amendment U-01 requires multiple actual neural geometry/appearance methods; original all-neural-deferral wording is superseded.
+All26 live PRD requirements are mapped below, including U-04/FR-17. A mapping is not a passed test. At package creation every row was not run; scoped bootstrap evidence does not pass any complete scanner requirement. V-01–V-07 remain independent; exact small vectors are in TEST_FIXTURES/domain documents. U-01 requires multiple actual neural geometry/appearance methods; original all-neural-deferral wording is superseded. [BATCH_EDITING](BATCH_EDITING.md) supplements existing task acceptance for cumulative album edits without replacing the accepted plan.
 
 | Requirement | Authoritative specification | Owning tasks | Required acceptance evidence |
 |---|---|---|---|
@@ -20,6 +20,7 @@ All25 PRD requirements are mapped below. A mapping is not a passed test. At pack
 | FR-14 | PIPELINE_CONTRACTS; UX_SPECIFICATION; DATA_MODEL_AND_STORAGE | T-02,T-03,T-08,T-09,T-11 | Failure-injection for each status, exact stage-input DEGRADED result, terminal skips/no recursive fallback, acceptedFallbackReusesPinnedActualRaster with frozen policy/actual dimensions and changed/lost-pin failure; V-01,V-02,V-04,V-07. |
 | FR-15 | UX_SPECIFICATION | T-09,T-12 | EditorAccessibilityTest plus physical TalkBack, font scaling,48dp targets/non-gesture controls; V-04,V-06. |
 | FR-16 | PERFORMANCE_AND_OFFLINE; SECURITY_PRIVACY | T-01,T-08,T-12 | Fresh-install airplane-mode every shipped path, local examples/assets and missing-provider behavior; V-06,V-07. |
+| FR-17 | BATCH_EDITING; UX_SPECIFICATION; DATA_MODEL_AND_STORAGE; PIPELINE_CONTRACTS | T-02,T-03,T-09,T-10,T-12 | A1/B2/C2/D0 changing-selection rotation; Done includes deselected edited pages; subset filters preserve unrelated geometry/settings; Mixed values; atomic revision-CAS save/rollback and one Undo; Cancel, stale previews, duplicate Done, reopen and accessible album journey. BatchRecipeTest/BatchEditSessionTest/BatchEditingJourneyTest; V-01,V-02,V-04. Not implemented. |
 | NFR-01 | PHOTOMETRIC_ALGORITHMS; GEOMETRY_ALGORITHMS; VALIDATION_PLAN | T-06,T-07,T-08,T-12 | Per-stroke/color/geometry/failure measurements and real-page review, separate lossy-binary intent; V-05. |
 | NFR-02 | PERFORMANCE_AND_OFFLINE; CAPTURE_IMPORT_EXPORT | T-04,T-06,T-07,T-08,T-11,T-12 | Preallocation guards, peak owned/PSS memory, repeated cycles, controlled RESOURCE_LIMIT/no silent resize; V-06. |
 | NFR-03 | ARCHITECTURE; UX_SPECIFICATION; PERFORMANCE_AND_OFFLINE | T-05,T-09,T-12 | UI-thread/queue/cancel tracing, rapid-switch stress, cold/warm timing distributions and truthful slow-state labels; V-04,V-06. |
@@ -41,6 +42,7 @@ All25 PRD requirements are mapped below. A mapping is not a passed test. At pack
 | Algorithms→renderer/UI | Parameter defaults, candidate precision, exactly one blend/stage, integrated model stages | T-07/T-08/T-09. |
 | Editor→persistent data | Draft versus accepted revision, CAS and stable page IDs, source reference lifetime | T-03/T-09/T-10. |
 | Library→export | Frozen page order/recipe/provider/output snapshot; no current-state rereads | T-10/T-11. |
+| Album batch draft→persistent pages | Stable captured PageIds/revisions, selection-independent edits, final per-page recipes, atomic aggregate Done and one Undo; frozen exports unchanged | T-03/T-09/T-10; FR-17. |
 | Export→external URI/share | Private complete artifact versus non-atomic external copy; ownership/grant/cleanup | T-11/T-12. |
 | Provider→release | Exact rights/hash/source/exported CPU/device/quality statuses | T-08/T-12. |
 

@@ -10,6 +10,8 @@ Document overview shows numbered pages with thumbnails and pending/edited/error 
 
 ## Editor layout
 
+Live U-04/FR-17 adds mandatory [album batch editing](BATCH_EDITING.md) from document overview. Select all/clear selection/individual pages; Rotate90° affects that command's captured selection and accumulates independently per page. Selection changes retain earlier drafts; Done saves every effectively edited page, even when deselected. Supported appearance/color/shadow settings use the same workflow without copying crops/turns/whole recipes. Show previews, per-page effective rotation, Mixed values, Undo/Redo and Cancel; disclose preset side effects and incompatible pages. One atomic recipe save and one document Undo cover the final batch. Per-page crop/curve tools remain; no cross-album save. BATCH_EDITING defines state/conflict/resource/tests, not thumbnail inference.
+
 ```text
 Back          Page 2 of 5            Undo
 ┌──────────────────────────────────────┐

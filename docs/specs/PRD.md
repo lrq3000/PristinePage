@@ -22,6 +22,10 @@ Branding decision U-02: after the34-character replacement request, the operator 
 
 On2026-11-15, the operator questioned the legacy internal Paperlight name, confirmed canonical spelling PristinePage (not PrestigePage), and explicitly approved [I-01](../../validation/bootstrap/identity-amendment.md). Kotlin/Android identity and Gradle group become `app.pristinepage`; debug/test packages are `app.pristinepage.debug` / `app.pristinepage.debug.test`, with corresponding data/image library namespaces and source directories. This supersedes D-13's earlier namespace retention, not U-02's visible name/title. Code-path prefixes in retained v1 documents/accepted implementation plan map to app/pristinepage; algorithms/interfaces/task order remain unchanged. Preserve immutable source/root/accepted-plan bytes, approved repository/cache locations and historical APK/review identities. Same development key and LDPlayer-only target rules apply to the new named packages through I-01; no data migration, physical-phone use or publication is authorized. Changed artifacts require new checks/review before installation or acceptance.
 
+### User amendment U-04 — cumulative album batch editing is mandatory
+
+On2026-11-15, the operator requested album-style multi-selection editing: rotate all or selected pages90° repeatedly, change selection between commands and use one Done to save each page's independently accumulated turns, including pages no longer selected. Apply supported appearance/color/shadow methods/settings to subsets without copying whole recipes or unrelated geometry. The operator selected current album/document scope and explicitly approved recording the [batch design](BATCH_EDITING.md), including previews, Undo/Redo, Cancel, immutable originals, field-scoped edits and an all-or-nothing recipe save. New P0 FR-17 supplements T-02/T-03/T-09/T-10 and validation; individual-page rotation alone does not satisfy it. Cross-album batches and batch crop/control-point copying are excluded. Preserve accepted-plan bytes; this amendment supplies the additional acceptance contract. Approval records design/requirements/tests, not a working feature or acquisition/device grant.
+
 ## Purpose and users
 
 Turn ordinary photographs of receipts, printed pages, handwritten notes, colored documents and curved book pages into useful scan-like digital documents, while retaining faint marks, colored content and the original photograph. The user must be able to choose between faithful appearance and white-paper aesthetics rather than have information erased by an invisible enhancement decision.
@@ -57,6 +61,7 @@ Version 1 is a complete local scanner, not just an image-filter demonstrator. It
 | FR-14 | Structured errors distinguish invalid input, unavailable provider, invalid map, processing failure, cancellation, permission loss, storage failure and resource limit; original and last accepted recipe remain retrievable. |
 | FR-15 | Accessible navigation, selected-state descriptions, at least 48dp targets, large-font layouts and non-gesture alternatives for crop/curve adjustments and comparison. |
 | FR-16 | Cold-start capture/import, every shipped algorithm, examples, saved documents and export work in airplane mode with only installed assets. |
+| FR-17 | Within the open album/document, select all or any pages, accumulate per-page90° rotations across changing selections and apply supported appearance/color/shadow methods/settings to subsets in one draft session. Done atomically saves all effectively edited pages, not only the final selection; preserve unrelated edits/originals, previews, mixed values, Undo/Redo and Cancel. BATCH_EDITING defines exact selection/recipe/conflict semantics and required tests. |
 
 ## Nonfunctional requirements
 
@@ -75,6 +80,8 @@ Version 1 is a complete local scanner, not just an image-filter demonstrator. It
 ## First release, optional experiments and exclusions
 
 P0 release: FR-01–06 and FR-08–16, plus provider capability boundaries in FR-07. A missing neural model is allowed; a missing manual geometry or deterministic enhancement path is not. Multi-page PDF export is mandatory but must respect explicit tested admission limits. Add no model until a classical import→edit→save→export vertical slice works.
+
+Live U-04 additionally makes FR-17 mandatory for P0; live U-01 supersedes the preceding historical all-models-optional completion wording. Neither amendment relaxes acquisition, rights, numerical, device or fidelity gates.
 
 P1 gated experiments: DocQuad detection, UVDoc map-based dewarp, GCDRNet field/full appearance, DocRes task modes and coarse SyntheticDoc geometry. Keep a second candidate only for a useful measured trade-off. FSENet is a conditional slow research comparator, not promised handset functionality. [MODEL_PROVIDERS.md](MODEL_PROVIDERS.md) controls exact statuses and interfaces.
 
