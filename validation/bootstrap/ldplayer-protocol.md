@@ -2,6 +2,8 @@
 
 Status: **explicitly approved through the P-04 form, recorded2026-11-15**. The operator selected “Approve P-04 on released instance 2”, with no added note or widened scope. The operator explicitly selected LDPlayer and excluded their phone; no further physical-phone command is permitted. Read both ldplayer-apk-debugging and android-apk-parallel-debugging-in-emulator skills and their Windows/lifecycle/debugging references. Read-only inspection has run; no LDPlayer instance/guest/claim had changed at this approval checkpoint. Revalidate the exact candidate name/observed index/current ownership and live resources before executing the approved operations below.
 
+Subsequent execution: [ldplayer-receipt.md](ldplayer-receipt.md) records actual I-01 replacement installation/launch, saved-evidence review and verified graceful shutdown/release. Preflight/no-claim observations below are historical approval inputs, not current usage authority. Retained guest storage is not currently claimed; every reuse requires a fresh exclusive generation and live admission checks under this same scope.
+
 Approved I-01 package amendment2026-11-15: use **app.pristinepage.debug / app.pristinepage.debug.test**, with the same S-01 signer and owned-instance rules. Rebuild/verify/review the replacement before first installation. The earlier app.paperlight bootstrap/hash is historical and is not a current install target. This changes neither instance ownership nor physical-phone exclusion; no instance has yet been claimed/launched for this project.
 
 ## Verified prerequisites and proposed target

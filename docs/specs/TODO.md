@@ -6,7 +6,7 @@ User amendment U-01 in live PRD requires multiple actual neural methods, includi
 
 | ID | Task | Depends on | Initial state | Claim / evidence |
 |---|---|---|---|---|
-| T-01 | Reproducible Android bootstrap and capability-free launch | None | I-01 locally verified/reviewed; LDPlayer runtime next | Owner coordinator `LOCAL_SESSION`; subattempt T01-20261115-I01; baseline c1c807a. Observed4 expected RED then9 app tests GREEN/offline build exit0/148tasks; replacement app.pristinepage.debug SHA19595f091f69 static checks and [independent review](../../validation/reviews/i01-identity-review.md) PASS. Identity commit next; no emulator claim/launch or phone use yet. |
+| T-01 | Reproducible Android bootstrap and capability-free launch | None | Verified — bounded bootstrap only | Coordinator `LOCAL_SESSION`; T01-20261115-I01 source b3759b2.9 app tests GREEN/offline build148tasks, static review PASS. Reviewed SHA19595f091f69 installed/byte-matched; launcher/UI/PID logs checked on owned index2/API28 ARM64 translation; original player/VM exits verified and usage released. [Runtime receipt](../../validation/bootstrap/ldplayer-receipt.md) and [independent review](../../validation/reviews/t01-runtime-review.md) PASS with retained RT-1/RT-2 Minor limitations. Phone excluded; no full scanner/offline/physical/rights acceptance. |
 | T-02 | Pure contracts, geometry math and deterministic fixtures | T-01 | Not started | Unclaimed. |
 | T-03 | Durable source/document/recipe store and recovery | T-02 | Not started | Unclaimed. |
 | T-04 | Picker import and orientation/color-normalized decode | T-03 | Not started | Unclaimed. |
@@ -21,19 +21,19 @@ User amendment U-01 in live PRD requires multiple actual neural methods, includi
 
 ## Claim and completion record template
 
-### Active claim T-01 / T01-20261114-A
+### Completed bounded claim T-01 / T01-20261114-A, identity/runtime subattempt T01-20261115-I01
 
 Claimed 2026-11-14T13:51:41Z by the integration coordinator, session `LOCAL_SESSION`, in branch `feat/paperlight-v1` and worktree `X:\local-workspace\.worktrees\paperlight-v1`. Input source package technical SHA-256 `54f5d3f72134075b40ca178f8e68f39a626352de2632b2e7db4fe598aba263c3`; original implementation-plan SHA-256 `791dba54b888ac430cf12c0a4d83a363a24dd570f5305e989c91815fb9be78fa`; seed commit `a74c341e780f0ea7466ce6814d998e63afb27d27`. Current prerequisites: P-01, exact P-02/P-02A, S-01 with I-01 package amendment, and exclusive LDPlayer P-04 are granted. Personal phone is excluded; neural acquisition, broader devices, production signing and publication remain unapproved. Current subattemptT01-20261115-I01 changes executable identity only; old plan/source prefix mapping follows U-03.
 
 Permitted coordinator paths: root build/settings/ignore/instruction files, `gradle/`, the five module build files, T-01 app policy/launcher/manifest/resources and tests, live `docs/specs/` authority records, `validation/` and required notices under `licenses/`. These are not permission to bypass failing-test or acquisition gates. A delegated toolchain reviewer may write only its named report under `validation/reviews/`, not shared configuration. No other production task is claimed.
 
-Last verified milestone: final offline-strict module/test/lint/debug build exit0/148tasks,9 app tests passed/0 failures; exact signed bootstrap APK static inspection and independent artifact review passed their scoped checks. Publisher-verified8.13 wrapper, named S-01 key/debug-only signing, exact P-02A authority reconciliation and583-component notice register are retained. Lint has0 errors/3 warnings; core/fixture/data/image tests are source-empty, not scanner coverage. Next action: coherent verified local commit, then separately authorized named-device bootstrap launch evidence or nonaffected foundation work. Actual installation/launch, complete scanner/visual/rights gates remain open; T-01 acceptance is not silently inferred from the build. Restart map: [validation/progress.md](../../validation/progress.md).
+Last verified milestone: I-01 sourceb3759b2 after9 green app tests/offline strict148-task build and independent static review; P-04/I-01 freshly installed/byte-matched the reviewed replacement, verified launch/foreground/UI/scoped logs and gracefully stopped the owned instance with both original player/VM exits confirmed. Independent T01-RUNTIME-R passed bounded scope/evidence quality with RT-1 transcript and RT-2 post-shutdown-anchor Minor limitations; coordinator reverified actual evidence/hashes/current released records and accepted only bounded T-01. No application source changed or device replay occurred during reconciliation. Publisher-verified8.13 wrapper, S-01 signing, P-02A and583-component register retained; lint0errors/3warnings, source-empty nonapp tests and rights gaps remain. Next unclaimed task is T-02 under the accepted plan; full scanner/physical/offline/visual/rights gates stay open. Restart map: [validation/progress.md](../../validation/progress.md).
 
 For a task append: owner; claim UTC time; attempt ID; input package/contract hashes; branch/worktree if applicable; exact permitted file set; last verified milestone; next action; focused test names/commands; result/evidence paths; reviewer findings/dispositions; and acceptance state. A resumed worker verifies current source/build state before trusting a prior checklist.
 
 Use `in-progress`, `blocked`, `ready-for-review`, `verified`, or `superseded`; explain a block and its smallest remedy. Test output and implementation acceptance are different. An optional model can be deliberately deferred with evidence, but T-08's registry/unsupported-state tests still must pass. Do not use a deferred model to justify checking an unrelated mandatory feature complete.
 
-- [ ] T-01 accepted.
+- [x] T-01 accepted — bounded reproducible/capability-free bootstrap only; runtime-evidence limitations and unperformed dependent physical/offline/rights gates remain explicit in the receipt/review.
 - [ ] T-02 accepted.
 - [ ] T-03 accepted.
 - [ ] T-04 accepted.
