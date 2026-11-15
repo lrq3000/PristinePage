@@ -6,14 +6,14 @@ DESIGN: native Kotlin/Compose with a deterministic local image core and optional
 
 ## Modules and files
 
-Use package prefix `app.paperlight` as an internal working namespace; final application ID/signing identity must be confirmed before publication. Keep five Gradle modules, not a module per screen:
+Use package prefix `app.pristinepage` under approved I-01/live PRD U-03; development application ID is `app.pristinepage.debug`. The retained v1 plan/domain code prefix app/paperlight maps to app/pristinepage without changing algorithm/contracts or immutable plan bytes. Repository/cache directory labels remain historical. Final production signing/publication remains separately gated. Keep five Gradle modules, not a module per screen:
 
 | Module | Responsibilities / principal paths |
 |---|---|
-| `:core` | Kotlin/JVM contracts, recipe serialization/hash, geometry math, deterministic reference algorithms, topology checks; `core/src/main/kotlin/app/paperlight/core/{image,geometry,pipeline,recipe}`. No Android or model runtime dependencies. |
-| `:image-android` | Android decoding/color bridge, native OpenCV operations, renderer, provider adapters and resource accounting; `image-android/src/main/kotlin/app/paperlight/image/{decode,render,provider}`; JNI code under `src/main/cpp` only when justified. |
-| `:data` | Room entities/DAOs, private file store, source ownership, journals, job/export snapshots and recovery; `data/src/main/kotlin/app/paperlight/data`. |
-| `:app` | Compose navigation/screens, CameraX, pickers, lifecycle, foreground UI processing and WorkManager integration; `app/src/main/kotlin/app/paperlight/{capture,editor,library,export}`. |
+| `:core` | Kotlin/JVM contracts, recipe serialization/hash, geometry math, deterministic reference algorithms, topology checks; `core/src/main/kotlin/app/pristinepage/core/{image,geometry,pipeline,recipe}`. No Android or model runtime dependencies. |
+| `:image-android` | Android decoding/color bridge, native OpenCV operations, renderer, provider adapters and resource accounting; `image-android/src/main/kotlin/app/pristinepage/image/{decode,render,provider}`; JNI code under `src/main/cpp` only when justified. |
+| `:data` | Room entities/DAOs, private file store, source ownership, journals, job/export snapshots and recovery; `data/src/main/kotlin/app/pristinepage/data`. |
+| `:app` | Compose navigation/screens, CameraX, pickers, lifecycle, foreground UI processing and WorkManager integration; `app/src/main/kotlin/app/pristinepage/{capture,editor,library,export}`. |
 | `:test-fixtures` | Reproducible pure fixture generator and semantic masks consumed by JVM/device tests; no copyrighted sample bundle is assumed. |
 
 UI depends on domain contracts/repository interfaces, not native tensor layouts. Core never opens URIs or loads models. Decode and native image ownership do not leak through a Room entity. Put feature logic in cohesive classes; avoid a generic workflow/graph/plugin execution framework, service locator or mandatory dependency-injection framework.

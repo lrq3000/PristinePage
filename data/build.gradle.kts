@@ -8,7 +8,7 @@ plugins {
 }
 
 android {
-    namespace = "app.paperlight.data"
+    namespace = "app.pristinepage.data"
     compileSdk = libs.versions.compileSdk.get().toInt()
     buildToolsVersion = libs.versions.buildTools.get()
     defaultConfig {

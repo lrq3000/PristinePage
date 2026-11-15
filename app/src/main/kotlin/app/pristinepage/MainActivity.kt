@@ -1,4 +1,4 @@
-package app.paperlight
+package app.pristinepage
 
 import android.os.Build
 import android.os.Bundle

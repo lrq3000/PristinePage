@@ -1,4 +1,4 @@
-package app.paperlight
+package app.pristinepage
 
 /** Bootstrap capabilities are deliberately independent of an Android Context; asset-specific enablement belongs to the later validated provider registry. */
 object BuildPolicy {

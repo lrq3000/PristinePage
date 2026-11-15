@@ -1,4 +1,4 @@
-package app.paperlight
+package app.pristinepage
 
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -44,7 +44,7 @@ class BootstrapPolicyTest {
     }
 
     private fun policyType(): Class<*> = try {
-        Class.forName("app.paperlight.BuildPolicy")
+        Class.forName("app.pristinepage.BuildPolicy")
     } catch (missing: ClassNotFoundException) {
         throw AssertionError("Bootstrap policy is absent: minimum platform, provider and network capabilities are not implemented.", missing)
     }

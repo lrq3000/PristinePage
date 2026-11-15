@@ -21,6 +21,7 @@ Version1.0,2026-11-14. These are product/engineering decisions, not evidence tha
 | D-13 | Operator-approved visible application name PristinePage; requested future full store title `PristinePage: Documents & Photos Scanner`; keep approved workspace/internal namespace unchanged | Branding amendment approved with P-01 launch on 2026-11-14. Do not silently infer a new application ID or publish a listing. |
 | D-14 | Operator-confirmed current app name PristinePage and future store title `PristinePage: Doc & Photo Scan`, exactly30 characters | Explicit branding-form selection on2026-11-14 supersedes prior longer requests/interim spelling. Length compliance is not publication or trademark clearance. |
 | D-15 | U-01 requires multiple actual neural geometry/appearance methods alongside all classical methods before completion | User clarification supersedes all-neural-deferral completion in originalv1.0. Exact provider set/asset/runtime plan remains pending; rights/parity/device/fidelity gates and acquisition permissions are not waived. |
+| D-16 | I-01/U-03 aligns internal identity to app.pristinepage and development/test IDs app.pristinepage.debug / app.pristinepage.debug.test, visible name PristinePage | Explicit spelling selection and I-01 form approval2026-11-15 supersede D-13's legacy namespace retention. Keep repository/cache locations and immutable plan/source bytes, same development key, LDPlayer-only testing. Old APK/review remains historical; replacement needs new evidence. |
 
 ## External/implementation gates
 

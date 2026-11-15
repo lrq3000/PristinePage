@@ -1,4 +1,4 @@
-package app.paperlight
+package app.pristinepage
 
 import java.io.File
 import java.io.StringReader
@@ -15,10 +15,10 @@ import org.xml.sax.InputSource
 /** Reads the actual AGP merged artifacts, not the source manifest: a dependency can add a permission or change application attributes during merging. Device backup behavior remains a separate gate. */
 class ManifestPolicyTest {
     @Test
-    fun debugMergedManifestCannotGrantNetworkOrBackup() = assertManifest("debug", "app.paperlight.debug")
+    fun debugMergedManifestCannotGrantNetworkOrBackup() = assertManifest("debug", "app.pristinepage.debug")
 
     @Test
-    fun releaseMergedManifestCannotGrantNetworkOrBackup() = assertManifest("release", "app.paperlight")
+    fun releaseMergedManifestCannotGrantNetworkOrBackup() = assertManifest("release", "app.pristinepage")
 
     @Test
     fun legacyBackupRulesExcludeAllPrivateAndExternalDomains() {
@@ -42,13 +42,13 @@ class ManifestPolicyTest {
     fun exportedActivityWithoutOneCompleteLauncherFilterIsRejected() {
         val factory = DocumentBuilderFactory.newInstance().apply { isNamespaceAware = true }
         for (filters in listOf("", "<intent-filter><action android:name=\"android.intent.action.MAIN\" /></intent-filter><intent-filter><category android:name=\"android.intent.category.LAUNCHER\" /></intent-filter>")) {
-            val activity = factory.newDocumentBuilder().parse(InputSource(StringReader("<activity xmlns:android=\"http://schemas.android.com/apk/res/android\" android:name=\"app.paperlight.MainActivity\" android:exported=\"true\">$filters</activity>"))).documentElement
+            val activity = factory.newDocumentBuilder().parse(InputSource(StringReader("<activity xmlns:android=\"http://schemas.android.com/apk/res/android\" android:name=\"app.pristinepage.MainActivity\" android:exported=\"true\">$filters</activity>"))).documentElement
             assertFalse("An exported activity alone is not a launchable entry point", isLauncher(activity))
         }
     }
 
     private fun assertManifest(variant: String, packageName: String) {
-        val manifest = parse(inputFile("paperlight.manifest.$variant"))
+        val manifest = parse(inputFile("pristinepage.manifest.$variant"))
         assertEquals(packageName, manifest.documentElement.getAttribute("package"))
         for (tag in listOf("uses-permission", "uses-permission-sdk-23")) {
             val permissions = manifest.getElementsByTagName(tag)
@@ -74,7 +74,7 @@ class ManifestPolicyTest {
     }
 
     private fun isLauncher(activity: Element): Boolean {
-        if (activity.android("name") != "app.paperlight.MainActivity" || activity.android("exported") != "true") return false
+        if (activity.android("name") != "app.pristinepage.MainActivity" || activity.android("exported") != "true") return false
         val filters = activity.getElementsByTagName("intent-filter")
         return (0 until filters.length).any { index ->
             val filter = filters.item(index) as Element
@@ -98,7 +98,7 @@ class ManifestPolicyTest {
         assertEquals(setOf("root", "file", "database", "sharedpref", "external", "device_root", "device_file", "device_database", "device_sharedpref"), excludedDomains)
     }
 
-    private fun resourceFile(name: String): File = File(inputFile("paperlight.policyResourceDir"), name)
+    private fun resourceFile(name: String): File = File(inputFile("pristinepage.policyResourceDir"), name)
 
     private fun inputFile(property: String): File {
         val path = System.getProperty(property)

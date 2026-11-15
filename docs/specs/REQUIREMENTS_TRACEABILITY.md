@@ -52,6 +52,8 @@ The documentation package's own requirement coverage and review are in SPEC_PACK
 
 ## Current partial bootstrap evidence — T01-20261114-A
 
+Identity amendment I-01/U-03 (attemptT01-20261115-I01) supersedes the legacy executable package identity only; the earlier artifact evidence below remains historical. [Replacement identity validation](../../validation/bootstrap/identity-receipt.md) must establish the new package/class/signer/resource evidence before LDPlayer installation. Repo/cache paths and accepted-plan/source bytes remain unchanged; no complete requirement row is passed by this rename.
+
 [APK receipt](../../validation/bootstrap/apk-receipt.md) identifies the exact development artifact SHA-256387217986018f31b7854abe153efb0febd0c0d2bd1029d7eb4e5e1b341ec7183 and actual9-test/offline-build/lint/signature/resource/ABI checks. [Toolchain receipt](../../validation/bootstrap/toolchain-receipt.md), [code review](../../validation/reviews/t01-code-review.md), [dependency audit](../../validation/reviews/t01-dependency-audit.md), approved [P-02A](../../validation/bootstrap/dependency-scope-amendment.md) and [notice register](../../validation/reviews/t01-notice-register.md) retain boundary-specific findings and permissions. These support only these portions:
 
 - FR-16/NFR-04: bootstrap configuration, merged debug/release network/backup assertions and actual debug packaged resources; actual fresh-install airplane-mode scanner journeys and OEM transfer behavior remain not run.

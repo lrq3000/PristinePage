@@ -11,11 +11,11 @@ plugins {
 val minimumApi = libs.versions.minSdk.get().toInt()
 
 android {
-    namespace = "app.paperlight"
+    namespace = "app.pristinepage"
     compileSdk = libs.versions.compileSdk.get().toInt()
     buildToolsVersion = libs.versions.buildTools.get()
     defaultConfig {
-        applicationId = "app.paperlight"
+        applicationId = "app.pristinepage"
         minSdk = minimumApi
         targetSdk = libs.versions.targetSdk.get().toInt()
         versionCode = libs.versions.appVersionCode.get().toInt()
@@ -69,7 +69,7 @@ androidComponents {
         tasks.withType<Test>().configureEach {
             inputs.file(mergedManifest).withPropertyName("${variant.name}PolicyManifest")
             doFirst {
-                systemProperty("paperlight.manifest.${variant.name}", mergedManifest.get().asFile.absolutePath)
+                systemProperty("pristinepage.manifest.${variant.name}", mergedManifest.get().asFile.absolutePath)
             }
         }
     }
@@ -77,7 +77,7 @@ androidComponents {
 tasks.withType<Test>().configureEach {
     val policyResources = layout.projectDirectory.dir("src/main/res/xml")
     inputs.dir(policyResources).withPropertyName("backupPolicyResources")
-    systemProperty("paperlight.policyResourceDir", policyResources.asFile.absolutePath)
+    systemProperty("pristinepage.policyResourceDir", policyResources.asFile.absolutePath)
 }
 
 dependencies {

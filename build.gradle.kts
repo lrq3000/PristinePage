@@ -11,7 +11,7 @@ plugins {
 }
 
 allprojects {
-    group = "app.paperlight"
+    group = "app.pristinepage"
     version = "0.1.0-dev"
 
     // Lock resolved inputs after a successful run; a failed red test is deliberately not accepted as persisted lock evidence.

@@ -6,7 +6,7 @@ User amendment U-01 in live PRD requires multiple actual neural methods, includi
 
 | ID | Task | Depends on | Initial state | Claim / evidence |
 |---|---|---|---|---|
-| T-01 | Reproducible Android bootstrap and capability-free launch | None | Local verified; approved LDPlayer runtime check queued | Owner coordinator `LOCAL_SESSION`; attempt `T01-20261114-A`; local efa7ae6/ffce635,9 tests green/offline strict build exit0/148tasks, scoped artifact PASS. Phone excluded/P-03 revoked. Exact [P-04](../../validation/bootstrap/ldplayer-protocol.md) released-instance claim/launch/test/shutdown approved; revalidation precedes emulator mutation. |
+| T-01 | Reproducible Android bootstrap and capability-free launch | None | I-01 locally verified/reviewed; LDPlayer runtime next | Owner coordinator `LOCAL_SESSION`; subattempt T01-20261115-I01; baseline c1c807a. Observed4 expected RED then9 app tests GREEN/offline build exit0/148tasks; replacement app.pristinepage.debug SHA19595f091f69 static checks and [independent review](../../validation/reviews/i01-identity-review.md) PASS. Identity commit next; no emulator claim/launch or phone use yet. |
 | T-02 | Pure contracts, geometry math and deterministic fixtures | T-01 | Not started | Unclaimed. |
 | T-03 | Durable source/document/recipe store and recovery | T-02 | Not started | Unclaimed. |
 | T-04 | Picker import and orientation/color-normalized decode | T-03 | Not started | Unclaimed. |
@@ -23,7 +23,7 @@ User amendment U-01 in live PRD requires multiple actual neural methods, includi
 
 ### Active claim T-01 / T01-20261114-A
 
-Claimed 2026-11-14T13:51:41Z by the integration coordinator, session `LOCAL_SESSION`, in branch `feat/paperlight-v1` and worktree `X:\local-workspace\.worktrees\paperlight-v1`. Input source package technical SHA-256 `54f5d3f72134075b40ca178f8e68f39a626352de2632b2e7db4fe598aba263c3`; original implementation-plan SHA-256 `791dba54b888ac430cf12c0a4d83a363a24dd570f5305e989c91815fb9be78fa`; seed commit `a74c341e780f0ea7466ce6814d998e63afb27d27`. Prerequisites: P-01 local launch, exact P-02 development acquisition and subsequent S-01 named development signing are granted; devices, neural acquisition and production/publication remain unapproved.
+Claimed 2026-11-14T13:51:41Z by the integration coordinator, session `LOCAL_SESSION`, in branch `feat/paperlight-v1` and worktree `X:\local-workspace\.worktrees\paperlight-v1`. Input source package technical SHA-256 `54f5d3f72134075b40ca178f8e68f39a626352de2632b2e7db4fe598aba263c3`; original implementation-plan SHA-256 `791dba54b888ac430cf12c0a4d83a363a24dd570f5305e989c91815fb9be78fa`; seed commit `a74c341e780f0ea7466ce6814d998e63afb27d27`. Current prerequisites: P-01, exact P-02/P-02A, S-01 with I-01 package amendment, and exclusive LDPlayer P-04 are granted. Personal phone is excluded; neural acquisition, broader devices, production signing and publication remain unapproved. Current subattemptT01-20261115-I01 changes executable identity only; old plan/source prefix mapping follows U-03.
 
 Permitted coordinator paths: root build/settings/ignore/instruction files, `gradle/`, the five module build files, T-01 app policy/launcher/manifest/resources and tests, live `docs/specs/` authority records, `validation/` and required notices under `licenses/`. These are not permission to bypass failing-test or acquisition gates. A delegated toolchain reviewer may write only its named report under `validation/reviews/`, not shared configuration. No other production task is claimed.
 

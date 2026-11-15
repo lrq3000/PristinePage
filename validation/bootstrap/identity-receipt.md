@@ -1,0 +1,26 @@
+# I-01 identity validation receipt — local checks verified
+
+AttemptT01-20261115-I01, baselinec1c807a,2026-11-15. Approved canonical app name is PristinePage and target internal identity app.pristinepage, debug/test packages app.pristinepage.debug / app.pristinepage.debug.test. See identity-amendment.md for exact approved scope and live PRD U-03 for precedence; no repository/cache relocation or accepted-plan/source-root rewrite.
+
+## Observed intended RED
+
+Moved/updated the two test sources to app/pristinepage before production code/build identifiers. Ran the focused BootstrapPolicyTest offline with strict dependency verification; raw log validation/raw/bootstrap/identity-policy-red.log. Gradle reached JUnit and exited1,63 tasks; parsed XML confirms4 intended missing-app.pristinepage.BuildPolicy assertions,0 infrastructure errors. Every failure contains the new fully qualified class name, so the legacy implementation cannot satisfy the renamed policy contract. Preserved original XML at validation/raw/bootstrap/identity-policy-red.junit.xml before the next run.
+
+## Implementation and observed GREEN
+
+After that RED, moved the two production classes into app/pristinepage, changed root Gradle group and app/data/image namespaces/application ID, and aligned the internal manifest-test property keys. Did not change algorithms/UI behavior, versions/dependencies/locks, key, backup/network policy, release signing or original/accepted-plan bytes. The existing disabled-feature bootstrap remains explicitly not a scanner.
+
+Normal incremental offline-strict all-module/unit/lint/debug-assembly/release-manifest command completed exit0 in2m32s,148 tasks (69 executed/79 up-to-date); raw log validation/raw/bootstrap/identity-green-assembly.log. Parsed and preserved new-package JUnit confirms BootstrapPolicyTest4/4 and ManifestPolicyTest5/5,0 failures/errors. Other modules remain source-empty, not image/scanner coverage. Lint still has0 errors/3 disclosed warnings (OldTargetApi, ChromeOsAbiSupport, MissingApplicationIcon); the existing implied rear-camera minor is not changed by this identity-only work. Gradle9 deprecation warnings remain disclosed; no upgrade was attempted.
+
+## Actual replacement artifact
+
+- Package:`app.pristinepage.debug`; launcher/class`app.pristinepage.MainActivity`; labelPristinePage; minimum/target SDK agree with the pinned catalog. Actual version metadata was compared to app/build/outputs/apk/debug/output-metadata.json, not a literal release assertion; observed versionName0.1.0-debug/versionCode1 at this snapshot.
+- SHA-256:`19595f091f69eda19fb7d05450c55160ba32c598ab6ee68b4d1d703be16557a7`;16,779,849bytes; preserved unique copy`dist/pristinepage-0.1.0-debug-i01-19595f091f69.apk` with generated inventory JSON.
+- Existing SDK apksigner verifies APK v2 and unchanged RSA2048 development certificate SHA-256`7ef552d3eab5d93fac15b3d2dd7233f1b50a170d2baf68460b12f6085f8dadee`. Release signing stays null; no key regenerated or printed.
+- aapt2 verifies new compiled manifest/launcher, no INTERNET/ACCESS_NETWORK_STATE, allowBackup=false and actual resource-ID mapping to both policy XMLs. Compiled legacy/cloud/device-transfer resources each retain all nine domain exclusions at path`.` and no includes.
+- 527 unique ZIP entries/CRC clean;24,287 defined DEX classes include the new MainActivity/BuildPolicy and **zero app/paperlight class definitions**. No inspected host-tool/inference-runtime class prefixes or model/key filename extensions. Three arm64 native binaries have identical hashes to the legacy artifact; ELF load alignment/congruence and zipalign16KiB checks pass. These are scoped static checks, not a semantic malware/SBOM or physical-device proof.
+- Dependency verification XML/six locks remain byte-identical to baseline; accepted-plan SHA remains791dba54b888ac430cf12c0a4d83a363a24dd570f5305e989c91815fb9be78fa. No dependencies/versions/algorithms changed. C: free17.59GiB after assembly, higher than the earlier9.46GiB for an undetermined external reason; this task performed no cleanup and does not attribute the volume change to its files.
+
+Raw signature/badging/manifest/resources/backup/ZIP/JUnit/inventory evidence is retained under validation/raw/bootstrap/identity, alongside identity-policy-red.junit.xml. [Independent I01-R](../reviews/i01-identity-review.md) returned spec-compliance PASS and task-quality PASS with one Minor stale-TODO follow-up, verified/corrected before commit; no Critical/Important identity/artifact defect. Existing rear-camera filtering and missing-icon minors remain explicitly deferred. The reviewer independently reverified current and historical APKs, unchanged dependencies/plan/source seed, nine-test evidence and static resource/class/native checks. No device/build operations were performed by that review.
+
+The coherent identity milestone is ready for local commit. Legacy APK/review remains historical and is not an installation target. No emulator has yet been claimed/launched or APK installed for this project at this checkpoint. The phone remains excluded; all scanner/neural/physical/OEM/visual/rights gates remain open. P-04 runtime validation is next with only the reviewed replacement.

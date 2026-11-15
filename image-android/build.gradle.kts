@@ -6,7 +6,7 @@ plugins {
 }
 
 android {
-    namespace = "app.paperlight.image"
+    namespace = "app.pristinepage.image"
     compileSdk = libs.versions.compileSdk.get().toInt()
     buildToolsVersion = libs.versions.buildTools.get()
     defaultConfig {

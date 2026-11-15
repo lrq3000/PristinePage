@@ -1,12 +1,14 @@
 # PristinePage
 
-Native offline Android document/photo scanner under active implementation. Confirmed future store title: **PristinePage: Doc & Photo Scan**. This repository is not yet a delivered scanner. T-01 has a signed development bootstrap with9 passing policy/privacy tests and inspected signature/package/resources; it has not been installed/launched and its import/capture actions are intentionally unavailable. See the [exact artifact receipt](validation/bootstrap/apk-receipt.md); no complete scanner or device/visual acceptance is claimed.
+Native offline Android document/photo scanner under active implementation. Confirmed future store title: **PristinePage: Doc & Photo Scan**. This repository is not yet a delivered scanner. T-01 has a signed app.pristinepage.debug bootstrap with9 passing policy/privacy tests and inspected signature/package/resources; it has not been installed/launched and its import/capture actions are intentionally unavailable. See the [current identity/artifact receipt](validation/bootstrap/identity-receipt.md); the [earlier legacy-package artifact](validation/bootstrap/apk-receipt.md) is historical, not an installation target. No complete scanner or device/visual acceptance is claimed.
 
 ## Authorities and scope
 
 Read [AGENTS.md](AGENTS.md), [live PRD](docs/specs/PRD.md), [TODO](docs/specs/TODO.md), [pipeline contracts](docs/specs/PIPELINE_CONTRACTS.md), [accepted implementation plan](docs/specs/IMPLEMENTATION_PLAN.md) and [operational permissions](docs/specs/OPERATIONAL_PLAN.md). [Execution progress](validation/progress.md) records actual evidence and restart state. The original external v1.0 source package remains unchanged.
 
 Both classical and multiple genuinely working neural geometry/appearance methods are mandatory under live PRD amendment U-01. Neural provider/asset/runtime selection is a later separately approved milestone after a tested classical import→edit→save→export slice. Missing or gated models cannot be disguised as implemented methods, and a registry-only/classical-only result cannot close the amended objective.
+
+Approved identity alignment I-01/U-03 makes the executable namespace/application ID `app.pristinepage`, with development/test packages `app.pristinepage.debug` / `app.pristinepage.debug.test`; visible name remains PristinePage. Repository/worktree/cache paths retain historical names. [Identity validation](validation/bootstrap/identity-receipt.md) distinguishes the replacement's current evidence from the earlier legacy-package bootstrap receipt. Development/runtime testing uses only the exclusively assigned LDPlayer instance under P-04; the operator's phone is excluded.
 
 ## Current build baseline
 

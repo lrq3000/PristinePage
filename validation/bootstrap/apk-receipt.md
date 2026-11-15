@@ -1,5 +1,7 @@
 # T-01 verified development APK — bootstrap only
 
+Historical artifact after I-01/U-03: this receipt identifies the genuine earlier app.paperlight.debug APK only. Preserve its hash-named dist copy/review; do not install it after the approved PristinePage identity alignment. [identity-receipt.md](identity-receipt.md) records the replacement app.pristinepage.debug artifact and its separate checks. No prior evidence is relabeled as validation of the changed package.
+
 Built2026-11-14 under approved P-01/P-02/P-02A/S-01, attemptT01-20261114-A, from the T-01 worktree source changes after preparation commit434d58f. This artifact is a development bootstrap, **not the requested completed scanner**: import/capture are visibly disabled and no image algorithms, durable library or export journey exist. No installation or launch was authorized or performed.
 
 ## Exact artifact
