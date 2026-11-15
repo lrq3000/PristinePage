@@ -8,4 +8,5 @@ import androidx.room.RoomDatabase
 abstract class PristineDatabase : RoomDatabase() {
     abstract fun catalog(): CatalogDao
     abstract fun importSessions(): ImportSessionDao
+    abstract fun jobLeases(): JobLeaseDao
 }

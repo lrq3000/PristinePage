@@ -34,35 +34,34 @@ class SourceFiles @JvmOverloads constructor(root: File, private val directorySyn
     var directorySyncSupported: Boolean = true
         private set
 
-    @Synchronized fun stage(transactionId: String, sourceBlobId: String, input: InputStream, maxBytes: Long): StagedSource {
+    /** Accepting the stream transfers its close responsibility, including validation/path/setup failures before the first read. SourceStore still owns the provider-open scope before this call. */
+    @Synchronized fun stage(transactionId: String, sourceBlobId: String, input: InputStream, maxBytes: Long): StagedSource = input.use { source ->
         validateId(transactionId); validateId(sourceBlobId)
         require(maxBytes in 1..inputLimit) { "Invalid encoded-byte admission limit" }
         val file = staging(transactionId)
         createDirectories(checkNotNull(file.parentFile))
         val digest = MessageDigest.getInstance("SHA-256")
         var count = 0L
-        input.use { source ->
-            FileChannel.open(file.toPath(), CREATE_NEW, WRITE).use { output ->
-                val buffer = ByteArray(65536)
-                while (true) {
-                    var length = source.read(buffer)
-                    if (length < 0) break
-                    if (length == 0) {
-                        val single = source.read()
-                        if (single < 0) break
-                        buffer[0] = single.toByte(); length = 1
-                    }
-                    require(length.toLong() <= maxBytes - count) { "Encoded source exceeds admission limit" }
-                    val bytes = java.nio.ByteBuffer.wrap(buffer, 0, length)
-                    while (bytes.hasRemaining()) output.write(bytes)
-                    digest.update(buffer, 0, length); count += length
+        FileChannel.open(file.toPath(), CREATE_NEW, WRITE).use { output ->
+            val buffer = ByteArray(65536)
+            while (true) {
+                var length = source.read(buffer)
+                if (length < 0) break
+                if (length == 0) {
+                    val single = source.read()
+                    if (single < 0) break
+                    buffer[0] = single.toByte(); length = 1
                 }
-                require(count > 0) { "Empty source" }
-                output.force(true)
+                require(length.toLong() <= maxBytes - count) { "Encoded source exceeds admission limit" }
+                val bytes = java.nio.ByteBuffer.wrap(buffer, 0, length)
+                while (bytes.hasRemaining()) output.write(bytes)
+                digest.update(buffer, 0, length); count += length
             }
+            require(count > 0) { "Empty source" }
+            output.force(true)
         }
         syncDirectory(checkNotNull(file.parentFile))
-        return StagedSource(transactionId, sourceBlobId, hex(digest.digest()), count, file)
+        StagedSource(transactionId, sourceBlobId, hex(digest.digest()), count, file)
     }
 
     /** Metadata is the caller's bounded canonical normalized-inspection/ownership payload. It is opaque to this file layer; the repository validates its typed meaning before commit. */
