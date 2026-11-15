@@ -12,6 +12,7 @@ interface MetadataAccess {
 
 interface CatalogQueries {
     fun document(id: String): DocumentRow?
+    fun retainedDocumentIdsAfter(objectId: String?, limit: Int): List<String>
     fun activePages(documentId: String): List<PageRow>
     fun page(id: String): PageRow?
     fun source(id: String): SourceRow?
@@ -49,6 +50,7 @@ fun interface RecipeAdmission {
 /** Growing T-03 command surface; export/session/recovery contracts are added with their implementations before task acceptance, never as successful no-op stubs. */
 interface DocumentRepository {
     suspend fun createDocument(title: String): DocumentId
+    suspend fun reconcile(): RecoveryReport
     suspend fun saveRecipe(pageId: PageId, expectedRevision: Long, recipe: Recipe): SaveRecipeResult
     suspend fun applyBatchRecipes(documentId: DocumentId, expectedDocumentRevision: Long, changes: List<BatchRecipeChange>): DocumentMutationResult
     suspend fun duplicatePage(pageId: PageId, expectedDocumentRevision: Long): DocumentMutationResult

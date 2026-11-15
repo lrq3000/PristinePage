@@ -10,6 +10,9 @@ import app.pristinepage.data.repository.CatalogQueries
 /** Bound SQL only. Business commands run these synchronous metadata operations on IO inside Room's transaction, never across provider/decode/render work. */
 @Dao abstract class CatalogDao : CatalogQueries {
     @Query("SELECT * FROM Document WHERE documentId=:id") abstract override fun document(id: String): DocumentRow?
+    // All retained lifecycles participate in availability expiry; select IDs only, with an indexed initial range that also exposes invalid empty IDs for rejection.
+    @Query("SELECT documentId FROM Document WHERE documentId>=COALESCE(:objectId,'') AND (:objectId IS NULL OR documentId>:objectId) ORDER BY documentId LIMIT :limit")
+    abstract override fun retainedDocumentIdsAfter(objectId: String?, limit: Int): List<String>
     @Query("SELECT * FROM Page WHERE documentId=:documentId AND state='ACTIVE' ORDER BY ordinal") abstract override fun activePages(documentId: String): List<PageRow>
     @Query("SELECT * FROM Page WHERE pageId=:id") abstract override fun page(id: String): PageRow?
     @Query("SELECT * FROM Source WHERE sourceId=:id") abstract override fun source(id: String): SourceRow?

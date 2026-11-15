@@ -28,7 +28,7 @@ import kotlinx.serialization.json.JsonObject
 @Serializable private data class MembershipUndoState(val documentId: String, val pages: List<MembershipPointer>, val version: Int = 1)
 
 /** File/decode/render work is deliberately absent. Canonical/capability preflight finishes before a short metadata transaction, which rechecks every mutable pointer and publishes all revisions together. RoomMetadataAccess supplies actual Android rollback; host tests exercise this same business code through its database port. */
-class RoomDocumentRepository @JvmOverloads constructor(private val metadata: MetadataAccess, private val admission: RecipeAdmission, private val clock: () -> Long = System::currentTimeMillis, private val dispatcher: CoroutineDispatcher = Dispatchers.IO) : DocumentRepository {
+class RoomDocumentRepository @JvmOverloads constructor(private val metadata: MetadataAccess, private val admission: RecipeAdmission, private val clock: () -> Long = System::currentTimeMillis, private val dispatcher: CoroutineDispatcher = Dispatchers.IO, private val recovery: RecoveryCoordinator? = null) : DocumentRepository {
     private val q: CatalogQueries get() = metadata.queries
     private val json = Json { encodeDefaults = true; ignoreUnknownKeys = false }
     private class Conflict(val actual: Long) : RuntimeException()
@@ -46,6 +46,17 @@ class RoomDocumentRepository @JvmOverloads constructor(private val metadata: Met
         } catch (canceled: CancellationException) { throw canceled }
         catch (failure: RepositoryFailure) { throw failure }
         catch (_: Exception) { reject(OperationErrorCode.STORAGE_FAILED, "metadata_write_failed", retryable = true) }
+    }
+
+    /** Application wiring supplies one scoped coordinator. Missing wiring must not masquerade as a clean recovery; the coordinator documents which domains it actually implements. */
+    override suspend fun reconcile(): RecoveryReport = withContext(dispatcher) {
+        try {
+            coroutineContext.ensureActive()
+            val coordinator = recovery ?: reject(OperationErrorCode.PROVIDER_UNAVAILABLE, "recovery_unavailable")
+            coordinator.reconcile()
+        } catch (canceled: CancellationException) { throw canceled }
+        catch (failure: RepositoryFailure) { throw failure }
+        catch (_: Exception) { reject(OperationErrorCode.STORAGE_FAILED, "store_recovery_failed", retryable = true) }
     }
 
     override suspend fun saveRecipe(pageId: PageId, expectedRevision: Long, recipe: Recipe): SaveRecipeResult = withContext(dispatcher) {

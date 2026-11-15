@@ -48,6 +48,10 @@ internal class MemoryMetadata : MetadataAccess, CatalogQueries {
     }
 
     override fun document(id: String) = documents[id]
+    override fun retainedDocumentIdsAfter(objectId: String?, limit: Int): List<String> {
+        check(inTransaction); check(limit in 1..64)
+        return documents.keys.filter { objectId == null || it > objectId }.sorted().take(limit)
+    }
     override fun activePages(documentId: String) = pages.values.filter { it.documentId == documentId && it.state == "ACTIVE" }.sortedBy { it.ordinal }
     override fun page(id: String) = pages[id]
     override fun source(id: String) = sources[id]
