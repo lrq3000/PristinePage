@@ -1,0 +1,43 @@
+# P-04 — proposed exclusive LDPlayer development/test target
+
+Status: **explicitly approved through the P-04 form, recorded2026-11-15**. The operator selected “Approve P-04 on released instance 2”, with no added note or widened scope. The operator explicitly selected LDPlayer and excluded their phone; no further physical-phone command is permitted. Read both ldplayer-apk-debugging and android-apk-parallel-debugging-in-emulator skills and their Windows/lifecycle/debugging references. Read-only inspection has run; no LDPlayer instance/guest/claim had changed at this approval checkpoint. Revalidate the exact candidate name/observed index/current ownership and live resources before executing the approved operations below.
+
+## Verified prerequisites and proposed target
+
+Installed tools:`C:\LDPlayer\LDPlayer9\ldconsole.exe` and bundled adb.exe. Actual CLI help identifies LDPlayer9.5.39.0; bundled ADB1.0.41/34.0.4. Original-skill shared coordinator exists at `C:\Users\local-user\AppData\Local\agent-emulators\ldplayer`, with exact atomic `allocation.lock` protocol; reuse it, do not create a competing registry. The allocation-owner slot is released and no lock directory was observed.
+
+Three listed instances are stopped, with no running player/VM process observed. Exact candidate `LOCAL_TEST_INSTANCE`, observed index2, matches its owner-null/stopped-released record, evidence_saved/shutdown_ready=true and no keep-running/handoff. Its stored guest settings are4096MiB RAM,2vCPU, ADB debugging1, rootMode=false. Ordinary installation/launch/UI checks do not require enabling root. Other instances and their data are not assigned to this work and must be preserved.
+
+Available host physical RAM was36.93GiB, above the4GiB launch admission floor. C: free was9.46GiB, leaving only1.46GiB above P-01's8GiB guard; existing guest data disks alone occupy about1.94–3.05GiB. A fresh instance's actual footprint is not established, so creating another is not a safe default with this disk headroom. **Proposed: exclusively reclaim the explicitly released candidate rather than clone/create a new disk.** Preserve all existing unrelated guest apps/data, which remain outside test input scope. This is a fresh app installation if the named debug package is absent, not a claim of a factory-fresh Android image.
+
+## Exact authority requested
+
+1. Under the existing atomic allocation lock, reread list2/ownership, remeasure live free RAM/disk and verify the exact name/index/installation still match. Stop for a newer owner, conflicting lock/record, unknown identity, less than4GiB available physical RAM or less than8GiB free C:. No override is implied.
+2. Update only the shared allocation-owner slot and this candidate's record, associating it exclusively with `X:\local-workspace\.worktrees\paperlight-v1` and the current session/new ownership generation; clear prior shutdown authorization for the new usage. Retain original identity/history fields and pending storage-retention obligation. Launch only this candidate; do not change its guest/global settings. Bound boot readiness to180seconds with per-command deadlines. Require instance mapping, verified ADB state, sys.boot_completed=1 and pm path android, and inspect actual API/ABI/native-bridge support before installation. Do not assume ARM64 support from the host architecture or infer the ADB serial from index arithmetic.
+3. Install initially only the verified bootstrap APK `X:\local-workspace\.worktrees\paperlight-v1\dist\pristinepage-0.1.0-debug-t01-387217986018.apk`, SHA-256387217986018f31b7854abe153efb0febd0c0d2bd1029d7eb4e5e1b341ec7183, development signer7ef552d3eab5d93fac15b3d2dd7233f1b50a170d2baf68460b12f6085f8dadee. If app.paperlight.debug already exists on first assignment, stop for ownership/signature/data reconciliation; no unrelated app replacement or adoption. Start its explicit launcher and inspect package/foreground/UI and bounded package-PID logs before concluding launch success. No failed emulator setup may be disguised as an app bug.
+4. Permit recurring install/update/launch and deterministic UI/instrumentation testing of later locally verified builds of only app.paperlight.debug and app.paperlight.debug.test from this approved worktree, signed with the S-01 identity, on this same exclusively owned instance. Verify each actual artifact's hash/build metadata/signer and installed package consistency; do not pin tests to a literal project release number. Use only generated fixtures and operation-owned test files/databases, never prior apps' files or personal photographs. Scope camera-permission grant/refusal, rotation/background and force-stop lifecycle stimuli to these packages and this emulator only when a named test requires them. Do not enable host webcam/physical-camera passthrough, host file sharing, arbitrary accounts or external recipients. No app-data clearing, uninstall, deletion of unrelated guest data, settings repair, guest network/airplane-mode change or global log clearing is included without its separate concrete test/approval.
+5. Capture app-scoped hierarchy/screenshots and bounded package-PID log evidence from the owned emulator, with deterministic expected-state checks and LLM checkpoints; stop on unmatched UI, wrong package/instance, unknown side effects or permission/system prompts. No physical-phone target may be chosen even if it remains connected. No broad ADB server restart/kill or guessed port. If privileged/file/ADB setup is actually missing, stop for assigned-instance setup rather than enabling root/global settings silently.
+6. After each finished/blocked testing session, save evidence, set current-generation shutdown_ready/evidence_saved when all consumers ended, capture player/VM PID+start identities, and gracefully quit only this named owned instance. Verify both processes exit and list2/isrunning agree before releasing usage. Reuse later only through a fresh generation/launch admission. Preserve retained disk storage; **no remove/VM disk deletion is approved here**. Preserve unknown/other instances. No force-kill or quitall. Cleanup failure remains an explicit ownership/resource obligation, not a falsely successful cleanup claim.
+
+## Commands and write paths
+
+Use the installed console and existing SDK/bundled ADB only after verifying client/server compatibility. No daemon restart is permitted; use the console's index-scoped native fallback if a normal serial is unavailable. Re-resolve the index by exact candidate name under the lock;2 is the observed current index, not an unconditional future target.
+
+```text
+ldconsole.exe list2
+ldconsole.exe launch --index <verified-owned-index>
+ldconsole.exe isrunning --index <verified-owned-index>
+ldconsole.exe adb --index <verified-owned-index> --command "get-serialno"
+ldconsole.exe adb --index <verified-owned-index> --command "shell getprop sys.boot_completed"
+ldconsole.exe adb --index <verified-owned-index> --command "shell pm path android"
+ldconsole.exe installapp --index <verified-owned-index> --filename <verified-worktree-APK>
+ldconsole.exe adb --index <verified-owned-index> --command "shell am start -W -n app.paperlight.debug/app.paperlight.MainActivity"
+ldconsole.exe adb --index <verified-owned-index> --command "shell dumpsys package app.paperlight.debug"
+ldconsole.exe quit --index <verified-owned-index>
+```
+
+Routine diagnostics/UI/instrumentation use the same verified index or its observed serial, never unqualified installDebug or the first adb target. Release the owned short-lived allocation lock after bounded readiness or a safely reconciled failure; do not hold it awaiting user input. Updates to the shared record/lock are operational metadata, not permission to overwrite another claim.
+
+Writes: existing candidate VM app/guest state under `C:\LDPlayer\LDPlayer9\vms\leidian2` only after name/index confirmation; its shared JSON record and allocation metadata outside worktrees; approved build/test/source files and retained evidence under this worktree's validation/raw and validation/bootstrap. No new LDPlayer/image/tool/model/runtime/dependency acquisition, global configuration, spending, physical-device use, external sharing, push/merge or production signing/publication. Existing P-02/P-02A/S-01 limits still govern builds.
+
+Alternative: allocate a fresh uniquely named instance only after sufficient disk headroom is restored and its exact creation/storage/claim/lifecycle plan is approved. Do not delete old instances/caches/files to create space automatically. Emulator functional/runtime evidence does not satisfy physical4–6GiB-device performance, OEM transfer, real-camera or human real-page fidelity acceptance; retain those limitations without requesting the excluded phone again.
