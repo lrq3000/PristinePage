@@ -1,5 +1,6 @@
 package app.pristinepage.data.repository
 
+import android.net.Uri
 import app.pristinepage.data.db.ImportSessionRow
 import app.pristinepage.data.model.*
 
@@ -15,4 +16,10 @@ interface ImportSessionQueries {
 interface ImportSessionCommands {
     suspend fun beginImport(documentId: DocumentId, expectedDocumentRevision: Long, anchorPageId: PageId?): ImportBatch
     suspend fun reserveImportItems(sessionId: ImportSessionId, count: Int): ImportBatch
+    suspend fun bindImportItem(sessionId: ImportSessionId, ordinal: Int, uri: Uri): ImportSessionId
+}
+
+/** Pure private-metadata boundary for the Android Uri adapter. It records only a selected provider reference; successful binding is not read permission, a private byte copy or an accepted page. */
+interface ImportItemBindings {
+    suspend fun bindProviderItem(sessionId: ImportSessionId, ordinal: Int, uriText: String): ImportSessionId
 }

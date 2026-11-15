@@ -1,5 +1,7 @@
 package app.pristinepage.data.repository
 
+import android.net.Uri
+import app.pristinepage.core.pipeline.requireWellFormedUnicode
 import app.pristinepage.data.db.ImportSessionRow
 import app.pristinepage.data.db.PageRow
 import app.pristinepage.data.db.PristineDatabase
@@ -7,6 +9,7 @@ import app.pristinepage.data.model.*
 import java.io.ByteArrayOutputStream
 import java.io.DataOutputStream
 import java.security.MessageDigest
+import java.net.URI
 import java.util.UUID
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineDispatcher
@@ -15,7 +18,7 @@ import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.withContext
 
 /** Reserves identities/order before external activity IO. A batch is not a Page and cannot expose an uncommitted source. Import sessions and catalog queries must share the injected metadata transaction. */
-class RoomImportSessions @JvmOverloads constructor(private val metadata: MetadataAccess, private val sessions: ImportSessionQueries, private val clock: () -> Long = System::currentTimeMillis, private val dispatcher: CoroutineDispatcher = Dispatchers.IO) : ImportSessionCommands {
+class RoomImportSessions @JvmOverloads constructor(private val metadata: MetadataAccess, private val sessions: ImportSessionQueries, private val clock: () -> Long = System::currentTimeMillis, private val dispatcher: CoroutineDispatcher = Dispatchers.IO) : ImportSessionCommands, ImportItemBindings {
     /** Native construction binds both DAOs to the same writer transaction; host tests inject only the unavailable Android database boundary. */
     constructor(database: PristineDatabase) : this(RoomMetadataAccess(database), database.importSessions())
 
@@ -63,6 +66,38 @@ class RoomImportSessions @JvmOverloads constructor(private val metadata: Metadat
                 rows.forEach(sessions::insertSession)
                 if (sessions.updateSession(parent.copy(state = "RESERVED")) != 1) reject(OperationErrorCode.INTEGRITY_FAILED, "import_session_unavailable", sessionId.value)
                 ImportBatch(sessionId, rows.map { ImportSessionId(it.sessionId) })
+            }
+        }
+    }
+
+    override suspend fun bindImportItem(sessionId: ImportSessionId, ordinal: Int, uri: Uri): ImportSessionId = bindProviderItem(sessionId, ordinal, uri.toString())
+
+    override suspend fun bindProviderItem(sessionId: ImportSessionId, ordinal: Int, uriText: String): ImportSessionId = withContext(dispatcher) {
+        guarded {
+            // Parsing never opens the URI or tests a provider grant. File/camera handoff is a later exact-transaction exception, not an arbitrary file URI admitted through this picker path.
+            if (ordinal !in 0..99 || uriText.isEmpty() || uriText.length > 8192) reject(OperationErrorCode.INVALID_INPUT, "invalid_import_reference", sessionId.value)
+            try {
+                requireWellFormedUnicode(uriText)
+                val reference = URI(uriText)
+                require(reference.scheme == "content" && !reference.rawAuthority.isNullOrBlank())
+            } catch (_: IllegalArgumentException) { reject(OperationErrorCode.INVALID_INPUT, "invalid_import_reference", sessionId.value) }
+            catch (_: java.net.URISyntaxException) { reject(OperationErrorCode.INVALID_INPUT, "invalid_import_reference", sessionId.value) }
+            coroutineContext.ensureActive()
+            metadata.transaction {
+                val parent = sessions.session(sessionId.value) ?: reject(OperationErrorCode.SESSION_EXPIRED, "import_session_unavailable", sessionId.value)
+                if (parent.kind != "BATCH" || parent.parentSessionId != null || parent.state != "RESERVED" || parent.expiresAt <= clock()) reject(OperationErrorCode.SESSION_EXPIRED, "import_session_unavailable", sessionId.value)
+                if (ImportMembership.hash(activePages(parent.documentId)) != parent.expectedMembershipToken) reject(OperationErrorCode.REVISION_CONFLICT, "import_membership_changed", sessionId.value)
+                val child = sessions.children(parent.sessionId).singleOrNull { it.selectionOrdinal == ordinal } ?: reject(OperationErrorCode.INVALID_INPUT, "import_item_not_reserved", sessionId.value)
+                if (child.kind != "ITEM" || child.documentId != parent.documentId || child.plannedPageId == null || child.expiresAt <= clock()) reject(OperationErrorCode.INTEGRITY_FAILED, "invalid_import_reservation", child.sessionId)
+                if (child.uriText != null) {
+                    if (child.uriText != uriText) reject(OperationErrorCode.INVALID_INPUT, "import_reference_already_bound", child.sessionId)
+                    if (child.state in setOf("CANCELED", "FAILED", "QUARANTINED")) reject(OperationErrorCode.SESSION_EXPIRED, "import_item_unavailable", child.sessionId)
+                    return@transaction ImportSessionId(child.sessionId)
+                }
+                if (child.state != "RESERVED" || child.transactionId != null) reject(OperationErrorCode.INTEGRITY_FAILED, "invalid_import_reservation", child.sessionId)
+                coroutineContext.ensureActive()
+                if (sessions.updateSession(child.copy(uriText = uriText, state = "BOUND")) != 1) reject(OperationErrorCode.INTEGRITY_FAILED, "import_item_not_reserved", child.sessionId)
+                ImportSessionId(child.sessionId)
             }
         }
     }
