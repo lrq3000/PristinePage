@@ -20,6 +20,7 @@ class JobLeaseTest {
         var now = 1000L
         var wallNow: Long? = null
         var liveness = LeaseOwnerState.UNKNOWN
+        private val registered = mutableSetOf<String>()
         var failWrite = false
         val metadata = object : MetadataAccess {
             override val queries: CatalogQueries get() = catalog
@@ -32,7 +33,7 @@ class JobLeaseTest {
         init {
             val type = try { Class.forName("app.pristinepage.data.repository.RoomJobLeases") }
             catch (error: ClassNotFoundException) { throw AssertionError("Fenced persistent job lease commands are absent", error) }
-            val gate = LeaseOwnerLiveness { check(catalog.inTransaction); liveness }
+            val gate = LeaseOwnerLiveness { owner -> check(catalog.inTransaction); if (owner == row.leaseOwner) liveness else if (owner in registered) LeaseOwnerState.ALIVE else LeaseOwnerState.UNKNOWN }
             commands = try { type.constructors.single { it.parameterCount == 6 }.newInstance(metadata, this, gate, { wallNow ?: now }, { now }, Dispatchers.Unconfined) as JobLeaseCommands }
             catch (error: InvocationTargetException) { throw error.targetException }
         }
@@ -43,7 +44,7 @@ class JobLeaseTest {
             if (this.row.jobId != row.jobId || this.row.leaseGeneration != expectedGeneration) return 0
             this.row = row; return 1
         }
-        fun owner() = UUID.randomUUID().toString()
+        fun owner() = UUID.randomUUID().toString().also { registered += it }
     }
 
     @Test fun onlyOneRunnerGetsAnAdmittedJobAndGenerationAdvances() = runTest {

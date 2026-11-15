@@ -6,6 +6,7 @@ import app.pristinepage.data.repository.*
 import java.io.IOException
 import java.lang.reflect.InvocationTargetException
 import java.util.UUID
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.*
 import org.junit.Test
@@ -113,5 +114,32 @@ class IngestReadmissionTest {
             } else assertFalse(f.commands.readmitEnded(f.intent, old))
             assertEquals("RUNNING", f.db.jobs.values.single().state); assertEquals(old.owner, f.db.jobs.values.single().leaseOwner)
         }
+    }
+
+    @Test fun readmittedJobRejectsEndedRequesterButFreshLiveOwnerCanFenceTheOldLease() = runTest {
+        val f = Fixture(); val old = f.ended()
+        assertTrue(f.commands.readmitEnded(f.intent, old))
+        val admitted = f.db.jobs.values.single()
+        val leases = RoomJobLeases(f.db.metadata, f.db, f.owners, { f.db.now }, { f.db.now }, Dispatchers.Unconfined)
+        val duplicate = leases.acquireAdmitted(f.intent.jobId, old.owner, 100)
+        assertFalse("Readmission let an already-ENDED identity acquire a new execution", duplicate is AcquireLeaseResult.Granted)
+        assertSame(admitted, f.db.jobs.values.single())
+        assertEquals(LeaseOwnerState.ENDED, f.owners.state(old.owner))
+        f.owners.run { fresh ->
+            val acquired = leases.acquireAdmitted(f.intent.jobId, fresh, 100) as AcquireLeaseResult.Granted
+            assertEquals(2L, acquired.lease.generation); assertEquals(fresh, acquired.lease.owner)
+            assertFalse(leases.checkpoint(old, byteArrayOf(9))); assertFalse(leases.complete(old))
+            assertTrue(leases.checkpoint(acquired.lease, byteArrayOf(7)))
+            assertTrue(leases.complete(acquired.lease))
+        }
+        assertEquals("SUCCEEDED", f.db.jobs.values.single().state)
+    }
+
+    @Test fun readmittedJobCannotStartWithAnUnknownRequesterIdentity() = runTest {
+        val f = Fixture(); val old = f.ended(); assertTrue(f.commands.readmitEnded(f.intent, old))
+        val admitted = f.db.jobs.values.single()
+        val leases = RoomJobLeases(f.db.metadata, f.db, f.owners, { f.db.now }, { f.db.now }, Dispatchers.Unconfined)
+        assertFalse(leases.acquireAdmitted(f.intent.jobId, UUID.randomUUID().toString(), 100) is AcquireLeaseResult.Granted)
+        assertSame(admitted, f.db.jobs.values.single()); assertTrue(f.db.catalog.pages.isEmpty())
     }
 }

@@ -13,7 +13,6 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ensureActive
-import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 
@@ -32,7 +31,7 @@ class RoomSourceStore @JvmOverloads constructor(private val files: SourceFiles, 
                 if (result.recoveryState != FileTransactionState.INTENT) return@withContext result
             }
             val intent = preparation.prepare(session, boundReference)
-            copyAdmission.withLock {
+            SourceCopyAdmission.mutex.withLock {
                 coroutineContext.ensureActive()
                 val result = replay.replay(intent)
                 if (result !is IngestResult.Pending || result.recoveryState != FileTransactionState.INTENT) return@withLock result
@@ -105,7 +104,6 @@ class RoomSourceStore @JvmOverloads constructor(private val files: SourceFiles, 
 
     private companion object {
         const val MAX_BYTES = 104857600L
-        val copyAdmission = Mutex()
 
         /** Normalize only provider-origin failures, before private file IO can see them. Missing/revoked/failed provider content needs a new readable selection, not a blind retry into an existing partial attempt. Fatal VM errors and coroutine cancellation are never swallowed. */
         inline fun <T> providerCall(session: ImportSessionId, action: () -> T): T = try { action() }

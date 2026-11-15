@@ -26,6 +26,7 @@ sealed class AcquireLeaseResult {
     data class Rejected(val error: OperationError) : AcquireLeaseResult()
 }
 
+/** Resource admission precedes acquisition; the requesting identity must also be currently ALIVE in the shared bounded owner registry. An ADMITTED row never revives a terminal/unknown requester. */
 interface JobLeaseCommands {
     suspend fun acquireAdmitted(jobId: JobId, owner: String, durationMillis: Long): AcquireLeaseResult
     suspend fun checkpoint(lease: JobLease, checkpoint: ByteArray): Boolean

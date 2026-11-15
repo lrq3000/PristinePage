@@ -110,7 +110,7 @@ class RoomSourceIngestIntegrationTest {
         }
     }
 
-    private class Fixture : AutoCloseable {
+    internal class Fixture : AutoCloseable {
         private val context: Context = InstrumentationRegistry.getInstrumentation().context
         private val name = "t03-ingest-${UUID.randomUUID()}.db"
         val root = File(context.filesDir, "t03-ingest-${UUID.randomUUID()}")

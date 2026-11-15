@@ -33,6 +33,8 @@ class RoomJobLeases @JvmOverloads constructor(private val metadata: MetadataAcce
                     }
                     else -> reject(OperationErrorCode.INVALID_INPUT, "job_not_admitted", jobId.value)
                 }
+                // Admission deliberately clears the previous owner. Require a currently scoped requester even on that owner-free path, or an already-ENDED/unknown identity could gain a new generation and invalidate the terminal evidence recovery relies on.
+                if (liveness.state(owner) != LeaseOwnerState.ALIVE) reject(OperationErrorCode.INVALID_INPUT, "job_owner_not_alive", jobId.value)
                 val generation: Long; val attempt: Long; val until: Long
                 try { generation = Math.addExact(job.leaseGeneration, 1L); attempt = Math.addExact(job.attempt, 1L); until = Math.addExact(now, durationMillis) }
                 catch (_: ArithmeticException) { reject(OperationErrorCode.RESOURCE_LIMIT, "job_lease_limit", jobId.value) }

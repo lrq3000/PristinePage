@@ -12,7 +12,7 @@ import org.junit.Test
 
 /** Actual intent/session/job commands with only Android's row storage/transaction substituted. Preparation cannot copy/decode a source or make a Page visible; those remain consuming SourceStore/recovery tests. */
 class IngestIntentTest {
-    internal class Fixture : ImportSessionQueries, IngestPreparationQueries, IngestCompletionQueries, IngestLookupQueries, IngestPhaseQueries, JobLeaseQueries {
+    internal class Fixture : ImportSessionQueries, IngestPreparationQueries, IngestCompletionQueries, IngestLookupQueries, IngestPhaseQueries, IngestRecoveryQueries, JobLeaseQueries {
         val catalog = MemoryMetadata()
         val document = DocumentId(UUID.randomUUID().toString())
         val parent = ImportSessionId(UUID.randomUUID().toString())
@@ -80,6 +80,10 @@ class IngestIntentTest {
             check(catalog.inTransaction)
             if (row.state == rejectPhaseState || files[row.transactionId]?.state != expectedState) return 0
             files[row.transactionId] = row; return 1
+        }
+        override fun unfinishedIngestsAfter(transactionId: String, limit: Int): List<FileTransactionRow> {
+            check(catalog.inTransaction)
+            return files.values.filter { it.kind == "INGEST" && it.transactionId > transactionId && it.state !in setOf("COMMITTED", "CANCELED", "FAILED", "QUARANTINED") }.sortedBy { it.transactionId }.take(limit)
         }
     }
 

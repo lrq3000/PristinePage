@@ -24,7 +24,7 @@ import org.junit.Test
 
 /** Real source-store orchestration/private files/journal/lease/owner/metadata commands. Only provider streams, normalized inspection and Android DB storage are substituted; this is not actual decoder/provider/device/process-death acceptance. */
 class SourceStoreTest {
-    private class Fixture(directorySync: DirectorySync? = null) {
+    internal class Fixture(directorySync: DirectorySync? = null) {
         val db = IngestIntentTest.Fixture()
         val bytes = byteArrayOf(1, 2, 3, 4)
         private val parent = File(System.getProperty("user.dir"), "build/test-source-files").apply { mkdirs() }

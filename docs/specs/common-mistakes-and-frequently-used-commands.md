@@ -13,6 +13,7 @@ Read this file at task start and after resumption. These are anticipated pitfall
 - Updating a document's current recipe/order while an export rereads it; publishing a result whose generation no longer matches.
 - Treating SAF URI access as a durable private copy; assuming provider rename/delete is atomic; reporting a partial external output as complete.
 - Assuming moving a file and updating Room is one transaction. Use journals and reconcile both sides after interruption.
+- Treating owner-free ADMITTED as permission for an old ENDED/UNKNOWN runner to execute again. Require a currently ALIVE scoped requester before lease acquisition writes, separately from resource admission and old-owner positive-termination evidence.
 - Assuming WorkManager runs immediately or completes after force-stop. Show pending/interrupted state truthfully.
 - Packaging unresolved/research-restricted weights under a permissive code license; installing both inference runtimes before a selected provider requires them.
 
