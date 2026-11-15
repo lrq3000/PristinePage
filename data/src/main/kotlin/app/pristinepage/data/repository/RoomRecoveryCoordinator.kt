@@ -82,7 +82,9 @@ class RoomRecoveryCoordinator @JvmOverloads constructor(private val metadata: Me
             val recorded = when (job.state) {
                 "RUNNING", "CHECKPOINTED" -> {
                     val owner = job.leaseOwner ?: return blocked(session, "ingest_owner_missing")
-                    if (owners.state(owner) != LeaseOwnerState.ENDED) return Outcome(recordedResult)
+                    // Native proof refresh is explicit IO outside Room; readmission below consults only its bounded cached result. Registry-only owners retain the conservative local/UNKNOWN behavior.
+                    val priorState = if (owners is OperationOwnerProof) owners.refresh(owner) else owners.state(owner)
+                    if (priorState != LeaseOwnerState.ENDED) return Outcome(recordedResult)
                     JobLease(intent.jobId, owner, job.leaseGeneration)
                 }
                 "ADMITTED" -> {

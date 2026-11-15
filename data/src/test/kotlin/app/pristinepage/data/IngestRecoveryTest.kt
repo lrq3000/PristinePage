@@ -6,6 +6,7 @@ import app.pristinepage.data.db.FileTransactionRow
 import java.io.File
 import java.io.IOException
 import java.lang.reflect.InvocationTargetException
+import java.nio.file.Files
 import java.util.UUID
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
@@ -215,6 +216,29 @@ class IngestRecoveryTest {
             }
             assertTrue(f.db.catalog.pages.isEmpty()); assertEquals(0, f.opened)
             assertEquals("PENDING", f.db.jobs.values.single().state)
+        }
+    }
+
+    @Test fun nativeProofIsRefreshedOutsideMetadataBeforeReadmittingAnExitedForeignOwner() = runTest {
+        val f = SourceStoreTest.Fixture(); sealAheadOfJournal(f)
+        val proofRoot = File(Files.createTempDirectory(f.root.parentFile!!.toPath(), "proof-consumer-").toFile(), "store")
+        val native = fileOwners(proofRoot)
+        val monitored = object : OperationOwners by native, OperationOwnerProof {
+            override suspend fun refresh(owner: String): LeaseOwnerState {
+                assertFalse("Native ownership IO occurred under the Room writer", f.db.catalog.inTransaction)
+                return (native as OperationOwnerProof).refresh(owner)
+            }
+        }
+        FileOperationOwnersTest.OwnerChild(proofRoot).use { child ->
+            val foreign = child.owner(); val row = f.db.jobs.values.single()
+            f.db.jobs[row.jobId] = row.copy(leaseOwner = foreign)
+            child.stopAbruptly()
+            assertEquals(LeaseOwnerState.UNKNOWN, native.state(foreign))
+            val report = coordinator(f, monitored).reconcile()
+            assertEquals(1L, report.completed); assertEquals(1L, report.resumed); assertEquals(0L, report.blocked)
+            assertEquals(LeaseOwnerState.ENDED, native.state(foreign))
+            assertEquals(1, f.db.catalog.pages.size); assertEquals(2L, f.db.jobs.values.single().leaseGeneration)
+            assertEquals(1, f.opened); assertEquals(0L, coordinator(f, monitored).reconcile().completed)
         }
     }
 }
