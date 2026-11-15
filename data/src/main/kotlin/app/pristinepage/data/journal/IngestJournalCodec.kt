@@ -3,6 +3,7 @@ package app.pristinepage.data.journal
 import app.pristinepage.core.pipeline.requireSha256
 import app.pristinepage.data.model.IngestJournalIntent
 import app.pristinepage.data.model.IngestJournalSeal
+import app.pristinepage.data.model.IngestJournalCommit
 import java.nio.ByteBuffer
 import java.nio.CharBuffer
 import java.nio.charset.CodingErrorAction
@@ -35,6 +36,20 @@ object IngestJournalCodec {
         validate(seal)
         require(seal.intent == expected) { "Ingest seal ownership mismatch" }
         return seal
+    }
+
+    @JvmStatic fun encodeCommit(commit: IngestJournalCommit): ByteArray {
+        validate(commit.seal)
+        require(commit.schemaVersion == 1 && commit.documentRevision >= 1) { "Unsupported ingest commit" }
+        return encode(IngestJournalCommit.serializer(), commit)
+    }
+
+    @JvmStatic fun decodeCommit(bytes: ByteArray, expected: IngestJournalIntent): IngestJournalCommit {
+        validate(expected)
+        val commit = decode(IngestJournalCommit.serializer(), bytes)
+        encodeCommit(commit)
+        require(commit.seal.intent == expected) { "Ingest commit ownership mismatch" }
+        return commit
     }
 
     private fun validate(intent: IngestJournalIntent) {

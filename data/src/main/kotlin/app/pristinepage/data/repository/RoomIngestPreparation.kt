@@ -5,8 +5,6 @@ import app.pristinepage.data.db.JobRow
 import app.pristinepage.data.db.PristineDatabase
 import app.pristinepage.data.journal.IngestJournalCodec
 import app.pristinepage.data.model.*
-import java.nio.ByteBuffer
-import java.security.MessageDigest
 import java.util.UUID
 import kotlinx.coroutines.CancellationException
 
@@ -36,7 +34,7 @@ class RoomIngestPreparation @JvmOverloads constructor(private val metadata: Meta
                     catch (_: IllegalArgumentException) { reject(OperationErrorCode.INTEGRITY_FAILED, "invalid_ingest_intent", sessionId.value) }
                     if (child.state != "INGESTING" || row.kind != "INGEST" || row.ownerId != child.sessionId || row.state !in setOf("INTENT", "COPYING", "SEALED", "MOVED", "RETRYABLE") || row.transactionId != intent.transactionId.value || row.attempt != intent.attempt || intent.sessionId.value != child.sessionId || intent.documentId.value != doc.documentId || intent.pageId.value != child.plannedPageId || row.stagingPath != stagingPath(intent) || row.finalPath != finalPath(intent)) reject(OperationErrorCode.INTEGRITY_FAILED, "ingest_intent_binding_mismatch", sessionId.value)
                     val job = jobs.job(intent.jobId.value) ?: reject(OperationErrorCode.INTEGRITY_FAILED, "ingest_job_missing", sessionId.value)
-                    if (job.kind != "RECONCILE" || job.idempotenceKey != jobKey(intent) || job.canonicalInputSha256 != inputHash(row.payload) || !job.input.contentEquals(row.payload)) reject(OperationErrorCode.INTEGRITY_FAILED, "ingest_job_binding_mismatch", sessionId.value)
+                    if (job.kind != "RECONCILE" || job.idempotenceKey != IngestJobIdentity.key(intent) || job.canonicalInputSha256 != IngestJobIdentity.hash(row.payload) || !job.input.contentEquals(row.payload)) reject(OperationErrorCode.INTEGRITY_FAILED, "ingest_job_binding_mismatch", sessionId.value)
                     if (job.state !in setOf("PENDING", "ADMITTED", "RUNNING", "CHECKPOINTED", "WAITING_RESOURCE", "RETRYABLE", "INTERRUPTED")) reject(OperationErrorCode.SESSION_EXPIRED, "ingest_job_not_active", sessionId.value)
                     return@transaction intent
                 }
@@ -44,7 +42,7 @@ class RoomIngestPreparation @JvmOverloads constructor(private val metadata: Meta
                 if (pages.size >= 100) reject(OperationErrorCode.RESOURCE_LIMIT, "document_page_limit", doc.documentId)
                 val intent = IngestJournalIntent(TransactionId(newId()), sessionId, DocumentId(doc.documentId), PageId(child.plannedPageId), SourceBlobId(newId()), SourceId(newId()), JobId(newId()), 1)
                 val bytes = IngestJournalCodec.encodeIntent(intent)
-                ingest.insertIngestJob(JobRow(intent.jobId.value, "RECONCILE", jobKey(intent), inputHash(bytes), null, null, bytes.copyOf(), "PENDING", 0, null, null, 0, null, null, now, now))
+                ingest.insertIngestJob(JobRow(intent.jobId.value, "RECONCILE", IngestJobIdentity.key(intent), IngestJobIdentity.hash(bytes), null, null, bytes.copyOf(), "PENDING", 0, null, null, 0, null, null, now, now))
                 ingest.insertFileTransaction(FileTransactionRow(intent.transactionId.value, "INGEST", child.sessionId, "INTENT", stagingPath(intent), finalPath(intent), null, null, null, bytes, intent.attempt, null, now))
                 if (sessions.updateSession(child.copy(state = "INGESTING", transactionId = intent.transactionId.value)) != 1) reject(OperationErrorCode.INTEGRITY_FAILED, "import_item_unavailable", sessionId.value)
                 intent
@@ -57,12 +55,5 @@ class RoomIngestPreparation @JvmOverloads constructor(private val metadata: Meta
     private fun newId() = UUID.randomUUID().toString()
     private fun stagingPath(intent: IngestJournalIntent) = "staging/${intent.transactionId.value}/original.part"
     private fun finalPath(intent: IngestJournalIntent) = "sources/${intent.sourceBlobId.value}/original.bin"
-    private fun jobKey(intent: IngestJournalIntent) = "ingest-v1:${intent.sessionId.value}:${intent.attempt}"
-    private fun inputHash(bytes: ByteArray): String {
-        val digest = MessageDigest.getInstance("SHA-256")
-        digest.update("pristinepage-ingest-input-v1\u0000".toByteArray(Charsets.UTF_8))
-        digest.update(ByteBuffer.allocate(4).putInt(bytes.size).array())
-        return digest.digest(bytes).joinToString("") { "%02x".format(it.toInt() and 255) }
-    }
     private fun reject(code: OperationErrorCode, key: String, id: String): Nothing = throw RepositoryFailure(OperationError(code, false, key, id))
 }

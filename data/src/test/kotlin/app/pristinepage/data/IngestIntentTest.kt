@@ -12,7 +12,7 @@ import org.junit.Test
 
 /** Actual intent/session/job commands with only Android's row storage/transaction substituted. Preparation cannot copy/decode a source or make a Page visible; those remain consuming SourceStore/recovery tests. */
 class IngestIntentTest {
-    private class Fixture : ImportSessionQueries, IngestPreparationQueries, JobLeaseQueries {
+    internal class Fixture : ImportSessionQueries, IngestPreparationQueries, IngestCompletionQueries, JobLeaseQueries {
         val catalog = MemoryMetadata()
         val document = DocumentId(UUID.randomUUID().toString())
         val parent = ImportSessionId(UUID.randomUUID().toString())
@@ -22,15 +22,16 @@ class IngestIntentTest {
         val sessions = linkedMapOf<String, ImportSessionRow>()
         val files = linkedMapOf<String, FileTransactionRow>()
         val jobs = linkedMapOf<String, JobRow>()
+        val blobs = linkedMapOf<String, SourceBlobRow>()
         var now = 1000L
         var rejectChildUpdate = false
         val metadata = object : MetadataAccess {
             override val queries: CatalogQueries get() = catalog
             override fun <T> transaction(action: () -> T): T {
-                val s = sessions.toMap(); val f = files.toMap(); val j = jobs.toMap()
+                val s = sessions.toMap(); val f = files.toMap(); val j = jobs.toMap(); val b = blobs.toMap()
                 return try { catalog.transaction(action) }
                 catch (failure: Throwable) {
-                    sessions.clear(); sessions.putAll(s); files.clear(); files.putAll(f); jobs.clear(); jobs.putAll(j)
+                    sessions.clear(); sessions.putAll(s); files.clear(); files.putAll(f); jobs.clear(); jobs.putAll(j); blobs.clear(); blobs.putAll(b)
                     throw failure
                 }
             }
@@ -60,7 +61,19 @@ class IngestIntentTest {
         override fun insertFileTransaction(row: FileTransactionRow) { check(catalog.inTransaction); check(files.putIfAbsent(row.transactionId, row) == null) }
         override fun insertIngestJob(row: JobRow) { check(catalog.inTransaction); check(jobs.putIfAbsent(row.jobId, row) == null) }
         override fun job(id: String): JobRow? { check(catalog.inTransaction); return jobs[id] }
-        override fun updateLease(row: JobRow, expectedGeneration: Long): Int = error("Preparation cannot acquire or complete a lease")
+        override fun updateLease(row: JobRow, expectedGeneration: Long): Int {
+            check(catalog.inTransaction)
+            if (jobs[row.jobId]?.leaseGeneration != expectedGeneration) return 0
+            jobs[row.jobId] = row; return 1
+        }
+        override fun sourceBlob(id: String): SourceBlobRow? { check(catalog.inTransaction); return blobs[id] }
+        override fun insertSourceBlob(row: SourceBlobRow) { check(catalog.inTransaction); check(blobs.putIfAbsent(row.sourceBlobId, row) == null) }
+        override fun insertSource(row: SourceRow) { check(catalog.inTransaction); check(catalog.sources.putIfAbsent(row.sourceId, row) == null) }
+        override fun updateFileTransaction(row: FileTransactionRow, expectedState: String): Int {
+            check(catalog.inTransaction)
+            if (files[row.transactionId]?.state != expectedState) return 0
+            files[row.transactionId] = row; return 1
+        }
     }
 
     @Test fun durableIntentAndPendingJobPrecedeAnySourceOrPageVisibility() {
