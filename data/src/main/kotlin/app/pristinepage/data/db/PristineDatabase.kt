@@ -13,4 +13,5 @@ abstract class PristineDatabase : RoomDatabase() {
     abstract fun ingestCompletion(): IngestCompletionDao
     abstract fun ingestPhases(): IngestPhaseDao
     abstract fun ingestRecovery(): IngestRecoveryDao
+    abstract fun referenceAudit(): ReferenceAuditDao
 }
