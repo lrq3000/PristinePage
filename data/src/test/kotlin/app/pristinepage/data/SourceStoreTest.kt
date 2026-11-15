@@ -24,7 +24,7 @@ import org.junit.Test
 
 /** Real source-store orchestration/private files/journal/lease/owner/metadata commands. Only provider streams, normalized inspection and Android DB storage are substituted; this is not actual decoder/provider/device/process-death acceptance. */
 class SourceStoreTest {
-    internal class Fixture(directorySync: DirectorySync? = null) {
+    internal class Fixture(directorySync: DirectorySync? = null, enableRetry: Boolean = false) {
         val db = IngestIntentTest.Fixture()
         val bytes = byteArrayOf(1, 2, 3, 4)
         private val parent = File(System.getProperty("user.dir"), "build/test-source-files").apply { mkdirs() }
@@ -34,6 +34,8 @@ class SourceStoreTest {
         var opened = 0; var closed = 0; var inspected = 0
         var inspectionFailure: RepositoryFailure? = null
         var duringInspection: () -> Unit = {}
+        var beforeReplay: suspend (IngestJournalIntent) -> Unit = {}
+        var beforePreparation: () -> Unit = {}
         var input: () -> InputStream = {
             object : ByteArrayInputStream(bytes) { override fun close() { closed++; super.close() } }
         }
@@ -58,9 +60,17 @@ class SourceStoreTest {
                 SourceInspection("image/png", PixelSize(3, 2), PixelSize(3, 2), 1, null, "synthetic-v1", "a".repeat(64))
             }
             val completion = RoomIngestCompletion(db.metadata, db, db, db, db, files, { db.now }, { db.now }, Dispatchers.Unconfined)
+            val replay = object : IngestReplay { override suspend fun replay(intent: IngestJournalIntent): IngestResult { beforeReplay(intent); return completion.replay(intent) } }
+            val preparation = object : IngestPreparation { override fun prepare(sessionId: ImportSessionId, boundUriText: String): IngestJournalIntent { beforePreparation(); return db.commands.prepare(sessionId, boundUriText) } }
             val lookup = RoomIngestLookup(db.metadata, db, db, db)
             val leases = RoomJobLeases(db.metadata, db, owners, { db.now }, { db.now }, Dispatchers.Unconfined)
-            store = try { type.constructors.single { it.parameterCount == 11 }.newInstance(files, provider, inspector, db.commands, lookup, completion, completion, phases, leases, owners, Dispatchers.Unconfined) as BoundSourceIngest }
+            val restart = if (enableRetry) {
+                val restartType = try { Class.forName("app.pristinepage.data.repository.RoomIngestRestarts") }
+                catch (failure: ClassNotFoundException) { throw AssertionError("Admitted unsealed-file retry consumption is absent", failure) }
+                try { restartType.constructors.single { it.parameterCount == 7 }.newInstance(db.metadata, db, db, files, owners, RoomIngestAttempts(db.metadata, db, db, db, db, owners, { db.now }), Dispatchers.Unconfined) }
+                catch (failure: InvocationTargetException) { throw failure.targetException }
+            } else null
+            store = try { if (enableRetry) type.constructors.single { it.parameterCount == 12 }.newInstance(files, provider, inspector, preparation, lookup, replay, completion, phases, leases, owners, Dispatchers.Unconfined, restart) as BoundSourceIngest else type.constructors.single { it.parameterCount == 11 }.newInstance(files, provider, inspector, preparation, lookup, replay, completion, phases, leases, owners, Dispatchers.Unconfined) as BoundSourceIngest }
             catch (error: InvocationTargetException) { throw error.targetException }
         }
     }

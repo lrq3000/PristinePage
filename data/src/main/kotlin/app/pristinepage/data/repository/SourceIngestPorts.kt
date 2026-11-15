@@ -32,4 +32,6 @@ interface IngestPhases {
     fun sealed(intent: IngestJournalIntent, lease: JobLease, sealed: SealedSource): Boolean
     fun moved(intent: IngestJournalIntent, lease: JobLease): Boolean
     fun failed(intent: IngestJournalIntent, lease: JobLease, error: OperationError): Boolean
+    /** Re-admit only an exact owner-free retry generation with an already verified private seal. Caller holds copy admission and performs actual seal/file proof outside Room; this does not allocate another copy or revive an old owner. Legacy phase adapters may conservatively decline. */
+    fun readmitSealedRetry(intent: IngestJournalIntent, recordedGeneration: Long, sealed: SealedSource): Boolean = false
 }

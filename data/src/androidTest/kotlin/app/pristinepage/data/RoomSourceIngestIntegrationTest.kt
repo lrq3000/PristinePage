@@ -9,6 +9,7 @@ import app.pristinepage.core.pipeline.PixelSize
 import app.pristinepage.data.db.PristineDatabase
 import app.pristinepage.data.files.SourceFiles
 import app.pristinepage.data.files.SourceInspector
+import app.pristinepage.data.files.DirectorySync
 import app.pristinepage.data.model.*
 import app.pristinepage.data.repository.*
 import java.io.ByteArrayInputStream
@@ -110,11 +111,11 @@ class RoomSourceIngestIntegrationTest {
         }
     }
 
-    internal class Fixture : AutoCloseable {
+    internal class Fixture(private val enableRetry: Boolean = false, directorySync: DirectorySync? = null) : AutoCloseable {
         private val context: Context = InstrumentationRegistry.getInstrumentation().context
         private val name = "t03-ingest-${UUID.randomUUID()}.db"
         val root = File(context.filesDir, "t03-ingest-${UUID.randomUUID()}")
-        val files = SourceFiles(root)
+        val files = if (directorySync == null) SourceFiles(root) else SourceFiles(root, directorySync)
         val bytes = byteArrayOf(1, 2, 3, 4)
         val reference = Uri.parse("content://fixture.documents/synthetic-source")
         val owners = LocalOperationOwners()
@@ -148,7 +149,7 @@ class RoomSourceIngestIntegrationTest {
                 SourceInspection("image/png", PixelSize(3, 2), PixelSize(3, 2), 1, null, "synthetic-v1", "a".repeat(64))
             }
             val completion = RoomIngestCompletion(database, files)
-            return RoomSourceStore(files, provider, inspector, RoomIngestPreparation(database), RoomIngestLookup(database), completion, completion, RoomIngestPhases(database), RoomJobLeases(database, owners), owners)
+            return RoomSourceStore(files, provider, inspector, RoomIngestPreparation(database), RoomIngestLookup(database), completion, completion, RoomIngestPhases(database), RoomJobLeases(database, owners), owners, restarts = if (enableRetry) RoomIngestRestarts(database, files, owners) else null)
         }
         fun reopen() { database.close(); database = open(); store = store() }
         fun count(table: String): Long {

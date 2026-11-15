@@ -91,6 +91,10 @@ class RoomRecoveryCoordinator @JvmOverloads constructor(private val metadata: Me
                     if (job.leaseOwner != null || job.leaseUntil != null) return blocked(session, "ingest_owner_mismatch")
                     null
                 }
+                "RETRYABLE", "INTERRUPTED" -> {
+                    if (job.leaseOwner != null || job.leaseUntil != null || before.state != "RETRYABLE") return Outcome(recordedResult)
+                    null // Actual sealed proof below is mandatory before restoring an owner-free retry to ADMITTED.
+                }
                 else -> return Outcome(recordedResult) // INTENT provider resumption and owner-free retry/new-attempt routes are separate, still-unimplemented recovery work.
             }
             context.ensureActive()
@@ -99,6 +103,7 @@ class RoomRecoveryCoordinator @JvmOverloads constructor(private val metadata: Me
             val seal = IngestJournalCodec.decodeSeal(sealed.metadata, intent)
             if (sealed.staged.sourceBlobId != intent.sourceBlobId.value || sealed.staged.transactionId != intent.transactionId.value || seal.sourceByteHash != sealed.staged.byteSha256 || seal.byteCount != sealed.staged.byteCount || before.state in setOf("SEALED", "MOVED") && (before.sealSha256 == null || before.expectedByteSha256 != seal.sourceByteHash || before.expectedByteCount != seal.byteCount)) return blocked(session, "ingest_source_binding_mismatch")
             if (recorded != null && !readmission.readmitEnded(intent, recorded)) return Outcome(recordedResult)
+            if (job.state in setOf("RETRYABLE", "INTERRUPTED") && !phases.readmitSealedRetry(intent, job.leaseGeneration, sealed)) return Outcome(recordedResult)
             return owners.run { owner ->
                 when (val acquired = leases.acquireAdmitted(intent.jobId, owner, 300_000L)) {
                     is AcquireLeaseResult.Busy -> Outcome(replay.replay(intent))

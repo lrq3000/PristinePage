@@ -3,6 +3,7 @@ package app.pristinepage.data
 import app.pristinepage.data.model.*
 import app.pristinepage.data.repository.*
 import app.pristinepage.data.db.FileTransactionRow
+import app.pristinepage.data.files.DirectorySync
 import java.io.File
 import java.io.IOException
 import java.lang.reflect.InvocationTargetException
@@ -240,5 +241,49 @@ class IngestRecoveryTest {
             assertEquals(1, f.db.catalog.pages.size); assertEquals(2L, f.db.jobs.values.single().leaseGeneration)
             assertEquals(1, f.opened); assertEquals(0L, coordinator(f, monitored).reconcile().completed)
         }
+    }
+
+    private suspend fun sealedStorageRetry(afterMove: Boolean): SourceStoreTest.Fixture {
+        var fired = false
+        val f = SourceStoreTest.Fixture(DirectorySync { directory ->
+            val boundary = File(directory, if (afterMove) "original.bin" else "seal.json")
+            if (!fired && boundary.isFile) { fired = true; throw IOException("synthetic one-shot private directory sync failure") }
+            true
+        })
+        assertTrue(f.store.ingestBoundProvider(f.db.uri, f.db.child) is IngestResult.Pending)
+        assertTrue("The real file protocol never reached the requested fault boundary", fired)
+        assertEquals("RETRYABLE", f.db.files.values.single().state); assertEquals("RETRYABLE", f.db.jobs.values.single().state)
+        assertNull(f.db.jobs.values.single().leaseOwner); assertNotNull(f.files.recover(f.db.files.values.single().transactionId, null))
+        f.input = { throw SecurityException("Synthetic provider access removed after sealed copy") }
+        return f
+    }
+
+    private suspend fun assertSealedRetryRecoveredWithoutRecopy(afterMove: Boolean) {
+        val f = sealedStorageRetry(afterMove); val original = f.db.files.values.single()
+        val report = coordinator(f).reconcile()
+        assertEquals(1L, report.completed); assertEquals(1L, report.resumed); assertEquals(0L, report.blocked)
+        assertEquals(1, f.db.files.size); assertEquals(1, f.db.jobs.size); assertEquals(1, f.opened)
+        assertEquals("COMMITTED", f.db.files[original.transactionId]!!.state); assertEquals("SUCCEEDED", f.db.jobs.values.single().state)
+        assertEquals(2L, f.db.jobs.values.single().leaseGeneration)
+        assertEquals(1, f.db.catalog.pages.size); assertEquals(2, f.db.catalog.references.size)
+        assertArrayEquals(f.bytes, File(f.root, original.finalPath!!).readBytes())
+        assertEquals(0L, coordinator(f).reconcile().completed); assertEquals(1, f.db.catalog.pages.size)
+    }
+
+    @Test fun retryableSyncFailureAfterSealCreationRecoversTheValidBytesWithoutProviderAccess() = runTest {
+        assertSealedRetryRecoveredWithoutRecopy(afterMove = false)
+    }
+
+    @Test fun retryableSyncFailureAfterFinalMoveRecoversTheSameAttemptWithoutAnotherCopy() = runTest {
+        assertSealedRetryRecoveredWithoutRecopy(afterMove = true)
+    }
+
+    @Test fun refusedSealedRetryPhaseLeavesOwnerFreeJobAndJournalUnchangedUntilReadmissionSucceeds() = runTest {
+        val f = sealedStorageRetry(afterMove = false); val row = f.db.files.values.single(); val job = f.db.jobs.values.single()
+        f.db.rejectPhaseState = "SEALED"
+        val blocked = coordinator(f).reconcile(); assertEquals(1L, blocked.blocked); assertEquals(0L, blocked.resumed)
+        assertSame(row, f.db.files.values.single()); assertSame(job, f.db.jobs.values.single()); assertTrue(f.db.catalog.pages.isEmpty())
+        f.db.rejectPhaseState = null
+        assertEquals(1L, coordinator(f).reconcile().completed); assertEquals(1, f.opened)
     }
 }

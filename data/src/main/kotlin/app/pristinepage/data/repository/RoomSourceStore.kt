@@ -17,36 +17,70 @@ import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 
 /** One bounded provider copy at a time across store instances in this process. This accounts for the 64KiB copy buffer, not decoder/native allocation: the injected inspector must separately admit full normalization before allocating. Unknown old owners and interrupted files require recovery, never blind CREATE_NEW retries. */
-class RoomSourceStore @JvmOverloads constructor(private val files: SourceFiles, private val provider: SourceInput, private val inspector: SourceInspector, private val preparation: IngestPreparation, private val lookup: IngestOperationLookup, private val replay: IngestReplay, private val completion: IngestCompletion, private val phases: IngestPhases, private val leases: JobLeaseCommands, private val owners: OperationOwners, private val dispatcher: CoroutineDispatcher = Dispatchers.IO) : SourceStore, BoundSourceIngest {
+class RoomSourceStore @JvmOverloads constructor(private val files: SourceFiles, private val provider: SourceInput, private val inspector: SourceInspector, private val preparation: IngestPreparation, private val lookup: IngestOperationLookup, private val replay: IngestReplay, private val completion: IngestCompletion, private val phases: IngestPhases, private val leases: JobLeaseCommands, private val owners: OperationOwners, private val dispatcher: CoroutineDispatcher = Dispatchers.IO, private val restarts: IngestRestarts? = null) : SourceStore, BoundSourceIngest {
     override suspend fun ingest(uri: Uri, session: ImportSessionId): IngestResult = ingestBoundProvider(uri.toString(), session)
 
     override suspend fun ingestBoundProvider(boundReference: String, session: ImportSessionId): IngestResult = withContext(dispatcher) {
+        var observed: IngestJournalIntent? = null
         try {
             coroutineContext.ensureActive()
             // Repeated committed callbacks use private bytes, not today's provider grant. Active callbacks must still pass preparation's exact URI/session checks before executing anything.
-            val recorded = lookup.find(session)
+            val recorded = currentReplay(session)
             if (recorded != null) {
-                val result = replay.replay(recorded)
+                observed = recorded.intent
+                val result = recorded.result
                 if (result !is IngestResult.Pending) return@withContext result
-                if (result.recoveryState != FileTransactionState.INTENT) return@withContext result
+                if (result.recoveryState != FileTransactionState.INTENT && restarts == null) return@withContext result
             }
-            val intent = preparation.prepare(session, boundReference)
+            val prepared = preparation.prepare(session, boundReference)
             SourceCopyAdmission.mutex.withLock {
                 coroutineContext.ensureActive()
-                val result = replay.replay(intent)
-                if (result !is IngestResult.Pending || result.recoveryState != FileTransactionState.INTENT) return@withLock result
-                owners.run { owner ->
-                    if (!phases.admit(intent)) return@run replay.replay(intent)
+                // Another callback may retire/commit the prepared attempt while this one waits for copy admission. Re-read the stable session's current pointer, never replay a now-quarantined stale snapshot.
+                val current = currentReplay(session)
+                var intent = current?.intent ?: prepared
+                observed = intent
+                val result = current?.result ?: replay.replay(intent)
+                if (result !is IngestResult.Pending) return@withLock result
+                if (result.recoveryState != FileTransactionState.INTENT) intent = restarts?.restartUnsealed(intent) ?: return@withLock result
+                val executed = owners.run { owner ->
+                    if (!phases.admit(intent)) return@run currentReplay(session)?.result ?: replay.replay(intent)
                     val acquired = leases.acquireAdmitted(intent.jobId, owner, 300_000L)
                     when (acquired) {
-                        is AcquireLeaseResult.Busy -> replay.replay(intent)
+                        is AcquireLeaseResult.Busy -> currentReplay(session)?.result ?: replay.replay(intent)
                         is AcquireLeaseResult.Rejected -> IngestResult.Rejected(session, acquired.error)
                         is AcquireLeaseResult.Granted -> execute(intent, acquired.lease, boundReference)
                     }
                 }
+                if (executed is IngestResult.Rejected) {
+                    val latest = currentReplay(session)
+                    if (latest != null && latest.intent.transactionId != intent.transactionId) return@withLock latest.result
+                }
+                executed
             }
         } catch (canceled: CancellationException) { throw canceled }
-        catch (failure: RepositoryFailure) { IngestResult.Rejected(session, failure.error) }
+        catch (failure: RepositoryFailure) {
+            // Preparation may have been preempted by a healthy successor commit. Follow a changed stable-session pointer for stale-state errors, without hiding an invalid reference or an error in the current attempt.
+            val previous = observed
+            if (previous != null && failure.error.code in setOf(OperationErrorCode.SESSION_EXPIRED, OperationErrorCode.INTEGRITY_FAILED, OperationErrorCode.REVISION_CONFLICT)) {
+                val latest = try { currentReplay(session) }
+                catch (currentFailure: RepositoryFailure) { return@withContext IngestResult.Rejected(session, currentFailure.error) }
+                if (latest != null && latest.intent.transactionId != previous.transactionId) return@withContext latest.result
+            }
+            IngestResult.Rejected(session, failure.error)
+        }
+    }
+
+    private data class ReplaySnapshot(val intent: IngestJournalIntent, val result: IngestResult)
+
+    /** The copy permit is process-local, so even its consuming paths revalidate after read-only replay. Retirement updates the journal and ITEM pointer in one metadata transaction; an old terminal replay cannot be reported as current if that pointer changed. Bound churn rather than looping indefinitely or inventing a Pending file phase. */
+    private suspend fun currentReplay(session: ImportSessionId): ReplaySnapshot? {
+        repeat(3) {
+            kotlinx.coroutines.currentCoroutineContext().ensureActive()
+            val intent = lookup.find(session) ?: return null
+            val result = replay.replay(intent)
+            if (lookup.find(session)?.transactionId == intent.transactionId) return ReplaySnapshot(intent, result)
+        }
+        throw RepositoryFailure(OperationError(OperationErrorCode.REVISION_CONFLICT, true, "ingest_attempt_changed", session.value))
     }
 
     private suspend fun execute(intent: IngestJournalIntent, lease: JobLease, boundReference: String): IngestResult {

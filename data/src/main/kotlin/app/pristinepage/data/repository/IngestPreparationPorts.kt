@@ -15,3 +15,8 @@ interface IngestPreparationQueries {
 interface IngestPreparation {
     fun prepare(sessionId: ImportSessionId, boundUriText: String): IngestJournalIntent
 }
+
+/** Metadata retirement/allocation only. Caller holds copy admission, has inspected private files outside Room and found no valid recoverable seal/final, and refreshed any native proof before invoking this bounded participant. A returned INTENT is PENDING, never execution admission. */
+interface IngestAttempts {
+    fun restartUnsealed(intent: IngestJournalIntent, recordedGeneration: Long, recordedOwner: String?): IngestJournalIntent?
+}

@@ -30,12 +30,29 @@ class RoomIngestPhases @JvmOverloads constructor(private val metadata: MetadataA
     override fun copying(intent: IngestJournalIntent, lease: JobLease): Boolean = transition(intent, lease, "INTENT") { it.copy(state = "COPYING", updatedAt = auditClock()) }
 
     override fun sealed(intent: IngestJournalIntent, lease: JobLease, sealed: SealedSource): Boolean {
-        // Validate only bounded already-produced metadata here. Payload hashing/readback belongs to SourceFiles outside Room.
-        val seal = IngestJournalCodec.decodeSeal(sealed.metadata, intent)
+        validateSeal(intent, sealed)
         val staged = sealed.staged
-        if (staged.transactionId != intent.transactionId.value || staged.sourceBlobId != intent.sourceBlobId.value || seal.sourceByteHash != staged.byteSha256 || seal.byteCount != staged.byteCount) reject(intent, "ingest_seal_binding_mismatch")
-        app.pristinepage.core.pipeline.requireSha256(sealed.sealSha256)
         return transition(intent, lease, "COPYING") { it.copy(state = "SEALED", sealSha256 = sealed.sealSha256, expectedByteSha256 = staged.byteSha256, expectedByteCount = staged.byteCount, updatedAt = auditClock()) }
+    }
+
+    override fun readmitSealedRetry(intent: IngestJournalIntent, recordedGeneration: Long, sealed: SealedSource): Boolean {
+        validateSeal(intent, sealed)
+        return guarded(intent) {
+            metadata.transaction {
+                val row = read(intent); val job = checkNotNull(jobs.job(intent.jobId.value))
+                if (row.state != "RETRYABLE" || job.state !in setOf("RETRYABLE", "INTERRUPTED") || recordedGeneration < 1 || job.leaseGeneration != recordedGeneration || job.leaseOwner != null || job.leaseUntil != null || !live(intent)) return@transaction false
+                val staged = sealed.staged
+                if (row.sealSha256 != null && row.sealSha256 != sealed.sealSha256 || row.expectedByteSha256 != null && row.expectedByteSha256 != staged.byteSha256 || row.expectedByteCount != null && row.expectedByteCount != staged.byteCount) reject(intent, "ingest_seal_binding_mismatch")
+                val child = checkNotNull(sessions.session(intent.sessionId.value)); val parent = checkNotNull(child.parentSessionId?.let(sessions::session))
+                val pages = metadata.queries.activePages(intent.documentId.value)
+                if (pages.size >= 100 || pages.map { it.ordinal } != pages.indices.toList() || ImportMembership.hash(pages) != parent.expectedMembershipToken || metadata.queries.page(intent.pageId.value) != null) return@transaction false
+                val now = auditClock()
+                // IO may have completed before its retryable failure was journaled. Restore SEALED and ADMITTED together from the actual retained proof; lease acquisition still needs a distinct currently ALIVE runner and increments the generation.
+                if (phases.updateIngestPhase(row.copy(state = "SEALED", sealSha256 = sealed.sealSha256, expectedByteSha256 = staged.byteSha256, expectedByteCount = staged.byteCount, errorCode = null, updatedAt = now), "RETRYABLE") != 1) return@transaction false
+                if (jobs.updateLease(job.copy(state = "ADMITTED", errorCode = null, updatedAt = now), recordedGeneration) != 1) lost(intent)
+                true
+            }
+        }
     }
 
     override fun moved(intent: IngestJournalIntent, lease: JobLease): Boolean = transition(intent, lease, "SEALED") {
@@ -93,6 +110,13 @@ class RoomIngestPhases @JvmOverloads constructor(private val metadata: MetadataA
         val input = IngestJournalCodec.encodeIntent(intent)
         if (row.transactionId != intent.transactionId.value || row.kind != "INGEST" || row.ownerId != intent.sessionId.value || row.attempt != intent.attempt || row.stagingPath != "staging/${intent.transactionId.value}/original.part" || row.finalPath != "sources/${intent.sourceBlobId.value}/original.bin" || (row.state != "COMMITTED" && !row.payload.contentEquals(input)) || job.kind != "RECONCILE" || job.idempotenceKey != IngestJobIdentity.key(intent) || job.canonicalInputSha256 != IngestJobIdentity.hash(input) || !job.input.contentEquals(input) || job.snapshotId != null || job.pageOrdinal != null) reject(intent, "ingest_intent_binding_mismatch")
         return row
+    }
+
+    /** Validate bounded already-produced metadata only; actual payload hashing/native proof belongs outside the metadata writer. */
+    private fun validateSeal(intent: IngestJournalIntent, sealed: SealedSource) {
+        val seal = IngestJournalCodec.decodeSeal(sealed.metadata, intent); val staged = sealed.staged
+        if (staged.transactionId != intent.transactionId.value || staged.sourceBlobId != intent.sourceBlobId.value || seal.sourceByteHash != staged.byteSha256 || seal.byteCount != staged.byteCount) reject(intent, "ingest_seal_binding_mismatch")
+        app.pristinepage.core.pipeline.requireSha256(sealed.sealSha256)
     }
 
     private fun live(intent: IngestJournalIntent): Boolean {
