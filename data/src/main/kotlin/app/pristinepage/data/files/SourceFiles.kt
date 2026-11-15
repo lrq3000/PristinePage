@@ -1,6 +1,7 @@
 package app.pristinepage.data.files
 
 import app.pristinepage.core.pipeline.requireSha256
+import app.pristinepage.data.model.requireOpaqueId
 import java.io.File
 import java.io.InputStream
 import java.nio.channels.FileChannel
@@ -10,7 +11,6 @@ import java.nio.file.StandardOpenOption.CREATE_NEW
 import java.nio.file.StandardOpenOption.WRITE
 import java.security.MessageDigest
 import java.util.Base64
-import java.util.UUID
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
 
@@ -181,7 +181,7 @@ class SourceFiles @JvmOverloads constructor(root: File, private val directorySyn
         if (!directorySync.sync(directory)) directorySyncSupported = false
     }
 
-    private fun validateId(value: String) { require(runCatching { UUID.fromString(value).toString() == value }.getOrDefault(false)) { "Expected opaque UUID" } }
+    private fun validateId(value: String) = requireOpaqueId(value)
     private fun sha256(bytes: ByteArray): String = hex(MessageDigest.getInstance("SHA-256").digest(bytes))
     private fun hex(bytes: ByteArray): String = bytes.joinToString("") { "%02x".format(it.toInt() and 255) }
 }

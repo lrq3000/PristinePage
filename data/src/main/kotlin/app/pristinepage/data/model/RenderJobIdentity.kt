@@ -7,7 +7,6 @@ import app.pristinepage.core.recipe.RecipeCodec
 import java.io.ByteArrayOutputStream
 import java.io.DataOutputStream
 import java.security.MessageDigest
-import java.util.UUID
 
 class PersistentRenderIdentity internal constructor(input: ByteArray, val canonicalInputSha256: String) {
     private val ownedInput = input.copyOf()
@@ -51,5 +50,5 @@ object RenderJobIdentity {
         return PersistentRenderIdentity(canonical, hash)
     }
 
-    private fun requireUuid(value: String) { require(runCatching { UUID.fromString(value).toString() == value }.getOrDefault(false)) { "Expected opaque UUID" } }
+    private fun requireUuid(value: String) = requireOpaqueId(value)
 }
