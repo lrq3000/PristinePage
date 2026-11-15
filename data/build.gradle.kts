@@ -13,7 +13,20 @@ android {
     buildToolsVersion = libs.versions.buildTools.get()
     defaultConfig {
         minSdk = libs.versions.minSdk.get().toInt()
+        testApplicationId = "app.pristinepage.debug.test"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+    }
+    val localDevelopmentSigning = signingConfigs.create("localDevelopment") {
+        // S-01/I-01 permits only the existing worktree key and this named test package; never generate a global debug key for library instrumentation.
+        storeFile = rootProject.file(".local-signing/debug.keystore")
+        storeType = "PKCS12"
+        storePassword = "android"
+        keyAlias = "androiddebugkey"
+        keyPassword = "android"
+    }
+    buildTypes {
+        debug { signingConfig = localDevelopmentSigning }
+        release { signingConfig = null }
     }
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
