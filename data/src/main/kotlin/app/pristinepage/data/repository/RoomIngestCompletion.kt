@@ -17,18 +17,22 @@ import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.withContext
 
 /** Only consumes an already MOVED, inspected source. Hash/readback is outside Room; visibility, ownership and journal/job completion share the subsequent short transaction. SourceStore still owns provider copy/admission/inspection/phase transitions; this helper neither performs nor claims them. */
-class RoomIngestCompletion @JvmOverloads constructor(private val metadata: MetadataAccess, private val sessions: ImportSessionQueries, private val journal: IngestPreparationQueries, private val sources: IngestCompletionQueries, private val jobs: JobLeaseQueries, private val files: SourceFiles, private val auditClock: () -> Long = System::currentTimeMillis, private val leaseClock: () -> Long = SystemClock::elapsedRealtime, private val dispatcher: CoroutineDispatcher = Dispatchers.IO) : IngestCompletion {
+class RoomIngestCompletion @JvmOverloads constructor(private val metadata: MetadataAccess, private val sessions: ImportSessionQueries, private val journal: IngestPreparationQueries, private val sources: IngestCompletionQueries, private val jobs: JobLeaseQueries, private val files: SourceFiles, private val auditClock: () -> Long = System::currentTimeMillis, private val leaseClock: () -> Long = SystemClock::elapsedRealtime, private val dispatcher: CoroutineDispatcher = Dispatchers.IO) : IngestCompletion, IngestReplay {
     constructor(database: PristineDatabase, files: SourceFiles) : this(RoomMetadataAccess(database), database.importSessions(), database.ingestPreparation(), database.ingestCompletion(), database.jobLeases(), files)
     private val completion = JobLeaseTransactions(metadata, jobs, auditClock, leaseClock)
 
-    override suspend fun commit(intent: IngestJournalIntent, lease: JobLease): IngestResult = withContext(dispatcher) {
+    override suspend fun commit(intent: IngestJournalIntent, lease: JobLease): IngestResult = process(intent, lease)
+    override suspend fun replay(intent: IngestJournalIntent): IngestResult = process(intent, null)
+
+    private suspend fun process(intent: IngestJournalIntent, lease: JobLease?): IngestResult = withContext(dispatcher) {
         var observed = FileTransactionState.MOVED
         try {
-            if (lease.jobId != intent.jobId) reject(OperationErrorCode.INTEGRITY_FAILED, "ingest_job_binding_mismatch", intent)
+            if (lease != null && lease.jobId != intent.jobId) reject(OperationErrorCode.INTEGRITY_FAILED, "ingest_job_binding_mismatch", intent)
             coroutineContext.ensureActive()
             val before = metadata.transaction { readJournal(intent).also { checkTerminalOutcomes(it, intent) } }
             observed = FileTransactionState.valueOf(before.state)
             if (observed !in setOf(FileTransactionState.MOVED, FileTransactionState.COMMITTED)) return@withContext IngestResult.Pending(intent.sessionId, observed)
+            if (lease == null && observed != FileTransactionState.COMMITTED) return@withContext IngestResult.Pending(intent.sessionId, observed)
             val receipt = if (observed == FileTransactionState.COMMITTED) IngestJournalCodec.decodeCommit(before.payload, intent) else null
             if (receipt == null && IngestJournalCodec.decodeIntent(before.payload) != intent) reject(OperationErrorCode.INTEGRITY_FAILED, "ingest_intent_binding_mismatch", intent)
             val recovered = files.recover(intent.transactionId.value, before.sealSha256 ?: reject(OperationErrorCode.INTEGRITY_FAILED, "ingest_seal_missing", intent)) ?: reject(OperationErrorCode.INTEGRITY_FAILED, "ingest_seal_missing", intent)
@@ -36,6 +40,7 @@ class RoomIngestCompletion @JvmOverloads constructor(private val metadata: Metad
             if (seal.sourceByteHash != recovered.staged.byteSha256 || seal.byteCount != recovered.staged.byteCount || seal.sourceByteHash != before.expectedByteSha256 || seal.byteCount != before.expectedByteCount || recovered.staged.sourceBlobId != intent.sourceBlobId.value || !files.finalFile(intent.sourceBlobId.value).isFile || (receipt != null && receipt.seal != seal)) reject(OperationErrorCode.INTEGRITY_FAILED, "ingest_source_binding_mismatch", intent)
             coroutineContext.ensureActive()
             if (receipt != null) return@withContext metadata.transaction { replay(intent, before, receipt) }
+            if (lease == null) return@withContext IngestResult.Pending(intent.sessionId, observed)
             val result = completion.complete(lease) {
                 coroutineContext.ensureActive()
                 val live = readJournal(intent)

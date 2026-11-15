@@ -12,7 +12,7 @@ import org.junit.Test
 
 /** Actual intent/session/job commands with only Android's row storage/transaction substituted. Preparation cannot copy/decode a source or make a Page visible; those remain consuming SourceStore/recovery tests. */
 class IngestIntentTest {
-    internal class Fixture : ImportSessionQueries, IngestPreparationQueries, IngestCompletionQueries, JobLeaseQueries {
+    internal class Fixture : ImportSessionQueries, IngestPreparationQueries, IngestCompletionQueries, IngestLookupQueries, JobLeaseQueries {
         val catalog = MemoryMetadata()
         val document = DocumentId(UUID.randomUUID().toString())
         val parent = ImportSessionId(UUID.randomUUID().toString())
@@ -61,6 +61,7 @@ class IngestIntentTest {
         override fun insertFileTransaction(row: FileTransactionRow) { check(catalog.inTransaction); check(files.putIfAbsent(row.transactionId, row) == null) }
         override fun insertIngestJob(row: JobRow) { check(catalog.inTransaction); check(jobs.putIfAbsent(row.jobId, row) == null) }
         override fun job(id: String): JobRow? { check(catalog.inTransaction); return jobs[id] }
+        override fun ingestJobByKey(key: String): JobRow? { check(catalog.inTransaction); return jobs.values.singleOrNull { it.idempotenceKey == key } }
         override fun updateLease(row: JobRow, expectedGeneration: Long): Int {
             check(catalog.inTransaction)
             if (jobs[row.jobId]?.leaseGeneration != expectedGeneration) return 0

@@ -18,7 +18,7 @@ import org.junit.Test
 
 /** Real private staging/seal/move/readback plus real metadata commands; only Android rows/transactions and normalized inspection are substituted. Synthetic bytes are not claimed to be a decodable PNG, and preparation of MOVED/RUNNING fixtures is not worker/admission/recovery evidence. */
 class IngestCompletionTest {
-    private class Fixture {
+    internal class Fixture {
         val db = IngestIntentTest.Fixture()
         private val parent = File(System.getProperty("user.dir"), "build/test-source-files").apply { mkdirs() }
         val root = Files.createTempDirectory(parent.toPath(), "ingest-completion-").toFile()
