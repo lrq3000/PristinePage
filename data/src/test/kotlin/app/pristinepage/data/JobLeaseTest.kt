@@ -18,6 +18,7 @@ class JobLeaseTest {
         val id = JobId(UUID.randomUUID().toString())
         var row = JobRow(id.value, "RECONCILE", "reconcile-v1:${id.value}", "9f64a747e1b97f131fabb6b447296c9b6f0201e79fb3c5356e6c77e89b6a806a", null, null, byteArrayOf(1, 2, 3, 4), "ADMITTED", 0, null, null, 0, null, null, 0, 0)
         var now = 1000L
+        var wallNow: Long? = null
         var liveness = LeaseOwnerState.UNKNOWN
         var failWrite = false
         val metadata = object : MetadataAccess {
@@ -32,7 +33,7 @@ class JobLeaseTest {
             val type = try { Class.forName("app.pristinepage.data.repository.RoomJobLeases") }
             catch (error: ClassNotFoundException) { throw AssertionError("Fenced persistent job lease commands are absent", error) }
             val gate = LeaseOwnerLiveness { check(catalog.inTransaction); liveness }
-            commands = try { type.constructors.single { it.parameterCount == 5 }.newInstance(metadata, this, gate, { now }, Dispatchers.Unconfined) as JobLeaseCommands }
+            commands = try { type.constructors.single { it.parameterCount == 6 }.newInstance(metadata, this, gate, { wallNow ?: now }, { now }, Dispatchers.Unconfined) as JobLeaseCommands }
             catch (error: InvocationTargetException) { throw error.targetException }
         }
         override fun job(id: String) = row.takeIf { it.jobId == id }
@@ -140,5 +141,29 @@ class JobLeaseTest {
             assertEquals("RUNNING", f.row.state); assertNull(f.row.checkpoint)
             assertEquals(1L, f.row.leaseGeneration); assertEquals(lease.owner, f.row.leaseOwner)
         }
+    }
+
+    @Test fun forwardWallAdjustmentCannotExpireAStillLiveRuntimeLease() = runTest {
+        val f = Fixture(); f.wallNow = 1000; f.now = 5000
+        val lease = (f.commands.acquireAdmitted(f.id, f.owner(), 100) as AcquireLeaseResult.Granted).lease
+        f.now = 5010; f.wallNow = 500000
+        assertTrue("Only ten elapsed milliseconds have passed", f.commands.checkpoint(lease, byteArrayOf(9)))
+        assertTrue(f.commands.complete(lease))
+        assertEquals(500000L, f.row.updatedAt)
+    }
+
+    @Test fun backwardWallAdjustmentCannotExtendAnElapsedRuntimeLease() = runTest {
+        val f = Fixture(); f.wallNow = 1000; f.now = 5000
+        val lease = (f.commands.acquireAdmitted(f.id, f.owner(), 100) as AcquireLeaseResult.Granted).lease
+        f.now = 5150; f.wallNow = 1050
+        assertFalse("The full elapsed deadline has passed despite wall time below1100", f.commands.checkpoint(lease, byteArrayOf(9)))
+        assertFalse(f.commands.complete(lease)); assertEquals("RUNNING", f.row.state)
+    }
+
+    @Test fun runtimeLeaseDeadlineAndUnixAuditTimeUseDifferentClockDomains() = runTest {
+        val f = Fixture(); f.wallNow = 1700000000000; f.now = 5000
+        assertTrue(f.commands.acquireAdmitted(f.id, f.owner(), 100) is AcquireLeaseResult.Granted)
+        assertEquals(5100L, f.row.leaseUntil)
+        assertEquals(1700000000000L, f.row.updatedAt)
     }
 }

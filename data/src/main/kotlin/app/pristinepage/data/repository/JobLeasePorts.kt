@@ -31,3 +31,8 @@ interface JobLeaseCommands {
     suspend fun checkpoint(lease: JobLease, checkpoint: ByteArray): Boolean
     suspend fun complete(lease: JobLease): Boolean
 }
+
+/** The action performs bounded synchronous metadata changes only, in the same writer transaction as the fenced SUCCEEDED transition. Files must already be durably verified; null means the lease failed admission before the action ran. Errors after the action begins roll back the complete transaction. */
+interface FencedJobCompletion {
+    fun <T : Any> complete(lease: JobLease, commitMetadata: () -> T): T?
+}
