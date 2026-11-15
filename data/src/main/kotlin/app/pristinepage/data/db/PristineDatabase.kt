@@ -7,4 +7,5 @@ import androidx.room.RoomDatabase
 @Database(entities = [DocumentRow::class, SourceBlobRow::class, SourceRow::class, PageRow::class, RecipeRevisionRow::class, ImportSessionRow::class, UndoEntryRow::class, ConfirmationRow::class, MaskRow::class, RecipeMaskRow::class, SourceReferenceRow::class, MaskReferenceRow::class, AssetPinRow::class, RenderReferenceRow::class, ExportSnapshotRow::class, ExportPageRow::class, JobRow::class, RenderedPageRow::class, ExportArtifactRow::class, FileTransactionRow::class, PublicationRow::class, ShareLeaseRow::class], version = 1, exportSchema = true)
 abstract class PristineDatabase : RoomDatabase() {
     abstract fun catalog(): CatalogDao
+    abstract fun importSessions(): ImportSessionDao
 }
