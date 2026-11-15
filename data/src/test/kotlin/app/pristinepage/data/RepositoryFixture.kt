@@ -71,13 +71,22 @@ internal class MemoryMetadata : MetadataAccess, CatalogQueries {
     override fun setSourceRefCount(sourceId: String, count: Long): Int { val row = sources[sourceId] ?: return 0; sources[sourceId] = row.copy(refCount = count); return 1 }
     override fun insertUndo(row: UndoEntryRow) { check(undos.putIfAbsent(row.undoId, row) == null) }
     override fun updateUndo(row: UndoEntryRow): Int { if (row.undoId !in undos) return 0; undos[row.undoId] = row; return 1 }
+    override fun countUnexpiredUndoEntries(documentId: String): Long = undos.values.count { it.documentId == documentId && it.state in setOf("AVAILABLE", "APPLIED") }.toLong()
+    override fun expireUndoEntries(documentId: String, now: Long): Int {
+        check(inTransaction)
+        val newest = undos.values.filter { it.documentId == documentId }.sortedWith(compareByDescending<UndoEntryRow> { it.appliedDocumentRevision }.thenByDescending { it.undoId }).take(20).map { it.undoId }.toSet()
+        val expired = undos.values.filter { it.documentId == documentId && it.state in setOf("AVAILABLE", "APPLIED") && (it.expiresAt <= now || it.undoId !in newest) }
+        for (row in expired) undos[row.undoId] = row.copy(state = "EXPIRED")
+        return expired.size
+    }
+    override fun undoIsWithinWindow(documentId: String, undoId: String): Boolean = undos.values.filter { it.documentId == documentId }.sortedWith(compareByDescending<UndoEntryRow> { it.appliedDocumentRevision }.thenByDescending { it.undoId }).take(20).any { it.undoId == undoId }
     override fun insertRecipeMask(row: RecipeMaskRow) { check(associations.putIfAbsent(Triple(row.pageId, row.recipeRevision, row.maskId), row) == null) }
     override fun insertMaskReference(row: MaskReferenceRow): Long = if (maskReferences.putIfAbsent(Triple(row.ownerType, row.ownerId, row.maskId), row) == null) 1 else -1
     override fun countMaskReferences(maskId: String): Long = associations.values.count { it.maskId == maskId }.toLong() + maskReferences.values.count { it.maskId == maskId }
     override fun setMaskRefCount(maskId: String, count: Long): Int { val row = masks[maskId] ?: return 0; masks[maskId] = row.copy(refCount = count); return 1 }
 }
 
-internal class RepositoryFixture(count: Int = 2, admission: ((Recipe, Boolean) -> OperationError?)? = null) {
+internal class RepositoryFixture(count: Int = 2, clock: () -> Long = { 1000L }, admission: ((Recipe, Boolean) -> OperationError?)? = null) {
     val metadata = MemoryMetadata()
     val document = DocumentId(UUID.randomUUID().toString())
     val source = SourceId(UUID.randomUUID().toString())
@@ -105,7 +114,7 @@ internal class RepositoryFixture(count: Int = 2, admission: ((Recipe, Boolean) -
             check(!metadata.inTransaction) { "Expensive/capability preflight must finish before the write transaction" }
             admission?.invoke(recipe, protected)
         }
-        repository = try { type.constructors.single { it.parameterCount == 4 }.newInstance(metadata, gate, { 1000L }, Dispatchers.Unconfined) as DocumentRepository }
+        repository = try { type.constructors.single { it.parameterCount == 4 }.newInstance(metadata, gate, clock, Dispatchers.Unconfined) as DocumentRepository }
         catch (error: InvocationTargetException) { throw error.targetException }
     }
 

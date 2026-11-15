@@ -11,20 +11,7 @@ import org.junit.runner.RunWith
 /** Actual Room command/Undo/reopen with generated metadata, not source-image/decoder/process-death evidence. Retain each synthetic database and every history/reference row. */
 @RunWith(AndroidJUnit4::class)
 class RoomDuplicateUndoIntegrationTest {
-    /** Compare actual persisted values, including BLOB bytes, across refusal/reopen. This fixture-only inventory is bounded and includes every metadata table that duplication may touch. */
-    private fun metadataState(f: RoomRepositoryIntegrationTest.Fixture): List<List<List<String>>> = listOf("Document", "Page", "Source", "SourceBlob", "RecipeRevision", "SourceReference", "UndoEntry", "Mask", "RecipeMask", "MaskReference").map { table ->
-        f.database.openHelper.readableDatabase.query("SELECT * FROM $table LIMIT 1001").use { cursor ->
-            val rows = mutableListOf<List<String>>()
-            while (cursor.moveToNext()) rows.add((0 until cursor.columnCount).map { column ->
-                when (cursor.getType(column)) {
-                    android.database.Cursor.FIELD_TYPE_NULL -> "NULL"
-                    android.database.Cursor.FIELD_TYPE_BLOB -> "B:" + java.util.Base64.getEncoder().encodeToString(cursor.getBlob(column))
-                    else -> cursor.getType(column).toString() + ":" + cursor.getString(column)
-                }
-            })
-            check(rows.size <= 1000); rows.sortedBy { it.toString() }
-        }
-    }
+    private fun metadataState(f: RoomRepositoryIntegrationTest.Fixture) = f.metadataState()
 
     private fun separateSurvivorSource(f: RoomRepositoryIntegrationTest.Fixture): String {
         val sourceId = java.util.UUID.randomUUID().toString(); val blobId = java.util.UUID.randomUUID().toString()

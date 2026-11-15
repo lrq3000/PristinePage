@@ -225,6 +225,8 @@ class RoomDocumentRepository @JvmOverloads constructor(private val metadata: Met
                 if (doc.documentRevision != expectedDocumentRevision) throw Conflict(doc.documentRevision)
                 val liveEntry = q.undo(undoId.value) ?: reject(OperationErrorCode.INVALID_INPUT, "undo_unavailable", undoId.value)
                 if (liveEntry.state != "AVAILABLE" || !liveEntry.beforeState.contentEquals(entry.beforeState) || !liveEntry.afterState.contentEquals(entry.afterState) || liveEntry.expiresAt <= clock()) throw Conflict(doc.documentRevision)
+                // Legacy AVAILABLE flags may predate startup expiry. Fence the same recorded-edit window in the actual Undo transaction; repeated logical after-states must not revive an evicted token.
+                if (!q.undoIsWithinWindow(doc.documentId, liveEntry.undoId)) reject(OperationErrorCode.INVALID_INPUT, "undo_unavailable", undoId.value)
                 val live = targets.mapIndexed { index, target ->
                     val page = verifyLive(target, target.page.currentRecipeRevision) { doc.documentRevision }
                     // Undo creates history, so a prior Undo may have restored this logical after-state at a newer physical revision. Fence the prepared live pointer, then compare complete effective content rather than requiring the old revision number.
@@ -261,6 +263,7 @@ class RoomDocumentRepository @JvmOverloads constructor(private val metadata: Met
         q.insertUndo(UndoEntryRow(id.value, documentId, encodeMembership(documentId, before.map(::membershipPointer)), encodeMembership(documentId, after.map(::membershipPointer)), action, revision, expires, "AVAILABLE"))
         for (source in before.map { it.sourceId }.distinct()) pinSource("UNDO", id.value, source, now)
         // Page/history ownership is retained for removed pages. Its existing RecipeMask links keep masks pinned; no file, reference or history is purged by this reversible command.
+        RoomUndoRetention.expireWithinTransaction(q, documentId, now)
         return id
     }
 
@@ -301,6 +304,7 @@ class RoomDocumentRepository @JvmOverloads constructor(private val metadata: Met
             val active = membershipPages(doc.documentId)
             val liveEntry = q.undo(entry.undoId) ?: reject(OperationErrorCode.INVALID_INPUT, "undo_unavailable", entry.undoId)
             if (liveEntry.state != "AVAILABLE" || liveEntry.action != entry.action || liveEntry.documentId != entry.documentId || liveEntry.expiresAt != entry.expiresAt || liveEntry.expiresAt <= clock() || !liveEntry.beforeState.contentEquals(entry.beforeState) || !liveEntry.afterState.contentEquals(entry.afterState)) throw Conflict(doc.documentRevision)
+            if (!q.undoIsWithinWindow(doc.documentId, liveEntry.undoId)) reject(OperationErrorCode.INVALID_INPUT, "undo_unavailable", entry.undoId)
             if (active.map { it.pageId }.toSet() != after.pages.filter { it.state == "ACTIVE" }.map { it.pageId }.toSet()) throw Conflict(doc.documentRevision)
             val live = after.pages.map { expected ->
                 val page = q.page(expected.pageId) ?: reject(OperationErrorCode.INTEGRITY_FAILED, "page_unavailable", expected.pageId)
@@ -416,6 +420,7 @@ class RoomDocumentRepository @JvmOverloads constructor(private val metadata: Met
             q.insertMaskReference(MaskReferenceRow("UNDO", id.value, maskId, now))
             if (q.setMaskRefCount(maskId, q.countMaskReferences(maskId)) != 1) reject(OperationErrorCode.INTEGRITY_FAILED, "mask_unavailable", maskId)
         }
+        RoomUndoRetention.expireWithinTransaction(q, documentId, now)
         return id
     }
 

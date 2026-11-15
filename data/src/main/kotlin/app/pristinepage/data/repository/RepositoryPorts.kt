@@ -32,6 +32,9 @@ interface CatalogQueries {
     fun setSourceRefCount(sourceId: String, count: Long): Int
     fun insertUndo(row: UndoEntryRow)
     fun updateUndo(row: UndoEntryRow): Int
+    fun countUnexpiredUndoEntries(documentId: String): Long
+    fun expireUndoEntries(documentId: String, now: Long): Int
+    fun undoIsWithinWindow(documentId: String, undoId: String): Boolean
     fun insertRecipeMask(row: RecipeMaskRow)
     fun insertMaskReference(row: MaskReferenceRow): Long
     fun countMaskReferences(maskId: String): Long

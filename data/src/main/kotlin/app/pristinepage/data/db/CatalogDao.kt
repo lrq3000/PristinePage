@@ -30,6 +30,12 @@ import app.pristinepage.data.repository.CatalogQueries
     @Query("UPDATE Source SET refCount=:count WHERE sourceId=:sourceId") abstract override fun setSourceRefCount(sourceId: String, count: Long): Int
     @Insert(onConflict = OnConflictStrategy.ABORT) abstract override fun insertUndo(row: UndoEntryRow)
     @Update(onConflict = OnConflictStrategy.ABORT) abstract override fun updateUndo(row: UndoEntryRow): Int
+    // Count state candidates, including clock-expired AVAILABLE/APPLIED rows not yet visited by the policy. Do not load serialized before/after BLOBs or delete their ownership pins here.
+    @Query("SELECT COUNT(*) FROM UndoEntry WHERE documentId=:documentId AND state IN ('AVAILABLE','APPLIED')") abstract override fun countUnexpiredUndoEntries(documentId: String): Long
+    @Query("UPDATE UndoEntry SET state='EXPIRED' WHERE documentId=:documentId AND state IN ('AVAILABLE','APPLIED') AND (expiresAt<=:now OR undoId NOT IN (SELECT undoId FROM UndoEntry WHERE documentId=:documentId ORDER BY appliedDocumentRevision DESC,undoId DESC LIMIT 20))")
+    abstract override fun expireUndoEntries(documentId: String, now: Long): Int
+    @Query("SELECT EXISTS(SELECT 1 FROM (SELECT undoId FROM UndoEntry WHERE documentId=:documentId ORDER BY appliedDocumentRevision DESC,undoId DESC LIMIT 20) retained WHERE retained.undoId=:undoId)")
+    abstract override fun undoIsWithinWindow(documentId: String, undoId: String): Boolean
     @Insert(onConflict = OnConflictStrategy.ABORT) abstract override fun insertRecipeMask(row: RecipeMaskRow)
     @Insert(onConflict = OnConflictStrategy.IGNORE) abstract override fun insertMaskReference(row: MaskReferenceRow): Long
     @Query("SELECT (SELECT COUNT(*) FROM RecipeMask WHERE maskId=:maskId)+(SELECT COUNT(*) FROM MaskReference WHERE maskId=:maskId)") abstract override fun countMaskReferences(maskId: String): Long

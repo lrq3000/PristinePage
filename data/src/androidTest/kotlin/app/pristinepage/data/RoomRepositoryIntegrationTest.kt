@@ -141,6 +141,21 @@ class RoomRepositoryIntegrationTest {
             require(table in setOf("RecipeRevision", "UndoEntry", "SourceReference"))
             return database.openHelper.readableDatabase.query("SELECT COUNT(*) FROM $table").use { cursor -> check(cursor.moveToFirst()); cursor.getLong(0) }
         }
+        /** Complete bounded synthetic metadata, including BLOB bytes. Availability-only expiry may explicitly ignore just UndoEntry.state; all history/pins/pointers/content remain compared. No production database or image file is inspected. */
+        fun metadataState(ignoreUndoState: Boolean = false): List<List<List<String>>> = listOf("Document", "Page", "Source", "SourceBlob", "RecipeRevision", "SourceReference", "UndoEntry", "Mask", "RecipeMask", "MaskReference").map { table ->
+            database.openHelper.readableDatabase.query("SELECT * FROM $table LIMIT 1001").use { cursor ->
+                val rows = mutableListOf<List<String>>()
+                while (cursor.moveToNext()) rows.add((0 until cursor.columnCount).map { column ->
+                    if (ignoreUndoState && table == "UndoEntry" && cursor.getColumnName(column) == "state") "IGNORED_UNDO_STATE"
+                    else when (cursor.getType(column)) {
+                        android.database.Cursor.FIELD_TYPE_NULL -> "NULL"
+                        android.database.Cursor.FIELD_TYPE_BLOB -> "B:" + java.util.Base64.getEncoder().encodeToString(cursor.getBlob(column))
+                        else -> cursor.getType(column).toString() + ":" + cursor.getString(column)
+                    }
+                })
+                check(rows.size <= 1000); rows.sortedBy { it.toString() }
+            }
+        }
         fun assertForeignKeys() { database.openHelper.readableDatabase.query("PRAGMA foreign_key_check").use { cursor -> assertFalse(cursor.moveToFirst()) } }
         override fun close() { database.close() }
     }

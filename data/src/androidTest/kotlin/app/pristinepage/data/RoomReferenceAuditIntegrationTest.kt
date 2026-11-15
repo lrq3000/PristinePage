@@ -14,20 +14,7 @@ import org.junit.runner.RunWith
 /** Actual SQL counts on generated metadata; databases stay retained. Repeated audit/reopen is not process-death, owner-validity, decoder or reclamation evidence. */
 @RunWith(AndroidJUnit4::class)
 class RoomReferenceAuditIntegrationTest {
-    /** Bound the complete fixture metadata comparison, including history/Undo BLOB bytes. Only synthetic databases with at most1000rows/table enter this test helper. */
-    private fun metadataState(f: RoomRepositoryIntegrationTest.Fixture): List<List<List<String>>> = listOf("Document", "Page", "Source", "SourceBlob", "RecipeRevision", "SourceReference", "UndoEntry", "Mask", "RecipeMask", "MaskReference").map { table ->
-        f.database.openHelper.readableDatabase.query("SELECT * FROM $table LIMIT 1001").use { cursor ->
-            val rows = mutableListOf<List<String>>()
-            while (cursor.moveToNext()) rows.add((0 until cursor.columnCount).map { column ->
-                when (cursor.getType(column)) {
-                    android.database.Cursor.FIELD_TYPE_NULL -> "NULL"
-                    android.database.Cursor.FIELD_TYPE_BLOB -> "B:" + java.util.Base64.getEncoder().encodeToString(cursor.getBlob(column))
-                    else -> cursor.getType(column).toString() + ":" + cursor.getString(column)
-                }
-            })
-            check(rows.size <= 1000); rows.sortedBy { it.toString() }
-        }
-    }
+    private fun metadataState(f: RoomRepositoryIntegrationTest.Fixture) = f.metadataState()
 
     private fun protectionMask(f: RoomRepositoryIntegrationTest.Fixture): String {
         val mask = UUID.randomUUID().toString()
