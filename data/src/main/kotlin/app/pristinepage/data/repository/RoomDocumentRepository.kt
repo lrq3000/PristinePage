@@ -10,6 +10,7 @@ import app.pristinepage.data.model.*
 import java.util.UUID
 import java.nio.ByteBuffer
 import java.nio.charset.CodingErrorAction
+import kotlin.coroutines.CoroutineContext
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers
@@ -40,7 +41,7 @@ class RoomDocumentRepository @JvmOverloads constructor(private val metadata: Met
             if (normalized.isEmpty() || normalized.length > 160) reject(OperationErrorCode.INVALID_INPUT, "invalid_document_title")
             try { requireWellFormedUnicode(normalized) } catch (_: IllegalArgumentException) { reject(OperationErrorCode.INVALID_INPUT, "invalid_document_title") }
             val id = DocumentId(uuid()); val now = clock()
-            metadata.transaction { q.insertDocument(DocumentRow(id.value, normalized, 1, "ACTIVE", now, now, null)) }
+            metadata.transaction { coroutineContext.ensureActive(); q.insertDocument(DocumentRow(id.value, normalized, 1, "ACTIVE", now, now, null)) }
             id
         } catch (canceled: CancellationException) { throw canceled }
         catch (failure: RepositoryFailure) { throw failure }
@@ -55,6 +56,7 @@ class RoomDocumentRepository @JvmOverloads constructor(private val metadata: Met
                 val doc = activeDocument(prepared.page.documentId)
                 val page = verifyLive(prepared, expectedRevision) { it.currentRecipeRevision }
                 val now = clock(); val nextDoc = next(doc.documentRevision)
+                coroutineContext.ensureActive()
                 val after = append(page, prepared.bytes, prepared.hash, prepared.masks.links, now)
                 addUndo(doc.documentId, "RECIPE_EDIT", listOf(pointer(page)), listOf(pointer(after)), prepared.masks.links, nextDoc, now)
                 updateDocument(doc.copy(documentRevision = nextDoc, updatedAt = now))
@@ -72,8 +74,9 @@ class RoomDocumentRepository @JvmOverloads constructor(private val metadata: Met
                 val doc = activeDocument(documentId.value)
                 if (doc.documentRevision != expectedDocumentRevision) throw Conflict(doc.documentRevision)
                 if (doc.title == normalized) reject(OperationErrorCode.INVALID_INPUT, "document_title_unchanged", documentId.value)
-                val revision = next(doc.documentRevision)
-                updateDocument(doc.copy(title = normalized, documentRevision = revision, updatedAt = clock()))
+                val revision = next(doc.documentRevision); val now = clock()
+                coroutineContext.ensureActive()
+                updateDocument(doc.copy(title = normalized, documentRevision = revision, updatedAt = now))
                 DocumentMutationResult.Applied(revision, emptyList(), null)
             }
         }
@@ -112,6 +115,7 @@ class RoomDocumentRepository @JvmOverloads constructor(private val metadata: Met
                 val byId = pages.associateBy { it.pageId }
                 val reordered = requested.mapIndexed { ordinal, id -> checkNotNull(byId[id]).copy(ordinal = ordinal) }
                 val now = clock(); val revision = next(doc.documentRevision)
+                coroutineContext.ensureActive()
                 writeMembership(pages, reordered)
                 val undo = addMembershipUndo(doc.documentId, "PAGE_REORDER", pages, reordered, revision, now)
                 updateDocument(doc.copy(documentRevision = revision, updatedAt = now))
@@ -134,6 +138,7 @@ class RoomDocumentRepository @JvmOverloads constructor(private val metadata: Met
                     if (current.pageId == page.pageId) current.copy(state = "REMOVED", ordinal = null, removedAt = now)
                     else current.copy(ordinal = checkNotNull(current.ordinal).let { if (it > ordinal) it - 1 else it })
                 }
+                coroutineContext.ensureActive()
                 writeMembership(pages, removed)
                 val undo = addMembershipUndo(doc.documentId, "PAGE_REMOVE", pages, removed, revision, now)
                 updateDocument(doc.copy(documentRevision = revision, updatedAt = now))
@@ -157,6 +162,7 @@ class RoomDocumentRepository @JvmOverloads constructor(private val metadata: Met
                 if (changed.isEmpty()) reject(OperationErrorCode.INVALID_INPUT, "recipe_batch_has_no_changes", documentId.value)
                 val now = clock(); val nextDoc = next(doc.documentRevision)
                 val before = changed.map { pointer(live[it]) }
+                coroutineContext.ensureActive()
                 val after = changed.map { index -> val item = prepared[index]; pointer(append(live[index], item.bytes, item.hash, item.masks.links, now)) }
                 val undo = addUndo(doc.documentId, "BATCH_RECIPE_EDIT", before, after, changed.flatMap { prepared[it].masks.links }, nextDoc, now)
                 updateDocument(doc.copy(documentRevision = nextDoc, updatedAt = now))
@@ -182,6 +188,7 @@ class RoomDocumentRepository @JvmOverloads constructor(private val metadata: Met
                 if (index < 0) reject(OperationErrorCode.SOURCE_UNAVAILABLE, "page_unavailable", pageId.value)
                 val now = clock(); val id = PageId(uuid()); val nextDoc = next(doc.documentRevision)
                 // Real SQLite uniqueness is checked at each UPDATE, not just at transaction end. Move all existing rows to a disjoint range before assigning final contiguous ordinals.
+                coroutineContext.ensureActive()
                 for (page in pages) updatePage(page.copy(ordinal = checkNotNull(page.ordinal) + pages.size + 1))
                 val added = PageRow(id.value, doc.documentId, source.sourceId, 1, "ACTIVE", index + 1, null, now)
                 q.insertPage(added)
@@ -200,7 +207,7 @@ class RoomDocumentRepository @JvmOverloads constructor(private val metadata: Met
     override suspend fun undoDocumentEdit(undoId: UndoId, expectedDocumentRevision: Long): DocumentMutationResult = withContext(dispatcher) {
         documentCommand {
             val entry = q.undo(undoId.value) ?: reject(OperationErrorCode.INVALID_INPUT, "undo_unavailable", undoId.value)
-            if (entry.action in setOf("PAGE_REORDER", "PAGE_REMOVE")) return@documentCommand undoMembership(entry, expectedDocumentRevision)
+            if (entry.action in setOf("PAGE_REORDER", "PAGE_REMOVE")) return@documentCommand undoMembership(entry, expectedDocumentRevision, coroutineContext)
             if (entry.action !in setOf("RECIPE_EDIT", "BATCH_RECIPE_EDIT") || entry.state != "AVAILABLE" || entry.expiresAt <= clock()) reject(OperationErrorCode.INVALID_INPUT, "undo_unavailable", undoId.value)
             val before = decodeUndo(entry.beforeState); val after = decodeUndo(entry.afterState)
             if (before.pages.map { it.pageId } != after.pages.map { it.pageId }) reject(OperationErrorCode.INTEGRITY_FAILED, "invalid_undo_metadata", undoId.value)
@@ -225,6 +232,7 @@ class RoomDocumentRepository @JvmOverloads constructor(private val metadata: Met
                     page
                 }
                 val now = clock(); val nextDoc = next(doc.documentRevision)
+                coroutineContext.ensureActive()
                 for (index in targets.indices) { val target = targets[index]; append(live[index], target.bytes, target.hash, target.masks.links, now) }
                 if (q.updateUndo(liveEntry.copy(state = "APPLIED")) != 1) reject(OperationErrorCode.INTEGRITY_FAILED, "undo_unavailable", undoId.value)
                 updateDocument(doc.copy(documentRevision = nextDoc, updatedAt = now))
@@ -255,7 +263,7 @@ class RoomDocumentRepository @JvmOverloads constructor(private val metadata: Met
         return id
     }
 
-    private fun undoMembership(entry: UndoEntryRow, expectedDocumentRevision: Long): DocumentMutationResult {
+    private fun undoMembership(entry: UndoEntryRow, expectedDocumentRevision: Long, ownerContext: CoroutineContext): DocumentMutationResult {
         if (expectedDocumentRevision < 1 || entry.state != "AVAILABLE" || entry.expiresAt <= clock()) reject(OperationErrorCode.INVALID_INPUT, "undo_unavailable", entry.undoId)
         val before = decodeMembership(entry.beforeState); val after = decodeMembership(entry.afterState)
         if (before.documentId != entry.documentId || after.documentId != entry.documentId || before.pages.map { it.pageId to it.sourceId } != after.pages.map { it.pageId to it.sourceId }) reject(OperationErrorCode.INTEGRITY_FAILED, "invalid_undo_metadata", entry.undoId)
@@ -289,6 +297,7 @@ class RoomDocumentRepository @JvmOverloads constructor(private val metadata: Met
             // Restore only membership. Current recipe pointers may legitimately be newer than the edit's snapshot and must never be rolled back by a page move/remove Undo.
             val restored = before.pages.map { prior -> checkNotNull(byId[prior.pageId]).copy(state = prior.state, ordinal = prior.ordinal, removedAt = prior.removedAt) }
             val revision = next(doc.documentRevision); val now = clock()
+            ownerContext.ensureActive()
             writeMembership(live, restored)
             if (q.updateUndo(liveEntry.copy(state = "APPLIED")) != 1) reject(OperationErrorCode.INTEGRITY_FAILED, "undo_unavailable", entry.undoId)
             updateDocument(doc.copy(documentRevision = revision, updatedAt = now))
