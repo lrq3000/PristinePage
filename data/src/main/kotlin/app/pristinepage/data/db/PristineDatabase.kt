@@ -11,4 +11,5 @@ abstract class PristineDatabase : RoomDatabase() {
     abstract fun jobLeases(): JobLeaseDao
     abstract fun ingestPreparation(): IngestPreparationDao
     abstract fun ingestCompletion(): IngestCompletionDao
+    abstract fun ingestPhases(): IngestPhaseDao
 }

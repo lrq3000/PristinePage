@@ -12,7 +12,7 @@ import org.junit.Test
 
 /** Actual intent/session/job commands with only Android's row storage/transaction substituted. Preparation cannot copy/decode a source or make a Page visible; those remain consuming SourceStore/recovery tests. */
 class IngestIntentTest {
-    internal class Fixture : ImportSessionQueries, IngestPreparationQueries, IngestCompletionQueries, IngestLookupQueries, JobLeaseQueries {
+    internal class Fixture : ImportSessionQueries, IngestPreparationQueries, IngestCompletionQueries, IngestLookupQueries, IngestPhaseQueries, JobLeaseQueries {
         val catalog = MemoryMetadata()
         val document = DocumentId(UUID.randomUUID().toString())
         val parent = ImportSessionId(UUID.randomUUID().toString())
@@ -25,6 +25,7 @@ class IngestIntentTest {
         val blobs = linkedMapOf<String, SourceBlobRow>()
         var now = 1000L
         var rejectChildUpdate = false
+        var rejectPhaseState: String? = null
         val metadata = object : MetadataAccess {
             override val queries: CatalogQueries get() = catalog
             override fun <T> transaction(action: () -> T): T {
@@ -73,6 +74,11 @@ class IngestIntentTest {
         override fun updateFileTransaction(row: FileTransactionRow, expectedState: String): Int {
             check(catalog.inTransaction)
             if (files[row.transactionId]?.state != expectedState) return 0
+            files[row.transactionId] = row; return 1
+        }
+        override fun updateIngestPhase(row: FileTransactionRow, expectedState: String): Int {
+            check(catalog.inTransaction)
+            if (row.state == rejectPhaseState || files[row.transactionId]?.state != expectedState) return 0
             files[row.transactionId] = row; return 1
         }
     }
