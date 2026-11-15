@@ -1,0 +1,36 @@
+package app.pristinepage.data.db
+
+import androidx.room.Dao
+import androidx.room.Insert
+import androidx.room.OnConflictStrategy
+import androidx.room.Query
+import androidx.room.Update
+import app.pristinepage.data.repository.CatalogQueries
+
+/** Bound SQL only. Business commands run these synchronous metadata operations on IO inside Room's transaction, never across provider/decode/render work. */
+@Dao abstract class CatalogDao : CatalogQueries {
+    @Query("SELECT * FROM Document WHERE documentId=:id") abstract override fun document(id: String): DocumentRow?
+    @Query("SELECT * FROM Page WHERE documentId=:documentId AND state='ACTIVE' ORDER BY ordinal") abstract override fun activePages(documentId: String): List<PageRow>
+    @Query("SELECT * FROM Page WHERE pageId=:id") abstract override fun page(id: String): PageRow?
+    @Query("SELECT * FROM Source WHERE sourceId=:id") abstract override fun source(id: String): SourceRow?
+    @Query("SELECT * FROM RecipeRevision WHERE pageId=:pageId AND recipeRevision=:revision") abstract override fun recipe(pageId: String, revision: Long): RecipeRevisionRow?
+    @Query("SELECT COALESCE(MAX(recipeRevision),0) FROM RecipeRevision WHERE pageId=:pageId") abstract override fun maxRecipeRevision(pageId: String): Long
+    @Query("SELECT * FROM RecipeMask WHERE pageId=:pageId AND recipeRevision=:revision ORDER BY maskId") abstract override fun recipeMasks(pageId: String, revision: Long): List<RecipeMaskRow>
+    @Query("SELECT * FROM Mask WHERE maskId=:id") abstract override fun mask(id: String): MaskRow?
+    @Query("SELECT * FROM UndoEntry WHERE undoId=:id") abstract override fun undo(id: String): UndoEntryRow?
+    @Query("SELECT EXISTS(SELECT 1 FROM ImportSession WHERE documentId=:documentId AND kind='BATCH' AND state NOT IN ('COMMITTED','CANCELED','FAILED','QUARANTINED'))") abstract override fun hasPendingImport(documentId: String): Boolean
+    @Insert(onConflict = OnConflictStrategy.ABORT) abstract override fun insertDocument(row: DocumentRow)
+    @Update(onConflict = OnConflictStrategy.ABORT) abstract override fun updateDocument(row: DocumentRow): Int
+    @Insert(onConflict = OnConflictStrategy.ABORT) abstract override fun insertPage(row: PageRow)
+    @Update(onConflict = OnConflictStrategy.ABORT) abstract override fun updatePage(row: PageRow): Int
+    @Insert(onConflict = OnConflictStrategy.ABORT) abstract override fun insertRecipe(row: RecipeRevisionRow)
+    @Insert(onConflict = OnConflictStrategy.IGNORE) abstract override fun insertReference(row: SourceReferenceRow): Long
+    @Query("SELECT COUNT(*) FROM SourceReference WHERE sourceId=:sourceId") abstract override fun countSourceReferences(sourceId: String): Long
+    @Query("UPDATE Source SET refCount=:count WHERE sourceId=:sourceId") abstract override fun setSourceRefCount(sourceId: String, count: Long): Int
+    @Insert(onConflict = OnConflictStrategy.ABORT) abstract override fun insertUndo(row: UndoEntryRow)
+    @Update(onConflict = OnConflictStrategy.ABORT) abstract override fun updateUndo(row: UndoEntryRow): Int
+    @Insert(onConflict = OnConflictStrategy.ABORT) abstract override fun insertRecipeMask(row: RecipeMaskRow)
+    @Insert(onConflict = OnConflictStrategy.IGNORE) abstract override fun insertMaskReference(row: MaskReferenceRow): Long
+    @Query("SELECT (SELECT COUNT(*) FROM RecipeMask WHERE maskId=:maskId)+(SELECT COUNT(*) FROM MaskReference WHERE maskId=:maskId)") abstract override fun countMaskReferences(maskId: String): Long
+    @Query("UPDATE Mask SET refCount=:count WHERE maskId=:maskId") abstract override fun setMaskRefCount(maskId: String, count: Long): Int
+}
