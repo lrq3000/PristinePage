@@ -66,3 +66,7 @@ Current replacement source commitb3759b2 and [LDPlayer receipt](../../validation
 - NFR-09: original24 source/root-seed identities and accepted-plan hash reverified, live relative links checked; this is not final standalone app/release acceptance.
 
 No import/capture/edit/save/reopen/export/share journey, deterministic image algorithm, actual learned model or physical-device/visual gate has passed. The development artifact is intentionally labeled a bootstrap with unavailable actions, not a substitute for mandatory functionality.
+
+## Current bounded core evidence — T02-20261115-A
+
+[T-02 receipt](../../validation/contracts/t02-receipt.md) adds owned RGB/typed-mask, numeric/coordinate, strict canonical recipe/default/hash and F-01–F-05 fixture evidence to FR-10/FR-14/FR-17 and NFR-06/NFR-08 preparation. Current47 tests include23 core,15 fixture and9 bootstrap cases;129 named variants repeat complete dataset manifests. Independent Important Unicode-identity/fixture omissions were reproduced and corrected RED→GREEN; original review verdict is retained and remaining Minor coverage is explicit. Four turns restore canonical recipe identity with unchanged source controls/independent duplicate. No complete requirement row passes from types/fixtures alone; storage revisions, actual geometry/appearance/neural execution, album batch UI, export and current-artifact runtime/physical/offline/visual gates remain open.

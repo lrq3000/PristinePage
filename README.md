@@ -4,6 +4,8 @@ Native offline Android document/photo scanner under active implementation. Confi
 
 ## Authorities and scope
 
+T-02 now adds validated owned RGB/float masks, typed recipes, canonical UTF-8 codec/hash, coordinate/numerical helpers and129 deterministic fixture variants. Current recorded JVM checks total47 passing tests; [T-02 receipt](validation/contracts/t02-receipt.md) preserves independent review findings, observed fixes and remaining coverage. The newly generated APK has not been runtime-tested; earlier LDPlayer evidence belongs to the preserved I-01 bootstrap. Storage/import/editor/export and actual neural methods remain to implement under continuous execution.
+
 Read [AGENTS.md](AGENTS.md), [live PRD](docs/specs/PRD.md), [TODO](docs/specs/TODO.md), [pipeline contracts](docs/specs/PIPELINE_CONTRACTS.md), [accepted implementation plan](docs/specs/IMPLEMENTATION_PLAN.md) and [operational permissions](docs/specs/OPERATIONAL_PLAN.md). [Execution progress](validation/progress.md) records actual evidence and restart state. The original external v1.0 source package remains unchanged.
 
 Both classical and multiple genuinely working neural geometry/appearance methods are mandatory under live PRD amendment U-01. Neural provider/asset/runtime selection is a later separately approved milestone after a tested classical import→edit→save→export slice. Missing or gated models cannot be disguised as implemented methods, and a registry-only/classical-only result cannot close the amended objective.

@@ -4,12 +4,12 @@ This checklist is the live PristinePage application task-state authority, not th
 
 User amendment U-01 in live PRD requires multiple actual neural methods, including learned geometry and appearance, before completion. Original optional-model defaults do not authorize finishing with every model deferred. Provider selection/assets/runtime and amended T-08/T-12 acceptance need a separately approved concrete plan; no neural download is included in P-02. This blocks only dependent provider/release acceptance, not the approved foundation/classical slice.
 
-U-04/FR-17 now mandates [cumulative album batch editing](BATCH_EDITING.md), explicitly approved for design/requirement recording2026-11-15. Select all/subsets, preserve independent accumulated turns/settings across selection changes and save all effectively edited pages on one Done, with previews, Undo/Redo, Cancel and one atomic recipe save. This supplements T-02/T-03/T-09/T-10, not a replacement implementation plan or completed feature. [Independent design review](../../validation/reviews/batch-editing-design-review.md) passed its documentation/builder scope; implementation precautions were made explicit. T-02 remains unclaimed/not started.
+U-04/FR-17 now mandates [cumulative album batch editing](BATCH_EDITING.md), explicitly approved for design/requirement recording2026-11-15. Select all/subsets, preserve independent accumulated turns/settings across selection changes and save all effectively edited pages on one Done, with previews, Undo/Redo, Cancel and one atomic recipe save. This supplements T-02/T-03/T-09/T-10, not a replacement implementation plan or completed feature. [Independent design review](../../validation/reviews/batch-editing-design-review.md) passed its documentation/builder scope; implementation precautions were made explicit. T-02's rotation contract/checks now exist; the actual batch feature remains unimplemented.
 
 | ID | Task | Depends on | Initial state | Claim / evidence |
 |---|---|---|---|---|
 | T-01 | Reproducible Android bootstrap and capability-free launch | None | Verified — bounded bootstrap only | Coordinator `LOCAL_SESSION`; T01-20261115-I01 source b3759b2.9 app tests GREEN/offline build148tasks, static review PASS. Reviewed SHA19595f091f69 installed/byte-matched; launcher/UI/PID logs checked on owned index2/API28 ARM64 translation; original player/VM exits verified and usage released. [Runtime receipt](../../validation/bootstrap/ldplayer-receipt.md) and [independent review](../../validation/reviews/t01-runtime-review.md) PASS with retained RT-1/RT-2 Minor limitations. Phone excluded; no full scanner/offline/physical/rights acceptance. |
-| T-02 | Pure contracts, geometry math and deterministic fixtures | T-01 | Not started | Unclaimed. |
+| T-02 | Pure contracts, geometry math and deterministic fixtures | T-01 | Verified — bounded pure boundary | T02-20261115-A baseline753bb4f; owned RGB/typed masks, recipe-json-v1 codec/hash, coordinates/numerics and fixture-v1 seed20261114/129 variants. Final47 tests/0failures/errors; offline strict154-task integration plus final core tests. Independent review I-1/I-2 reproduced/fixed RED→GREEN; original FAIL retained, no reviewer rerun claim; M-1/M-2 remaining coverage follows T-06/T-08. [Receipt](../../validation/contracts/t02-receipt.md). No scanner/runtime acceptance. |
 | T-03 | Durable source/document/recipe store and recovery | T-02 | Not started | Unclaimed; U-04 adds atomic applyBatchRecipes, full revision validation and one saved-batch Undo; BatchRecipeTest remains future work. |
 | T-04 | Picker import and orientation/color-normalized decode | T-03 | Not started | Unclaimed. |
 | T-05 | Camera capture with manual fallbacks | T-04 | Not started | Unclaimed. |
@@ -22,6 +22,12 @@ U-04/FR-17 now mandates [cumulative album batch editing](BATCH_EDITING.md), expl
 | T-12 | Device/offline/fidelity/accessibility/privacy/release gates | T-05,T-08,T-09,T-10,T-11 | Not started | Unclaimed; no application validation run. |
 
 ## Claim and completion record template
+
+### Completed bounded claim T-02 / T02-20261115-A
+
+Coordinator `LOCAL_SESSION`; primary worktree/branch unchanged; input HEAD753bb4f, accepted-plan SHA791dba54b888ac430cf12c0a4d83a363a24dd570f5305e989c91815fb9be78fa, live PIPELINE_CONTRACTS/domain recipe families/TEST_FIXTURES and U-04. Exclusive implementation paths: `core/src/`, `test-fixtures/src/`, with coordinator-owned shared-contract/README/TODO/progress and `validation/contracts/` receipts/review paths. No new dependencies, Android/Room types in core, asset acquisition or emulator launch. Implement validated owned RGB/float masks, coordinates/numerics, sealed recipe/status/output contracts, canonical codec/hash and deterministic F-01–F-05 generation; carry U-04 per-page rotations without UI batch state. Tests: ContractTest, CoordinatesTest, RecipeCodecTest and fixture generator reproducibility/scalar/semantic checks. First incomplete step: write/run intended RED; do not mark accepted from source presence. After verified T-02 commit, proceed directly to T-03 under U-05 rather than asking to continue.
+
+Completion2026-11-15: observed intended initial/duplicate-key/provenance/review/manifest REDs and final GREEN;47 parsed tests in current evidence with129 repeated complete fixture manifests. Canonical golden343bytes/SHAe9c6c21880a3c8802e7f59bdeb80305956150c380b76f4254dcfae3458928ce0. Receipt records Important fixes, remaining Minor coverage and reviewer-declined dependent gates. No active build/child/owned emulator; next eligible task T-03, preserving the SourceInspector/T-04 integrated-ingestion gate.
 
 ### U-04 documentation-only amendment / U04-20261115-BATCH
 
@@ -40,7 +46,7 @@ For a task append: owner; claim UTC time; attempt ID; input package/contract has
 Use `in-progress`, `blocked`, `ready-for-review`, `verified`, or `superseded`; explain a block and its smallest remedy. Test output and implementation acceptance are different. An optional model can be deliberately deferred with evidence, but T-08's registry/unsupported-state tests still must pass. Do not use a deferred model to justify checking an unrelated mandatory feature complete.
 
 - [x] T-01 accepted — bounded reproducible/capability-free bootstrap only; runtime-evidence limitations and unperformed dependent physical/offline/rights gates remain explicit in the receipt/review.
-- [ ] T-02 accepted.
+- [x] T-02 accepted — bounded pure contracts/numerics/codec/fixture boundary; remaining coverage and dependent gates retained in receipt.
 - [ ] T-03 accepted.
 - [ ] T-04 accepted.
 - [ ] T-05 accepted.
