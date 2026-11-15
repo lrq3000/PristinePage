@@ -179,11 +179,11 @@ class RoomDocumentRepository @JvmOverloads constructor(private val metadata: Met
             metadata.transaction {
                 val doc = activeDocument(original.documentId)
                 if (doc.documentRevision != expectedDocumentRevision) throw Conflict(doc.documentRevision)
-                if (q.hasPendingImport(doc.documentId)) reject(OperationErrorCode.REVISION_CONFLICT, "finish_import_before_membership_edit", doc.documentId, true)
                 val source = verifyLive(prepared, original.currentRecipeRevision) { doc.documentRevision }
-                val pages = q.activePages(doc.documentId)
+                val pages = membershipPages(doc.documentId)
                 if (pages.size >= 100) reject(OperationErrorCode.RESOURCE_LIMIT, "document_page_limit", doc.documentId)
-                if (pages.map { it.ordinal } != pages.indices.toList()) reject(OperationErrorCode.INTEGRITY_FAILED, "invalid_page_order", doc.documentId)
+                // The reversal validates every captured member, not only the new copy. Refuse an already unavailable survivor chain before publishing an Undo that cannot execute; no file IO belongs under this lock.
+                for (sourceId in pages.map { it.sourceId }.distinct()) requireReadySourceChain(sourceId)
                 val index = pages.indexOfFirst { it.pageId == pageId.value }
                 if (index < 0) reject(OperationErrorCode.SOURCE_UNAVAILABLE, "page_unavailable", pageId.value)
                 val now = clock(); val id = PageId(uuid()); val nextDoc = next(doc.documentRevision)
@@ -197,9 +197,10 @@ class RoomDocumentRepository @JvmOverloads constructor(private val metadata: Met
                 pinSource("PAGE", id.value, source.sourceId, now)
                 pinSource("RECIPE_HISTORY", recipeOwner(id.value, 1), source.sourceId, now)
                 copyMasks(prepared.masks.links, id.value, 1)
+                val finalOrder = (pages.take(index + 1) + added + pages.drop(index + 1)).mapIndexed { ordinal, page -> page.copy(ordinal = ordinal) }
+                val undo = addMembershipUndo(doc.documentId, "PAGE_DUPLICATE", pages, finalOrder, nextDoc, now)
                 updateDocument(doc.copy(documentRevision = nextDoc, updatedAt = now))
-                // Reversible membership history is completed with the T-10 remove/reorder commands, not represented by an unusable Undo token here.
-                DocumentMutationResult.Applied(nextDoc, listOf(id), null)
+                DocumentMutationResult.Applied(nextDoc, listOf(id), undo)
             }
         }
     }
@@ -207,7 +208,7 @@ class RoomDocumentRepository @JvmOverloads constructor(private val metadata: Met
     override suspend fun undoDocumentEdit(undoId: UndoId, expectedDocumentRevision: Long): DocumentMutationResult = withContext(dispatcher) {
         documentCommand {
             val entry = q.undo(undoId.value) ?: reject(OperationErrorCode.INVALID_INPUT, "undo_unavailable", undoId.value)
-            if (entry.action in setOf("PAGE_REORDER", "PAGE_REMOVE")) return@documentCommand undoMembership(entry, expectedDocumentRevision, coroutineContext)
+            if (entry.action in setOf("PAGE_REORDER", "PAGE_REMOVE", "PAGE_DUPLICATE")) return@documentCommand undoMembership(entry, expectedDocumentRevision, coroutineContext)
             if (entry.action !in setOf("RECIPE_EDIT", "BATCH_RECIPE_EDIT") || entry.state != "AVAILABLE" || entry.expiresAt <= clock()) reject(OperationErrorCode.INVALID_INPUT, "undo_unavailable", undoId.value)
             val before = decodeUndo(entry.beforeState); val after = decodeUndo(entry.afterState)
             if (before.pages.map { it.pageId } != after.pages.map { it.pageId }) reject(OperationErrorCode.INTEGRITY_FAILED, "invalid_undo_metadata", undoId.value)
@@ -266,8 +267,24 @@ class RoomDocumentRepository @JvmOverloads constructor(private val metadata: Met
     private fun undoMembership(entry: UndoEntryRow, expectedDocumentRevision: Long, ownerContext: CoroutineContext): DocumentMutationResult {
         if (expectedDocumentRevision < 1 || entry.state != "AVAILABLE" || entry.expiresAt <= clock()) reject(OperationErrorCode.INVALID_INPUT, "undo_unavailable", entry.undoId)
         val before = decodeMembership(entry.beforeState); val after = decodeMembership(entry.afterState)
-        if (before.documentId != entry.documentId || after.documentId != entry.documentId || before.pages.map { it.pageId to it.sourceId } != after.pages.map { it.pageId to it.sourceId }) reject(OperationErrorCode.INTEGRITY_FAILED, "invalid_undo_metadata", entry.undoId)
-        if (before.pages.any { it.state != "ACTIVE" } || (entry.action == "PAGE_REORDER" && after.pages.any { it.state != "ACTIVE" }) || (entry.action == "PAGE_REMOVE" && after.pages.count { it.state == "REMOVED" } != 1)) reject(OperationErrorCode.INTEGRITY_FAILED, "invalid_undo_metadata", entry.undoId)
+        if (before.documentId != entry.documentId || after.documentId != entry.documentId) reject(OperationErrorCode.INTEGRITY_FAILED, "invalid_undo_metadata", entry.undoId)
+        // Every supported membership edit starts from an active set. Validate before reading non-null ordinals so corrupted but canonical history never becomes a misleading storage retry.
+        if (before.pages.any { it.state != "ACTIVE" }) reject(OperationErrorCode.INTEGRITY_FAILED, "invalid_undo_metadata", entry.undoId)
+        val duplicate = if (entry.action == "PAGE_DUPLICATE") {
+            val beforeIds = before.pages.map { it.pageId }.toSet()
+            val added = after.pages.filter { it.pageId !in beforeIds }
+            if (after.pages.size != before.pages.size + 1 || added.size != 1 || after.pages.any { it.state != "ACTIVE" }) reject(OperationErrorCode.INTEGRITY_FAILED, "invalid_undo_metadata", entry.undoId)
+            val copy = added.single(); val ordinal = checkNotNull(copy.ordinal)
+            val original = before.pages.singleOrNull { it.ordinal == ordinal - 1 }
+            if (ordinal < 1 || original?.sourceId != copy.sourceId) reject(OperationErrorCode.INTEGRITY_FAILED, "invalid_undo_metadata", entry.undoId)
+            val derived = (before.pages.map { page -> page.copy(ordinal = checkNotNull(page.ordinal).let { if (it >= ordinal) it + 1 else it }) } + copy).sortedBy { it.pageId }
+            if (derived != after.pages) reject(OperationErrorCode.INTEGRITY_FAILED, "invalid_undo_metadata", entry.undoId)
+            copy
+        } else {
+            if (before.pages.map { it.pageId to it.sourceId } != after.pages.map { it.pageId to it.sourceId }) reject(OperationErrorCode.INTEGRITY_FAILED, "invalid_undo_metadata", entry.undoId)
+            null
+        }
+        if ((entry.action == "PAGE_REORDER" && after.pages.any { it.state != "ACTIVE" }) || (entry.action == "PAGE_REMOVE" && after.pages.count { it.state == "REMOVED" } != 1)) reject(OperationErrorCode.INTEGRITY_FAILED, "invalid_undo_metadata", entry.undoId)
         if (entry.action == "PAGE_REMOVE") {
             val removed = after.pages.single { it.state == "REMOVED" }
             val oldOrdinal = checkNotNull(before.pages.single { it.pageId == removed.pageId }.ordinal)
@@ -289,14 +306,15 @@ class RoomDocumentRepository @JvmOverloads constructor(private val metadata: Met
                 val page = q.page(expected.pageId) ?: reject(OperationErrorCode.INTEGRITY_FAILED, "page_unavailable", expected.pageId)
                 if (page.documentId != doc.documentId || membershipPointer(page) != expected) throw Conflict(doc.documentRevision)
                 // Retained page/history pins prohibit ordinary reclamation, but corruption/recovery may have quarantined a source. Undo must not make that affected page active merely because its old order still matches.
-                val source = q.source(page.sourceId)
-                if (source?.state != "READY" || q.sourceBlob(source.sourceBlobId)?.state != "READY") reject(OperationErrorCode.INTEGRITY_FAILED, "source_not_ready", page.sourceId)
+                requireReadySourceChain(page.sourceId)
                 page
             }
             val byId = live.associateBy { it.pageId }
             // Restore only membership. Current recipe pointers may legitimately be newer than the edit's snapshot and must never be rolled back by a page move/remove Undo.
-            val restored = before.pages.map { prior -> checkNotNull(byId[prior.pageId]).copy(state = prior.state, ordinal = prior.ordinal, removedAt = prior.removedAt) }
             val revision = next(doc.documentRevision); val now = clock()
+            val restored = before.pages.map { prior -> checkNotNull(byId[prior.pageId]).copy(state = prior.state, ordinal = prior.ordinal, removedAt = prior.removedAt) } +
+                (duplicate?.let { listOf(checkNotNull(byId[it.pageId]).copy(state = "REMOVED", ordinal = null, removedAt = now)) } ?: emptyList())
+            // Undoing insertion retains the copy's immutable history/masks/source pins as a tombstone; absence from the old active set is never permission to delete it.
             ownerContext.ensureActive()
             writeMembership(live, restored)
             if (q.updateUndo(liveEntry.copy(state = "APPLIED")) != 1) reject(OperationErrorCode.INTEGRITY_FAILED, "undo_unavailable", entry.undoId)
@@ -399,6 +417,11 @@ class RoomDocumentRepository @JvmOverloads constructor(private val metadata: Met
             if (q.setMaskRefCount(maskId, q.countMaskReferences(maskId)) != 1) reject(OperationErrorCode.INTEGRITY_FAILED, "mask_unavailable", maskId)
         }
         return id
+    }
+
+    private fun requireReadySourceChain(sourceId: String) {
+        val source = q.source(sourceId)
+        if (source?.state != "READY" || q.sourceBlob(source.sourceBlobId)?.state != "READY") reject(OperationErrorCode.INTEGRITY_FAILED, "source_not_ready", sourceId)
     }
 
     private fun pinSource(type: String, owner: String, sourceId: String, now: Long) {
