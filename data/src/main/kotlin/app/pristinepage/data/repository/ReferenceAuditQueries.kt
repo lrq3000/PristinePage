@@ -1,6 +1,6 @@
 package app.pristinepage.data.repository
 
-/** One indexed ownership count observed with its stored counter in the same metadata snapshot. A matching count says nothing about polymorphic-owner legitimacy or file integrity. */
+/** One count pair observed in the same metadata snapshot: storedCount is the recorded counter, required cardinality or listed owner count for that route; actualCount is its independently matched cardinality. A single route never establishes whole-store ownership or file integrity. */
 data class ReferenceCountRow(val objectId: String, val storedCount: Long, val actualCount: Long)
 
 interface ReferenceAuditQueries {
@@ -11,4 +11,5 @@ interface ReferenceAuditQueries {
     fun pageSourcePinsAfter(objectId: String?, limit: Int): List<ReferenceCountRow>
     fun recipeSourcePinsAfter(objectId: String?, limit: Int): List<ReferenceCountRow>
     fun maskSourcePinsAfter(objectId: String?, limit: Int): List<ReferenceCountRow>
+    fun directSourceOwnersAfter(objectId: String?, limit: Int): List<ReferenceCountRow>
 }

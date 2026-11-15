@@ -63,6 +63,19 @@ class RoomReferenceAuditIntegrationTest {
         f.reopen(); assertEquals(before, metadataState(f)); f.assertForeignKeys()
     }
 
+    private suspend fun assertInvalidDirectOwner(f: RoomRepositoryIntegrationTest.Fixture, source: String = f.source) {
+        f.reopen(); val before = metadataState(f); val audit = RoomReferenceAudit(f.database)
+        assertEquals(0L, audit.audit().blocked); assertEquals(0L, audit.auditRequiredPins().blocked)
+        val report = audit.auditDirectOwners(); assertEquals(1L, report.blocked)
+        val issue = report.safeIssues.single()
+        assertEquals(source, issue.operationId); assertEquals("SOURCE_DIRECT_OWNERS", issue.state)
+        assertEquals(OperationErrorCode.INTEGRITY_FAILED, issue.error!!.code); assertFalse(issue.error.retryable)
+        assertEquals("invalid_direct_source_owner", issue.error.safeMessageKey); assertEquals(RecoveryAction.REVIEW_INTEGRITY, issue.action)
+        assertEquals(0L, report.completed); assertEquals(0L, report.resumed); assertEquals(0L, report.quarantined)
+        assertEquals(report, audit.auditDirectOwners())
+        f.reopen(); assertEquals(before, metadataState(f)); f.assertForeignKeys()
+    }
+
     @Test fun sourceAndBlobCountersCompareActualRowsAndNeverRepairMismatch() = runBlocking {
         RoomRepositoryIntegrationTest.Fixture().use { f ->
             assertEquals(RecoveryReport(2, 0, 0, 0, 0, emptyList()), RoomReferenceAudit(f.database).audit())
@@ -161,6 +174,7 @@ class RoomReferenceAuditIntegrationTest {
             assertEquals(RecoveryReport(7, 0, 0, 0, 0, emptyList()), audit.auditRequiredPins())
             assertEquals(RecoveryReport(7, 0, 0, 0, 0, emptyList()), audit.auditRequiredPins())
             assertEquals(0L, audit.audit().blocked)
+            assertEquals(RecoveryReport(1, 0, 0, 0, 0, emptyList()), audit.auditDirectOwners())
             f.reopen(); assertEquals(before, metadataState(f))
             assertEquals("REMOVED", f.database.catalog().page(copy.value)!!.state)
             assertEquals(2L, f.database.catalog().page(copy.value)!!.currentRecipeRevision); f.assertForeignKeys()
@@ -223,6 +237,55 @@ class RoomReferenceAuditIntegrationTest {
             assertRequiredPinFailure(f, page, "PAGE_SOURCE_PIN")
             assertEquals("REMOVED", f.database.catalog().page(page)!!.state)
             assertEquals(2L, f.count("RecipeRevision")); assertEquals(1L, f.count("UndoEntry"))
+        }
+    }
+
+    @Test fun danglingPageMaskAndHistoryOwnersRemainInvalidWithAllRequiredPinsIntact() = runBlocking {
+        for (kind in listOf("PAGE", "MASK", "RECIPE_HISTORY")) RoomRepositoryIntegrationTest.Fixture().use { f ->
+            val owner = if (kind == "RECIPE_HISTORY") "recipe-v1/${f.pages[0].value}/2" else UUID.randomUUID().toString()
+            f.database.runInTransaction {
+                val q = f.database.catalog()
+                q.insertReference(SourceReferenceRow(kind, owner, f.source, 0))
+                assertEquals(1, q.setSourceRefCount(f.source, q.countSourceReferences(f.source)))
+            }
+            assertInvalidDirectOwner(f)
+        }
+    }
+
+    @Test fun actualSqlHistoryLookupRejectsAliasesAndOverflowWithoutRejectingCanonicalLongMax() = runBlocking {
+        for (revision in listOf("01", "+1", "1extra", "1/extra", "9223372036854775808")) RoomRepositoryIntegrationTest.Fixture().use { f ->
+            val page = f.pages[0].value
+            f.database.runInTransaction {
+                val q = f.database.catalog()
+                q.insertRecipe(q.recipe(page, 1)!!.copy(recipeRevision = Long.MAX_VALUE, parentRevision = 1))
+                q.insertReference(SourceReferenceRow("RECIPE_HISTORY", "recipe-v1/$page/${Long.MAX_VALUE}", f.source, 0))
+                assertEquals(1, q.setSourceRefCount(f.source, q.countSourceReferences(f.source)))
+            }
+            // The highest valid decimal Long must match; SQLite's saturating overflow cast alone must not let the next value alias it.
+            assertEquals(RecoveryReport(1, 0, 0, 0, 0, emptyList()), RoomReferenceAudit(f.database).auditDirectOwners())
+            f.database.runInTransaction {
+                val q = f.database.catalog()
+                q.insertReference(SourceReferenceRow("RECIPE_HISTORY", "recipe-v1/$page/$revision", f.source, 0))
+                assertEquals(1, q.setSourceRefCount(f.source, q.countSourceReferences(f.source)))
+            }
+            assertInvalidDirectOwner(f)
+            assertNotNull(f.database.catalog().recipe(page, Long.MAX_VALUE))
+        }
+    }
+
+    @Test fun extraWrongSourceDirectPinsDoNotInvalidateOrReplaceGenuineOwnerPins() = runBlocking {
+        for (kind in listOf("PAGE", "MASK", "RECIPE_HISTORY")) RoomRepositoryIntegrationTest.Fixture().use { f ->
+            val owner = when (kind) {
+                "MASK" -> protectionMask(f)
+                "RECIPE_HISTORY" -> "recipe-v1/${f.pages[0].value}/1"
+                else -> f.pages[0].value
+            }
+            lateinit var other: String
+            f.database.runInTransaction {
+                other = anotherSource(f)
+                f.database.catalog().insertReference(SourceReferenceRow(kind, owner, other, 0))
+            }
+            assertInvalidDirectOwner(f, other)
         }
     }
 }

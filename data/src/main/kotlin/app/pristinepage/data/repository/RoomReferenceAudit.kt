@@ -14,13 +14,17 @@ class RoomReferenceAudit @JvmOverloads constructor(private val metadata: Metadat
 
     private enum class Kind(val state: String, val messageKey: String = "reference_counter_mismatch") {
         SOURCE("SOURCE_REFERENCE_COUNT"), BLOB("BLOB_SOURCE_COUNT"), MASK("MASK_REFERENCE_COUNT"),
-        PAGE_PIN("PAGE_SOURCE_PIN", "required_source_pin_missing"), RECIPE_PINS("RECIPE_SOURCE_PINS", "required_source_pin_missing"), MASK_PIN("MASK_SOURCE_PIN", "required_source_pin_missing")
+        PAGE_PIN("PAGE_SOURCE_PIN", "required_source_pin_missing"), RECIPE_PINS("RECIPE_SOURCE_PINS", "required_source_pin_missing"), MASK_PIN("MASK_SOURCE_PIN", "required_source_pin_missing"),
+        DIRECT_OWNERS("SOURCE_DIRECT_OWNERS", "invalid_direct_source_owner")
     }
 
     suspend fun audit(): RecoveryReport = auditKinds(listOf(Kind.SOURCE, Kind.BLOB, Kind.MASK))
 
     /** Required source pins for retained pages, each immutable recipe and each mask only. This does not validate the reverse/dangling owner relation or Undo/import/job/export membership, and cannot authorize repair/GC. */
     suspend fun auditRequiredPins(): RecoveryReport = auditKinds(listOf(Kind.PAGE_PIN, Kind.RECIPE_PINS, Kind.MASK_PIN))
+
+    /** Inverse binding of PAGE, RECIPE_HISTORY and MASK source pins only. Extra or dangling pins are reported by SourceId, never removed. Other/unknown owner families and full schema/content/file integrity remain separate checks. */
+    suspend fun auditDirectOwners(): RecoveryReport = auditKinds(listOf(Kind.DIRECT_OWNERS))
 
     private suspend fun auditKinds(kinds: List<Kind>): RecoveryReport = withContext(dispatcher) {
         var inspected = 0L; var blocked = 0L
@@ -56,6 +60,7 @@ class RoomReferenceAudit @JvmOverloads constructor(private val metadata: Metadat
                     Kind.PAGE_PIN -> queries.pageSourcePinsAfter(after, 64)
                     Kind.RECIPE_PINS -> queries.recipeSourcePinsAfter(after, 64)
                     Kind.MASK_PIN -> queries.maskSourcePinsAfter(after, 64)
+                    Kind.DIRECT_OWNERS -> queries.directSourceOwnersAfter(after, 64)
                 }
             }
             if (rows.size > 64) invalidListing()

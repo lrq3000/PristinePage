@@ -1,6 +1,7 @@
 package app.pristinepage.data
 
 import app.pristinepage.data.model.*
+import app.pristinepage.data.db.SourceReferenceRow
 import app.pristinepage.data.repository.MetadataAccess
 import java.io.IOException
 import java.lang.reflect.InvocationTargetException
@@ -24,11 +25,12 @@ class ReferenceCountAuditTest {
         var invalidId = false
         var onQuery: (() -> Unit)? = null
 
-        suspend fun audit(requiredPins: Boolean = false): RecoveryReport {
+        suspend fun audit(requiredPins: Boolean = false, directOwners: Boolean = false): RecoveryReport {
             val implementation = try { Class.forName("app.pristinepage.data.repository.RoomReferenceAudit") }
             catch (_: ClassNotFoundException) { throw AssertionError("Required bounded reference-counter audit is absent") }
-            val entry = implementation.methods.singleOrNull { it.name == if (requiredPins) "auditRequiredPins" else "audit" }
-                ?: throw AssertionError("Required source-pin audit route is absent")
+            val route = if (directOwners) "auditDirectOwners" else if (requiredPins) "auditRequiredPins" else "audit"
+            val entry = implementation.methods.singleOrNull { it.name == route }
+                ?: throw AssertionError(if (directOwners) "Direct source-owner audit route is absent" else "Required source-pin audit route is absent")
             val port = Class.forName("app.pristinepage.data.repository.ReferenceAuditQueries")
             val row = Class.forName("app.pristinepage.data.repository.ReferenceCountRow").getConstructor(String::class.java, Long::class.javaPrimitiveType, Long::class.javaPrimitiveType)
             val queries = Proxy.newProxyInstance(port.classLoader, arrayOf(port)) { _, method, args ->
@@ -47,6 +49,17 @@ class ReferenceCountAuditTest {
                             Triple(page.pageId, history.size.toLong(), history.count { references.containsKey(Triple("RECIPE_HISTORY", "recipe-v1/${page.pageId}/${it.recipeRevision}", it.sourceId)) }.toLong())
                         }
                         "maskSourcePinsAfter" -> masks.values.map { mask -> Triple(mask.maskId, 1L, if (references.containsKey(Triple("MASK", mask.maskId, mask.sourceId))) 1L else 0L) }
+                        "directSourceOwnersAfter" -> sources.values.map { source ->
+                            val direct = references.values.filter { it.sourceId == source.sourceId && it.ownerType in setOf("PAGE", "RECIPE_HISTORY", "MASK") }
+                            val matched = direct.count { ref ->
+                                when (ref.ownerType) {
+                                    "PAGE" -> pages[ref.ownerId]?.sourceId == ref.sourceId
+                                    "MASK" -> masks[ref.ownerId]?.sourceId == ref.sourceId
+                                    else -> recipes.values.any { "recipe-v1/${it.pageId}/${it.recipeRevision}" == ref.ownerId && it.sourceId == ref.sourceId }
+                                }
+                            }
+                            Triple(source.sourceId, direct.size.toLong(), matched.toLong())
+                        }
                         else -> error("Unexpected reference-audit query")
                     }
                 }
@@ -228,5 +241,85 @@ class ReferenceCountAuditTest {
         assertEquals(0L, h.audit().blocked); val before = metadataState(h.f); val report = h.audit(true)
         assertEquals(1L, report.blocked); assertEquals(page, report.safeIssues.single().operationId)
         assertEquals("REMOVED", h.f.metadata.pages.getValue(page).state); assertEquals(before, metadataState(h.f))
+    }
+
+    private fun extraPin(h: Harness, type: String, owner: String, source: String = h.f.source.value) {
+        val q = h.f.metadata
+        q.references[Triple(type, owner, source)] = SourceReferenceRow(type, owner, source, 0)
+        q.sources[source] = q.sources.getValue(source).copy(refCount = q.countSourceReferences(source))
+    }
+
+    private suspend fun assertInvalidDirectOwner(h: Harness, source: String = h.f.source.value) {
+        val before = metadataState(h.f)
+        assertEquals(0L, h.audit().blocked); assertEquals(0L, h.audit(requiredPins = true).blocked)
+        val report = h.audit(directOwners = true)
+        assertEquals(1L, report.blocked); assertEquals(0L, report.completed); assertEquals(0L, report.resumed); assertEquals(0L, report.quarantined)
+        val issue = report.safeIssues.single()
+        assertEquals(source, issue.operationId); assertEquals("SOURCE_DIRECT_OWNERS", issue.state)
+        assertEquals(OperationErrorCode.INTEGRITY_FAILED, issue.error!!.code); assertFalse(issue.error.retryable)
+        assertEquals("invalid_direct_source_owner", issue.error.safeMessageKey); assertEquals(RecoveryAction.REVIEW_INTEGRITY, issue.action)
+        assertEquals(report, h.audit(directOwners = true)); assertEquals(before, metadataState(h.f))
+    }
+
+    @Test fun directOwnersRemainValidForRetainedDuplicateHistoryMaskAndUndo() = runTest {
+        val h = Harness(); h.f.protectionMask(h.f.pageIds[0], 1)
+        val copied = h.f.repository.duplicatePage(h.f.pageIds[0], 1) as DocumentMutationResult.Applied
+        assertTrue(h.f.repository.saveRecipe(copied.affectedPageIds.single(), 1, h.f.turned(1)) is SaveRecipeResult.Saved)
+        assertTrue(h.f.repository.undoDocumentEdit(checkNotNull(copied.undoId), 3) is DocumentMutationResult.Applied)
+        val before = metadataState(h.f)
+        assertEquals(RecoveryReport(1, 0, 0, 0, 0, emptyList()), h.audit(directOwners = true))
+        assertEquals(before, metadataState(h.f))
+    }
+
+    @Test fun danglingPageAndMaskOwnerPinsAreNotMadeValidByBalancedCounters() = runTest {
+        for (kind in listOf("PAGE", "MASK")) {
+            val h = Harness(); extraPin(h, kind, UUID.randomUUID().toString()); assertInvalidDirectOwner(h)
+        }
+    }
+
+    @Test fun canonicalRecipeOwnerNeedsTheActualRetainedPageAndRevision() = runTest {
+        for (foreignPage in listOf(false, true)) {
+            val h = Harness(); val page = if (foreignPage) UUID.randomUUID().toString() else h.f.pageIds[0].value
+            extraPin(h, "RECIPE_HISTORY", "recipe-v1/$page/2"); assertInvalidDirectOwner(h)
+        }
+    }
+
+    @Test fun noncanonicalRecipeOwnerCannotAliasAnExistingGenuinelyPinnedRevision() = runTest {
+        for (revision in listOf("01", "+1", "1extra", "1/extra", "9223372036854775808")) {
+            val h = Harness(); extraPin(h, "RECIPE_HISTORY", "recipe-v1/${h.f.pageIds[0].value}/$revision"); assertInvalidDirectOwner(h)
+        }
+    }
+
+    @Test fun extraWrongSourcePinIsInvalidEvenWhenTheOwnersGenuinePinRemains() = runTest {
+        for (kind in listOf("PAGE", "MASK", "RECIPE_HISTORY")) {
+            val h = Harness(); val owner = when (kind) {
+                "MASK" -> h.f.protectionMask(h.f.pageIds[0], 1)
+                "RECIPE_HISTORY" -> "recipe-v1/${h.f.pageIds[0].value}/1"
+                else -> h.f.pageIds[0].value
+            }
+            val original = h.f.metadata.sources.getValue(h.f.source.value); val source = UUID.randomUUID().toString()
+            h.f.metadata.sources[source] = original.copy(sourceId = source, conversionFingerprint = "other-v2", refCount = 0)
+            h.f.metadata.blobs[original.sourceBlobId] = h.f.metadata.blobs.getValue(original.sourceBlobId).copy(sourceCount = 2)
+            extraPin(h, kind, owner, source); assertInvalidDirectOwner(h, source)
+        }
+    }
+
+    @Test fun directOwnerPaginationKeepsFullAffectedSourceCountBeyondIssueCap() = runTest {
+        val h = Harness(); val original = h.f.metadata.sources.getValue(h.f.source.value)
+        repeat(130) { index ->
+            val id = UUID.randomUUID().toString()
+            h.f.metadata.sources[id] = original.copy(sourceId = id, conversionFingerprint = "other-$index", refCount = 0)
+            extraPin(h, "PAGE", UUID.randomUUID().toString(), id)
+        }
+        h.f.metadata.blobs[original.sourceBlobId] = h.f.metadata.blobs.getValue(original.sourceBlobId).copy(sourceCount = 131)
+        val before = metadataState(h.f); assertEquals(0L, h.audit().blocked); assertEquals(0L, h.audit(requiredPins = true).blocked)
+        val report = h.audit(directOwners = true)
+        assertEquals(131L, report.inspected); assertEquals(130L, report.blocked); assertEquals(128, report.safeIssues.size)
+        assertEquals(before, metadataState(h.f))
+    }
+
+    @Test fun severalInvalidDirectPinsOnOneSourceReportOneAffectedGroup() = runTest {
+        val h = Harness(); extraPin(h, "PAGE", UUID.randomUUID().toString()); extraPin(h, "MASK", UUID.randomUUID().toString())
+        assertInvalidDirectOwner(h)
     }
 }
