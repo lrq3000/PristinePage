@@ -10,7 +10,7 @@ U-04/FR-17 now mandates [cumulative album batch editing](BATCH_EDITING.md), expl
 |---|---|---|---|---|
 | T-01 | Reproducible Android bootstrap and capability-free launch | None | Verified — bounded bootstrap only | Coordinator `LOCAL_SESSION`; T01-20261115-I01 source b3759b2.9 app tests GREEN/offline build148tasks, static review PASS. Reviewed SHA19595f091f69 installed/byte-matched; launcher/UI/PID logs checked on owned index2/API28 ARM64 translation; original player/VM exits verified and usage released. [Runtime receipt](../../validation/bootstrap/ldplayer-receipt.md) and [independent review](../../validation/reviews/t01-runtime-review.md) PASS with retained RT-1/RT-2 Minor limitations. Phone excluded; no full scanner/offline/physical/rights acceptance. |
 | T-02 | Pure contracts, geometry math and deterministic fixtures | T-01 | Verified — bounded pure boundary | T02-20261115-A baseline753bb4f; owned RGB/typed masks, recipe-json-v1 codec/hash, coordinates/numerics and fixture-v1 seed20261114/129 variants. Final47 tests/0failures/errors; offline strict154-task integration plus final core tests. Independent review I-1/I-2 reproduced/fixed RED→GREEN; original FAIL retained, no reviewer rerun claim; M-1/M-2 remaining coverage follows T-06/T-08. [Receipt](../../validation/contracts/t02-receipt.md). No scanner/runtime acceptance. |
-| T-03 | Durable source/document/recipe store and recovery | T-02 | Not started | Unclaimed; U-04 adds atomic applyBatchRecipes, full revision validation and one saved-batch Undo; BatchRecipeTest remains future work. |
+| T-03 | Durable source/document/recipe store and recovery | T-02 | In progress | T03-20261115-A baseline74bba9f. Verified file/job/22-table Room-DDL foundation:61 JVM +6 host SQLite checks,161-task build; independent file review I-1/I-2 reproduced/fixed, original verdict retained. No actual Android Room/open/repositories/ingest/recovery/CAS/batch/freeze acceptance; T-04 SourceInspector gate remains open. [Receipt](../../validation/storage/t03-receipt.md). |
 | T-04 | Picker import and orientation/color-normalized decode | T-03 | Not started | Unclaimed. |
 | T-05 | Camera capture with manual fallbacks | T-04 | Not started | Unclaimed. |
 | T-06 | Perspective/manual-curve geometry and protected masks | T-02,T-04 | Not started | Unclaimed. |
@@ -22,6 +22,10 @@ U-04/FR-17 now mandates [cumulative album batch editing](BATCH_EDITING.md), expl
 | T-12 | Device/offline/fidelity/accessibility/privacy/release gates | T-05,T-08,T-09,T-10,T-11 | Not started | Unclaimed; no application validation run. |
 
 ## Claim and completion record template
+
+### Active claim T-03 / T03-20261115-A
+
+Coordinator `LOCAL_SESSION`; baseline74bba9fb9542f14d48157d6a2bf1219cda882bc0, same isolated worktree/branch, accepted plan unchanged. Exclusive production/test/schema paths `data/src/`, `data/schemas/`; coordinator may update narrowly necessary data build wiring/shared contracts, live specs and `validation/storage/`, progress/review receipts. No new dependency or tool acquisition. Exact accepted T-03 plus DATA_MODEL_AND_STORAGE/BATCH_EDITING/PIPELINE/architecture/privacy/resource/capture-export contracts govern. Begin with real-filesystem bounds/path/seal/move/recovery tests before implementation, then journal/revision/reference/job/batch/Room tests. SourceInspector is a data-owned injected port; normalized real-ingest acceptance stays open until T-04. Initial schema is version1 with exported DDL, no destructive fallback; populated/device/process-death tests require fresh P-04 ownership/readiness and independent persistence review. First partial commit does not accept the whole task. No phone, external sharing, model acquisition, cleanup, push or merge.
 
 ### Completed bounded claim T-02 / T02-20261115-A
 

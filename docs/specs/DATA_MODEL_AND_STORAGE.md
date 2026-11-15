@@ -2,6 +2,8 @@
 
 Version 1.0, 2026-11-14. **DESIGN specification; no application database or migration has been created or tested.** Implements the persistence contract for FR-02/03/10–14 and NFR-05/06. Read [PIPELINE_CONTRACTS.md](PIPELINE_CONTRACTS.md), [ARCHITECTURE.md](ARCHITECTURE.md), [CAPTURE_IMPORT_EXPORT.md](CAPTURE_IMPORT_EXPORT.md), [SECURITY_PRIVACY.md](SECURITY_PRIVACY.md) and [PERFORMANCE_AND_OFFLINE.md](PERFORMANCE_AND_OFFLINE.md). Database/filesystem/export changes require independent implementation review.
 
+Implementation checkpoint2026-11-15, T03-20261115-A: the historical design-state sentence above predates the new coordinator-owned22-entity version1 Room DDL under `data/schemas/app.pristinepage.data.db.PristineDatabase/1.json`. Actual KSP generation and6 host SQLite FK/index/deferred-cycle/order/source/job checks have run; no real Android Room database/open/migration, repository commands, ingest/recovery/CAS/batch/freeze or task acceptance follows from that schema. [Storage receipt](../../validation/storage/t03-receipt.md) records file-layer review/fixes, canonical job identity and remaining gates. There is no released populated schema to migrate yet, and no destructive fallback is configured.
+
 ## Ownership and non-negotiable invariants
 
 `:data` owns Room entities/DAOs, private files, durable journals, repositories, snapshots and recovery. `:image-android` owns decode/render/encode and implements ExportService orchestration against repository/file contracts. `:app` owns URI result routing, CameraX, UI and WorkManager entry points. `:core` remains Android-free and supplies Recipe, OutputSpec, ProviderIdentity and canonical recipe encoding; no Room entity contains Bitmap, Mat, tensor, open file descriptor or live model session.
