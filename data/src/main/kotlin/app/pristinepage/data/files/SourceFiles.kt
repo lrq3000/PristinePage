@@ -126,6 +126,13 @@ class SourceFiles @JvmOverloads constructor(root: File, private val directorySyn
     }
 
     fun finalFile(sourceBlobId: String): File { validateId(sourceBlobId); return beneath("sources/$sourceBlobId/original.bin") }
+
+    /** Read-only committed-original proof, using the same path/hash protocol as ingest. The caller runs outside Room and supplies cooperative cancellation between bounded reads; stable cooperative roots are required, not protection against malicious same-UID concurrent replacement. */
+    fun verifyOriginal(sourceBlobId: String, length: Long, expectedHash: String, checkpoint: () -> Unit) {
+        require(length in 1..inputLimit); requireSha256(expectedHash); checkpoint()
+        verify(finalFile(sourceBlobId), length, expectedHash, checkpoint)
+        finalFile(sourceBlobId); checkpoint()
+    }
     private fun staging(id: String): File = beneath("staging/$id/original.part")
     private fun sealFile(id: String): File = beneath("staging/$id/seal.json")
 
@@ -160,13 +167,14 @@ class SourceFiles @JvmOverloads constructor(root: File, private val directorySyn
         }
     }
 
-    private fun verify(file: File, length: Long, expectedHash: String) {
+    private fun verify(file: File, length: Long, expectedHash: String, checkpoint: () -> Unit = {}) {
         require(file.isFile && file.length() == length) { "Source length mismatch" }
         val digest = MessageDigest.getInstance("SHA-256")
         file.inputStream().use { source ->
             val buffer = ByteArray(65536)
             var count = 0L
             while (true) {
+                checkpoint()
                 val n = source.read(buffer); if (n < 0) break
                 count += n; require(count <= length)
                 digest.update(buffer, 0, n)

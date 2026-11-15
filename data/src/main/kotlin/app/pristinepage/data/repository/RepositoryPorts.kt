@@ -51,6 +51,7 @@ fun interface RecipeAdmission {
 interface DocumentRepository {
     suspend fun createDocument(title: String): DocumentId
     suspend fun reconcile(): RecoveryReport
+    suspend fun freezeExport(documentId: DocumentId, expectedDocumentRevision: Long, settings: ExportSettings): ExportSnapshot
     suspend fun saveRecipe(pageId: PageId, expectedRevision: Long, recipe: Recipe): SaveRecipeResult
     suspend fun applyBatchRecipes(documentId: DocumentId, expectedDocumentRevision: Long, changes: List<BatchRecipeChange>): DocumentMutationResult
     suspend fun duplicatePage(pageId: PageId, expectedDocumentRevision: Long): DocumentMutationResult

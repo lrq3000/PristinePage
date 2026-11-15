@@ -28,7 +28,7 @@ import kotlinx.serialization.json.JsonObject
 @Serializable private data class MembershipUndoState(val documentId: String, val pages: List<MembershipPointer>, val version: Int = 1)
 
 /** File/decode/render work is deliberately absent. Canonical/capability preflight finishes before a short metadata transaction, which rechecks every mutable pointer and publishes all revisions together. RoomMetadataAccess supplies actual Android rollback; host tests exercise this same business code through its database port. */
-class RoomDocumentRepository @JvmOverloads constructor(private val metadata: MetadataAccess, private val admission: RecipeAdmission, private val clock: () -> Long = System::currentTimeMillis, private val dispatcher: CoroutineDispatcher = Dispatchers.IO, private val recovery: RecoveryCoordinator? = null) : DocumentRepository {
+class RoomDocumentRepository @JvmOverloads constructor(private val metadata: MetadataAccess, private val admission: RecipeAdmission, private val clock: () -> Long = System::currentTimeMillis, private val dispatcher: CoroutineDispatcher = Dispatchers.IO, private val recovery: RecoveryCoordinator? = null, private val snapshots: ExportSnapshots? = null) : DocumentRepository {
     private val q: CatalogQueries get() = metadata.queries
     private val json = Json { encodeDefaults = true; ignoreUnknownKeys = false }
     private class Conflict(val actual: Long) : RuntimeException()
@@ -57,6 +57,16 @@ class RoomDocumentRepository @JvmOverloads constructor(private val metadata: Met
         } catch (canceled: CancellationException) { throw canceled }
         catch (failure: RepositoryFailure) { throw failure }
         catch (_: Exception) { reject(OperationErrorCode.STORAGE_FAILED, "store_recovery_failed", retryable = true) }
+    }
+
+    override suspend fun freezeExport(documentId: DocumentId, expectedDocumentRevision: Long, settings: ExportSettings): ExportSnapshot = withContext(dispatcher) {
+        try {
+            coroutineContext.ensureActive()
+            val coordinator = snapshots ?: reject(OperationErrorCode.PROVIDER_UNAVAILABLE, "export_freeze_unavailable")
+            coordinator.freezeExport(documentId, expectedDocumentRevision, settings)
+        } catch (canceled: CancellationException) { throw canceled }
+        catch (failure: RepositoryFailure) { throw failure }
+        catch (_: Exception) { reject(OperationErrorCode.STORAGE_FAILED, "export_freeze_failed", retryable = true) }
     }
 
     override suspend fun saveRecipe(pageId: PageId, expectedRevision: Long, recipe: Recipe): SaveRecipeResult = withContext(dispatcher) {
