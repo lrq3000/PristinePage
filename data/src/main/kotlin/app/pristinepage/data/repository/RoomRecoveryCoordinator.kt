@@ -14,25 +14,45 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 
-/** Initial ingest-only reconciliation: valid sealed ownership may advance under fresh per-job DB leases; unknown/live owners, unsealed streams and unimplemented restart routes stay blocked. A zero result covers only this pass, not snapshots/refcounts/orphans or whole recovery acceptance. No provider/decoder is opened and no original/staging evidence is deleted. */
-class RoomRecoveryCoordinator @JvmOverloads constructor(private val metadata: MetadataAccess, private val queries: IngestRecoveryQueries, private val sessions: ImportSessionQueries, private val journal: IngestPreparationQueries, private val jobs: JobLeaseQueries, private val files: SourceFiles, private val lookup: IngestOperationLookup, private val replay: IngestReplay, private val completion: IngestCompletion, private val phases: IngestPhases, private val readmission: IngestReadmission, private val leases: JobLeaseCommands, private val owners: OperationOwners, private val dispatcher: CoroutineDispatcher = Dispatchers.IO) : RecoveryCoordinator {
-    constructor(database: PristineDatabase, files: SourceFiles, owners: OperationOwners) : this(RoomMetadataAccess(database), database.ingestRecovery(), database.importSessions(), database.ingestPreparation(), database.jobLeases(), files, RoomIngestLookup(database), RoomIngestCompletion(database, files), RoomIngestCompletion(database, files), RoomIngestPhases(database), RoomIngestReadmission(database, owners), RoomJobLeases(database, owners), owners)
+/** Ingest-only reconciliation: prefer verified sealed bytes under fresh fenced owners; optional bound-provider resumption delegates to the same SourceStore outside the copy lock. Unknown/live owners remain blocked and no original/staging evidence is deleted. A zero result covers only this pass, not snapshots/refcounts/orphans or whole recovery acceptance. */
+class RoomRecoveryCoordinator @JvmOverloads constructor(private val metadata: MetadataAccess, private val queries: IngestRecoveryQueries, private val sessions: ImportSessionQueries, private val journal: IngestPreparationQueries, private val jobs: JobLeaseQueries, private val files: SourceFiles, private val lookup: IngestOperationLookup, private val replay: IngestReplay, private val completion: IngestCompletion, private val phases: IngestPhases, private val readmission: IngestReadmission, private val leases: JobLeaseCommands, private val owners: OperationOwners, private val dispatcher: CoroutineDispatcher = Dispatchers.IO, private val resumer: BoundSourceIngest? = null) : RecoveryCoordinator {
+    constructor(database: PristineDatabase, files: SourceFiles, owners: OperationOwners) : this(database, files, owners, null)
+    constructor(database: PristineDatabase, files: SourceFiles, owners: OperationOwners, resumer: BoundSourceIngest?) : this(RoomMetadataAccess(database), database.ingestRecovery(), database.importSessions(), database.ingestPreparation(), database.jobLeases(), files, RoomIngestLookup(database), RoomIngestCompletion(database, files), RoomIngestCompletion(database, files), RoomIngestPhases(database), RoomIngestReadmission(database, owners), RoomJobLeases(database, owners), owners, Dispatchers.IO, resumer)
 
-    private data class Outcome(val result: IngestResult? = null, val resumed: Boolean = false, val completed: Boolean = false, val action: RecoveryAction = RecoveryAction.RETRY, val error: OperationError? = null)
+    /** Private transient reference only: never serialized to a job, report or diagnostic. This plan carries no grant/admission and SourceStore must revalidate it before any provider open. */
+    private data class ProviderPlan(val session: ImportSessionId, val reference: String, val pending: IngestResult.Pending)
+    private data class Outcome(val result: IngestResult? = null, val resumed: Boolean = false, val completed: Boolean = false, val action: RecoveryAction = RecoveryAction.RETRY, val error: OperationError? = null, val provider: ProviderPlan? = null)
+    // Scheduling hint only, guarded by reconciliation. Keep this coordinator application-scoped: recreation loses rotation, not ownership/file safety. Durable scheduler lifecycle/fairness is a separate integration gate.
+    private var providerAfter = ""
 
     override suspend fun reconcile(): RecoveryReport = withContext(dispatcher) {
         reconciliation.withLock {
             var inspected = 0L; var completed = 0L; var resumed = 0L; var blocked = 0L
             val issues = mutableListOf<RecoveryIssue>()
-            var after = ""
+            val providerSessions = HashSet<ImportSessionId>() // At most16: dynamic successor UUIDs cannot cause unbounded recopy in this pass.
+            val start = if (resumer == null) "" else providerAfter
+            var after = start
+            var wrapped = false
             while (true) {
                 coroutineContext.ensureActive()
-                val batch = unfinishedAfter(after)
+                val page = unfinishedAfter(after)
+                if (page.isEmpty()) {
+                    if (start.isNotEmpty() && !wrapped) { after = ""; wrapped = true; continue }
+                    break
+                }
+                // Visit the whole ring exactly once, including blocked/sealed rows. An unchanged expired or resource-waiting prefix cannot consume every later pass's first16 handoffs.
+                val batch = if (wrapped) page.takeWhile { it.transactionId <= start } else page
                 if (batch.isEmpty()) break
                 for (row in batch) {
                     coroutineContext.ensureActive()
                     after = row.transactionId; inspected++
-                    val outcome = SourceCopyAdmission.mutex.withLock { recover(row) }
+                    var outcome = SourceCopyAdmission.mutex.withLock { recover(row) }
+                    val plan = outcome.provider
+                    // SourceStore acquires this same non-reentrant permit. Never invoke it inside recovery's copy/file-proof critical section, even when its dispatcher happens to execute inline.
+                    if (plan != null && providerSessions.size < 16 && providerSessions.add(plan.session)) {
+                        providerAfter = row.transactionId // Advance even if this handoff returns Pending, rejects without mutation or propagates cancellation.
+                        outcome = resumeProvider(plan)
+                    }
                     if (outcome.resumed) resumed++
                     val result = outcome.result
                     if (outcome.completed) completed++
@@ -91,15 +111,27 @@ class RoomRecoveryCoordinator @JvmOverloads constructor(private val metadata: Me
                     if (job.leaseOwner != null || job.leaseUntil != null) return blocked(session, "ingest_owner_mismatch")
                     null
                 }
+                "PENDING" -> {
+                    if (resumer == null || before.state != "INTENT" || job.leaseOwner != null || job.leaseUntil != null) return Outcome(recordedResult)
+                    null
+                }
                 "RETRYABLE", "INTERRUPTED" -> {
                     if (job.leaseOwner != null || job.leaseUntil != null || before.state != "RETRYABLE") return Outcome(recordedResult)
                     null // Actual sealed proof below is mandatory before restoring an owner-free retry to ADMITTED.
                 }
-                else -> return Outcome(recordedResult) // INTENT provider resumption and owner-free retry/new-attempt routes are separate, still-unimplemented recovery work.
+                else -> return Outcome(recordedResult)
             }
             context.ensureActive()
             val sealed = files.recover(intent.transactionId.value, before.sealSha256)
-                ?: return Outcome(recordedResult, action = RecoveryAction.RESELECT)
+            if (sealed == null) {
+                if (files.finalFile(intent.sourceBlobId.value).exists()) return blocked(session, "ingest_unsealed_final_present")
+                val planned = planProvider(intent, recordedResult)
+                if (planned.provider == null) return planned
+                // An owned INTENT can have acquired its lease before process interruption but never opened its stream. Clear only a positively ended matching owner before SourceStore's ordinary INTENT admission; partial-copy retries keep their own retirement protocol.
+                if (before.state == "INTENT" && recorded != null && !readmission.readmitEnded(intent, recorded)) return Outcome(recordedResult)
+                return planned
+            }
+            if (job.state == "PENDING") return Outcome(recordedResult) // A never-admitted job cannot certify an unexplained preexisting seal's writer.
             val seal = IngestJournalCodec.decodeSeal(sealed.metadata, intent)
             if (sealed.staged.sourceBlobId != intent.sourceBlobId.value || sealed.staged.transactionId != intent.transactionId.value || seal.sourceByteHash != sealed.staged.byteSha256 || seal.byteCount != sealed.staged.byteCount || before.state in setOf("SEALED", "MOVED") && (before.sealSha256 == null || before.expectedByteSha256 != seal.sourceByteHash || before.expectedByteCount != seal.byteCount)) return blocked(session, "ingest_source_binding_mismatch")
             if (recorded != null && !readmission.readmitEnded(intent, recorded)) return Outcome(recordedResult)
@@ -138,6 +170,36 @@ class RoomRecoveryCoordinator @JvmOverloads constructor(private val metadata: Me
         catch (_: IllegalArgumentException) { return blocked(session, "invalid_ingest_recovery_data", resumed) }
         catch (_: IOException) { return Outcome(IngestResult.Rejected(session, OperationError(OperationErrorCode.STORAGE_FAILED, true, "ingest_recovery_io_failed", session.value)), resumed) }
         catch (_: Exception) { return Outcome(IngestResult.Rejected(session, OperationError(OperationErrorCode.STORAGE_FAILED, true, "ingest_recovery_failed", session.value)), resumed) }
+    }
+
+    private fun planProvider(intent: IngestJournalIntent, pending: IngestResult.Pending): Outcome {
+        if (resumer == null) return Outcome(pending, action = RecoveryAction.RESELECT)
+        val reference = metadata.transaction {
+            val child = sessions.session(intent.sessionId.value)
+            if (child == null || child.kind != "ITEM" || child.state != "INGESTING" || child.transactionId != intent.transactionId.value || child.documentId != intent.documentId.value || child.plannedPageId != intent.pageId.value) null else child.uriText
+        } ?: return Outcome(pending, action = RecoveryAction.RESELECT)
+        return Outcome(pending, provider = ProviderPlan(intent.sessionId, reference, pending))
+    }
+
+    private suspend fun resumeProvider(plan: ProviderPlan): Outcome {
+        val consumer = resumer ?: return Outcome(plan.pending)
+        val result = try {
+            kotlinx.coroutines.currentCoroutineContext().ensureActive()
+            consumer.ingestBoundProvider(plan.reference, plan.session)
+        } catch (canceled: CancellationException) { throw canceled }
+        catch (failure: RepositoryFailure) { IngestResult.Rejected(plan.session, failure.error) }
+        catch (_: Exception) { IngestResult.Rejected(plan.session, OperationError(OperationErrorCode.PROCESSING_FAILED, true, "ingest_resumption_failed", plan.session.value)) }
+        val error = (result as? IngestResult.Rejected)?.error
+        val action = when {
+            error == null -> RecoveryAction.RETRY
+            error.code == OperationErrorCode.INTEGRITY_FAILED -> RecoveryAction.REVIEW_INTEGRITY
+            error.retryable -> RecoveryAction.RETRY
+            error.code in setOf(OperationErrorCode.PERMISSION_LOST, OperationErrorCode.SOURCE_UNAVAILABLE, OperationErrorCode.SESSION_EXPIRED, OperationErrorCode.UNSUPPORTED_FORMAT, OperationErrorCode.INVALID_INPUT) -> RecoveryAction.RESELECT
+            else -> RecoveryAction.NONE
+        }
+        // A Pending delegation may have been a no-op after a concurrent owner/state change; do not count it as an executed copy. Complete results come from SourceStore's verified commit/receipt contract.
+        val committed = result is IngestResult.Committed
+        return Outcome(result, resumed = committed, completed = committed, action = action)
     }
 
     private fun blocked(session: ImportSessionId, key: String, resumed: Boolean = false) = Outcome(IngestResult.Rejected(session, OperationError(OperationErrorCode.INTEGRITY_FAILED, false, key, session.value)), resumed, action = RecoveryAction.REVIEW_INTEGRITY)

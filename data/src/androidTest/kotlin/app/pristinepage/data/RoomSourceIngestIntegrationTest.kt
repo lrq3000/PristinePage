@@ -121,6 +121,7 @@ class RoomSourceIngestIntegrationTest {
         val owners = LocalOperationOwners()
         var opened = 0; var closed = 0
         var inspectionFailure: RepositoryFailure? = null
+        var providerFailure: RuntimeException? = null
         var database = open()
             private set
         val document = runBlocking { RoomDocumentRepository(RoomMetadataAccess(database), RecipeAdmission { _, _ -> null }).createDocument("Synthetic ingest integration") }
@@ -140,6 +141,7 @@ class RoomSourceIngestIntegrationTest {
         private fun store(): SourceStore {
             val provider = SourceInput { bound ->
                 assertFalse(database.inTransaction()); assertEquals(reference.toString(), bound); opened++
+                providerFailure?.let { throw it }
                 object : ByteArrayInputStream(bytes) { override fun close() { closed++; super.close() } }
             }
             val inspector = SourceInspector { file, hash ->

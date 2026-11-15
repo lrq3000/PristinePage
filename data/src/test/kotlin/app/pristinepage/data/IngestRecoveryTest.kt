@@ -17,12 +17,17 @@ import org.junit.Test
 
 /** Actual SourceStore interruptions/private seals/files and real local owner lifetime, with only Android DB/provider/inspection substituted. Unknown restarted owners are intentionally blocked; this does not invent cross-process death proof or recover an unsealed stream. */
 class IngestRecoveryTest {
-    private fun coordinator(f: SourceStoreTest.Fixture, owners: OperationOwners = f.owners, queries: IngestRecoveryQueries = f.db, journal: IngestPreparationQueries = f.db): RecoveryCoordinator {
+    private fun coordinator(f: SourceStoreTest.Fixture, owners: OperationOwners = f.owners, queries: IngestRecoveryQueries = f.db, journal: IngestPreparationQueries = f.db, resumer: BoundSourceIngest? = null): RecoveryCoordinator {
         val type = try { Class.forName("app.pristinepage.data.repository.RoomRecoveryCoordinator") }
         catch (error: ClassNotFoundException) { throw AssertionError("Admitted seal-backed ingest reconciliation is absent", error) }
         val db = f.db
         val completion = RoomIngestCompletion(db.metadata, db, db, db, db, f.files, { db.now }, { db.now }, Dispatchers.Unconfined)
-        return try { type.constructors.single { it.parameterCount == 14 }.newInstance(db.metadata, queries, db, journal, db, f.files, RoomIngestLookup(db.metadata, db, db, db), completion, completion, RoomIngestPhases(db.metadata, db, db, db, db, { db.now }, { db.now }), RoomIngestReadmission(db.metadata, db, db, db, owners, { db.now }), RoomJobLeases(db.metadata, db, owners, { db.now }, { db.now }, Dispatchers.Unconfined), owners, Dispatchers.Unconfined) as RecoveryCoordinator }
+        return try {
+            val args = arrayOf(db.metadata, queries, db, journal, db, f.files, RoomIngestLookup(db.metadata, db, db, db), completion, completion, RoomIngestPhases(db.metadata, db, db, db, db, { db.now }, { db.now }), RoomIngestReadmission(db.metadata, db, db, db, owners, { db.now }), RoomJobLeases(db.metadata, db, owners, { db.now }, { db.now }, Dispatchers.Unconfined), owners, Dispatchers.Unconfined)
+            val consuming = type.constructors.singleOrNull { it.parameterCount == 15 }
+            if (resumer != null && consuming != null) consuming.newInstance(*args, resumer) as RecoveryCoordinator
+            else type.constructors.single { it.parameterCount == 14 }.newInstance(*args) as RecoveryCoordinator
+        }
         catch (error: InvocationTargetException) { throw error.targetException }
     }
 
@@ -285,5 +290,121 @@ class IngestRecoveryTest {
         assertSame(row, f.db.files.values.single()); assertSame(job, f.db.jobs.values.single()); assertTrue(f.db.catalog.pages.isEmpty())
         f.db.rejectPhaseState = null
         assertEquals(1L, coordinator(f).reconcile().completed); assertEquals(1, f.opened)
+    }
+
+    @Test fun initialPendingIntentUsesItsBoundProviderOnlyAfterRecoveryReleasesCopyAdmission() = runTest {
+        val f = SourceStoreTest.Fixture(); f.db.commands.prepare(f.db.child, f.db.uri)
+        val handoff = object : BoundSourceIngest {
+            override suspend fun ingestBoundProvider(boundReference: String, session: ImportSessionId): IngestResult {
+                assertFalse("Recovery would deadlock by recursively acquiring its copy permit", SourceCopyAdmission.mutex.isLocked)
+                assertFalse(f.db.catalog.inTransaction)
+                return f.store.ingestBoundProvider(boundReference, session)
+            }
+        }
+        val report = coordinator(f, resumer = handoff).reconcile()
+        assertEquals(1L, report.completed); assertEquals(1L, report.resumed); assertEquals(0L, report.blocked)
+        assertEquals(1, f.opened); assertEquals(1, f.db.catalog.pages.size)
+        assertEquals(0L, coordinator(f, resumer = handoff).reconcile().completed); assertEquals(1, f.opened)
+    }
+
+    @Test fun unsealedOwnerFreeRetryResumesThroughSourceStoreAndKeepsItsOldBytes() = runTest {
+        val f = SourceStoreTest.Fixture(enableRetry = true)
+        f.inspectionFailure = RepositoryFailure(OperationError(OperationErrorCode.STORAGE_FAILED, true, "synthetic_private_failure", f.db.child.value))
+        assertTrue(f.store.ingestBoundProvider(f.db.uri, f.db.child) is IngestResult.Pending)
+        val old = f.db.files.values.single(); val retained = File(f.root, old.stagingPath!!).readBytes(); f.inspectionFailure = null
+        val report = coordinator(f, resumer = f.store).reconcile()
+        assertEquals(1L, report.completed); assertEquals(1L, report.resumed)
+        assertArrayEquals(retained, File(f.root, old.stagingPath).readBytes()); assertEquals(1, f.db.catalog.pages.size); assertEquals(2, f.opened)
+        assertEquals("QUARANTINED", f.db.files[old.transactionId]!!.state)
+    }
+
+    @Test fun resumedProviderPermissionLossIsReportedAsReselectionWithoutPublishingAPage() = runTest {
+        val f = SourceStoreTest.Fixture(); f.db.commands.prepare(f.db.child, f.db.uri)
+        f.input = { throw SecurityException("synthetic private permission loss") }
+        val report = coordinator(f, resumer = f.store).reconcile()
+        assertEquals(1L, report.blocked); assertEquals(0L, report.completed); assertEquals(0L, report.resumed)
+        val error = report.safeIssues.single().error
+        assertNotNull("Recovery never attempted provider resumption or returned its typed permission failure", error)
+        assertEquals(OperationErrorCode.PERMISSION_LOST, error!!.code)
+        assertEquals(RecoveryAction.RESELECT, report.safeIssues.single().action)
+        assertTrue(f.db.catalog.pages.isEmpty()); assertNull(f.db.sessions[f.db.child.value]!!.uriText)
+    }
+
+    @Test fun providerResumptionIsBoundedPerPassWithoutLosingRemainingPendingOperations() = runTest {
+        val f = SourceStoreTest.Fixture(); pendingChildren(f, 17)
+        val first = coordinator(f, resumer = f.store).reconcile()
+        assertEquals(17L, first.inspected); assertEquals(16L, first.completed); assertEquals(16L, first.resumed); assertEquals(1L, first.blocked)
+        assertEquals(16, f.opened); assertEquals(16, f.db.catalog.pages.size)
+        val next = coordinator(f, resumer = f.store).reconcile()
+        assertEquals(1L, next.completed); assertEquals(0L, next.blocked); assertEquals(17, f.opened); assertEquals(17, f.db.catalog.pages.size)
+    }
+
+    @Test fun runningIntentCannotUseItsProviderUntilTheRealOwnerScopeEnds() = runTest {
+        val f = SourceStoreTest.Fixture(); val intent = f.db.commands.prepare(f.db.child, f.db.uri)
+        val phases = RoomIngestPhases(f.db.metadata, f.db, f.db, f.db, f.db, { f.db.now }, { f.db.now })
+        assertTrue(phases.admit(intent))
+        f.owners.run { owner ->
+            val leases = RoomJobLeases(f.db.metadata, f.db, f.owners, { f.db.now }, { f.db.now }, Dispatchers.Unconfined)
+            assertTrue(leases.acquireAdmitted(intent.jobId, owner, 100) is AcquireLeaseResult.Granted)
+            val blocked = coordinator(f, resumer = f.store).reconcile()
+            assertEquals(1L, blocked.blocked); assertEquals(0L, blocked.resumed); assertEquals(0, f.opened)
+        }
+        assertEquals(1L, coordinator(f, resumer = f.store).reconcile().completed)
+        assertEquals(1, f.opened); assertEquals(2L, f.db.jobs.values.single().leaseGeneration)
+    }
+
+    @Test fun providerHandoffCancellationPropagatesWithoutInventingARecoveryOutcome() = runTest {
+        val f = SourceStoreTest.Fixture(); f.db.commands.prepare(f.db.child, f.db.uri)
+        val canceled = CancellationException("synthetic resumption cancellation")
+        val resumer = object : BoundSourceIngest { override suspend fun ingestBoundProvider(boundReference: String, session: ImportSessionId): IngestResult = throw canceled }
+        try { coordinator(f, resumer = resumer).reconcile(); fail("Canceled handoff became a successful recovery report") }
+        catch (failure: CancellationException) { assertSame(canceled, failure) }
+        assertEquals(0, f.opened); assertTrue(f.db.catalog.pages.isEmpty()); assertEquals("INTENT", f.db.files.values.single().state)
+    }
+
+    @Test fun repeatedPrivateFailureCannotRetryTheSameItemMoreThanOnceInOnePass() = runTest {
+        val f = SourceStoreTest.Fixture(enableRetry = true); f.db.commands.prepare(f.db.child, f.db.uri)
+        f.inspectionFailure = RepositoryFailure(OperationError(OperationErrorCode.STORAGE_FAILED, true, "synthetic_repeated_storage_failure", f.db.child.value))
+        assertEquals(0L, coordinator(f, resumer = f.store).reconcile().completed); assertEquals(1, f.opened)
+        assertEquals(0L, coordinator(f, resumer = f.store).reconcile().completed); assertEquals(2, f.opened)
+        assertEquals(2, f.db.files.size); assertTrue(f.db.catalog.pages.isEmpty())
+        assertEquals(1, f.db.files.values.count { it.state == "RETRYABLE" }); assertEquals(1, f.db.files.values.count { it.state == "QUARANTINED" })
+    }
+
+    private suspend fun assertHealthyItemNotStarved(expired: Boolean) {
+        val f = SourceStoreTest.Fixture(); pendingChildren(f, 17)
+        val ordered = f.db.files.values.sortedBy { it.transactionId }
+        val healthy = ImportSessionId(ordered.last().ownerId)
+        val unchanged = ordered.take(16)
+        if (expired) for (row in unchanged) {
+            val child = f.db.sessions[row.ownerId]!!
+            f.db.sessions[row.ownerId] = child.copy(expiresAt = f.db.now)
+        }
+        var calls = 0
+        val consumer = object : BoundSourceIngest {
+            override suspend fun ingestBoundProvider(boundReference: String, session: ImportSessionId): IngestResult {
+                calls++
+                // Non-progressing adapters model an unavailable resource. Expired mode uses the real SourceStore rejection/preparation; both leave the old journal/input unchanged.
+                return if (!expired && session != healthy) IngestResult.Pending(session, FileTransactionState.INTENT)
+                else f.store.ingestBoundProvider(boundReference, session)
+            }
+        }
+        val recovery = coordinator(f, resumer = consumer)
+        assertEquals(0L, recovery.reconcile().completed); assertEquals(16, calls); assertEquals(0, f.opened)
+        calls = 0
+        val next = recovery.reconcile()
+        assertEquals("An unchanged prefix consumed every later pass's handoff budget", 1L, next.completed)
+        assertEquals(17L, next.inspected); assertEquals(16L, next.blocked); assertTrue(calls in 1..16)
+        assertEquals(1, f.opened); assertEquals(listOf(healthy.value), f.db.catalog.pages.values.map { page -> f.db.sessions.values.single { it.plannedPageId == page.pageId }.sessionId })
+        for (row in unchanged) { assertSame(row, f.db.files[row.transactionId]); assertEquals("PENDING", f.db.jobs.values.single { it.input.contentEquals(row.payload) }.state) }
+        assertEquals(0L, recovery.reconcile().completed); assertEquals(1, f.opened)
+    }
+
+    @Test fun sixteenExpiredIntentsCannotStarveALaterHealthyItemAcrossPasses() = runTest {
+        assertHealthyItemNotStarved(expired = true)
+    }
+
+    @Test fun sixteenUnchangedPendingHandoffsCannotStarveALaterHealthyItemAcrossPasses() = runTest {
+        assertHealthyItemNotStarved(expired = false)
     }
 }
