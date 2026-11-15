@@ -8,4 +8,7 @@ interface ReferenceAuditQueries {
     fun sourcesAfter(objectId: String?, limit: Int): List<ReferenceCountRow>
     fun sourceBlobsAfter(objectId: String?, limit: Int): List<ReferenceCountRow>
     fun masksAfter(objectId: String?, limit: Int): List<ReferenceCountRow>
+    fun pageSourcePinsAfter(objectId: String?, limit: Int): List<ReferenceCountRow>
+    fun recipeSourcePinsAfter(objectId: String?, limit: Int): List<ReferenceCountRow>
+    fun maskSourcePinsAfter(objectId: String?, limit: Int): List<ReferenceCountRow>
 }

@@ -14,6 +14,55 @@ import org.junit.runner.RunWith
 /** Actual SQL counts on generated metadata; databases stay retained. Repeated audit/reopen is not process-death, owner-validity, decoder or reclamation evidence. */
 @RunWith(AndroidJUnit4::class)
 class RoomReferenceAuditIntegrationTest {
+    /** Bound the complete fixture metadata comparison, including history/Undo BLOB bytes. Only synthetic databases with at most1000rows/table enter this test helper. */
+    private fun metadataState(f: RoomRepositoryIntegrationTest.Fixture): List<List<List<String>>> = listOf("Document", "Page", "Source", "SourceBlob", "RecipeRevision", "SourceReference", "UndoEntry", "Mask", "RecipeMask", "MaskReference").map { table ->
+        f.database.openHelper.readableDatabase.query("SELECT * FROM $table LIMIT 1001").use { cursor ->
+            val rows = mutableListOf<List<String>>()
+            while (cursor.moveToNext()) rows.add((0 until cursor.columnCount).map { column ->
+                when (cursor.getType(column)) {
+                    android.database.Cursor.FIELD_TYPE_NULL -> "NULL"
+                    android.database.Cursor.FIELD_TYPE_BLOB -> "B:" + java.util.Base64.getEncoder().encodeToString(cursor.getBlob(column))
+                    else -> cursor.getType(column).toString() + ":" + cursor.getString(column)
+                }
+            })
+            check(rows.size <= 1000); rows.sortedBy { it.toString() }
+        }
+    }
+
+    private fun protectionMask(f: RoomRepositoryIntegrationTest.Fixture): String {
+        val mask = UUID.randomUUID().toString()
+        f.database.runInTransaction {
+            f.database.openHelper.writableDatabase.execSQL("INSERT INTO Mask(maskId,sourceId,kind,sha256,width,height,relativePath,encodingVersion,refCount,state) VALUES(?,?,?,?,?,?,?,?,?,?)", arrayOf<Any>(mask, f.source, "PROTECTION", "c".repeat(64), 3, 2, "masks/$mask/mask.bin", 1, 1L, "READY"))
+            val q = f.database.catalog()
+            q.insertRecipeMask(RecipeMaskRow(f.pages[0].value, 1, mask, "PROTECTION"))
+            q.insertReference(SourceReferenceRow("MASK", mask, f.source, 0))
+            assertEquals(1, q.setSourceRefCount(f.source, q.countSourceReferences(f.source)))
+        }
+        return mask
+    }
+
+    /** Wrong-source pins remain FK-valid and counter-balanced, exposing binding errors rather than unrelated counter failures. Caller holds the fixture transaction. */
+    private fun anotherSource(f: RoomRepositoryIntegrationTest.Fixture): String {
+        val source = UUID.randomUUID().toString(); val blob = f.database.catalog().source(f.source)!!.sourceBlobId
+        val sql = f.database.openHelper.writableDatabase
+        sql.execSQL("INSERT INTO Source(sourceId,sourceBlobId,pixelSha256,width,height,exifOrientation,conversionFingerprint,profileSha256,refCount,state,createdAt) SELECT ?,sourceBlobId,pixelSha256,width,height,exifOrientation,?,profileSha256,1,state,createdAt FROM Source WHERE sourceId=?", arrayOf<Any>(source, "independent-$source", f.source))
+        sql.execSQL("UPDATE SourceBlob SET sourceCount=2 WHERE sourceBlobId=?", arrayOf<Any>(blob))
+        return source
+    }
+
+    private suspend fun assertRequiredPinFailure(f: RoomRepositoryIntegrationTest.Fixture, id: String, state: String) {
+        f.reopen(); val before = metadataState(f); val audit = RoomReferenceAudit(f.database)
+        assertEquals(0L, audit.audit().blocked)
+        val report = audit.auditRequiredPins(); assertEquals(1L, report.blocked)
+        val issue = report.safeIssues.single()
+        assertEquals(id, issue.operationId); assertEquals(state, issue.state)
+        assertEquals(OperationErrorCode.INTEGRITY_FAILED, issue.error!!.code); assertFalse(issue.error.retryable)
+        assertEquals("required_source_pin_missing", issue.error.safeMessageKey); assertEquals(RecoveryAction.REVIEW_INTEGRITY, issue.action)
+        assertEquals(0L, report.completed); assertEquals(0L, report.resumed); assertEquals(0L, report.quarantined)
+        assertEquals(report, audit.auditRequiredPins())
+        f.reopen(); assertEquals(before, metadataState(f)); f.assertForeignKeys()
+    }
+
     @Test fun sourceAndBlobCountersCompareActualRowsAndNeverRepairMismatch() = runBlocking {
         RoomRepositoryIntegrationTest.Fixture().use { f ->
             assertEquals(RecoveryReport(2, 0, 0, 0, 0, emptyList()), RoomReferenceAudit(f.database).audit())
@@ -98,6 +147,82 @@ class RoomReferenceAuditIntegrationTest {
             catch (failure: RepositoryFailure) { assertEquals(OperationErrorCode.INTEGRITY_FAILED, failure.error.code); assertFalse(failure.error.retryable); assertNull(failure.error.affectedId) }
             f.reopen(); assertEquals(before, projections())
             assertEquals(4L, f.count("SourceReference")); assertEquals(0L, f.count("UndoEntry")); assertEquals(2L, f.count("RecipeRevision")); f.assertForeignKeys()
+        }
+    }
+
+    @Test fun requiredPinsRemainCompleteForEditedDuplicateTombstoneAndMaskAcrossReopen() = runBlocking {
+        RoomRepositoryIntegrationTest.Fixture().use { f ->
+            protectionMask(f)
+            val duplicate = f.repository.duplicatePage(f.pages[0], 1) as DocumentMutationResult.Applied
+            val copy = duplicate.affectedPageIds.single()
+            assertTrue(f.repository.saveRecipe(copy, 1, f.turned(2)) is SaveRecipeResult.Saved)
+            assertTrue(f.repository.undoDocumentEdit(checkNotNull(duplicate.undoId), 3) is DocumentMutationResult.Applied)
+            f.reopen(); val before = metadataState(f); val audit = RoomReferenceAudit(f.database)
+            assertEquals(RecoveryReport(7, 0, 0, 0, 0, emptyList()), audit.auditRequiredPins())
+            assertEquals(RecoveryReport(7, 0, 0, 0, 0, emptyList()), audit.auditRequiredPins())
+            assertEquals(0L, audit.audit().blocked)
+            f.reopen(); assertEquals(before, metadataState(f))
+            assertEquals("REMOVED", f.database.catalog().page(copy.value)!!.state)
+            assertEquals(2L, f.database.catalog().page(copy.value)!!.currentRecipeRevision); f.assertForeignKeys()
+        }
+    }
+
+    @Test fun requiredPagePinRejectsMissingAndWrongSourcePinsDespiteBalancedCounters() = runBlocking {
+        for (wrongSource in listOf(false, true)) RoomRepositoryIntegrationTest.Fixture().use { f ->
+            val page = f.pages[0].value
+            f.database.runInTransaction {
+                val sql = f.database.openHelper.writableDatabase
+                if (wrongSource) sql.execSQL("UPDATE SourceReference SET sourceId=? WHERE ownerType='PAGE' AND ownerId=? AND sourceId=?", arrayOf<Any>(anotherSource(f), page, f.source))
+                else sql.execSQL("DELETE FROM SourceReference WHERE ownerType='PAGE' AND ownerId=? AND sourceId=?", arrayOf<Any>(page, f.source))
+                val q = f.database.catalog(); assertEquals(1, q.setSourceRefCount(f.source, q.countSourceReferences(f.source)))
+            }
+            assertRequiredPinFailure(f, page, "PAGE_SOURCE_PIN")
+        }
+    }
+
+    @Test fun everyOldHistoryPinMustMatchCanonicalRevisionKeyAndItsOwnSource() = runBlocking {
+        for (fault in listOf("MISSING", "WRONG_SOURCE", "NONCANONICAL")) RoomRepositoryIntegrationTest.Fixture().use { f ->
+            val page = f.pages[0].value
+            assertTrue(f.repository.saveRecipe(f.pages[0], 1, f.turned(1)) is SaveRecipeResult.Saved)
+            f.database.runInTransaction {
+                val sql = f.database.openHelper.writableDatabase; val old = "recipe-v1/$page/1"
+                when (fault) {
+                    "MISSING" -> sql.execSQL("DELETE FROM SourceReference WHERE ownerType='RECIPE_HISTORY' AND ownerId=? AND sourceId=?", arrayOf<Any>(old, f.source))
+                    "WRONG_SOURCE" -> sql.execSQL("UPDATE SourceReference SET sourceId=? WHERE ownerType='RECIPE_HISTORY' AND ownerId=? AND sourceId=?", arrayOf<Any>(anotherSource(f), old, f.source))
+                    "NONCANONICAL" -> sql.execSQL("UPDATE SourceReference SET ownerId=? WHERE ownerType='RECIPE_HISTORY' AND ownerId=? AND sourceId=?", arrayOf<Any>("recipe-v1/$page/01", old, f.source))
+                }
+                val q = f.database.catalog(); assertEquals(1, q.setSourceRefCount(f.source, q.countSourceReferences(f.source)))
+            }
+            assertRequiredPinFailure(f, page, "RECIPE_SOURCE_PINS")
+            assertEquals(2L, f.database.catalog().page(page)!!.currentRecipeRevision)
+            assertEquals(3L, f.count("RecipeRevision"))
+        }
+    }
+
+    @Test fun requiredMaskSourcePinIsNotReplacedByCorrectMaskRefcount() = runBlocking {
+        RoomRepositoryIntegrationTest.Fixture().use { f ->
+            val mask = protectionMask(f)
+            f.database.runInTransaction {
+                f.database.openHelper.writableDatabase.execSQL("DELETE FROM SourceReference WHERE ownerType='MASK' AND ownerId=? AND sourceId=?", arrayOf<Any>(mask, f.source))
+                val q = f.database.catalog(); assertEquals(1, q.setSourceRefCount(f.source, q.countSourceReferences(f.source)))
+            }
+            assertRequiredPinFailure(f, mask, "MASK_SOURCE_PIN")
+            assertEquals(1L, f.database.catalog().mask(mask)!!.refCount)
+            assertEquals(1L, f.database.catalog().countMaskReferences(mask))
+        }
+    }
+
+    @Test fun retainedRemovedPageRequiresSourcePinBeforeAnyFinalization() = runBlocking {
+        RoomRepositoryIntegrationTest.Fixture().use { f ->
+            val page = f.pages[0].value
+            assertTrue(f.repository.removePage(f.pages[0], 1) is DocumentMutationResult.Applied)
+            f.database.runInTransaction {
+                f.database.openHelper.writableDatabase.execSQL("DELETE FROM SourceReference WHERE ownerType='PAGE' AND ownerId=? AND sourceId=?", arrayOf<Any>(page, f.source))
+                val q = f.database.catalog(); assertEquals(1, q.setSourceRefCount(f.source, q.countSourceReferences(f.source)))
+            }
+            assertRequiredPinFailure(f, page, "PAGE_SOURCE_PIN")
+            assertEquals("REMOVED", f.database.catalog().page(page)!!.state)
+            assertEquals(2L, f.count("RecipeRevision")); assertEquals(1L, f.count("UndoEntry"))
         }
     }
 }

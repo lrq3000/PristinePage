@@ -24,9 +24,11 @@ class ReferenceCountAuditTest {
         var invalidId = false
         var onQuery: (() -> Unit)? = null
 
-        suspend fun audit(): RecoveryReport {
+        suspend fun audit(requiredPins: Boolean = false): RecoveryReport {
             val implementation = try { Class.forName("app.pristinepage.data.repository.RoomReferenceAudit") }
             catch (_: ClassNotFoundException) { throw AssertionError("Required bounded reference-counter audit is absent") }
+            val entry = implementation.methods.singleOrNull { it.name == if (requiredPins) "auditRequiredPins" else "audit" }
+                ?: throw AssertionError("Required source-pin audit route is absent")
             val port = Class.forName("app.pristinepage.data.repository.ReferenceAuditQueries")
             val row = Class.forName("app.pristinepage.data.repository.ReferenceCountRow").getConstructor(String::class.java, Long::class.javaPrimitiveType, Long::class.javaPrimitiveType)
             val queries = Proxy.newProxyInstance(port.classLoader, arrayOf(port)) { _, method, args ->
@@ -39,6 +41,12 @@ class ReferenceCountAuditTest {
                         "sourcesAfter" -> sources.values.map { Triple(it.sourceId, it.refCount, countSourceReferences(it.sourceId)) }
                         "sourceBlobsAfter" -> blobs.values.map { blob -> Triple(blob.sourceBlobId, blob.sourceCount, sources.values.count { it.sourceBlobId == blob.sourceBlobId }.toLong()) }
                         "masksAfter" -> masks.values.map { Triple(it.maskId, it.refCount, countMaskReferences(it.maskId)) }
+                        "pageSourcePinsAfter" -> pages.values.map { page -> Triple(page.pageId, 1L, if (references.containsKey(Triple("PAGE", page.pageId, page.sourceId))) 1L else 0L) }
+                        "recipeSourcePinsAfter" -> pages.values.map { page ->
+                            val history = recipes.values.filter { it.pageId == page.pageId }
+                            Triple(page.pageId, history.size.toLong(), history.count { references.containsKey(Triple("RECIPE_HISTORY", "recipe-v1/${page.pageId}/${it.recipeRevision}", it.sourceId)) }.toLong())
+                        }
+                        "maskSourcePinsAfter" -> masks.values.map { mask -> Triple(mask.maskId, 1L, if (references.containsKey(Triple("MASK", mask.maskId, mask.sourceId))) 1L else 0L) }
                         else -> error("Unexpected reference-audit query")
                     }
                 }
@@ -46,7 +54,7 @@ class ReferenceCountAuditTest {
             }
             val audit = implementation.getConstructor(MetadataAccess::class.java, port, CoroutineDispatcher::class.java).newInstance(f.metadata, queries, Dispatchers.Unconfined)
             return suspendCoroutineUninterceptedOrReturn { continuation ->
-                try { implementation.getMethod("audit", kotlin.coroutines.Continuation::class.java).invoke(audit, continuation) }
+                try { entry.invoke(audit, continuation) }
                 catch (failure: InvocationTargetException) { throw failure.targetException }
             }
         }
@@ -161,4 +169,64 @@ class ReferenceCountAuditTest {
     @Test fun emptySourceIdCannotBeOmittedFromAnOtherwiseCleanAudit() = runTest { assertEmptyIdRejected("SOURCE") }
     @Test fun emptyBlobIdCannotBeOmittedFromAnOtherwiseCleanAudit() = runTest { assertEmptyIdRejected("BLOB") }
     @Test fun emptyMaskIdCannotBeOmittedFromAnOtherwiseCleanAudit() = runTest { assertEmptyIdRejected("MASK") }
+
+    @Test fun retainedDuplicateHistoryAndMaskPinsRemainValidAfterMembershipUndo() = runTest {
+        val h = Harness(); h.f.protectionMask(h.f.pageIds[0], 1)
+        val duplicated = h.f.repository.duplicatePage(h.f.pageIds[0], 1) as DocumentMutationResult.Applied
+        assertTrue(h.f.repository.saveRecipe(duplicated.affectedPageIds.single(), 1, h.f.turned(2)) is SaveRecipeResult.Saved)
+        assertTrue(h.f.repository.undoDocumentEdit(checkNotNull(duplicated.undoId), 3) is DocumentMutationResult.Applied)
+        val before = metadataState(h.f); val report = h.audit(true)
+        assertEquals(RecoveryReport(7, 0, 0, 0, 0, emptyList()), report)
+        assertEquals(report, h.audit(true)); assertEquals(before, metadataState(h.f))
+    }
+
+    @Test fun missingPagePinCannotHideBehindARebalancedSourceCounter() = runTest {
+        val h = Harness(); val page = h.f.pageIds[0].value
+        h.f.metadata.references.remove(Triple("PAGE", page, h.f.source.value))
+        h.f.metadata.sources[h.f.source.value] = h.f.metadata.sources.getValue(h.f.source.value).copy(refCount = 3)
+        assertEquals(0L, h.audit().blocked); val before = metadataState(h.f); val report = h.audit(true)
+        assertEquals(1L, report.blocked); assertEquals(page, report.safeIssues.single().operationId)
+        assertEquals("PAGE_SOURCE_PIN", report.safeIssues.single().state); assertEquals(before, metadataState(h.f))
+    }
+
+    @Test fun missingOldHistoryPinIsReportedEvenWhenTheCurrentRevisionRemainsPinned() = runTest {
+        val h = Harness(); val page = h.f.pageIds[0].value
+        assertTrue(h.f.repository.saveRecipe(h.f.pageIds[0], 1, h.f.turned(1)) is SaveRecipeResult.Saved)
+        h.f.metadata.references.remove(Triple("RECIPE_HISTORY", "recipe-v1/$page/1", h.f.source.value))
+        h.f.metadata.sources[h.f.source.value] = h.f.metadata.sources.getValue(h.f.source.value).copy(refCount = 5)
+        assertEquals(0L, h.audit().blocked); val before = metadataState(h.f); val report = h.audit(true)
+        assertEquals(1L, report.blocked); assertEquals(page, report.safeIssues.single().operationId)
+        assertEquals("RECIPE_SOURCE_PINS", report.safeIssues.single().state); assertEquals(2L, h.f.metadata.pages.getValue(page).currentRecipeRevision)
+        assertEquals(before, metadataState(h.f))
+    }
+
+    @Test fun aPinToAnotherSourceDoesNotSatisfyThePagesRequiredBinding() = runTest {
+        val h = Harness(); val page = h.f.pageIds[0].value; val old = h.f.metadata.sources.getValue(h.f.source.value); val id = UUID.randomUUID().toString()
+        h.f.metadata.sources[id] = old.copy(sourceId = id, conversionFingerprint = "independent-v2", refCount = 1)
+        h.f.metadata.sources[old.sourceId] = old.copy(refCount = 3)
+        h.f.metadata.blobs[old.sourceBlobId] = h.f.metadata.blobs.getValue(old.sourceBlobId).copy(sourceCount = 2)
+        val ref = h.f.metadata.references.remove(Triple("PAGE", page, old.sourceId))!!
+        h.f.metadata.references[Triple("PAGE", page, id)] = ref.copy(sourceId = id)
+        assertEquals(0L, h.audit().blocked); val before = metadataState(h.f); val report = h.audit(true)
+        assertEquals(1L, report.blocked); assertEquals(page, report.safeIssues.single().operationId); assertEquals(before, metadataState(h.f))
+    }
+
+    @Test fun missingMaskSourcePinIsIndependentOfItsCorrectRecipeMaskRefcount() = runTest {
+        val h = Harness(); val mask = h.f.protectionMask(h.f.pageIds[0], 1)
+        h.f.metadata.references.remove(Triple("MASK", mask, h.f.source.value))
+        h.f.metadata.sources[h.f.source.value] = h.f.metadata.sources.getValue(h.f.source.value).copy(refCount = 4)
+        assertEquals(0L, h.audit().blocked); val before = metadataState(h.f); val report = h.audit(true)
+        assertEquals(1L, report.blocked); assertEquals(mask, report.safeIssues.single().operationId)
+        assertEquals("MASK_SOURCE_PIN", report.safeIssues.single().state); assertEquals(before, metadataState(h.f))
+    }
+
+    @Test fun removedPagesStillRequireTheirOwnSourcePinUntilExplicitFinalization() = runTest {
+        val h = Harness(); val page = h.f.pageIds[0].value
+        assertTrue(h.f.repository.removePage(h.f.pageIds[0], 1) is DocumentMutationResult.Applied)
+        h.f.metadata.references.remove(Triple("PAGE", page, h.f.source.value))
+        h.f.metadata.sources[h.f.source.value] = h.f.metadata.sources.getValue(h.f.source.value).copy(refCount = 4)
+        assertEquals(0L, h.audit().blocked); val before = metadataState(h.f); val report = h.audit(true)
+        assertEquals(1L, report.blocked); assertEquals(page, report.safeIssues.single().operationId)
+        assertEquals("REMOVED", h.f.metadata.pages.getValue(page).state); assertEquals(before, metadataState(h.f))
+    }
 }

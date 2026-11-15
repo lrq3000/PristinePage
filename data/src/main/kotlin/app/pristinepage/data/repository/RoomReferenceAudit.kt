@@ -12,12 +12,20 @@ import kotlinx.coroutines.withContext
 class RoomReferenceAudit @JvmOverloads constructor(private val metadata: MetadataAccess, private val queries: ReferenceAuditQueries, private val dispatcher: CoroutineDispatcher = Dispatchers.IO) {
     constructor(database: PristineDatabase) : this(RoomMetadataAccess(database), database.referenceAudit())
 
-    private enum class Kind(val state: String) { SOURCE("SOURCE_REFERENCE_COUNT"), BLOB("BLOB_SOURCE_COUNT"), MASK("MASK_REFERENCE_COUNT") }
+    private enum class Kind(val state: String, val messageKey: String = "reference_counter_mismatch") {
+        SOURCE("SOURCE_REFERENCE_COUNT"), BLOB("BLOB_SOURCE_COUNT"), MASK("MASK_REFERENCE_COUNT"),
+        PAGE_PIN("PAGE_SOURCE_PIN", "required_source_pin_missing"), RECIPE_PINS("RECIPE_SOURCE_PINS", "required_source_pin_missing"), MASK_PIN("MASK_SOURCE_PIN", "required_source_pin_missing")
+    }
 
-    suspend fun audit(): RecoveryReport = withContext(dispatcher) {
+    suspend fun audit(): RecoveryReport = auditKinds(listOf(Kind.SOURCE, Kind.BLOB, Kind.MASK))
+
+    /** Required source pins for retained pages, each immutable recipe and each mask only. This does not validate the reverse/dangling owner relation or Undo/import/job/export membership, and cannot authorize repair/GC. */
+    suspend fun auditRequiredPins(): RecoveryReport = auditKinds(listOf(Kind.PAGE_PIN, Kind.RECIPE_PINS, Kind.MASK_PIN))
+
+    private suspend fun auditKinds(kinds: List<Kind>): RecoveryReport = withContext(dispatcher) {
         var inspected = 0L; var blocked = 0L
         val issues = mutableListOf<RecoveryIssue>()
-        for (kind in Kind.entries) {
+        for (kind in kinds) {
             var after: String? = null
             while (true) {
                 coroutineContext.ensureActive()
@@ -29,7 +37,7 @@ class RoomReferenceAudit @JvmOverloads constructor(private val metadata: Metadat
                     inspected++; after = row.objectId
                     if (row.storedCount != row.actualCount) {
                         blocked++
-                        if (issues.size < 128) issues += RecoveryIssue(row.objectId, kind.state, OperationError(OperationErrorCode.INTEGRITY_FAILED, false, "reference_counter_mismatch", row.objectId), RecoveryAction.REVIEW_INTEGRITY)
+                        if (issues.size < 128) issues += RecoveryIssue(row.objectId, kind.state, OperationError(OperationErrorCode.INTEGRITY_FAILED, false, kind.messageKey, row.objectId), RecoveryAction.REVIEW_INTEGRITY)
                     }
                 }
             }
@@ -45,6 +53,9 @@ class RoomReferenceAudit @JvmOverloads constructor(private val metadata: Metadat
                     Kind.SOURCE -> queries.sourcesAfter(after, 64)
                     Kind.BLOB -> queries.sourceBlobsAfter(after, 64)
                     Kind.MASK -> queries.masksAfter(after, 64)
+                    Kind.PAGE_PIN -> queries.pageSourcePinsAfter(after, 64)
+                    Kind.RECIPE_PINS -> queries.recipeSourcePinsAfter(after, 64)
+                    Kind.MASK_PIN -> queries.maskSourcePinsAfter(after, 64)
                 }
             }
             if (rows.size > 64) invalidListing()
