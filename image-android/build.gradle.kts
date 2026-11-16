@@ -11,8 +11,21 @@ android {
     buildToolsVersion = libs.versions.buildTools.get()
     defaultConfig {
         minSdk = libs.versions.minSdk.get().toInt()
+        testApplicationId = "app.pristinepage.debug.test"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         ndk.abiFilters += "arm64-v8a"
+    }
+    val localDevelopmentSigning = signingConfigs.create("localDevelopment") {
+        // Reuse the exact S-01/I-01 key/test package, like data's self-target test APK. Never generate a global key; only one module's test APK is installed at a time on the owned P-04 instance.
+        storeFile = rootProject.file(".local-signing/debug.keystore")
+        storeType = "PKCS12"
+        storePassword = "android"
+        keyAlias = "androiddebugkey"
+        keyPassword = "android"
+    }
+    buildTypes {
+        debug { signingConfig = localDevelopmentSigning }
+        release { signingConfig = null }
     }
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
