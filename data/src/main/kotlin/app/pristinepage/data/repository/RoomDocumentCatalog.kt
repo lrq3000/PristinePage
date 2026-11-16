@@ -34,6 +34,14 @@ class RoomDocumentCatalog @JvmOverloads constructor(private val metadata: Metada
         DocumentOverview(document, owned(pages))
     }
 
+    /** Recover the exact unresolved insertion without UI saved state. Two candidates are enough to detect ambiguity; no URI/session row is materialized and no selection is resumed or rebound. */
+    override suspend fun activeImport(documentId: DocumentId): ImportSessionId? = read(documentId) {
+        val document = summary(documentId)
+        val ids = bounds.activeImportIds(documentId.value)
+        require(ids.size <= 1 && document.hasPendingImport == ids.isNotEmpty())
+        ids.singleOrNull()?.let(::ImportSessionId)
+    }
+
     private fun summary(id: DocumentId): DocumentSummary {
         when (bounds.documentReadIsBounded(id.value)) {
             null -> refuse(OperationErrorCode.SOURCE_UNAVAILABLE, "document_unavailable", id)

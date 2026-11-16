@@ -39,6 +39,10 @@ private const val ACTIVE_DOCUMENT_IDS_SQL = """SELECT CASE WHEN (typeof(document
         AND (SELECT COALESCE(MAX(ordinal),-1)+1 FROM Page WHERE documentId=:documentId AND state='ACTIVE')=(SELECT COUNT(*) FROM Page WHERE documentId=:documentId AND state='ACTIVE')
         THEN 1 ELSE 0 END""")
     abstract override fun activePagesReadIsBounded(documentId: String): Boolean
+    // Match the existing pending predicate exactly; no ordering is needed when a valid document has at most one active BATCH. LIMIT2 exposes ambiguity without a history sort or URI-bearing row projection.
+    @Query("""SELECT CASE WHEN (typeof(sessionId)='text' AND length(sessionId)=36 AND length(CAST(sessionId AS BLOB))=36) THEN sessionId ELSE '' END
+        FROM ImportSession WHERE documentId=:documentId AND kind='BATCH' AND state NOT IN ('COMMITTED','CANCELED','FAILED','QUARANTINED') LIMIT 2""")
+    abstract override fun activeImportIds(documentId: String): List<String>
     // Group related predicates explicitly: this scalar guard precedes SELECT-star/Int narrowing. TEXT character length stops at NUL, so raw UTF-8 byte ceilings must also hold before any Kotlin materialization; a128-UTF16-unit fingerprint needs at most512UTF8bytes.
     @Query("""SELECT CASE WHEN
         ((typeof(s.sourceId)='text' AND length(s.sourceId)=36 AND length(CAST(s.sourceId AS BLOB))=36) AND (typeof(s.sourceBlobId)='text' AND length(s.sourceBlobId)=36 AND length(CAST(s.sourceBlobId AS BLOB))=36))

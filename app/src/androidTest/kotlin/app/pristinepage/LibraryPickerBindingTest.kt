@@ -1,0 +1,98 @@
+package app.pristinepage
+
+import android.app.Activity
+import android.content.ActivityNotFoundException
+import android.content.Intent
+import android.net.Uri
+import android.os.Bundle
+import android.os.Parcel
+import androidx.activity.result.ActivityResultRegistry
+import androidx.activity.result.contract.ActivityResultContract
+import androidx.core.app.ActivityOptionsCompat
+import androidx.test.ext.junit.runners.AndroidJUnit4
+import androidx.test.platform.app.InstrumentationRegistry
+import app.pristinepage.capture.PhotoImportRequest
+import app.pristinepage.capture.PhotoPickerRegistration
+import app.pristinepage.data.model.ImportSessionId
+import app.pristinepage.library.*
+import java.lang.reflect.InvocationTargetException
+import kotlinx.coroutines.flow.MutableStateFlow
+import org.junit.Assert.*
+import org.junit.Test
+import org.junit.runner.RunWith
+
+/** Tests our Activity-owned binding against actual AndroidX queued raw results and Android Parcel. This is not an actual Activity recreation, external picker or platform URI-grant experiment. */
+@RunWith(AndroidJUnit4::class)
+class LibraryPickerBindingTest {
+    @Test fun parceledQueuedRawResultIsConsumedSynchronouslyDuringRestoredRegistrationWithoutRelaunch() {
+        val batch = ImportSessionId("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa")
+        val request = PhotoImportRequest(batch.value)
+        val old = RecordingRegistry(); val saved = Bundle()
+        main {
+            val registration = PhotoPickerRegistration(old, request) { _, _ -> throw AssertionError("Detached owner consumed pending result") }
+            registration.launch(); val code = old.codes.single(); registration.close()
+            assertTrue(old.dispatchResult(code, Activity.RESULT_OK, Intent().setData(Uri.parse("content://fixture.documents/queued"))))
+            old.onSaveInstanceState(saved)
+        }
+        val restoredState = parcel(saved)
+        val restoredRequest = PhotoImportRequest.restore(parcel(request.save()))!!
+        val registry = RecordingRegistry(); val session = Session(restoredRequest, false)
+        main { registry.onRestoreInstanceState(restoredState) }
+        val binding = binding(registry, session)
+        try {
+            main { synchronize(binding) }
+            val result = session.events.single() as LibraryEvent.PhotoResult
+            assertEquals(batch.value, result.request.batchId)
+            assertEquals(listOf("content://fixture.documents/queued"), (result.selection as LibraryPhotoResult.Selected).references)
+            assertTrue(registry.codes.isEmpty()); assertNull(session.identity().pending)
+            assertEquals(1, session.events.size)
+        } finally { main { binding.close() } }
+    }
+
+    @Test fun launchIsClaimedOnlyOnceAndARealLaunchFailureRemainsBoundToItsExactRequest() {
+        val request = PhotoImportRequest("bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb")
+        val registry = RecordingRegistry().apply { failLaunch = true }; val session = Session(request, true)
+        val binding = binding(registry, session)
+        try {
+            main { synchronize(binding); synchronize(binding) }
+            val failed = session.events.single() as LibraryEvent.PickerFailed
+            assertEquals(request.batchId, failed.request.batchId); assertEquals(1, registry.codes.size)
+            assertFalse(session.state.value.launchPending)
+        } finally { main { binding.close() } }
+    }
+
+    private class Session(request: PhotoImportRequest, launch: Boolean) : LibrarySession {
+        override val state = MutableStateFlow(LibraryState(loading = false, request = request, launchPending = launch, phase = if (launch) ImportPhase.WAITING_PICKER else ImportPhase.INTERRUPTED))
+        val events = mutableListOf<LibraryEvent>()
+        override fun identity() = LibraryIdentity(pending = state.value.request?.let { ImportSessionId(it.batchId) })
+        override fun claimPickerLaunch(batchId: ImportSessionId): Boolean {
+            if (state.value.request?.batchId != batchId.value || !state.value.launchPending) return false
+            state.value = state.value.copy(launchPending = false); return true
+        }
+        override fun accept(event: LibraryEvent) { events += event; state.value = state.value.copy(request = null, launchPending = false) }
+    }
+    private class RecordingRegistry : ActivityResultRegistry() {
+        val codes = mutableListOf<Int>(); var failLaunch = false
+        override fun <I, O> onLaunch(requestCode: Int, contract: ActivityResultContract<I, O>, input: I, options: ActivityOptionsCompat?) {
+            codes += requestCode
+            if (failLaunch) throw ActivityNotFoundException("Synthetic picker unavailable")
+        }
+    }
+    private companion object {
+        fun main(action: () -> Unit) = InstrumentationRegistry.getInstrumentation().runOnMainSync(action)
+        fun parcel(bundle: Bundle): Bundle = Parcel.obtain().let { p ->
+            try { p.writeBundle(bundle); p.setDataPosition(0); p.readBundle(LibraryPickerBindingTest::class.java.classLoader)!! }
+            finally { p.recycle() }
+        }
+        fun binding(registry: ActivityResultRegistry, session: LibrarySession): AutoCloseable {
+            val type = try { Class.forName("app.pristinepage.capture.LibraryPickerBinding") }
+            catch (_: ClassNotFoundException) { throw AssertionError("Activity-owned library picker binding is absent") }
+            return try { type.getConstructor(ActivityResultRegistry::class.java, LibrarySession::class.java).newInstance(registry, session) as AutoCloseable }
+            catch (failure: InvocationTargetException) { throw failure.targetException }
+        }
+        fun synchronize(binding: AutoCloseable) {
+            try { binding.javaClass.getMethod("synchronize").invoke(binding) }
+            catch (failure: InvocationTargetException) { throw failure.targetException }
+        }
+    }
+}

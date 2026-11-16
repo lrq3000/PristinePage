@@ -144,6 +144,22 @@ class DocumentCatalogBoundsTest(unittest.TestCase):
                 self.db.execute("UPDATE Document SET title=?", (title,))
                 self.assertEqual(1, self.document_gate())
 
+    def test_pending_import_discovery_is_document_scoped_and_excludes_terminal_or_item_rows(self):
+        batch = str(UUID(int=100))
+        for identity, kind, state in [(batch, "BATCH", "WAITING_SELECTION"), (str(UUID(int=101)), "ITEM", "RESERVED"), (str(UUID(int=102)), "BATCH", "CANCELED")]:
+            self.db.execute("INSERT INTO ImportSession(sessionId,kind,documentId,state,expectedMembershipToken,createdAt,expiresAt) VALUES (?,?,?,?,?,0,1)", (identity, kind, self.doc, state, "d" * 64))
+        ids = lambda doc: [row[0] for row in self.query("activeImportIds", documentId=doc)]
+        self.assertEqual([batch], ids(self.doc))
+        self.assertEqual([], ids(str(UUID(int=999))))
+
+    def test_pending_identity_projection_caps_candidates_and_never_materializes_an_oversized_id(self):
+        for i in range(100, 103):
+            self.db.execute("INSERT INTO ImportSession(sessionId,kind,documentId,state,expectedMembershipToken,createdAt,expiresAt) VALUES (?,'BATCH',?,'WAITING_SELECTION',?,0,1)", (str(UUID(int=i)), self.doc, "d" * 64))
+        self.assertEqual(2, len(list(self.query("activeImportIds", documentId=self.doc))))
+        self.db.execute("UPDATE ImportSession SET sessionId=? WHERE sessionId=?", ("x" * 4096, str(UUID(int=100))))
+        self.db.execute("UPDATE ImportSession SET state='CANCELED' WHERE sessionId<>?", ("x" * 4096,))
+        self.assertEqual([("",)], list(self.query("activeImportIds", documentId=self.doc)))
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

@@ -119,7 +119,7 @@ class DocumentCatalogIntegrationTest {
         }
     }
 
-    private class Fixture : AutoCloseable {
+    internal class Fixture : AutoCloseable {
         private val base = InstrumentationRegistry.getInstrumentation().targetContext
         private val root = File(base.filesDir, "t04-catalog-${UUID.randomUUID()}")
         private val context = object : ContextWrapper(base) {
@@ -132,9 +132,10 @@ class DocumentCatalogIntegrationTest {
             try { bitmap.eraseColor(0xffabcdef.toInt()); ByteArrayOutputStream().also { check(bitmap.compress(Bitmap.CompressFormat.PNG, 100, it)) }.toByteArray() } finally { bitmap.recycle() }
         }
         var providerOpens = 0; var forbid = false
+        var beforeProvider: (String, Int) -> Unit = { _, _ -> }
         private var graph: ApplicationImports? = null
         suspend fun open(): ApplicationImports = ApplicationServices(context, ApplicationImageBudget.create(64), SourceInput { reference ->
-            check(!forbid); check(reference == good || reference == bad); providerOpens++
+            check(!forbid); check(reference == good || reference == bad); providerOpens++; beforeProvider(reference, providerOpens)
             ByteArrayInputStream(if (reference == good) png else byteArrayOf(1, 2, 3, 4))
         }).imports().also { graph = it }
         suspend fun reopen(): ApplicationImports { close(); graph = null; return open() }

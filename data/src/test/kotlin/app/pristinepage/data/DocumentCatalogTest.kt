@@ -122,11 +122,40 @@ class DocumentCatalogTest {
         }
     }
 
+    @Test fun pendingBatchCanBeRediscoveredFromDurableDocumentMetadataWithoutUiSavedState() = runBlocking {
+        val f = Fixture(); val catalog = f.catalog()
+        assertEquals(ImportSessionId(BATCH), activeImport(catalog, f.second))
+        assertEquals(0, f.pageReads); assertEquals(3, f.memory.documents.size); assertEquals(2, f.memory.pages.size)
+    }
+
+    @Test fun noPendingBatchReturnsNullRatherThanAllocatingANewReservation() = runBlocking {
+        val f = Fixture(); val before = f.memory.pendingImports.toSet()
+        assertNull(activeImport(f.catalog(), f.first))
+        assertEquals(before, f.memory.pendingImports); assertEquals(0, f.pageReads)
+    }
+
+    @Test fun malformedAmbiguousOrFlagMismatchedPendingIdentityCannotBeUsedForCancellation() = runBlocking<Unit> {
+        for (ids in listOf(listOf("invalid"), listOf(BATCH, BATCH), emptyList())) {
+            val f = Fixture(); f.pendingIdsOverride = ids
+            rejected(OperationErrorCode.INTEGRITY_FAILED) { activeImport(f.catalog(), f.second) }
+        }
+        val f = Fixture(); f.pendingIdsOverride = listOf(BATCH)
+        rejected(OperationErrorCode.INTEGRITY_FAILED) { activeImport(f.catalog(), f.first) }
+    }
+
+    @Test fun pendingDiscoveryCannotExposeAMissingOrInactiveDocument() = runBlocking<Unit> {
+        val f = Fixture(); val catalog = f.catalog()
+        rejected(OperationErrorCode.SOURCE_UNAVAILABLE) { activeImport(catalog, DocumentId("44444444-4444-4444-8444-444444444444")) }
+        f.memory.documents[f.second.value] = f.memory.documents.getValue(f.second.value).copy(lifecycle = "TOMBSTONED", deletedAt = 1)
+        rejected(OperationErrorCode.SOURCE_UNAVAILABLE) { activeImport(catalog, f.second) }
+    }
+
     private class Fixture {
         val initial = RepositoryFixture(2)
         val memory = initial.metadata
         val first = DocumentId(FIRST); val second = DocumentId(SECOND); val third = DocumentId(THIRD)
         var projectedIds: List<String>? = null
+        var pendingIdsOverride: List<String>? = null
         var documentBound = true
         var pagesBound = true
         var countOverride: Long? = null
@@ -161,6 +190,10 @@ class DocumentCatalogTest {
             }
             override fun activePageCount(documentId: String): Long { check(memory.inTransaction); return countOverride ?: memory.activePages(documentId).size.toLong() }
             override fun activePagesReadIsBounded(documentId: String): Boolean { check(memory.inTransaction); if (pagesBound) admittedPages += documentId; return pagesBound }
+            override fun activeImportIds(documentId: String): List<String> {
+                check(memory.inTransaction)
+                return pendingIdsOverride ?: if (documentId in memory.pendingImports) listOf(BATCH) else emptyList()
+            }
         }
         private val queries = object : CatalogQueries by memory {
             override fun document(id: String): DocumentRow? { check(memory.inTransaction && id in admittedDocuments); documentReads++; return memory.document(id) }
@@ -182,6 +215,16 @@ class DocumentCatalogTest {
         const val FIRST = "11111111-1111-4111-8111-111111111111"
         const val SECOND = "22222222-2222-4222-8222-222222222222"
         const val THIRD = "33333333-3333-4333-8333-333333333333"
+        const val BATCH = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+        suspend fun activeImport(catalog: DocumentCatalog, id: DocumentId): ImportSessionId? {
+            val method = catalog.javaClass.methods.singleOrNull { it.name.startsWith("activeImport-") && it.parameterCount == 2 }
+                ?: throw AssertionError("Durable active-import discovery is absent")
+            val result: Any? = kotlin.coroutines.intrinsics.suspendCoroutineUninterceptedOrReturn { continuation ->
+                try { method.invoke(catalog, id.value, continuation) }
+                catch (failure: InvocationTargetException) { throw failure.targetException }
+            }
+            return when (result) { null -> null; is ImportSessionId -> result; is String -> ImportSessionId(result); else -> throw AssertionError("Invalid discovery result") }
+        }
         suspend fun rejected(code: OperationErrorCode, action: suspend () -> Any?): OperationError {
             try { action(); fail("Read unexpectedly succeeded") }
             catch (failure: RepositoryFailure) { assertEquals(code, failure.error.code); return failure.error }
