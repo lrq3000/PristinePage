@@ -6,9 +6,26 @@ import androidx.room.OnConflictStrategy
 import androidx.room.Query
 import androidx.room.Update
 import app.pristinepage.data.repository.CatalogQueries
+import app.pristinepage.data.repository.CommittedSourceQueries
 
 /** Bound SQL only. Business commands run these synchronous metadata operations on IO inside Room's transaction, never across provider/decode/render work. */
-@Dao abstract class CatalogDao : CatalogQueries {
+@Dao abstract class CatalogDao : CatalogQueries, CommittedSourceQueries {
+    // Group related predicates explicitly: this scalar guard precedes SELECT-star/Int narrowing. TEXT character length stops at NUL, so raw UTF-8 byte ceilings must also hold before any Kotlin materialization; a128-UTF16-unit fingerprint needs at most512UTF8bytes.
+    @Query("""SELECT CASE WHEN
+        ((typeof(s.sourceId)='text' AND length(s.sourceId)=36 AND length(CAST(s.sourceId AS BLOB))=36) AND (typeof(s.sourceBlobId)='text' AND length(s.sourceBlobId)=36 AND length(CAST(s.sourceBlobId AS BLOB))=36))
+        AND ((typeof(s.pixelSha256)='text' AND length(s.pixelSha256)=64 AND length(CAST(s.pixelSha256 AS BLOB))=64) AND (typeof(s.conversionFingerprint)='text' AND length(s.conversionFingerprint) BETWEEN 1 AND 128 AND length(CAST(s.conversionFingerprint AS BLOB)) BETWEEN 1 AND 512))
+        AND (s.profileSha256 IS NULL OR (typeof(s.profileSha256)='text' AND length(s.profileSha256)=64 AND length(CAST(s.profileSha256 AS BLOB))=64))
+        AND ((typeof(s.width)='integer' AND s.width BETWEEN 1 AND 12000) AND (typeof(s.height)='integer' AND s.height BETWEEN 1 AND 12000) AND s.width*s.height<=48000000)
+        AND ((typeof(s.exifOrientation)='integer' AND s.exifOrientation BETWEEN 1 AND 8) AND (typeof(s.state)='text' AND s.state='READY' AND length(CAST(s.state AS BLOB))=5))
+        AND ((typeof(s.refCount)='integer' AND s.refCount>=0) AND typeof(s.createdAt)='integer')
+        AND EXISTS(SELECT 1 FROM SourceBlob b WHERE b.sourceBlobId=s.sourceBlobId
+            AND ((typeof(b.sourceBlobId)='text' AND length(b.sourceBlobId)=36 AND length(CAST(b.sourceBlobId AS BLOB))=36) AND (typeof(b.byteSha256)='text' AND length(b.byteSha256)=64 AND length(CAST(b.byteSha256 AS BLOB))=64))
+            AND ((typeof(b.byteCount)='integer' AND b.byteCount BETWEEN 1 AND 104857600) AND (typeof(b.mime)='text' AND b.mime IN ('image/png','image/jpeg','image/webp') AND length(CAST(b.mime AS BLOB)) BETWEEN 9 AND 10))
+            AND ((typeof(b.encodedWidth)='integer' AND b.encodedWidth BETWEEN 1 AND 12000) AND (typeof(b.encodedHeight)='integer' AND b.encodedHeight BETWEEN 1 AND 12000) AND b.encodedWidth*b.encodedHeight<=48000000)
+            AND ((typeof(b.relativePath)='text' AND length(CAST(b.relativePath AS BLOB)) BETWEEN 1 AND 128 AND b.relativePath='sources/'||b.sourceBlobId||'/original.bin') AND (typeof(b.state)='text' AND b.state='READY' AND length(CAST(b.state AS BLOB))=5))
+            AND ((typeof(b.sourceCount)='integer' AND b.sourceCount>=0) AND (typeof(b.ingestTransactionId)='text' AND length(b.ingestTransactionId)=36 AND length(CAST(b.ingestTransactionId AS BLOB))=36) AND typeof(b.createdAt)='integer'))
+        THEN 1 ELSE 0 END FROM Source s WHERE s.sourceId=:id""")
+    abstract override fun sourceReadIsBounded(id: String): Boolean?
     @Query("SELECT * FROM Document WHERE documentId=:id") abstract override fun document(id: String): DocumentRow?
     // All retained lifecycles participate in availability expiry; select IDs only, with an indexed initial range that also exposes invalid empty IDs for rejection.
     @Query("SELECT documentId FROM Document WHERE documentId>=COALESCE(:objectId,'') AND (:objectId IS NULL OR documentId>:objectId) ORDER BY documentId LIMIT :limit")

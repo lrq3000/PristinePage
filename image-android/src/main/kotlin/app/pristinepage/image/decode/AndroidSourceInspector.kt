@@ -25,16 +25,17 @@ import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.withContext
 
 /** The whole result owns its image AND its tracked decode reservation. The image is borrowed within this scope: consumers must not retain a separate RgbImage lease past close without arranging shared-budget ownership transfer. */
-class DecodedSource internal constructor(val inspection: SourceInspection, val image: RgbImage, private val permit: DecodePermit) : AutoCloseable {
+class DecodedSource internal constructor(val inspection: SourceInspection, val image: RgbImage, private val permit: DecodePermit, val sourceByteHash: String) : AutoCloseable {
+    init { requireSha256(sourceByteHash) }
     private val closed = AtomicBoolean(false)
     override fun close() { if (closed.compareAndSet(false, true)) { try { image.close() } finally { permit.close() } } }
 }
 
 /** Closed private bytes only; no URI/provider/database access, original mutation or source downsampling. API28+'s strict partial-image policy is used first. API26/27 and embedded ICC support remain unavailable until separately validated, not silently emulated through a permissive partial decoder. */
-class AndroidSourceInspector @JvmOverloads constructor(private val budget: ImageAllocationBudget, private val dispatcher: CoroutineDispatcher = Dispatchers.IO) : SourceInspector {
+class AndroidSourceInspector @JvmOverloads constructor(private val budget: ImageAllocationBudget, private val dispatcher: CoroutineDispatcher = Dispatchers.IO) : SourceInspector, SourceFileDecoder {
     override suspend fun inspect(file: File, expectedByteSha256: String): SourceInspection = decodeFile(file, expectedByteSha256).use { it.inspection }
 
-    suspend fun decodeFile(file: File, expectedByteSha256: String): DecodedSource {
+    override suspend fun decodeFile(file: File, expectedByteSha256: String): DecodedSource {
         var completed: DecodedSource? = null
         try {
             return withContext(dispatcher) {
@@ -65,7 +66,7 @@ class AndroidSourceInspector @JvmOverloads constructor(private val budget: Image
                             val hash = CanonicalSourcePixels.hash(image, fingerprint) { context.ensureActive() }
                             val inspection = SourceInspection(header.mime, header.size, permit.size, orientation, null, fingerprint, hash)
                             context.ensureActive()
-                            DecodedSource(inspection, image, permit).also { completed = it; transferred = true }
+                            DecodedSource(inspection, image, permit, expectedByteSha256).also { completed = it; transferred = true }
                         } finally { if (!transferred) image.close() }
                     } finally { bitmap.recycle() }
                 } finally { if (!transferred) permit.close() }
