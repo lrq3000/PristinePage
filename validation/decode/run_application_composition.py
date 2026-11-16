@@ -9,6 +9,8 @@ from run_picker_adapter import ADB, ROOT, PickerAdapterRun
 
 class ApplicationCompositionRun(PickerAdapterRun):
     classes = ("app.pristinepage.PhotoPickerContractTest", "app.pristinepage.ApplicationCompositionTest")
+    case_count = 16
+    missing_marker = "Application-scoped composition is absent"
 
     def expected_tests(self):
         return Counter((cls, name) for cls in self.classes for name in re.findall(r"@Test\s+fun\s+(\w+)", (ROOT / "app/src/androidTest/kotlin" / (cls.replace(".", "/") + ".kt")).read_text()))
@@ -38,7 +40,7 @@ class ApplicationCompositionRun(PickerAdapterRun):
         assert "instrumentation:app.pristinepage.debug.test/androidx.test.runner.AndroidJUnitRunner (target=app.pristinepage.debug)" in registry
         self.save(self.path("install.json"), installs)
         expected = self.expected_tests()
-        assert len(expected) == 16
+        assert len(expected) == self.case_count
         output = self.command([ADB, "-s", self.serial, "shell", "am", "instrument", "-w", "-r", "-e", "class", ",".join(self.classes), "app.pristinepage.debug.test/androidx.test.runner.AndroidJUnitRunner"], 180)
         self.path("instrumentation.txt").write_text(output, encoding="utf-8")
         outcomes = {code: Counter() for code in ("1", "0", "-2", "-1")}
@@ -48,7 +50,7 @@ class ApplicationCompositionRun(PickerAdapterRun):
             name = re.search(r"^INSTRUMENTATION_STATUS: test=(.+)$", block, re.M)
             assert cls and name and code in outcomes
             outcomes[code][(cls.group(1).strip(), name.group(1).strip())] += 1
-            if code == "-2" and "Application-scoped composition is absent" in block:
+            if code == "-2" and self.missing_marker in block:
                 missing_assertions += 1
         assert outcomes["1"] == expected and outcomes["0"] + outcomes["-2"] + outcomes["-1"] == expected
         assert not outcomes["-1"] and sum(outcomes["-2"].values()) == self.missing and missing_assertions == self.missing
