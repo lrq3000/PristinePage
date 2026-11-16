@@ -12,7 +12,7 @@ import org.junit.Test
 /** Android metadata is the only substituted boundary; real page IDs, row types and session command logic are exercised. URI binding, file ingest and actual Room session serialization remain separate integration gates. */
 class ImportSessionTest {
     private fun binder(f: Fixture): ImportItemBindings = f.commands as? ImportItemBindings ?: throw AssertionError("Immutable session URI binding is absent")
-    private class Fixture(count: Int = 2) : ImportSessionQueries {
+    internal class Fixture(count: Int = 2) : ImportSessionQueries {
         val pages = RepositoryFixture(count)
         val rows = linkedMapOf<String, ImportSessionRow>()
         val access = object : MetadataAccess {
@@ -24,6 +24,7 @@ class ImportSessionTest {
             }
         }
         var now = 1000L
+        var onUpdate: (ImportSessionRow) -> Unit = {}
         val commands: ImportSessionCommands
         init {
             val type = try { Class.forName("app.pristinepage.data.repository.RoomImportSessions") }
@@ -35,7 +36,7 @@ class ImportSessionTest {
         override fun children(parentId: String) = rows.values.filter { it.parentSessionId == parentId }.sortedBy { it.selectionOrdinal }
         override fun activeBatches(documentId: String) = rows.values.filter { it.documentId == documentId && it.kind == "BATCH" && it.state !in setOf("COMMITTED", "CANCELED", "FAILED", "QUARANTINED") }
         override fun insertSession(row: ImportSessionRow) { check(rows.putIfAbsent(row.sessionId, row) == null) }
-        override fun updateSession(row: ImportSessionRow): Int { if (row.sessionId !in rows) return 0; rows[row.sessionId] = row; return 1 }
+        override fun updateSession(row: ImportSessionRow): Int { onUpdate(row); if (row.sessionId !in rows) return 0; rows[row.sessionId] = row; return 1 }
     }
 
     @Test fun parentIsDurableBeforePickerAndReservingChildrenDoesNotExposePages() = runTest {

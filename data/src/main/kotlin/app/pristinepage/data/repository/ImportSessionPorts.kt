@@ -23,3 +23,8 @@ interface ImportSessionCommands {
 interface ImportItemBindings {
     suspend fun bindProviderItem(sessionId: ImportSessionId, ordinal: Int, uriText: String): ImportSessionId
 }
+
+/** Whole picker callback handoff. Private provider references are copied/validated and all child IDs/bindings are committed together before any provider IO. Replaying the same ordered selection returns the same children even after terminal URI removal; a changed selection requires a new batch. Empty selection cancels an unselected batch, never creates a page. */
+fun interface ImportSelections {
+    suspend fun prepareSelection(sessionId: ImportSessionId, references: List<String>): ImportBatch
+}
