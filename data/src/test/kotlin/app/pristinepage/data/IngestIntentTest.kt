@@ -125,6 +125,33 @@ class IngestIntentTest {
         }
     }
 
+    @Test fun canceledUnattemptedItemKeepsItsOutcomeAfterExpiryWithoutMintingAnIntent() {
+        val f = Fixture()
+        f.sessions[f.parent.value] = f.sessions[f.parent.value]!!.copy(state = "CANCELED")
+        f.sessions[f.child.value] = f.sessions[f.child.value]!!.copy(state = "CANCELED", uriText = null, errorCode = "CANCELED")
+        f.now = 86400000
+        val before = f.sessions.toMap()
+        val failure = assertThrows(RepositoryFailure::class.java) { f.commands.prepare(f.child, f.uri) }
+        assertEquals(OperationErrorCode.CANCELED, failure.error.code)
+        assertFalse(failure.error.retryable); assertEquals(f.child.value, failure.error.affectedId)
+        assertEquals(before, f.sessions); assertTrue(f.files.isEmpty()); assertTrue(f.jobs.isEmpty()); assertTrue(f.catalog.pages.isEmpty())
+    }
+
+    @Test fun genuineUnattemptedExpiryIsNotMisreportedAsCancellation() {
+        val f = Fixture(); f.now = 86400000
+        val failure = assertThrows(RepositoryFailure::class.java) { f.commands.prepare(f.child, f.uri) }
+        assertEquals(OperationErrorCode.SESSION_EXPIRED, failure.error.code)
+        assertTrue(f.files.isEmpty()); assertTrue(f.jobs.isEmpty())
+    }
+
+    @Test fun canceledRowWithWrongParentDestinationCannotAssertAValidCancellation() {
+        val f = Fixture()
+        f.sessions[f.child.value] = f.sessions[f.child.value]!!.copy(state = "CANCELED", uriText = null, documentId = UUID.randomUUID().toString())
+        val failure = assertThrows(RepositoryFailure::class.java) { f.commands.prepare(f.child, f.uri) }
+        assertEquals(OperationErrorCode.INTEGRITY_FAILED, failure.error.code)
+        assertTrue(f.files.isEmpty()); assertTrue(f.jobs.isEmpty())
+    }
+
     @Test fun failureBindingChildRollsBackBothNewIntentAndPendingJob() {
         val f = Fixture(); f.rejectChildUpdate = true
         val failure = assertThrows(RepositoryFailure::class.java) { f.commands.prepare(f.child, f.uri) }

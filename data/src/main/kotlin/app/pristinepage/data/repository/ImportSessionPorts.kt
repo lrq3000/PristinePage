@@ -28,3 +28,8 @@ interface ImportItemBindings {
 fun interface ImportSelections {
     suspend fun prepareSelection(sessionId: ImportSessionId, references: List<String>): ImportBatch
 }
+
+/** Explicitly abandon unresolved insertion, not remove a page/source or promise provider IO already stopped. Terminal children and all files/journals/leases/pins survive; parent cancellation fences late completion. */
+fun interface ImportSessionLifecycle {
+    suspend fun cancelBatch(sessionId: ImportSessionId): ImportBatch
+}

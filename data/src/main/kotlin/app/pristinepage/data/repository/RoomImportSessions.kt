@@ -19,7 +19,7 @@ import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.withContext
 
 /** Reserves identities/order before external activity IO. A batch is not a Page and cannot expose an uncommitted source. Import sessions and catalog queries must share the injected metadata transaction. */
-class RoomImportSessions @JvmOverloads constructor(private val metadata: MetadataAccess, private val sessions: ImportSessionQueries, private val clock: () -> Long = System::currentTimeMillis, private val dispatcher: CoroutineDispatcher = Dispatchers.IO) : ImportSessionCommands, ImportItemBindings, ImportSelections {
+class RoomImportSessions @JvmOverloads constructor(private val metadata: MetadataAccess, private val sessions: ImportSessionQueries, private val clock: () -> Long = System::currentTimeMillis, private val dispatcher: CoroutineDispatcher = Dispatchers.IO) : ImportSessionCommands, ImportItemBindings, ImportSelections, ImportSessionLifecycle {
     /** Native construction binds both DAOs to the same writer transaction; host tests inject only the unavailable Android database boundary. */
     constructor(database: PristineDatabase) : this(RoomMetadataAccess(database), database.importSessions())
 
@@ -142,6 +142,38 @@ class RoomImportSessions @JvmOverloads constructor(private val metadata: Metadat
                 if (sessions.updateSession(parent.copy(state = "RESERVED", uriText = identity)) != 1) reject(OperationErrorCode.INTEGRITY_FAILED, "import_session_unavailable", sessionId.value)
                 coroutineContext.ensureActive()
                 reserved
+            }
+        }
+    }
+
+    override suspend fun cancelBatch(sessionId: ImportSessionId): ImportBatch = withContext(dispatcher) {
+        guarded {
+            coroutineContext.ensureActive()
+            metadata.transaction {
+                val parent = sessions.session(sessionId.value) ?: reject(OperationErrorCode.SESSION_EXPIRED, "import_session_unavailable", sessionId.value)
+                if (parent.sessionId != sessionId.value || parent.kind != "BATCH" || parent.parentSessionId != null) reject(OperationErrorCode.SESSION_EXPIRED, "import_session_unavailable", sessionId.value)
+                val children = sessions.children(parent.sessionId)
+                if (parent.state !in TERMINAL_ITEMS + setOf("WAITING_SELECTION", "RESERVED") || children.size > 100 || children.map { it.selectionOrdinal } != children.indices.toList() || children.map { it.sessionId }.toSet().size != children.size || children.map { it.plannedPageId }.toSet().size != children.size) reject(OperationErrorCode.INTEGRITY_FAILED, "invalid_import_reservation", sessionId.value)
+                children.forEach { child ->
+                    try { ImportSessionId(child.sessionId); PageId(child.plannedPageId ?: throw IllegalArgumentException()) }
+                    catch (_: IllegalArgumentException) { reject(OperationErrorCode.INTEGRITY_FAILED, "invalid_import_reservation", sessionId.value) }
+                    if (child.parentSessionId != parent.sessionId || child.documentId != parent.documentId || child.kind != "ITEM" || child.anchorPageId != parent.anchorPageId || child.state !in TERMINAL_ITEMS + setOf("RESERVED", "BOUND", "INGESTING")) reject(OperationErrorCode.INTEGRITY_FAILED, "invalid_import_reservation", sessionId.value)
+                }
+                val result = ImportBatch(sessionId, children.map { ImportSessionId(it.sessionId) })
+                if (parent.state in TERMINAL_ITEMS) {
+                    if (children.any { it.state !in TERMINAL_ITEMS }) reject(OperationErrorCode.INTEGRITY_FAILED, "invalid_import_reservation", sessionId.value)
+                    return@transaction result
+                }
+                if (parent.state == "WAITING_SELECTION" && children.isNotEmpty() || parent.state == "RESERVED" && children.isEmpty()) reject(OperationErrorCode.INTEGRITY_FAILED, "invalid_import_reservation", sessionId.value)
+                // Closing insertion does not depend on today's membership, expiry or anchor. No page/source/job/file/lease is touched, and completed children never change outcome.
+                for (child in children) if (child.state !in TERMINAL_ITEMS) {
+                    coroutineContext.ensureActive()
+                    if (sessions.updateSession(child.copy(state = "CANCELED", uriText = null, errorCode = "CANCELED")) != 1) reject(OperationErrorCode.INTEGRITY_FAILED, "import_item_unavailable", sessionId.value)
+                }
+                coroutineContext.ensureActive()
+                if (sessions.updateSession(parent.copy(state = "CANCELED", errorCode = "CANCELED")) != 1) reject(OperationErrorCode.INTEGRITY_FAILED, "import_session_unavailable", sessionId.value)
+                coroutineContext.ensureActive()
+                result
             }
         }
     }

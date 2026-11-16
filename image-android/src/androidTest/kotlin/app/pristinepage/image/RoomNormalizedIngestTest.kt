@@ -106,6 +106,7 @@ class RoomNormalizedIngestTest {
         var opened = 0; var closed = 0; var inspected = 0
         var forbidInputs = false
         var revokeAfterFirstRead = false
+        var afterInspection: suspend () -> Unit = {}
         var database = open()
             private set
         val document = runBlocking { RoomDocumentRepository(RoomMetadataAccess(database), RecipeAdmission { _, _ -> null }).createDocument("Normalized source integration") }
@@ -127,7 +128,9 @@ class RoomNormalizedIngestTest {
             val inspector = SourceInspector { file, hash ->
                 assertFalse(database.inTransaction()); assertFalse("Replay decoded the source again", forbidInputs); assertEquals(opened, closed); inspected++
                 assertArrayEquals(bytes, file.readBytes()); assertEquals(sha(bytes), hash)
-                decoder.inspect(file, hash)
+                val inspection = decoder.inspect(file, hash)
+                afterInspection()
+                inspection
             }
             val completion = RoomIngestCompletion(database, files)
             return RoomSourceStore(files, provider, inspector, RoomIngestPreparation(database), RoomIngestLookup(database), completion, completion, RoomIngestPhases(database), RoomJobLeases(database, owners), owners)

@@ -15,6 +15,14 @@ class RoomIngestPreparation @JvmOverloads constructor(private val metadata: Meta
             return metadata.transaction {
                 val child = sessions.session(sessionId.value) ?: reject(OperationErrorCode.SESSION_EXPIRED, "import_session_unavailable", sessionId.value)
                 val now = auditClock()
+                // A never-attempted abandoned ITEM has no journal to replay. Its durable terminal outcome survives URI clearing/expiry; do not turn explicit Cancel into reselection guidance or create an intent just to report it.
+                if (child.kind == "ITEM" && child.parentSessionId != null && child.state == "CANCELED" && child.transactionId == null) {
+                    val parent = sessions.session(child.parentSessionId) ?: reject(OperationErrorCode.INTEGRITY_FAILED, "invalid_import_reservation", sessionId.value)
+                    if (child.sessionId != sessionId.value || parent.kind != "BATCH" || parent.parentSessionId != null || parent.documentId != child.documentId || child.anchorPageId != parent.anchorPageId || child.selectionOrdinal !in 0..99 || child.plannedPageId == null) reject(OperationErrorCode.INTEGRITY_FAILED, "invalid_import_reservation", sessionId.value)
+                    try { DocumentId(child.documentId); PageId(child.plannedPageId) }
+                    catch (_: IllegalArgumentException) { reject(OperationErrorCode.INTEGRITY_FAILED, "invalid_import_reservation", sessionId.value) }
+                    reject(OperationErrorCode.CANCELED, "ingest_canceled", sessionId.value)
+                }
                 if (child.kind != "ITEM" || child.parentSessionId == null || child.state !in setOf("BOUND", "INGESTING") || child.expiresAt <= now) reject(OperationErrorCode.SESSION_EXPIRED, "import_item_unavailable", sessionId.value)
                 if (child.uriText == null || child.uriText != boundUriText) reject(OperationErrorCode.INVALID_INPUT, "import_reference_mismatch", sessionId.value)
                 val parent = sessions.session(child.parentSessionId) ?: reject(OperationErrorCode.SESSION_EXPIRED, "import_session_unavailable", sessionId.value)
