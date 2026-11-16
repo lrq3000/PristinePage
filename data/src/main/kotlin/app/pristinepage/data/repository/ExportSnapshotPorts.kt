@@ -5,6 +5,8 @@ import app.pristinepage.data.model.*
 
 /** Same-database participants: every call is inside the supplied MetadataAccess transaction, including unique-key lookup and insertion. */
 interface ExportSnapshotQueries {
+    fun snapshotMetadataIsBounded(snapshotId: String): Boolean?
+    fun exportPagesAreBounded(snapshotId: String): Boolean
     fun snapshot(id: String): ExportSnapshotRow?
     fun exportPages(snapshotId: String): List<ExportPageRow>
     fun insertSnapshot(row: ExportSnapshotRow)
@@ -28,4 +30,5 @@ fun interface ExportAdmission {
 
 interface ExportSnapshots {
     suspend fun freezeExport(documentId: DocumentId, expectedDocumentRevision: Long, settings: ExportSettings): ExportSnapshot
+    suspend fun load(snapshotId: ExportSnapshotId): ExportSnapshot
 }

@@ -27,6 +27,8 @@ class ExportSnapshotTest {
         var onProof: (() -> Unit)? = null
         var onAdmission: (() -> OperationError?)? = null
         var failPageInsertAt: Int? = null
+        var snapshotBounded = true
+        var pagesBounded = true
         private var pageInserts = 0
         var settings = ExportSettings(ExportFormat.PNG, f.pageIds.map { PageOutputSettings(it, OutputSpec(PixelSize(3, 2), RenderPurpose.EXPORT)) }, null, null, emptyList())
         private val metadata = object : MetadataAccess {
@@ -46,8 +48,10 @@ class ExportSnapshotTest {
             val queries = Proxy.newProxyInstance(type("ExportSnapshotQueries").classLoader, arrayOf(type("ExportSnapshotQueries"))) { _, method, args ->
                 check(f.metadata.inTransaction) { "Snapshot/job query must use the original metadata transaction" }
                 when (method.name) {
-                    "snapshot" -> snapshots[args[0] as String]
-                    "exportPages" -> pages.values.filter { it.snapshotId == args[0] }.sortedBy { it.ordinal }
+                    "snapshotMetadataIsBounded" -> if (args[0] in snapshots) snapshotBounded else null
+                    "exportPagesAreBounded" -> pagesBounded
+                    "snapshot" -> { check(snapshotBounded) { "Header BLOB materialized before scalar bounds refusal" }; snapshots[args[0] as String] }
+                    "exportPages" -> { check(pagesBounded) { "Page BLOBs materialized before scalar bounds refusal" }; pages.values.filter { it.snapshotId == args[0] }.sortedBy { it.ordinal } }
                     "insertSnapshot" -> { val row = args[0] as ExportSnapshotRow; check(snapshots.putIfAbsent(row.snapshotId, row) == null); Unit }
                     "insertExportPage" -> {
                         if (++pageInserts == failPageInsertAt) throw IOException("content://private-provider/snapshot-write-fault")
@@ -72,6 +76,13 @@ class ExportSnapshotTest {
             return suspendCoroutineUninterceptedOrReturn { continuation ->
                 try { method.invoke(service, f.document.value, expected, settings, continuation) }
                 catch (failure: InvocationTargetException) { throw failure.targetException }
+            }
+        }
+        suspend fun load(id: String = snapshots.keys.single()): ExportSnapshot {
+            val service = service(); val method = service.javaClass.methods.singleOrNull { it.name.startsWith("load") }
+                ?: throw AssertionError("Committed immutable snapshot retrieval is absent")
+            return suspendCoroutineUninterceptedOrReturn { continuation ->
+                try { method.invoke(service, id, continuation) } catch (failure: InvocationTargetException) { throw failure.targetException }
             }
         }
         fun nonSnapshotState(): List<Any> = with(f.metadata) { listOf(documents.toMap(), pages.toMap(), sources.toMap(), blobs.toMap(), recipes.toMap(), references.toMap(), undos.toMap(), masks.toMap(), associations.toMap(), maskReferences.toMap()) }
@@ -227,5 +238,82 @@ class ExportSnapshotTest {
             val error = try { h.freeze(); throw AssertionError("Unimplemented path silently dropped dependencies") } catch (failure: RepositoryFailure) { failure.error }
             assertEquals(OperationErrorCode.PROVIDER_UNAVAILABLE, error.code); assertTrue(h.snapshots.isEmpty()); assertTrue(h.jobs.isEmpty()); assertEquals(before, h.nonSnapshotState())
         }
+    }
+
+    @Test fun loadedSnapshotIgnoresLaterLivePageRemovalAndRecipeChanges() = runTest {
+        val h = Harness(); val frozen = h.freeze() as ExportSnapshot
+        h.f.metadata.pages.clear(); h.f.metadata.recipes.clear()
+        h.onProof = { throw AssertionError("Metadata lookup must not read source files") }; h.onAdmission = { throw AssertionError("Metadata lookup must not rerun admission") }
+        val before = h.nonSnapshotState(); val loaded = h.load()
+        assertEquals(frozen.snapshotId, loaded.snapshotId); assertEquals(frozen.snapshotHash, loaded.snapshotHash)
+        assertEquals(frozen.pages.map { it.pageId }, loaded.pages.map { it.pageId }); assertEquals(1L, loaded.documentRevision)
+        for (page in loaded.pages) assertEquals(0, RecipeCodec.decode(page.canonicalRecipe).geometry.outputQuarterTurns)
+        assertEquals(before, h.nonSnapshotState()); assertEquals(1, h.snapshots.size); assertEquals(3, h.jobs.size)
+    }
+
+    @Test fun missingCommittedSnapshotIsAnExplicitFailureNotAnEmptyDocument() = runTest {
+        val h = Harness(); val before = h.nonSnapshotState()
+        val error = try { h.load(java.util.UUID.randomUUID().toString()); throw AssertionError("Absent snapshot loaded") } catch (failure: RepositoryFailure) { failure.error }
+        assertEquals(OperationErrorCode.SOURCE_UNAVAILABLE, error.code); assertTrue(h.snapshots.isEmpty()); assertEquals(before, h.nonSnapshotState())
+    }
+
+    @Test fun changedFrozenContentOrStoredHashCannotBeLoadedAsTheReviewedSnapshot() = runTest {
+        for (fault in listOf("HASH", "RECIPE", "ROW_SNAPSHOT", "ORDINAL", "SOURCE")) {
+            val h = Harness(); h.freeze(); val snapshot = h.snapshots.values.single(); val page = h.pages.values.first(); val key = page.snapshotId to page.ordinal
+            when (fault) {
+                "HASH" -> h.snapshots[snapshot.snapshotId] = snapshot.copy(snapshotSha256 = "f".repeat(64))
+                "RECIPE" -> h.pages[key] = page.copy(recipe = byteArrayOf(0))
+                "ROW_SNAPSHOT" -> h.pages[key] = page.copy(snapshotId = java.util.UUID.randomUUID().toString())
+                "ORDINAL" -> h.pages[key] = page.copy(ordinal = 7)
+                else -> h.pages[key] = page.copy(sourceId = java.util.UUID.randomUUID().toString())
+            }
+            val rows = h.pages.toMap(); val records = h.snapshots.toMap(); val before = h.nonSnapshotState()
+            val error = try { h.load(); throw AssertionError("Changed frozen identity accepted") } catch (failure: RepositoryFailure) { failure.error }
+            assertEquals(OperationErrorCode.INTEGRITY_FAILED, error.code); assertEquals(rows, h.pages); assertEquals(records, h.snapshots); assertEquals(before, h.nonSnapshotState())
+        }
+    }
+
+    @Test fun unknownTerminalAndExpiredSnapshotsCannotAuthorizeConsumption() = runTest {
+        for ((state, code) in listOf("FUTURE_STATE" to OperationErrorCode.UNSUPPORTED_VERSION, "CANCELED" to OperationErrorCode.CANCELED, "FAILED" to OperationErrorCode.PROCESSING_FAILED, "EXPIRED" to OperationErrorCode.SESSION_EXPIRED, "FROZEN" to OperationErrorCode.SESSION_EXPIRED)) {
+            val h = Harness(); h.freeze(); val row = h.snapshots.values.single(); h.snapshots[row.snapshotId] = row.copy(state = state, retainedUntil = if (state == "FROZEN") 1000 else Long.MAX_VALUE)
+            h.pagesBounded = false
+            val before = h.snapshots.toMap()
+            val error = try { h.load(); throw AssertionError("Unusable lifecycle loaded") } catch (failure: RepositoryFailure) { failure.error }
+            assertEquals(code, error.code); assertEquals(before, h.snapshots)
+        }
+    }
+
+    @Test fun unsupportedOrNoncanonicalSettingsBytesStayPreservedOnLoadFailure() = runTest {
+        for (future in listOf(false, true)) {
+            val h = Harness(); h.freeze(); val row = h.snapshots.values.single(); val bytes = if (future) byteArrayOf(0) else row.settings + byteArrayOf(0)
+            h.snapshots[row.snapshotId] = row.copy(settings = bytes)
+            val error = try { h.load(); throw AssertionError("Unknown settings bytes loaded") } catch (failure: RepositoryFailure) { failure.error }
+            assertEquals(OperationErrorCode.UNSUPPORTED_VERSION, error.code); assertArrayEquals(bytes, h.snapshots.getValue(row.snapshotId).settings)
+        }
+    }
+
+    @Test fun loadedPublicValuesOwnEveryBlobAcrossRepeatedLookups() = runTest {
+        val h = Harness(); h.freeze(); val first = h.load(); val bytes = first.pages.first().canonicalRecipe
+        first.pages.first().canonicalRecipe.fill(0); first.pages.first().providers.fill(0); first.pages.first().masks.fill(0)
+        val second = h.load(); assertArrayEquals(bytes, second.pages.first().canonicalRecipe)
+        h.pages.values.first().recipe.fill(0); assertArrayEquals(bytes, first.pages.first().canonicalRecipe); assertArrayEquals(bytes, second.pages.first().canonicalRecipe)
+    }
+
+    @Test fun oversizedPersistedSnapshotHeaderRefusesBeforeBlobMaterialization() = runTest {
+        val h = Harness(); h.freeze(); h.snapshotBounded = false; val before = h.snapshots.toMap()
+        val error = try { h.load(); throw AssertionError("Unbounded persisted snapshot header was accepted") } catch (failure: RepositoryFailure) { failure.error }
+        assertEquals(OperationErrorCode.INTEGRITY_FAILED, error.code); assertEquals(before, h.snapshots)
+    }
+
+    @Test fun unboundedOrLossyPageProjectionCannotReachVerifiedLoad() = runTest {
+        val h = Harness(); h.freeze(); h.pagesBounded = false; val before = h.pages.toMap()
+        val error = try { h.load(); throw AssertionError("Unbounded or lossy page projection was accepted") } catch (failure: RepositoryFailure) { failure.error }
+        assertEquals(OperationErrorCode.INTEGRITY_FAILED, error.code); assertEquals(before, h.pages)
+    }
+
+    @Test fun retainedFutureFrozenRecipeIsUnsupportedRatherThanReportedCorrupt() = runTest {
+        val h = Harness(); h.freeze(); val row = h.pages.values.first(); h.pages[row.snapshotId to row.ordinal] = row.copy(recipeSchemaVersion = 2); val before = h.pages.toMap()
+        val error = try { h.load(); throw AssertionError("Future frozen recipe executed") } catch (failure: RepositoryFailure) { failure.error }
+        assertEquals(OperationErrorCode.UNSUPPORTED_VERSION, error.code); assertEquals(before, h.pages)
     }
 }
