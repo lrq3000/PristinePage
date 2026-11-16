@@ -1,22 +1,21 @@
 package app.pristinepage.image
 
-import android.graphics.Bitmap
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import app.pristinepage.core.image.RgbImage
 import app.pristinepage.data.files.SourceInspector
 import app.pristinepage.data.model.*
 import app.pristinepage.image.decode.ImageAllocationBudget
-import java.io.ByteArrayOutputStream
-import java.io.DataOutputStream
 import java.io.File
 import java.lang.reflect.InvocationTargetException
-import java.nio.ByteBuffer
-import java.nio.ByteOrder
-import java.security.MessageDigest
 import java.util.UUID
-import java.util.zip.CRC32
-import java.util.zip.DeflaterOutputStream
+import app.pristinepage.image.EncodedImageFixtures.be
+import app.pristinepage.image.EncodedImageFixtures.chunk
+import app.pristinepage.image.EncodedImageFixtures.exif
+import app.pristinepage.image.EncodedImageFixtures.jpeg
+import app.pristinepage.image.EncodedImageFixtures.png
+import app.pristinepage.image.EncodedImageFixtures.rgbaPng
+import app.pristinepage.image.EncodedImageFixtures.sha
 import kotlin.coroutines.intrinsics.suspendCoroutineUninterceptedOrReturn
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.*
@@ -33,7 +32,6 @@ class OrientationDecodeTest {
         catch (failure: InvocationTargetException) { throw failure.targetException }
     }
     private fun file(bytes: ByteArray): File = File(InstrumentationRegistry.getInstrumentation().targetContext.filesDir, "t04-decode/${UUID.randomUUID()}.bin").apply { parentFile!!.mkdirs(); writeBytes(bytes) }
-    private fun sha(bytes: ByteArray): String = MessageDigest.getInstance("SHA-256").digest(bytes).joinToString("") { "%02x".format(it.toInt() and 255) }
     private suspend fun decode(inspector: SourceInspector, file: File): Any {
         val method = inspector.javaClass.methods.single { it.name == "decodeFile" }
         return suspendCoroutineUninterceptedOrReturn { continuation ->
@@ -42,26 +40,6 @@ class OrientationDecodeTest {
     }
     private fun image(decoded: Any): RgbImage = decoded.javaClass.getMethod("getImage").invoke(decoded) as RgbImage
     private fun inspection(decoded: Any): SourceInspection = decoded.javaClass.getMethod("getInspection").invoke(decoded) as SourceInspection
-    private fun be(value: Int) = ByteBuffer.allocate(4).putInt(value).array()
-    private fun chunk(kind: String, data: ByteArray): ByteArray {
-        val body = kind.toByteArray() + data; val crc = CRC32().apply { update(body) }
-        return be(data.size) + body + be(crc.value.toInt())
-    }
-    private fun png(width: Int, height: Int, depth: Int, color: Int, row: ByteArray, extra: ByteArray = byteArrayOf()): ByteArray {
-        val z = ByteArrayOutputStream().also { out -> DeflaterOutputStream(out).use { it.write(row) } }.toByteArray()
-        return byteArrayOf(-119, 80, 78, 71, 13, 10, 26, 10) + chunk("IHDR", be(width) + be(height) + byteArrayOf(depth.toByte(), color.toByte(), 0, 0, 0)) + extra + chunk("IDAT", z) + chunk("IEND", byteArrayOf())
-    }
-    private fun rgbaPng(): ByteArray = png(4, 1, 8, 6, byteArrayOf(0, -1, 0, 64, 0, 64, 32, 0, -128, -1, 0, 0, -1, -1, -1, -1, 1))
-    private fun jpeg(): ByteArray {
-        val colors = intArrayOf(0xffff0000.toInt(), 0xff00ff00.toInt(), 0xff0000ff.toInt(), 0xffffff00.toInt(), 0xff00ffff.toInt(), 0xffff00ff.toInt())
-        val bitmap = Bitmap.createBitmap(colors, 3, 2, Bitmap.Config.ARGB_8888)
-        return try { ByteArrayOutputStream().also { assertTrue(bitmap.compress(Bitmap.CompressFormat.JPEG, 100, it)) }.toByteArray() } finally { bitmap.recycle() }
-    }
-    private fun exif(jpeg: ByteArray, orientation: Int, type: Int = 3, count: Int = 1, tag: Int = 0x112): ByteArray {
-        val tiff = ByteBuffer.allocate(26).order(ByteOrder.LITTLE_ENDIAN).put('I'.code.toByte()).put('I'.code.toByte()).putShort(42).putInt(8).putShort(1).putShort(tag.toShort()).putShort(type.toShort()).putInt(count).putShort(orientation.toShort()).putShort(0).putInt(0).array()
-        val payload = "Exif\u0000\u0000".toByteArray() + tiff
-        return jpeg.copyOfRange(0, 2) + byteArrayOf(-1, -31, 0, (payload.size + 2).toByte()) + payload + jpeg.copyOfRange(2, jpeg.size)
-    }
 
     @Test fun pngStraightAlphaIsComposedExactlyAndOriginalBytesNeverChange() = runBlocking {
         val budget = ImageAllocationBudget(32L * 1024 * 1024); val service = inspector(budget); val bytes = rgbaPng(); val source = file(bytes)

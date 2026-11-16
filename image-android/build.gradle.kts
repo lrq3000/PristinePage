@@ -48,4 +48,6 @@ dependencies {
     testImplementation(libs.kotlinx.coroutines.test)
     androidTestImplementation(libs.androidx.test.junit)
     androidTestImplementation(libs.androidx.test.runner)
+    // The production data dependency owns Room; expose its already-approved runtime API only to real cross-module instrumentation fixtures.
+    androidTestImplementation(libs.room.runtime)
 }
