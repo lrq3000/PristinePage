@@ -23,6 +23,7 @@ class PrivateImportStore private constructor(
     val lifecycle: ImportSessionLifecycle,
     val sources: BoundSourceIngest,
     val committedSources: CommittedSources,
+    val catalog: DocumentCatalog,
 ) : AutoCloseable {
     override fun close() = database.close()
 
@@ -48,7 +49,7 @@ class PrivateImportStore private constructor(
                     val unavailableRenderer = RecipeAdmission { _, _ -> OperationError(OperationErrorCode.PROVIDER_UNAVAILABLE, false, "renderer_unavailable", null) }
                     val documents = RoomDocumentRepository(metadata, unavailableRenderer, recovery = recovery)
                     coroutineContext.ensureActive()
-                    PrivateImportStore(database, documents, sessions, sessions, sessions, sources, RoomCommittedSources(metadata, database.catalog(), files))
+                    PrivateImportStore(database, documents, sessions, sessions, sessions, sources, RoomCommittedSources(metadata, database.catalog(), files), RoomDocumentCatalog(metadata, database.catalog()))
                 }
             } catch (failure: Throwable) {
                 // Preserve the initiating structured failure/cancellation even if close encounters another storage fault. No reset, schema rewrite or file cleanup is attempted.

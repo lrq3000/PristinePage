@@ -7,9 +7,38 @@ import androidx.room.Query
 import androidx.room.Update
 import app.pristinepage.data.repository.CatalogQueries
 import app.pristinepage.data.repository.CommittedSourceQueries
+import app.pristinepage.data.repository.DocumentReadQueries
+
+// Room's version-1 TEXT primary key has this SQLite auto-index. Without the explicit access path SQLite prefers the lifecycle/updatedAt index and sorts every active document for each tiny page. A PK range scan preserves cursor order without a new schema/index; work can still include inactive gaps, not every distant active row.
+private const val ACTIVE_DOCUMENT_IDS_SQL = """SELECT CASE WHEN (typeof(documentId)='text' AND length(documentId)=36 AND length(CAST(documentId AS BLOB))=36) THEN documentId ELSE '' END
+    FROM Document INDEXED BY sqlite_autoindex_Document_1 WHERE documentId>=COALESCE(:after,'') AND (:after IS NULL OR documentId>:after) AND lifecycle='ACTIVE' ORDER BY documentId LIMIT :limit"""
 
 /** Bound SQL only. Business commands run these synchronous metadata operations on IO inside Room's transaction, never across provider/decode/render work. */
-@Dao abstract class CatalogDao : CatalogQueries, CommittedSourceQueries {
+@Dao abstract class CatalogDao : CatalogQueries, CommittedSourceQueries, DocumentReadQueries {
+    // Only bounded identities cross the first projection. A malformed row remains observable as a tiny invalid sentinel; filtering it out would falsely present an intact empty library.
+    @Query(ACTIVE_DOCUMENT_IDS_SQL)
+    abstract override fun activeDocumentIdsAfter(after: String?, limit: Int): List<String>
+    // Existing title writers accept bounded well-formed NULs. SQLite length(TEXT) stops there, possibly at zero; byte bounds remain mandatory and the reader checks the entire materialized UTF-16 value without rewriting it.
+    @Query("""SELECT CASE WHEN
+        ((typeof(documentId)='text' AND length(documentId)=36 AND length(CAST(documentId AS BLOB))=36) AND (typeof(title)='text' AND length(title)<=160 AND length(CAST(title AS BLOB)) BETWEEN 1 AND 640))
+        AND ((typeof(documentRevision)='integer' AND documentRevision>=1) AND (typeof(lifecycle)='text' AND lifecycle IN ('ACTIVE','TOMBSTONED','PURGING') AND length(CAST(lifecycle AS BLOB)) BETWEEN 6 AND 10))
+        AND (typeof(createdAt)='integer' AND typeof(updatedAt)='integer' AND (deletedAt IS NULL OR typeof(deletedAt)='integer'))
+        THEN 1 ELSE 0 END FROM Document WHERE documentId=:documentId""")
+    abstract override fun documentReadIsBounded(documentId: String): Boolean?
+    @Query("SELECT COUNT(*) FROM Page WHERE documentId=:documentId AND state='ACTIVE'")
+    abstract override fun activePageCount(documentId: String): Long
+    // Guard every SELECT-star field before Room's String allocation/Int narrowing. The indexed active set must be bounded and contiguous, not merely have a plausible count; empty documents are valid metadata.
+    @Query("""SELECT CASE WHEN
+        (SELECT COUNT(*) FROM Page WHERE documentId=:documentId AND state='ACTIVE')<=100
+        AND NOT EXISTS(SELECT 1 FROM Page WHERE documentId=:documentId AND state='ACTIVE' AND NOT (
+            ((typeof(pageId)='text' AND length(pageId)=36 AND length(CAST(pageId AS BLOB))=36) AND (typeof(documentId)='text' AND length(documentId)=36 AND length(CAST(documentId AS BLOB))=36))
+            AND ((typeof(sourceId)='text' AND length(sourceId)=36 AND length(CAST(sourceId AS BLOB))=36) AND (typeof(currentRecipeRevision)='integer' AND currentRecipeRevision>=1))
+            AND ((typeof(state)='text' AND length(CAST(state AS BLOB))=6) AND (ordinal IS NOT NULL AND typeof(ordinal)='integer' AND ordinal BETWEEN 0 AND 99))
+            AND (removedAt IS NULL AND typeof(createdAt)='integer')))
+        AND (SELECT COALESCE(MIN(ordinal),0) FROM Page WHERE documentId=:documentId AND state='ACTIVE')=0
+        AND (SELECT COALESCE(MAX(ordinal),-1)+1 FROM Page WHERE documentId=:documentId AND state='ACTIVE')=(SELECT COUNT(*) FROM Page WHERE documentId=:documentId AND state='ACTIVE')
+        THEN 1 ELSE 0 END""")
+    abstract override fun activePagesReadIsBounded(documentId: String): Boolean
     // Group related predicates explicitly: this scalar guard precedes SELECT-star/Int narrowing. TEXT character length stops at NUL, so raw UTF-8 byte ceilings must also hold before any Kotlin materialization; a128-UTF16-unit fingerprint needs at most512UTF8bytes.
     @Query("""SELECT CASE WHEN
         ((typeof(s.sourceId)='text' AND length(s.sourceId)=36 AND length(CAST(s.sourceId AS BLOB))=36) AND (typeof(s.sourceBlobId)='text' AND length(s.sourceBlobId)=36 AND length(CAST(s.sourceBlobId AS BLOB))=36))
