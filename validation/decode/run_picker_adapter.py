@@ -270,11 +270,14 @@ class PickerAdapterRun:
             assert len(identities) == 2, "Persist partial-launch obligation; do not invent original process identities"
             row = self.exact(self.inventory())
             assert [int(row[5]), int(row[6])] == [identity[0] for identity in identities]
+            states = [self.process(pid) for pid, _ in identities]
+            # Matching numeric PIDs do not prove the current row is the original runtime: Windows can reuse them. Refuse before publishing shutdown authorization or issuing quit; retain the original ownership/reservation for reconciliation.
+            assert all(state and state["start"] == start and state["running"] for state, (_, start) in zip(states, identities)), {"expected": identities, "observed": states}
             attempt_token = str(uuid.uuid4())
             record.update(shutdown_ready=True, evidence_saved=True, state="shutdown_ready", shutdown_processes=identities, cleanup_attempt={"owner": OWNER, "generation": self.generation, "token": attempt_token, "state": "running", "started": now()})
             self.save(self.record, record)
             self.save(self.slot, {"owner": OWNER, "generation": self.generation, "state": "held", "operation": "P04 picker adapter shutdown", "acquired": now()})
-            self.save(self.path("pre-shutdown.json"), {"generation": self.generation, "processes": [self.process(pid) for pid, _ in identities], "transcriptPrefix": self.evidence(self.transcript)})
+            self.save(self.path("pre-shutdown.json"), {"generation": self.generation, "processes": states, "transcriptPrefix": self.evidence(self.transcript)})
             self.command([CONSOLE, "quit", "--index", "2"])
             deadline = time.monotonic() + 60
             while True:

@@ -65,6 +65,21 @@ class FailedVerification(runner.PickerAdapterRun):
 
 
 class PickerRunnerSafetyTest(unittest.TestCase):
+    def test_same_pid_with_replaced_start_identity_cannot_be_quit(self):
+        run = FailedVerification()
+        # Keep the current inventory's numeric IDs identical; only the real process-identity boundary reports a replacement. No emulator or OS process is created or stopped.
+        run.process = lambda pid: {"pid": pid, "start": {11: 999, 22: 202}[pid], "running": True, "wait": 258, "exit": 259}
+        try:
+            run.shutdown()
+        except (AssertionError, OSError):
+            pass
+        self.assertFalse(run.quit_finished, "A replacement process pair reached the native quit command")
+        self.assertEqual("shutdown_failed", run.record.value["state"])
+        self.assertEqual(runner.OWNER, run.record.value["owner"])
+        self.assertEqual([[11, 101], [22, 202]], run.record.value["runtime_processes"])
+        self.assertEqual(4194304, run.record.value["reservedKiB"])
+        self.assertFalse(run.lock.held)
+
     def test_finished_failed_cleanup_is_not_advertised_as_a_live_attempt(self):
         run = FailedVerification()
         with self.assertRaisesRegex(OSError, "post-quit inventory"):
