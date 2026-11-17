@@ -14,7 +14,7 @@ import java.util.UUID
 import kotlinx.coroutines.Dispatchers
 
 /** Only Android Room is substituted. Full production row types, canonical codec and repository business commands remain real; later actual Room rollback/process-death tests must validate this port's platform adapter. */
-internal class MemoryMetadata : MetadataAccess, CatalogQueries {
+internal class MemoryMetadata : MetadataAccess, CatalogQueries, EditablePageQueries {
     val documents = linkedMapOf<String, DocumentRow>()
     val pages = linkedMapOf<String, PageRow>()
     val sources = linkedMapOf<String, SourceRow>()
@@ -56,6 +56,34 @@ internal class MemoryMetadata : MetadataAccess, CatalogQueries {
     override fun page(id: String) = pages[id]
     override fun source(id: String) = sources[id]
     override fun sourceBlob(id: String) = blobs[id]
+    // Kotlin rows cannot represent SQLite storage-class/Int-narrowing adversaries. These checks model bounded fixture rows only; actual DAO SQL/native Room tests remain the raw-boundary evidence. Every guard still requires the same metadata transaction as its consumer.
+    private fun text(value: String, maximum: Int) = value.toByteArray(Charsets.UTF_8).size in 1..maximum
+    private fun id(value: String) = value.length == 36 && text(value, 36)
+    override fun pageReadIsBounded(pageId: String): Boolean? {
+        check(inTransaction)
+        return pages[pageId]?.let { id(it.pageId) && id(it.documentId) && id(it.sourceId) && it.currentRecipeRevision > 0 && ((it.state == "ACTIVE" && it.ordinal in 0..99 && it.removedAt == null) || (it.state == "REMOVED" && it.ordinal == null && it.removedAt != null)) }
+    }
+    override fun documentReadIsBounded(documentId: String): Boolean? {
+        check(inTransaction)
+        return documents[documentId]?.let { id(it.documentId) && it.title.length <= 160 && text(it.title, 640) && it.documentRevision > 0 && it.lifecycle in setOf("ACTIVE", "TOMBSTONED", "PURGING") }
+    }
+    override fun sourceReadIsBounded(id: String): Boolean? {
+        check(inTransaction)
+        return sources[id]?.let { s ->
+            val b = blobs[s.sourceBlobId]
+            id(s.sourceId) && id(s.sourceBlobId) && s.state == "READY" && s.pixelSha256.length == 64 && text(s.pixelSha256,64) && s.width in 1..12000 && s.height in 1..12000 && s.width.toLong()*s.height <= 48_000_000 && s.exifOrientation in 1..8 && s.conversionFingerprint.length in 1..128 && text(s.conversionFingerprint,512) && s.refCount >= 0 && (s.profileSha256 == null || (s.profileSha256.length == 64 && text(s.profileSha256,64))) &&
+                b != null && id(b.sourceBlobId) && b.state == "READY" && b.byteSha256.length == 64 && text(b.byteSha256,64) && b.byteCount in 1..104857600L && b.mime in setOf("image/png","image/jpeg","image/webp") && b.encodedWidth in 1..12000 && b.encodedHeight in 1..12000 && b.encodedWidth.toLong()*b.encodedHeight <= 48_000_000 && b.relativePath == "sources/${b.sourceBlobId}/original.bin" && b.sourceCount >= 0 && id(b.ingestTransactionId)
+        }
+    }
+    override fun recipeReadIsBounded(pageId: String, revision: Long): Boolean? {
+        check(inTransaction)
+        return recipes[pageId to revision]?.let { id(it.pageId) && id(it.sourceId) && it.recipeRevision > 0 && it.recipeSchemaVersion > 0 && it.canonicalRecipe.size in 1..524288 && it.recipeSha256.length == 64 && text(it.recipeSha256,64) && (it.parentRevision == null || (it.parentRevision > 0 && it.parentRevision < it.recipeRevision)) }
+    }
+    override fun recipeHasMasks(pageId: String, revision: Long): Boolean { check(inTransaction); return associations.values.any { it.pageId == pageId && it.recipeRevision == revision } }
+    override fun activePageCount(documentId: String): Long { check(inTransaction); return activePages(documentId).size.toLong() }
+    override fun activePagesReadIsBounded(documentId: String): Boolean { check(inTransaction); val rows = activePages(documentId); return rows.size <= 100 && rows.all { pageReadIsBounded(it.pageId) == true } && rows.map { it.ordinal } == rows.indices.toList() }
+    override fun activeDocumentIdsAfter(after: String?, limit: Int): List<String> { check(inTransaction); return documents.values.filter { it.lifecycle == "ACTIVE" && (after == null || it.documentId > after) }.sortedBy { it.documentId }.take(limit).map { it.documentId } }
+    override fun activeImportIds(documentId: String): List<String> = error("Recipe fixture has no import-session rows")
     override fun recipe(pageId: String, revision: Long) = recipes[pageId to revision]
     override fun maxRecipeRevision(pageId: String) = recipes.keys.filter { it.first == pageId }.maxOfOrNull { it.second } ?: 0
     override fun recipeMasks(pageId: String, revision: Long) = associations.values.filter { it.pageId == pageId && it.recipeRevision == revision }

@@ -93,7 +93,7 @@ class UndoRetentionTest {
 
     @Test fun lateExpiryWriteFailureRollsBackTheWholeCreatingEdit() = runTest {
         val f = RepositoryFixture(); edits(f, 20); val before = nonUndoState(f); val undos = f.metadata.undos.toMap()
-        val failingQueries = Proxy.newProxyInstance(CatalogQueries::class.java.classLoader, arrayOf(CatalogQueries::class.java)) { _, method, args ->
+        val failingQueries = Proxy.newProxyInstance(CatalogQueries::class.java.classLoader, arrayOf(CatalogQueries::class.java, EditablePageQueries::class.java)) { _, method, args ->
             if (method.name == "expireUndoEntries") throw IOException("content://private-provider/retention-fault")
             try { method.invoke(f.metadata, *(args ?: emptyArray())) }
             catch (failure: InvocationTargetException) { throw failure.targetException }

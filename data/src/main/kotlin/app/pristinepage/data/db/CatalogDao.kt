@@ -6,15 +6,14 @@ import androidx.room.OnConflictStrategy
 import androidx.room.Query
 import androidx.room.Update
 import app.pristinepage.data.repository.CatalogQueries
-import app.pristinepage.data.repository.CommittedSourceQueries
-import app.pristinepage.data.repository.DocumentReadQueries
+import app.pristinepage.data.repository.EditablePageQueries
 
 // Room's version-1 TEXT primary key has this SQLite auto-index. Without the explicit access path SQLite prefers the lifecycle/updatedAt index and sorts every active document for each tiny page. A PK range scan preserves cursor order without a new schema/index; work can still include inactive gaps, not every distant active row.
 private const val ACTIVE_DOCUMENT_IDS_SQL = """SELECT CASE WHEN (typeof(documentId)='text' AND length(documentId)=36 AND length(CAST(documentId AS BLOB))=36) THEN documentId ELSE '' END
     FROM Document INDEXED BY sqlite_autoindex_Document_1 WHERE documentId>=COALESCE(:after,'') AND (:after IS NULL OR documentId>:after) AND lifecycle='ACTIVE' ORDER BY documentId LIMIT :limit"""
 
 /** Bound SQL only. Business commands run these synchronous metadata operations on IO inside Room's transaction, never across provider/decode/render work. */
-@Dao abstract class CatalogDao : CatalogQueries, CommittedSourceQueries, DocumentReadQueries {
+@Dao abstract class CatalogDao : CatalogQueries, EditablePageQueries {
     // Only bounded identities cross the first projection. A malformed row remains observable as a tiny invalid sentinel; filtering it out would falsely present an intact empty library.
     @Query(ACTIVE_DOCUMENT_IDS_SQL)
     abstract override fun activeDocumentIdsAfter(after: String?, limit: Int): List<String>
@@ -39,6 +38,14 @@ private const val ACTIVE_DOCUMENT_IDS_SQL = """SELECT CASE WHEN (typeof(document
         AND (SELECT COALESCE(MAX(ordinal),-1)+1 FROM Page WHERE documentId=:documentId AND state='ACTIVE')=(SELECT COUNT(*) FROM Page WHERE documentId=:documentId AND state='ACTIVE')
         THEN 1 ELSE 0 END""")
     abstract override fun activePagesReadIsBounded(documentId: String): Boolean
+    // A save starts with one page ID, before its document is known. Bound every SELECT-star field without projecting a potentially huge identity or narrowing an ordinal first; inactive rows remain observable for an explicit refusal.
+    @Query("""SELECT CASE WHEN
+        ((typeof(pageId)='text' AND length(pageId)=36 AND length(CAST(pageId AS BLOB))=36) AND (typeof(documentId)='text' AND length(documentId)=36 AND length(CAST(documentId AS BLOB))=36))
+        AND ((typeof(sourceId)='text' AND length(sourceId)=36 AND length(CAST(sourceId AS BLOB))=36) AND (typeof(currentRecipeRevision)='integer' AND currentRecipeRevision>=1))
+        AND ((typeof(state)='text' AND ((state='ACTIVE' AND length(CAST(state AS BLOB))=6 AND typeof(ordinal)='integer' AND ordinal BETWEEN 0 AND 99 AND removedAt IS NULL)
+            OR (state='REMOVED' AND length(CAST(state AS BLOB))=7 AND ordinal IS NULL AND typeof(removedAt)='integer'))) AND typeof(createdAt)='integer')
+        THEN 1 ELSE 0 END FROM Page WHERE pageId=:pageId""")
+    abstract override fun pageReadIsBounded(pageId: String): Boolean?
     // Match the existing pending predicate exactly; no ordering is needed when a valid document has at most one active BATCH. LIMIT2 exposes ambiguity without a history sort or URI-bearing row projection.
     @Query("""SELECT CASE WHEN (typeof(sessionId)='text' AND length(sessionId)=36 AND length(CAST(sessionId AS BLOB))=36) THEN sessionId ELSE '' END
         FROM ImportSession WHERE documentId=:documentId AND kind='BATCH' AND state NOT IN ('COMMITTED','CANCELED','FAILED','QUARANTINED') LIMIT 2""")
@@ -59,6 +66,16 @@ private const val ACTIVE_DOCUMENT_IDS_SQL = """SELECT CASE WHEN (typeof(document
             AND ((typeof(b.sourceCount)='integer' AND b.sourceCount>=0) AND (typeof(b.ingestTransactionId)='text' AND length(b.ingestTransactionId)=36 AND length(CAST(b.ingestTransactionId AS BLOB))=36) AND typeof(b.createdAt)='integer'))
         THEN 1 ELSE 0 END FROM Source s WHERE s.sourceId=:id""")
     abstract override fun sourceReadIsBounded(id: String): Boolean?
+    // Bound the retained recipe before Room allocates its BLOB or narrows schemaVersion to Int. Future positive Int-range schemas reach explicit unsupported handling; aliases such as 2^32+1 never masquerade as v1. NUL-terminated TEXT length is not a byte bound.
+    @Query("""SELECT CASE WHEN
+        ((typeof(pageId)='text' AND length(pageId)=36 AND length(CAST(pageId AS BLOB))=36) AND (typeof(sourceId)='text' AND length(sourceId)=36 AND length(CAST(sourceId AS BLOB))=36))
+        AND ((typeof(recipeRevision)='integer' AND recipeRevision>=1) AND (typeof(recipeSchemaVersion)='integer' AND recipeSchemaVersion BETWEEN 1 AND 2147483647))
+        AND ((typeof(canonicalRecipe)='blob' AND length(canonicalRecipe) BETWEEN 1 AND 524288) AND (typeof(recipeSha256)='text' AND length(recipeSha256)=64 AND length(CAST(recipeSha256 AS BLOB))=64))
+        AND ((parentRevision IS NULL OR (typeof(parentRevision)='integer' AND parentRevision>=1 AND parentRevision<recipeRevision)) AND typeof(createdAt)='integer')
+        THEN 1 ELSE 0 END FROM RecipeRevision WHERE pageId=:pageId AND recipeRevision=:revision""")
+    abstract override fun recipeReadIsBounded(pageId: String, revision: Long): Boolean?
+    @Query("SELECT EXISTS(SELECT 1 FROM RecipeMask WHERE pageId=:pageId AND recipeRevision=:revision)")
+    abstract override fun recipeHasMasks(pageId: String, revision: Long): Boolean
     @Query("SELECT * FROM Document WHERE documentId=:id") abstract override fun document(id: String): DocumentRow?
     // All retained lifecycles participate in availability expiry; select IDs only, with an indexed initial range that also exposes invalid empty IDs for rejection.
     @Query("SELECT documentId FROM Document WHERE documentId>=COALESCE(:objectId,'') AND (:objectId IS NULL OR documentId>:objectId) ORDER BY documentId LIMIT :limit")

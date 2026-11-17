@@ -15,6 +15,7 @@ import app.pristinepage.core.pipeline.RenderCoordinator
 import app.pristinepage.image.render.DefaultRenderCoordinator
 import app.pristinepage.image.render.GeometryEngine
 import app.pristinepage.image.render.AppearanceEngine
+import app.pristinepage.image.render.ClassicalRecipeAdmission
 import java.io.FileNotFoundException
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
@@ -41,7 +42,7 @@ class ApplicationServices(context: Context, private val budget: ImageAllocationB
     suspend fun imports(): ApplicationImports = initialization.withLock {
         initialized ?: run {
             val normalizer = AndroidSourceInspector(budget)
-            val store = PrivateImportStore.open(context, provider, normalizer)
+            val store = PrivateImportStore.open(context, provider, normalizer, ClassicalRecipeAdmission())
             try {
                 val report = store.documents.reconcile()
                 currentCoroutineContext().ensureActive()

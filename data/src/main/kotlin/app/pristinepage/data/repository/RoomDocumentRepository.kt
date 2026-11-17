@@ -34,6 +34,9 @@ class RoomDocumentRepository @JvmOverloads constructor(private val metadata: Met
     private class Conflict(val actual: Long) : RuntimeException()
     private data class MaskState(val pageId: String, val revision: Long, val links: List<RecipeMaskRow>, val identities: List<MaskRow>)
     private data class Prepared(val page: PageRow, val current: RecipeRevisionRow, val recipe: Recipe, val bytes: ByteArray, val hash: String, val masks: MaskState, val restored: RecipeRevisionRow?)
+    private data class PreparationSnapshot(val page: PageRow, val current: RecipeRevisionRow, val source: SourceRow, val masks: MaskState, val restored: RecipeRevisionRow?)
+    // Missing raw-query support is unavailable, never permission to fall back to unsafe generated SELECT-star projections. Keep existing constructors/bridges; real Room exposes both ports through the same DAO.
+    private val bounds: EditablePageQueries get() = q as? EditablePageQueries ?: reject(OperationErrorCode.PROVIDER_UNAVAILABLE, "metadata_guards_unavailable")
 
     override suspend fun createDocument(title: String): DocumentId = withContext(dispatcher) {
         try {
@@ -379,34 +382,41 @@ class RoomDocumentRepository @JvmOverloads constructor(private val metadata: Met
     }
 
     private fun prepare(pageId: String, recipe: Recipe, restoreRevision: Long? = null): Prepared {
-        val page = q.page(pageId) ?: reject(OperationErrorCode.SOURCE_UNAVAILABLE, "page_unavailable", pageId)
-        if (page.state != "ACTIVE") reject(OperationErrorCode.INVALID_INPUT, "page_not_active", pageId)
-        val current = q.recipe(pageId, page.currentRecipeRevision) ?: reject(OperationErrorCode.INTEGRITY_FAILED, "recipe_history_missing", pageId)
-        decodeRecipe(current)
-        checkBinding(page, recipe)
-        // A historical target is a complete recipe-and-mask state. Admit that state from the outset; current masks must never be substituted and swapped back after capability checking.
-        val restored = restoreRevision?.let { revision ->
-            val row = q.recipe(pageId, revision) ?: reject(OperationErrorCode.INTEGRITY_FAILED, "recipe_history_missing", pageId)
-            decodeRecipe(row)
-            if (row.sourceId != page.sourceId || !row.canonicalRecipe.contentEquals(RecipeCodec.encode(recipe))) reject(OperationErrorCode.INTEGRITY_FAILED, "recipe_history_changed", pageId)
-            row
+        // Raw scalar checks and their typed reads share a short snapshot. The recipe BLOB is bounded BEFORE Room's getBlob/getLong.toInt and detached before codec/capability work outside the lock.
+        val snapshot = metadata.transaction {
+            val page = boundedPage(pageId)
+            if (page.state != "ACTIVE") reject(OperationErrorCode.INVALID_INPUT, "page_not_active", pageId)
+            activeDocument(page.documentId)
+            val source = boundedSource(page.sourceId)
+            val current = boundedRecipe(page, page.currentRecipeRevision)
+            val restored = restoreRevision?.let { boundedRecipe(page, it) }
+            PreparationSnapshot(page, current, source, checkedMasks(page.sourceId, pageId, restoreRevision ?: page.currentRecipeRevision), restored)
         }
-        val masks = checkedMasks(page.sourceId, pageId, restoreRevision ?: page.currentRecipeRevision)
+        val page = snapshot.page; val current = snapshot.current
+        checkBinding(page, snapshot.source, decodeRecipe(current), OperationErrorCode.INTEGRITY_FAILED)
+        checkBinding(page, snapshot.source, recipe)
+        // A historical target is a complete recipe-and-mask state. Admit that state from the outset; current masks must never be substituted and swapped back after capability checking.
+        val restored = snapshot.restored?.also { row ->
+            checkBinding(page, snapshot.source, decodeRecipe(row), OperationErrorCode.INTEGRITY_FAILED)
+            if (!row.canonicalRecipe.contentEquals(RecipeCodec.encode(recipe))) reject(OperationErrorCode.INTEGRITY_FAILED, "recipe_history_changed", pageId)
+        }
+        val masks = snapshot.masks
         if (recipe.geometry is GeometryRecipe.RoughCropDewarp || recipe.appearance is AppearanceRecipe.ProviderAppearanceV1) reject(OperationErrorCode.PROVIDER_UNAVAILABLE, "provider_asset_pinning_not_ready", pageId)
         admission.check(recipe, masks.links.any { it.role == "PROTECTION" })?.let { throw RepositoryFailure(it) }
         return Prepared(page, current, recipe, RecipeCodec.encode(recipe), RecipeCodec.hash(recipe), masks, restored)
     }
 
     private fun verifyLive(prepared: Prepared, expectedRevision: Long, conflictRevision: (PageRow) -> Long): PageRow {
-        val page = q.page(prepared.page.pageId) ?: reject(OperationErrorCode.SOURCE_UNAVAILABLE, "page_unavailable", prepared.page.pageId)
+        val page = boundedPage(prepared.page.pageId)
         if (page.currentRecipeRevision != expectedRevision) throw Conflict(conflictRevision(page))
         if (page.state != "ACTIVE" || page.documentId != prepared.page.documentId || page.sourceId != prepared.page.sourceId) reject(OperationErrorCode.INVALID_INPUT, "page_membership_changed", page.pageId)
-        checkBinding(page, prepared.recipe)
-        val current = q.recipe(page.pageId, page.currentRecipeRevision) ?: reject(OperationErrorCode.INTEGRITY_FAILED, "recipe_history_missing", page.pageId)
-        if (current.recipeSchemaVersion != prepared.current.recipeSchemaVersion || current.recipeSha256 != prepared.current.recipeSha256 || !current.canonicalRecipe.contentEquals(prepared.current.canonicalRecipe)) reject(OperationErrorCode.INTEGRITY_FAILED, "recipe_history_changed", page.pageId)
+        checkBinding(page, boundedSource(page.sourceId), prepared.recipe)
+        val current = boundedRecipe(page, page.currentRecipeRevision)
+        // Preparation authenticated the canonical current binding. Exact immutable-row equality now authenticates those same bytes without decoding/hashing under the writer lock; source refcounts may legitimately change.
+        if (!sameRevision(current, prepared.current)) reject(OperationErrorCode.INTEGRITY_FAILED, "recipe_history_changed", page.pageId)
         prepared.restored?.let { expected ->
-            val restored = q.recipe(expected.pageId, expected.recipeRevision) ?: reject(OperationErrorCode.INTEGRITY_FAILED, "recipe_history_missing", page.pageId)
-            if (restored.sourceId != expected.sourceId || restored.recipeSchemaVersion != expected.recipeSchemaVersion || restored.recipeSha256 != expected.recipeSha256 || !restored.canonicalRecipe.contentEquals(expected.canonicalRecipe)) reject(OperationErrorCode.INTEGRITY_FAILED, "recipe_history_changed", page.pageId)
+            val restored = boundedRecipe(page, expected.recipeRevision)
+            if (!sameRevision(restored, expected)) reject(OperationErrorCode.INTEGRITY_FAILED, "recipe_history_changed", page.pageId)
         }
         // Reference counts may legitimately change between admission and commit; immutable mask identity and its association may not. Revalidate the entire captured metadata set before any command writes, without opening mask files under Room's writer lock.
         if (checkedMasks(page.sourceId, prepared.masks.pageId, prepared.masks.revision) != prepared.masks) reject(OperationErrorCode.INTEGRITY_FAILED, "mask_history_changed", page.pageId)
@@ -475,12 +485,37 @@ class RoomDocumentRepository @JvmOverloads constructor(private val metadata: Met
         return MaskState(pageId, revision, masks, identities)
     }
 
-    private fun checkBinding(page: PageRow, recipe: Recipe) {
-        val source = q.source(page.sourceId) ?: reject(OperationErrorCode.SOURCE_UNAVAILABLE, "source_unavailable", page.sourceId)
+    private fun checkBinding(page: PageRow, source: SourceRow, recipe: Recipe, mismatch: OperationErrorCode = OperationErrorCode.INVALID_INPUT) {
         if (source.state != "READY") reject(OperationErrorCode.INTEGRITY_FAILED, "source_not_ready", page.sourceId)
         val binding = recipe.geometry.source
-        if (binding.sourcePixelHash != source.pixelSha256 || binding.sourceSize.width != source.width || binding.sourceSize.height != source.height || binding.orientationColorConversionVersion != source.conversionFingerprint) reject(OperationErrorCode.INVALID_INPUT, "recipe_source_mismatch", page.pageId)
+        if (source.sourceId != page.sourceId || binding.sourcePixelHash != source.pixelSha256 || binding.sourceSize.width != source.width || binding.sourceSize.height != source.height || binding.orientationColorConversionVersion != source.conversionFingerprint) reject(mismatch, "recipe_source_mismatch", page.pageId)
     }
+
+    private fun boundedPage(id: String): PageRow {
+        when (bounds.pageReadIsBounded(id)) {
+            null -> reject(OperationErrorCode.SOURCE_UNAVAILABLE, "page_unavailable", id)
+            false -> reject(OperationErrorCode.INTEGRITY_FAILED, "page_metadata_invalid", id)
+            true -> Unit
+        }
+        val page = q.page(id) ?: reject(OperationErrorCode.INTEGRITY_FAILED, "page_metadata_invalid", id)
+        try { require(page.pageId == id); PageId(page.pageId); DocumentId(page.documentId); SourceId(page.sourceId) }
+        catch (_: IllegalArgumentException) { reject(OperationErrorCode.INTEGRITY_FAILED, "page_metadata_invalid", id) }
+        return page
+    }
+
+    private fun boundedSource(id: String): SourceRow {
+        if (bounds.sourceReadIsBounded(id) != true) reject(OperationErrorCode.INTEGRITY_FAILED, "source_metadata_invalid", id)
+        return q.source(id)?.takeIf { it.sourceId == id && it.state == "READY" } ?: reject(OperationErrorCode.INTEGRITY_FAILED, "source_metadata_invalid", id)
+    }
+
+    private fun boundedRecipe(page: PageRow, revision: Long): RecipeRevisionRow {
+        if (bounds.recipeReadIsBounded(page.pageId, revision) != true) reject(OperationErrorCode.INTEGRITY_FAILED, "recipe_metadata_invalid", page.pageId)
+        val row = q.recipe(page.pageId, revision) ?: reject(OperationErrorCode.INTEGRITY_FAILED, "recipe_history_missing", page.pageId)
+        if (row.pageId != page.pageId || row.recipeRevision != revision || row.sourceId != page.sourceId) reject(OperationErrorCode.INTEGRITY_FAILED, "recipe_source_mismatch", page.pageId)
+        return row.copy(canonicalRecipe = row.canonicalRecipe.copyOf())
+    }
+
+    private fun sameRevision(a: RecipeRevisionRow, b: RecipeRevisionRow) = a.pageId == b.pageId && a.recipeRevision == b.recipeRevision && a.sourceId == b.sourceId && a.recipeSchemaVersion == b.recipeSchemaVersion && a.recipeSha256 == b.recipeSha256 && a.parentRevision == b.parentRevision && a.createdAt == b.createdAt && a.canonicalRecipe.contentEquals(b.canonicalRecipe)
 
     private fun supportedRecipe(page: PageRow): Recipe = decodeRecipe(q.recipe(page.pageId, page.currentRecipeRevision) ?: reject(OperationErrorCode.INTEGRITY_FAILED, "recipe_history_missing", page.pageId))
     private fun decodeRecipe(row: RecipeRevisionRow): Recipe {
@@ -491,7 +526,13 @@ class RoomDocumentRepository @JvmOverloads constructor(private val metadata: Met
     }
 
     private fun activeDocument(id: String): DocumentRow {
+        when (bounds.documentReadIsBounded(id)) {
+            null -> reject(OperationErrorCode.SOURCE_UNAVAILABLE, "document_unavailable", id)
+            false -> reject(OperationErrorCode.INTEGRITY_FAILED, "document_metadata_invalid", id)
+            true -> Unit
+        }
         val document = q.document(id) ?: reject(OperationErrorCode.SOURCE_UNAVAILABLE, "document_unavailable", id)
+        if (document.documentId != id) reject(OperationErrorCode.INTEGRITY_FAILED, "document_metadata_invalid", id)
         if (document.lifecycle != "ACTIVE" || document.documentRevision < 1) reject(OperationErrorCode.SOURCE_UNAVAILABLE, "document_not_active", id)
         return document
     }

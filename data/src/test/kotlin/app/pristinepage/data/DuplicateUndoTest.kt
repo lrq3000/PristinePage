@@ -112,7 +112,11 @@ class DuplicateUndoTest {
                 before = metadataState(f); null
             })
             val blobId = f.metadata.sources.getValue(f.source.value).sourceBlobId
-            if (!duringAdmission) f.metadata.blobs[blobId] = f.metadata.blobs.getValue(blobId).copy(state = state)
+            if (!duringAdmission) {
+                f.metadata.blobs[blobId] = f.metadata.blobs.getValue(blobId).copy(state = state)
+                // The raw source-chain guard now rejects before capability admission. The unchanged-state oracle must not depend on reaching that later callback.
+                before = metadataState(f)
+            }
             val rejected = f.repository.duplicatePage(f.pageIds[0], 1) as? DocumentMutationResult.Rejected
                 ?: throw AssertionError("Duplication committed with an unavailable backing blob")
             assertEquals(OperationErrorCode.INTEGRITY_FAILED, rejected.error.code); assertFalse(rejected.error.retryable)

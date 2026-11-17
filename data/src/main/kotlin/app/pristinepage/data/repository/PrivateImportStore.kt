@@ -24,12 +24,13 @@ class PrivateImportStore private constructor(
     val sources: BoundSourceIngest,
     val committedSources: CommittedSources,
     val catalog: DocumentCatalog,
+    val editablePages: EditablePages,
 ) : AutoCloseable {
     override fun close() = database.close()
 
     companion object {
         /** No destructive migration fallback, provider resumption or optimistic renderer admission. Opening verifies Room on IO; cancellation during result dispatch closes the database even if the caller never receives the constructed owner. */
-        @JvmStatic suspend fun open(context: Context, provider: SourceInput, inspector: SourceInspector): PrivateImportStore {
+        @JvmStatic @JvmOverloads suspend fun open(context: Context, provider: SourceInput, inspector: SourceInspector, admission: RecipeAdmission = RecipeAdmission { _, _ -> OperationError(OperationErrorCode.PROVIDER_UNAVAILABLE, false, "renderer_unavailable", null) }): PrivateImportStore {
             var opened: PristineDatabase? = null
             try {
                 return withContext(Dispatchers.IO) {
@@ -46,10 +47,10 @@ class PrivateImportStore private constructor(
                     val sources = RoomSourceStore(files, provider, inspector, RoomIngestPreparation(database), RoomIngestLookup(database), completion, completion, RoomIngestPhases(database), RoomJobLeases(database, owners), owners, restarts = RoomIngestRestarts(database, files, owners))
                     // A temporary provider reference is not a retained read grant. Reconcile private proof and metadata only; foreground result routing must explicitly establish any future provider handoff.
                     val recovery = RoomStoreRecovery(database, RoomRecoveryCoordinator(database, files, owners))
-                    val unavailableRenderer = RecipeAdmission { _, _ -> OperationError(OperationErrorCode.PROVIDER_UNAVAILABLE, false, "renderer_unavailable", null) }
-                    val documents = RoomDocumentRepository(metadata, unavailableRenderer, recovery = recovery)
+                    // Direct/test callers remain fail-closed by default. Application supplies the image-owned structural policy explicitly; data never imports rendering or infers capability from a stored recipe name.
+                    val documents = RoomDocumentRepository(metadata, admission, recovery = recovery)
                     coroutineContext.ensureActive()
-                    PrivateImportStore(database, documents, sessions, sessions, sessions, sources, RoomCommittedSources(metadata, database.catalog(), files), RoomDocumentCatalog(metadata, database.catalog()))
+                    PrivateImportStore(database, documents, sessions, sessions, sessions, sources, RoomCommittedSources(metadata, database.catalog(), files), RoomDocumentCatalog(metadata, database.catalog()), RoomEditablePages(metadata, database.catalog()))
                 }
             } catch (failure: Throwable) {
                 // Preserve the initiating structured failure/cancellation even if close encounters another storage fault. No reset, schema rewrite or file cleanup is attempted.

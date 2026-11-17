@@ -22,7 +22,7 @@ class IngestIntentTest {
         val sessions = linkedMapOf<String, ImportSessionRow>()
         val files = linkedMapOf<String, FileTransactionRow>()
         val jobs = linkedMapOf<String, JobRow>()
-        val blobs = linkedMapOf<String, SourceBlobRow>()
+        val blobs = catalog.blobs // One backing table for ingest and catalog/raw guards, as in the real Room database.
         var now = 1000L
         var rejectChildUpdate = false
         var rejectPhaseState: String? = null
