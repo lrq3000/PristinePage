@@ -70,12 +70,18 @@ class Homography private constructor(private val backward: DoubleArray, val sour
                 val q = evaluate(backward, destination[i].x, destination[i].y)
                 if (hypot(p.x - destination[i].x, p.y - destination[i].y) > destinationTolerance || hypot(q.x - sourcePoints[i].x, q.y - sourcePoints[i].y) > sourceTolerance) invalid("Corner reprojection exceeded tolerance")
             }
-            val z = destination.map { p -> denominator(backward, p.x, p.y) }
+            validateInverse(backward, output)
+            return Homography(backward, source, output)
+        }
+
+        /** Numerical safety seam used by the solver itself. Private coefficient fixtures can reach a pole/reflection that a valid convex corner fit ordinarily excludes; this does not expose arbitrary matrix rendering. */
+        private fun validateInverse(backward: DoubleArray, output: PixelSize) {
+            val x = (output.width - 1).toDouble(); val y = (output.height - 1).toDouble()
+            val z = doubleArrayOf(denominator(backward, 0.0, 0.0), denominator(backward, x, 0.0), denominator(backward, x, y), denominator(backward, 0.0, y))
             val largest = z.maxOf { abs(it) }
             if (!largest.isFinite() || largest == 0.0 || !(z.all { it > 1e-10 * largest } || z.all { it < -1e-10 * largest })) invalid("Inverse denominator touches or crosses a pole")
             val determinant = CommonOps_DDRM.det(matrix(backward))
             if (!determinant.isFinite() || z.any { val jacobian = determinant / (it * it * it); !jacobian.isFinite() || jacobian <= 0.0 }) invalid("Inverse map does not preserve orientation")
-            return Homography(backward, source, output)
         }
 
         private fun condition(values: DoubleArray, count: Int, expected: Int) {

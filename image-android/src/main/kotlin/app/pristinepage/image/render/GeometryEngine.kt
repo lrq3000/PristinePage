@@ -3,6 +3,12 @@ package app.pristinepage.image.render
 import app.pristinepage.core.geometry.BilinearSampler
 import app.pristinepage.core.geometry.Coordinates
 import app.pristinepage.core.geometry.GeometrySizing
+import app.pristinepage.core.geometry.GeometryWorkLimitException
+import app.pristinepage.core.geometry.Homography
+import app.pristinepage.core.geometry.InvalidHomographyException
+import app.pristinepage.core.geometry.InvalidInverseMapException
+import app.pristinepage.core.geometry.InverseMapValidator
+import app.pristinepage.core.geometry.PerspectiveValidation
 import app.pristinepage.core.image.CoverageMask
 import app.pristinepage.core.image.ProtectionMask
 import app.pristinepage.core.image.RgbImage
@@ -14,9 +20,10 @@ import app.pristinepage.data.model.OperationErrorCode
 import app.pristinepage.data.model.RepositoryFailure
 import app.pristinepage.image.decode.ImageAllocationBudget
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.CancellationException
 
 /** Complete destination planes share one accounting lifetime. Inputs and their separately admitted source leases remain caller-owned. */
-class GeometryRaster internal constructor(val image: RgbImage, val protection: ProtectionMask?, val coverage: CoverageMask?, val stage: StageRecord, private val reservation: AutoCloseable) : AutoCloseable {
+class GeometryRaster internal constructor(val image: RgbImage, val protection: ProtectionMask?, val coverage: CoverageMask?, val stage: StageRecord, private val reservation: AutoCloseable, val perspectiveValidation: PerspectiveValidation? = null) : AutoCloseable {
     private val closed = AtomicBoolean(false)
     override fun close() {
         if (closed.compareAndSet(false, true)) {
@@ -25,7 +32,7 @@ class GeometryRaster internal constructor(val image: RgbImage, val protection: P
     }
 }
 
-/** Synchronous off-UI-thread primitive. The initial admitted paths are NONE and exact full-frame permutations; unimplemented maps refuse explicitly rather than sampling a substitute. */
+/** Synchronous off-UI-thread primitive. NONE and exact full-frame permutations bypass lossy solves; other perspective maps require the analytic admission proof before any RGB/mask output allocation. Manual/learned maps still refuse explicitly. */
 class GeometryEngine(private val budget: ImageAllocationBudget) {
     fun render(source: RgbImage, binding: SourceBinding, recipe: GeometryRecipe, output: OutputSpec, protection: ProtectionMask?, coverage: CoverageMask?, checkpoint: () -> Unit): GeometryRaster {
         checkpoint()
@@ -43,19 +50,34 @@ class GeometryEngine(private val budget: ImageAllocationBudget) {
         val q = recipe.outputQuarterTurns
         val base = Coordinates.rotatedSize(output.size, q)
         val identitySize = base == sourceSize
-        if (recipe !is GeometryRecipe.None && !(recipe is GeometryRecipe.Perspective && fullFrame(recipe) && identitySize)) {
+        if (recipe !is GeometryRecipe.None && recipe !is GeometryRecipe.Perspective) {
             refuse(OperationErrorCode.PROVIDER_UNAVAILABLE, "geometry_map_not_implemented")
         }
+        val exactPermutation = identitySize && (recipe is GeometryRecipe.None || fullFrame(recipe as GeometryRecipe.Perspective))
+        val needsPerspectiveProof = recipe is GeometryRecipe.Perspective && !exactPermutation
         val n = output.size.pixelCount
         if (n > Int.MAX_VALUE / 3L || output.size.width > Int.MAX_VALUE / 3) refuse(OperationErrorCode.RESOURCE_LIMIT, "geometry_output_extent")
         // Scratch plus immutable constructor copies: RGB6N, each float mask8N, and fixed metadata/object headroom. The caller continues charging the full source and source masks independently.
-        val charge = 65536L + 6L * n + (if (protection != null) 8L * n else 0L) + (if (coverage != null) 8L * n else 0L)
+        val charge = 65536L + 6L * n + (if (protection != null) 8L * n else 0L) + (if (coverage != null) 8L * n else 0L) + (if (needsPerspectiveProof) InverseMapValidator.perspectiveWorkspaceBytes() else 0L)
         val reservation = budget.reserve(charge)
         var image: RgbImage? = null
         var transformedProtection: ProtectionMask? = null
         var transformedCoverage: CoverageMask? = null
         var transferred = false
         try {
+            var validation: PerspectiveValidation? = null
+            val map = if (needsPerspectiveProof) {
+                try {
+                    val controls = recipe.quad
+                    fun point(p: PointPx) = PointPx(p.x * (source.width - 1), p.y * (source.height - 1))
+                    val quad = QuadPx(point(controls.tl), point(controls.tr), point(controls.br), point(controls.bl))
+                    Homography.solve(quad, sourceSize, base).also { validation = InverseMapValidator.perspective(it, checkpoint) }
+                } catch (_: InvalidHomographyException) { refuse(OperationErrorCode.INVALID_MAP, "invalid_perspective_solution") }
+                catch (_: InvalidInverseMapException) { refuse(OperationErrorCode.INVALID_MAP, "invalid_perspective_map") }
+                catch (_: GeometryWorkLimitException) { refuse(OperationErrorCode.RESOURCE_LIMIT, "perspective_validation_work_limit") }
+                catch (failure: CancellationException) { throw failure }
+            } else null
+            checkpoint()
             val rgb = ByteArray((3L * n).toInt())
             val mask = if (protection != null) FloatArray(n.toInt()) else null
             val page = if (coverage != null) FloatArray(n.toInt()) else null
@@ -71,20 +93,26 @@ class GeometryEngine(private val budget: ImageAllocationBudget) {
                         else -> { bx = base.width - 1 - y; by = x }
                     }
                     val index = y * output.size.width + x
-                    val sx = if (identitySize) bx.toDouble() else Coordinates.halfPixelSource(bx.toDouble(), source.width, base.width)
-                    val sy = if (identitySize) by.toDouble() else Coordinates.halfPixelSource(by.toDouble(), source.height, base.height)
-                    for (c in 0..2) rgb[3 * index + c] = (if (identitySize) source.getUnsigned(bx, by, c) else BilinearSampler.resizedRgb(source, sx, sy, c)).toByte()
-                    if (mask != null) mask[index] = if (identitySize) protection!!.sample(bx, by) else BilinearSampler.protection(protection!!, sx, sy)
-                    if (page != null) page[index] = if (identitySize) coverage!!.sample(bx, by) else BilinearSampler.coverage(coverage!!, sx, sy)
+                    val mapped = map?.map(bx.toDouble(), by.toDouble())
+                    val sx = mapped?.x ?: if (identitySize) bx.toDouble() else Coordinates.halfPixelSource(bx.toDouble(), source.width, base.width)
+                    val sy = mapped?.y ?: if (identitySize) by.toDouble() else Coordinates.halfPixelSource(by.toDouble(), source.height, base.height)
+                    for (c in 0..2) rgb[3 * index + c] = when {
+                        exactPermutation -> source.getUnsigned(bx, by, c)
+                        map != null -> BilinearSampler.rgb(source, sx, sy, c)
+                        else -> BilinearSampler.resizedRgb(source, sx, sy, c)
+                    }.toByte()
+                    if (mask != null) mask[index] = if (exactPermutation) protection!!.sample(bx, by) else BilinearSampler.protection(protection!!, sx, sy)
+                    if (page != null) page[index] = if (exactPermutation) coverage!!.sample(bx, by) else BilinearSampler.coverage(coverage!!, sx, sy)
                 }
             }
             image = RgbImage(output.size.width, output.size.height, output.size.width * 3, rgb)
             if (mask != null) transformedProtection = ProtectionMask(output.size.width, output.size.height, mask)
             if (page != null) transformedCoverage = CoverageMask(output.size.width, output.size.height, page)
             checkpoint()
-            val stageId = if (!identitySize) "source_resize_half_pixel_v1" else if (recipe is GeometryRecipe.None) "geometry_none_v1" else "perspective_v1"
-            val stage = StageRecord(stageId, 1, null, if (identitySize) "EXACT_PERMUTATION" else "OK", sourceSize, output.size, listOf("OUTPUT_QUARTER_TURNS_$q"))
-            return GeometryRaster(image, transformedProtection, transformedCoverage, stage, reservation).also { transferred = true }
+            val stageId = if (recipe is GeometryRecipe.Perspective) "perspective_v1" else if (!identitySize) "source_resize_half_pixel_v1" else "geometry_none_v1"
+            val diagnostics = listOf("OUTPUT_QUARTER_TURNS_$q") + if (validation != null) listOf("GEOMETRY_VISIBILITY_V1") else emptyList()
+            val stage = StageRecord(stageId, 1, null, if (exactPermutation) "EXACT_PERMUTATION" else "OK", sourceSize, output.size, diagnostics)
+            return GeometryRaster(image, transformedProtection, transformedCoverage, stage, reservation, validation).also { transferred = true }
         } finally {
             if (!transferred) {
                 try { image?.close(); transformedProtection?.close(); transformedCoverage?.close() } finally { reservation.close() }

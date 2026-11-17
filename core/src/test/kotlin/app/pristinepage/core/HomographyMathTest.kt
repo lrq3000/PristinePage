@@ -3,6 +3,7 @@ package app.pristinepage.core
 import app.pristinepage.core.pipeline.PixelSize
 import app.pristinepage.core.pipeline.PointPx
 import app.pristinepage.core.pipeline.QuadPx
+import app.pristinepage.core.geometry.QuadValidation
 import java.lang.reflect.InvocationTargetException
 import org.junit.Assert.*
 import org.junit.Test
@@ -17,6 +18,13 @@ class HomographyMathTest {
     private fun point(expectedX: Double, expectedY: Double, actual: PointPx) {
         assertEquals(expectedX, actual.x, 1e-6)
         assertEquals(expectedY, actual.y, 1e-6)
+    }
+    private fun numericalGate(name: String, vararg args: Any?) {
+        val companion = CoreApi.type("geometry.Homography").getField("Companion").get(null)
+        val method = companion.javaClass.declaredMethods.singleOrNull { it.name == name && it.parameterCount == args.size }
+        assertNotNull("Targeted homography inverse-safety seam is absent", method)
+        method!!.isAccessible = true
+        try { method.invoke(companion, *args) } catch (failure: InvocationTargetException) { throw failure.targetException }
     }
 
     @Test fun selectedBackendSuppliesTheNinthRightNullVectorOfAWideEightByNineMatrix() {
@@ -108,5 +116,43 @@ class HomographyMathTest {
         for ((x, y) in listOf(Double.NaN to 0.0, 0.0 to Double.POSITIVE_INFINITY, -0.1 to 0.0, 0.0 to 4.1)) {
             assertThrows(IllegalArgumentException::class.java) { map(h, x, y) }
         }
+    }
+
+    @Test fun validConvexIllConditionedCorrespondencesReachNumericalRejectionAfterQuadAdmission() {
+        // Independent parallelogram: long direction(1e9,1e9), short direction(1,1.01). Every turn is about1e7 (>8e6 predicate uncertainty), edges>=1 and area about1e7, yet its normalized aspect is about2e11. No image of these metadata dimensions is allocated.
+        val source = PixelSize(2_000_000_001, 2_000_000_001)
+        val q = quad(100.0, 100.0, 1_000_000_100.0, 1_000_000_100.0, 1_000_000_101.0, 1_000_000_101.01, 101.0, 101.01)
+        QuadValidation.validate(q, source)
+        val failure = assertThrows(IllegalArgumentException::class.java) { solve(q, source, PixelSize(11, 11)) }
+        assertEquals("app.pristinepage.core.geometry.InvalidHomographyException", failure.javaClass.name)
+        assertTrue(failure.message.orEmpty().contains("condition"))
+    }
+
+    @Test fun rankAndConditionGateUsesFinitePositiveSingularValuesAndInclusiveLimit() {
+        numericalGate("condition", DoubleArray(8) { if (it == 7) 1e-10 else 1.0 }, 8, 8)
+        // Independent binary64 division: one nextDown still rounds1/min to exactly1e10; two nextDowns give10000000000.000002 and reach the strict-greater rejection branch.
+        numericalGate("condition", DoubleArray(8) { if (it == 7) Math.nextDown(1e-10) else 1.0 }, 8, 8)
+        for (minimum in listOf(Math.nextDown(Math.nextDown(1e-10)), 0.0, -1.0, Double.NaN, Double.POSITIVE_INFINITY)) {
+            val failure = assertThrows(IllegalArgumentException::class.java) { numericalGate("condition", DoubleArray(8) { if (it == 7) minimum else 1.0 }, 8, 8) }
+            assertEquals("app.pristinepage.core.geometry.InvalidHomographyException", failure.javaClass.name)
+        }
+    }
+
+    @Test fun inversePoleMarginGateRejectsCrossingAndNearZeroButAcceptsCommonScaleSigns() {
+        // Check availability outside the refusal assertion: an absent seam is not a successful rejection witness.
+        numericalGate("validateInverse", doubleArrayOf(1.0,0.0,0.0,0.0,1.0,0.0,0.0,0.0,1.0), PixelSize(11, 11))
+        for (denominatorX in listOf(-.2, -.1, (5e-11 - 1.0) / 10)) {
+            val failure = assertThrows(IllegalArgumentException::class.java) { numericalGate("validateInverse", doubleArrayOf(1.0,0.0,0.0,0.0,1.0,0.0,denominatorX,0.0,1.0), PixelSize(11, 11)) }
+            assertEquals("app.pristinepage.core.geometry.InvalidHomographyException", failure.javaClass.name)
+            assertTrue(failure.message.orEmpty().contains("pole"))
+        }
+        numericalGate("validateInverse", doubleArrayOf(-1.0,0.0,0.0,0.0,-1.0,0.0,0.0,0.0,-1.0), PixelSize(11, 11))
+    }
+
+    @Test fun inverseReflectionIsRejectedRatherThanRepairingItsDeterminantSign() {
+        numericalGate("validateInverse", doubleArrayOf(1.0,0.0,0.0,0.0,1.0,0.0,0.0,0.0,1.0), PixelSize(11, 11))
+        val failure = assertThrows(IllegalArgumentException::class.java) { numericalGate("validateInverse", doubleArrayOf(-1.0,0.0,0.0,0.0,1.0,0.0,0.0,0.0,1.0), PixelSize(11, 11)) }
+        assertEquals("app.pristinepage.core.geometry.InvalidHomographyException", failure.javaClass.name)
+        assertTrue(failure.message.orEmpty().contains("orientation"))
     }
 }
