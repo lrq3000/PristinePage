@@ -15,17 +15,25 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.selected
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import app.pristinepage.R
 import app.pristinepage.data.model.IngestResult
 import app.pristinepage.data.model.OperationErrorCode
+import app.pristinepage.data.model.PageId
+import app.pristinepage.image.preview.OriginalPreviewBitmap
 
-/** Current metadata/import slice only. No placeholder raster, fabricated completion percentage, renderer result, camera or export capability is displayed as working. */
-@Composable fun LibraryScreen(session: LibrarySession) {
+/** Import/library and explicit original photograph preview only. No recipe result, camera or export capability is displayed as working. */
+@Composable fun LibraryScreen(session: LibrarySession, loadOriginal: (suspend (String) -> OriginalPreviewBitmap)? = null) {
     val state by session.state.collectAsStateWithLifecycle()
     val newTitle = stringResource(R.string.new_document)
     Column(Modifier.fillMaxSize().safeDrawingPadding().verticalScroll(rememberScrollState()).padding(24.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {
@@ -60,12 +68,20 @@ import app.pristinepage.data.model.OperationErrorCode
             Text(message)
         }
         state.document?.let { overview ->
+            var selectedPage by remember(session, overview.document.documentId) { mutableStateOf<PageId?>(null) }
+            val selected = overview.pages.firstOrNull { it.pageId == selectedPage } ?: overview.pages.firstOrNull()
             Column(Modifier.fillMaxWidth().testTag("document-overview"), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 Text(overview.document.title, style = MaterialTheme.typography.titleLarge)
                 Text(stringResource(R.string.saved_page_count, overview.document.pageCount))
                 if (overview.pages.isEmpty()) Text(stringResource(R.string.no_saved_pages))
-                overview.pages.forEach { page -> Text(stringResource(R.string.page_number, page.ordinal + 1)) }
-                Text(stringResource(R.string.preview_not_available))
+                overview.pages.forEach { page ->
+                    val isSelected = page.pageId == selected?.pageId
+                    Button(onClick = { selectedPage = page.pageId }, modifier = actionModifier().testTag("original-page-${page.pageId.value}").semantics { this.selected = isSelected }) { Text(stringResource(if (isSelected) R.string.page_number_selected else R.string.page_number, page.ordinal + 1)) }
+                }
+                if (selected != null && loadOriginal != null) {
+                    // Page identity is part of the lifetime even when two pages share a source. Changing document/page/source immediately detaches the old draw state; no bitmap or source lease enters saved state.
+                    key(session, overview.document.documentId, selected.pageId, selected.sourceId) { OriginalPagePreview(selected, loadOriginal) }
+                } else if (selected != null) Text(stringResource(R.string.preview_not_available))
             }
         }
         Text(stringResource(R.string.library_heading), style = MaterialTheme.typography.titleLarge)
@@ -81,7 +97,7 @@ import app.pristinepage.data.model.OperationErrorCode
 
 private fun actionModifier() = Modifier.fillMaxWidth().heightIn(min = 48.dp)
 
-@Composable private fun errorText(code: OperationErrorCode): String = stringResource(when (code) {
+@Composable internal fun errorText(code: OperationErrorCode): String = stringResource(when (code) {
     OperationErrorCode.CANCELED -> R.string.error_canceled
     OperationErrorCode.INVALID_INPUT -> R.string.error_invalid_input
     OperationErrorCode.UNSUPPORTED_FORMAT -> R.string.error_unsupported_format

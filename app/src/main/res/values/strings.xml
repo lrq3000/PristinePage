@@ -21,6 +21,11 @@
     <string name="no_saved_pages">No pages have been saved in this document.</string>
     <string name="page_number">Page %1$d</string>
     <string name="preview_not_available">Original preview and editing are not available in this increment.</string>
+    <string name="page_number_selected">Page %1$d — Selected</string>
+    <string name="original_preview_loading">Loading original photograph preview, page %1$d</string>
+    <string name="original_preview_description">Original photograph preview, page %1$d</string>
+    <string name="original_preview_notice">Uncropped original, resized for display. This is not an edited scan or full-resolution detail.</string>
+    <string name="retry_original_preview">Retry original preview, page %1$d</string>
     <string name="library_heading">Local library</string>
     <string name="empty_library">No documents yet. Import photos or create an empty document.</string>
     <string name="document_summary">%1$s — saved pages: %2$d</string>

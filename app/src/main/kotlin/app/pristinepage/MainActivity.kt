@@ -33,6 +33,9 @@ import app.pristinepage.library.ImportLibraryViewModel
 import app.pristinepage.library.LibraryIdentity
 import app.pristinepage.library.LibraryScreen
 import app.pristinepage.library.LibrarySession
+import app.pristinepage.image.preview.OriginalPreviewBitmap
+import app.pristinepage.image.preview.OriginalPreviewBitmapLoader
+import app.pristinepage.image.preview.OriginalPreviewLoader
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 
@@ -71,7 +74,12 @@ class MainActivity : ComponentActivity() {
         picker = binding
         binding.synchronize()
         observing = lifecycleScope.launch { repeatOnLifecycle(Lifecycle.State.STARTED) { retained.state.collect { binding.synchronize() } } }
-        setContent { AppTheme { LibraryScreen(retained) } }
+        val loadOriginal: suspend (String) -> OriginalPreviewBitmap = { source ->
+            val graph = services.imports()
+            // Reuse the process-owned private store, decoder and shared allowance. Screen lifetime owns only the delivered display lease, not another import graph or provider reference.
+            OriginalPreviewBitmapLoader(OriginalPreviewLoader(graph.store.committedSources, graph.decoder, graph.budget), graph.budget).load(source)
+        }
+        setContent { AppTheme { LibraryScreen(retained, loadOriginal) } }
     }
 
     override fun onSaveInstanceState(outState: Bundle) {

@@ -119,7 +119,7 @@ class DocumentCatalogIntegrationTest {
         }
     }
 
-    internal class Fixture : AutoCloseable {
+    internal class Fixture(encoded: ByteArray? = null) : AutoCloseable {
         private val base = InstrumentationRegistry.getInstrumentation().targetContext
         private val root = File(base.filesDir, "t04-catalog-${UUID.randomUUID()}")
         private val context = object : ContextWrapper(base) {
@@ -128,7 +128,7 @@ class DocumentCatalogIntegrationTest {
             override fun getDatabasePath(name: String): File = File(root, "databases/$name").also { it.parentFile!!.mkdirs() }
         }
         val good = "content://fixture.documents/good"; val bad = "content://fixture.documents/bad"
-        val png = Bitmap.createBitmap(2, 2, Bitmap.Config.ARGB_8888).let { bitmap ->
+        val png = encoded ?: Bitmap.createBitmap(2, 2, Bitmap.Config.ARGB_8888).let { bitmap ->
             try { bitmap.eraseColor(0xffabcdef.toInt()); ByteArrayOutputStream().also { check(bitmap.compress(Bitmap.CompressFormat.PNG, 100, it)) }.toByteArray() } finally { bitmap.recycle() }
         }
         var providerOpens = 0; var forbid = false
