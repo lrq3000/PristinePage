@@ -163,13 +163,13 @@ class PerspectiveGeometryEngineTest {
         } }
     }
 
-    @Test fun unimplementedManualMapStillRefusesBeforeAnyReservationOrSubstitute() {
+    @Test fun admittedManualStraightPathStillRefusesInsufficientSharedBudgetWithoutSubstitute() {
         val b = binding.copy(sourceSize = PixelSize(3, 2))
         val full = QuadPx(PointPx(0.0, 0.0), PointPx(1.0, 0.0), PointPx(1.0, 1.0), PointPx(0.0, 1.0))
         val budget = ImageAllocationBudget(1)
         RgbImage(3, 2, 9, ByteArray(18)).use { input ->
             val failure = assertThrows(RepositoryFailure::class.java) { GeometryEngine(budget).render(input, b, GeometryRecipe.ManualCurve(b, full), OutputSpec(PixelSize(3, 2), RenderPurpose.PREVIEW), null, null, {}).close() }
-            assertEquals(OperationErrorCode.PROVIDER_UNAVAILABLE, failure.error.code); assertEquals(0L, budget.usedBytes)
+            assertEquals(OperationErrorCode.RESOURCE_LIMIT, failure.error.code); assertEquals(0L, budget.usedBytes)
         }
     }
 }
