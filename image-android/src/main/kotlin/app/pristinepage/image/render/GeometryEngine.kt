@@ -50,8 +50,7 @@ class GeometryEngine(private val budget: ImageAllocationBudget) {
             GeometrySizing.target(recipe)
         } catch (_: IllegalArgumentException) { refuse(OperationErrorCode.INVALID_INPUT, "invalid_geometry_binding") }
         catch (_: IllegalStateException) { refuse(OperationErrorCode.INVALID_INPUT, "closed_geometry_input") }
-        val geometric = recipe !is GeometryRecipe.None
-        if (!admissibleSize(target, output.size, geometric)) refuse(OperationErrorCode.INVALID_INPUT, "invalid_geometry_output")
+        validateOutput(target, output.size, recipe !is GeometryRecipe.None)
         val q = recipe.outputQuarterTurns
         val base = Coordinates.rotatedSize(output.size, q)
         val identitySize = base == sourceSize
@@ -147,15 +146,22 @@ class GeometryEngine(private val budget: ImageAllocationBudget) {
     private fun fullFrame(quad: QuadPx): Boolean = quad == QuadPx(PointPx(0.0, 0.0), PointPx(1.0, 0.0), PointPx(1.0, 1.0), PointPx(0.0, 1.0))
     private fun midpoint(a: PointPx, b: PointPx) = PointPx((a.x + b.x) / 2.0, (a.y + b.y) / 2.0)
 
-    /** An explicit destination must arise from the common floored scale, including NONE's max(1,...) singleton rule; a near aspect ratio alone does not authorize stretching. */
-    private fun admissibleSize(target: PixelSize, output: PixelSize, geometric: Boolean): Boolean {
-        if (output.width > target.width || output.height > target.height || (geometric && (output.width < 2 || output.height < 2))) return false
-        if (output == target) return true
-        fun lower(value: Int, original: Int) = if (!geometric && value == 1) 0.0 else value.toDouble() / original
-        val low = maxOf(lower(output.width, target.width), lower(output.height, target.height))
-        val high = minOf(1.0, (output.width.toDouble() + 1.0) / target.width, (output.height.toDouble() + 1.0) / target.height)
-        return low < high
-    }
+    companion object {
+        /** Shared before coordinator decode and again at primitive entry: one predicate avoids disagreement about common-floor aspect/no-upscale/singleton policy. It does not admit source pixels or bypass map proof. */
+        internal fun validateOutput(target: PixelSize, output: PixelSize, geometric: Boolean) {
+            if (!admissibleSize(target, output, geometric)) refuse(OperationErrorCode.INVALID_INPUT, "invalid_geometry_output")
+        }
 
-    private fun refuse(code: OperationErrorCode, key: String): Nothing = throw RepositoryFailure(OperationError(code, false, key, null))
+        /** An explicit destination must arise from the common floored scale, including NONE's max(1,...) singleton rule; a near aspect ratio alone does not authorize stretching. */
+        private fun admissibleSize(target: PixelSize, output: PixelSize, geometric: Boolean): Boolean {
+            if (output.width > target.width || output.height > target.height || (geometric && (output.width < 2 || output.height < 2))) return false
+            if (output == target) return true
+            fun lower(value: Int, original: Int) = if (!geometric && value == 1) 0.0 else value.toDouble() / original
+            val low = maxOf(lower(output.width, target.width), lower(output.height, target.height))
+            val high = minOf(1.0, (output.width.toDouble() + 1.0) / target.width, (output.height.toDouble() + 1.0) / target.height)
+            return low < high
+        }
+
+        private fun refuse(code: OperationErrorCode, key: String): Nothing = throw RepositoryFailure(OperationError(code, false, key, null))
+    }
 }

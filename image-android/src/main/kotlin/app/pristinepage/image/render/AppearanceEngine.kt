@@ -29,13 +29,11 @@ class AppearanceEngine(private val budget: ImageAllocationBudget) {
         try {
             require(protection == null || (protection.width == input.width && protection.height == input.height))
             input.getUnsigned(0, 0, 0); protection?.sample(0, 0)
-            require(protection == null || (recipe.detail == null && recipe.binary == null))
         } catch (_: IllegalArgumentException) { refuse(OperationErrorCode.INVALID_INPUT, "invalid_appearance_graph") }
         catch (_: IllegalStateException) { refuse(OperationErrorCode.INVALID_INPUT, "closed_appearance_input") }
         val n = size.pixelCount
         if (size.width > 12000 || size.height > 12000 || n > 48_000_000 || n > (Int.MAX_VALUE - 8L) / 3) refuse(OperationErrorCode.RESOURCE_LIMIT, "appearance_raster_extent")
-        // Capability checks precede every exact-off path. A zero-strength unavailable provider is not silently replaced by None.
-        if (recipe.appearance is AppearanceRecipe.ProviderAppearanceV1 || recipe.appearance is AppearanceRecipe.LocalMaxGainV1) refuse(OperationErrorCode.PROVIDER_UNAVAILABLE, "appearance_method_not_implemented")
+        preflight(recipe, protection != null)
         val steps = steps(recipe, size)
         var peak = 6L * n
         var priorOutput = false
@@ -111,5 +109,12 @@ class AppearanceEngine(private val budget: ImageAllocationBudget) {
         return result
     }
 
-    private fun refuse(code: OperationErrorCode, key: String): Nothing = throw RepositoryFailure(OperationError(code, false, key, null))
+    companion object {
+        /** Shared graph/capability check before expensive source decode, and again at direct adapter entry. Zero-strength settings do not make an incompatible or unavailable graph valid. Size/buffer admission remains the actual raster consumer's responsibility. */
+        fun preflight(recipe: Recipe, protectionPresent: Boolean) {
+            if (protectionPresent && (recipe.detail != null || recipe.binary != null)) refuse(OperationErrorCode.INVALID_INPUT, "invalid_appearance_graph")
+            if (recipe.appearance is AppearanceRecipe.ProviderAppearanceV1 || recipe.appearance is AppearanceRecipe.LocalMaxGainV1) refuse(OperationErrorCode.PROVIDER_UNAVAILABLE, "appearance_method_not_implemented")
+        }
+        private fun refuse(code: OperationErrorCode, key: String): Nothing = throw RepositoryFailure(OperationError(code, false, key, null))
+    }
 }
