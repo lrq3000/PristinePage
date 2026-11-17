@@ -16,6 +16,9 @@ class InvalidHomographyException(message: String) : IllegalArgumentException(mes
 
 /** A pole-free source-center inverse map. This solver does not itself establish the separate stretch, visibility, resource or image/mask acceptance gates. */
 class Homography private constructor(private val backward: DoubleArray, val sourceSize: PixelSize, val outputSize: PixelSize) {
+    /** Internal copied read port for validation, not an arbitrary-matrix construction API. The proof must enclose normalization of these exact rendered coefficients, not just a rounded/refitted unit matrix. */
+    internal fun backwardCoefficients(): DoubleArray = backward.copyOf()
+
     fun map(x: Double, y: Double): PointPx {
         require(x.isFinite() && y.isFinite() && x in 0.0..(outputSize.width - 1).toDouble() && y in 0.0..(outputSize.height - 1).toDouble()) { "Homography input must be a destination center" }
         return evaluate(backward, x, y)
