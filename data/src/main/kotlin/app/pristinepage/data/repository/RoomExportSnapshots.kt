@@ -15,16 +15,13 @@ import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.withContext
-import kotlinx.serialization.json.*
 
 /** Ordinary mask-free snapshot publication. Proof/admission suspend outside Room; the final transaction rechecks exact frozen inputs before its first write. Neither PENDING jobs nor FROZEN rows claim rendering, codec execution or publication. Unsupported retention paths fail closed instead of shedding dependencies. */
 class RoomExportSnapshots @JvmOverloads constructor(private val metadata: MetadataAccess, private val queries: ExportSnapshotQueries, private val proof: ExportSourceProof, private val admission: ExportAdmission, private val rendererVersion: String, private val encodingVersion: String, private val backend: String, private val precision: String, private val clock: () -> Long = System::currentTimeMillis, private val dispatcher: CoroutineDispatcher = Dispatchers.IO) : ExportSnapshots {
     constructor(database: PristineDatabase, proof: ExportSourceProof, admission: ExportAdmission, rendererVersion: String, encodingVersion: String, backend: String, precision: String) : this(RoomMetadataAccess(database), database.exportSnapshots(), proof, admission, rendererVersion, encodingVersion, backend, precision)
     private val q get() = metadata.queries
+    private val profile = OrdinaryExportProfile(rendererVersion,encodingVersion,backend,precision)
     private data class Prepared(val rows: List<ExportPageRow>, val bindings: List<ExportSourceBinding>, val identity: FrozenExportIdentity)
-    init {
-        for (value in listOf(rendererVersion, encodingVersion, backend, precision)) { require(value.isNotBlank() && value.length <= 128); requireWellFormedUnicode(value) }
-    }
 
     /** Read-only metadata retrieval, not execution admission or file readiness. The transaction reads only immutable snapshot rows; later album deletion/edits never select substitute recipes. A consuming worker must still validate its job state, leases, files, provider/codec/resource capabilities before execution. */
     override suspend fun load(snapshotId: ExportSnapshotId): ExportSnapshot = withContext(dispatcher) {
@@ -139,7 +136,7 @@ class RoomExportSnapshots @JvmOverloads constructor(private val metadata: Metada
             val output = settings.pages[ordinal]
             if (output.fallbackPolicy != FallbackPolicy.FAIL) reject(OperationErrorCode.PROVIDER_UNAVAILABLE, "accepted_render_freeze_unavailable", page.pageId)
             bindings += ExportSourceBinding(source, blob)
-            ExportPageRow(snapshotId.value, ordinal, page.pageId, source.sourceId, blob.sourceBlobId, blob.byteSha256, source.pixelSha256, source.width, source.height, source.conversionFingerprint, stored.recipeRevision, stored.recipeSchemaVersion, stored.canonicalRecipe.copyOf(), stored.recipeSha256, "[]".toByteArray(), providerDescriptor(), EMPTY_ASSET_HASH, rendererVersion, output.requestedOutput.size.width, output.requestedOutput.size.height, output.output.size.width, output.output.size.height, output.fallbackPolicy.name, null, null)
+            ExportPageRow(snapshotId.value, ordinal, page.pageId, source.sourceId, blob.sourceBlobId, blob.byteSha256, source.pixelSha256, source.width, source.height, source.conversionFingerprint, stored.recipeRevision, stored.recipeSchemaVersion, stored.canonicalRecipe.copyOf(), stored.recipeSha256, "[]".toByteArray(), profile.providerDescriptor(), OrdinaryExportProfile.emptyAssetSetHash, rendererVersion, output.requestedOutput.size.width, output.requestedOutput.size.height, output.output.size.width, output.output.size.height, output.fallbackPolicy.name, null, null)
         }
         val identity = try { ExportSnapshotIdentity.create(documentId, revision, settings, rows) } catch (_: IllegalArgumentException) { reject(OperationErrorCode.INTEGRITY_FAILED, "export_metadata_invalid", documentId.value) }
         return Prepared(rows, bindings, identity)
@@ -158,9 +155,6 @@ class RoomExportSnapshots @JvmOverloads constructor(private val metadata: Metada
         val count = q.countSourceReferences(source)
         if (count < 1 || q.setSourceRefCount(source, count) != 1) reject(OperationErrorCode.INTEGRITY_FAILED, "source_unavailable", source)
     }
-    private fun providerDescriptor(): ByteArray = buildJsonObject {
-        put("backend", backend); put("encodingVersion", encodingVersion); put("precision", precision); put("providers", JsonArray(emptyList())); put("version", 1)
-    }.toString().toByteArray(Charsets.UTF_8)
     private fun assemblyInput(snapshot: ExportSnapshotId, hash: String, jobs: List<String>): ByteArray {
         val bytes = ByteArrayOutputStream()
         DataOutputStream(bytes).use { output ->
@@ -174,6 +168,5 @@ class RoomExportSnapshots @JvmOverloads constructor(private val metadata: Metada
     private fun reject(code: OperationErrorCode, key: String, id: String? = null, retryable: Boolean = false): Nothing = throw RepositoryFailure(OperationError(code, retryable, key, id))
     private companion object {
         fun sha(bytes: ByteArray): String = MessageDigest.getInstance("SHA-256").digest(bytes).joinToString("") { "%02x".format(it.toInt() and 255) }
-        val EMPTY_ASSET_HASH = sha("pristinepage-export-assets-v1\u0000".toByteArray() + byteArrayOf(0, 0, 0, 0))
     }
 }
