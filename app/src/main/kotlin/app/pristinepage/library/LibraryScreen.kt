@@ -30,10 +30,11 @@ import app.pristinepage.R
 import app.pristinepage.data.model.IngestResult
 import app.pristinepage.data.model.OperationErrorCode
 import app.pristinepage.data.model.PageId
+import app.pristinepage.data.model.DocumentId
 import app.pristinepage.image.preview.OriginalPreviewBitmap
 
-/** Import/library and explicit original photograph preview only. No recipe result, camera or export capability is displayed as working. */
-@Composable fun LibraryScreen(session: LibrarySession, loadOriginal: (suspend (String) -> OriginalPreviewBitmap)? = null) {
+/** Library original previews remain explicitly separate from the editor's rendered recipe. Navigation passes only retained document/page identities, never borrowed pixels or temporary provider references. */
+@Composable fun LibraryScreen(session: LibrarySession, loadOriginal: (suspend (String) -> OriginalPreviewBitmap)? = null, onEdit: ((DocumentId, PageId) -> Unit)? = null) {
     val state by session.state.collectAsStateWithLifecycle()
     val newTitle = stringResource(R.string.new_document)
     Column(Modifier.fillMaxSize().safeDrawingPadding().verticalScroll(rememberScrollState()).padding(24.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {
@@ -78,6 +79,7 @@ import app.pristinepage.image.preview.OriginalPreviewBitmap
                     val isSelected = page.pageId == selected?.pageId
                     Button(onClick = { selectedPage = page.pageId }, modifier = actionModifier().testTag("original-page-${page.pageId.value}").semantics { this.selected = isSelected }) { Text(stringResource(if (isSelected) R.string.page_number_selected else R.string.page_number, page.ordinal + 1)) }
                 }
+                if (selected != null && onEdit != null) Button(onClick = { onEdit(overview.document.documentId, selected.pageId) }, enabled = !state.loading && state.request == null, modifier = actionModifier().testTag("edit-selected-page")) { Text(stringResource(R.string.editor_open_selected, selected.ordinal + 1)) }
                 if (selected != null && loadOriginal != null) {
                     // Page identity is part of the lifetime even when two pages share a source. Changing document/page/source immediately detaches the old draw state; no bitmap or source lease enters saved state.
                     key(session, overview.document.documentId, selected.pageId, selected.sourceId) { OriginalPagePreview(selected, loadOriginal) }

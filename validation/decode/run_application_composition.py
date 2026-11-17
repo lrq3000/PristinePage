@@ -15,6 +15,11 @@ class ApplicationCompositionRun(PickerAdapterRun):
     def expected_tests(self):
         return Counter((cls, name) for cls in self.classes for name in re.findall(r"@Test\s+fun\s+(\w+)", (ROOT / "app/src/androidTest/kotlin" / (cls.replace(".", "/") + ".kt")).read_text()))
 
+    @staticmethod
+    def completed_summary(output, count):
+        noun = "test" if count == 1 else "tests"
+        return f"OK ({count} {noun})" in output
+
     def install_and_test(self):
         record = self.owned()
         row = self.exact(self.inventory())
@@ -55,6 +60,6 @@ class ApplicationCompositionRun(PickerAdapterRun):
         assert outcomes["1"] == expected and outcomes["0"] + outcomes["-2"] + outcomes["-1"] == expected
         assert not outcomes["-1"] and sum(outcomes["-2"].values()) == self.missing and missing_assertions == self.missing
         if not self.missing:
-            assert f"OK ({len(expected)} tests)" in output
+            assert self.completed_summary(output, len(expected))
         self.save(self.path("outcomes.json"), {"expectedMissingAssertions": self.missing, "outcomes": {code: [{"class": cls, "test": name, "count": count} for (cls, name), count in items.items()] for code, items in outcomes.items()}})
         print(json.dumps({"started": len(expected), "passed": sum(outcomes["0"].values()), "intendedMissing": self.missing}), flush=True)
