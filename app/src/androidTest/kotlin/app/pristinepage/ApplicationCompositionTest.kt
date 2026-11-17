@@ -10,6 +10,13 @@ import app.pristinepage.capture.PhotoImportController
 import app.pristinepage.core.pipeline.OutputSpec
 import app.pristinepage.core.pipeline.PixelSize
 import app.pristinepage.core.pipeline.RenderPurpose
+import app.pristinepage.core.pipeline.RenderCoordinator
+import app.pristinepage.core.pipeline.RenderRequest
+import app.pristinepage.core.pipeline.RenderStatus
+import app.pristinepage.core.pipeline.Recipe
+import app.pristinepage.core.pipeline.FallbackPolicy
+import app.pristinepage.core.recipe.GeometryRecipe
+import app.pristinepage.core.recipe.SourceBinding
 import app.pristinepage.data.files.SourceInspector
 import app.pristinepage.data.model.*
 import app.pristinepage.data.repository.*
@@ -155,6 +162,41 @@ class ApplicationCompositionTest {
         assertSame(method.invoke(app), method.invoke(app))
     }
 
+    @Test fun applicationRendererRetainsTheSharedAllowanceAndReadsOnlyCommittedSources() = runBlocking {
+        Fixture().use { f ->
+            f.open(); val doc = f.documents.createDocument("Application renderer source")
+            val batch = f.sessions.beginImport(doc,1,null)
+            val imported = f.controller.importProviderReferences(listOf(f.good),batch.parentId).single() as IngestResult.Committed
+            val source = f.committed.load(imported.sourceId); val info = source.inspection
+            val binding = SourceBinding(info.sourcePixelHash,info.normalizedSize,info.conversionFingerprint)
+            val request = RenderRequest(imported.sourceId.value,binding.sourcePixelHash,imported.pageId.value,1,Recipe(geometry = GeometryRecipe.None(binding,outputQuarterTurns = 1)),output,1,null,FallbackPolicy.FAIL)
+            val renderer = f.renderer; f.forbid = true
+            assertSame(renderer,f.renderer)
+            renderer.render(request).use {
+                assertEquals(RenderStatus.OK,it.status); val image = checkNotNull(it.image)
+                val rotated = byteArrayOf(0,0,-1,-1,0,0,-1,-1,-1,0,-1,0)
+                assertArrayEquals(rotated,image.toPackedByteArray()); val owned = f.budget.usedBytes; assertTrue(owned > 0)
+                f.budget.reserve(f.budget.capacityBytes-owned).use {
+                    f.renderer.render(request.copy(generation = 2)).use { assertEquals(RenderStatus.RESOURCE_LIMIT,it.status); assertNull(it.image) }
+                    assertArrayEquals(rotated,image.toPackedByteArray())
+                }
+                assertEquals(owned,f.budget.usedBytes)
+            }
+            assertEquals(0L,f.budget.usedBytes); assertArrayEquals(f.png,source.file.readBytes()); assertEquals(1,f.opened.size)
+        }
+    }
+
+    @Test fun concurrentApplicationConsumersShareOneRendererNotIndependentProcessingQueues() = runBlocking {
+        Fixture().use { f ->
+            val services = services(f.context,f.budget,f.provider)
+            val graphs = coroutineScope { List(12) { async { runtime(services) } }.map { it.await() } }
+            try {
+                val renderers = graphs.map { renderer(it) }
+                assertTrue(renderers.all { it === renderers[0] }); assertTrue(f.opened.isEmpty()); assertEquals(0L,f.budget.usedBytes)
+            } finally { (property<Any>(graphs[0],"Store") as AutoCloseable).close() }
+        }
+    }
+
     @Test fun failedRecoveryDoesNotCacheReadinessAndTheSameRootCanRetry() = runBlocking {
         Fixture().use { f ->
             val owner = services(f.context, f.budget, f.provider)
@@ -232,6 +274,7 @@ class ApplicationCompositionTest {
         val committed get() = property<CommittedSources>(property<Any>(graph, "Store"), "CommittedSources")
         val controller get() = property<PhotoImportController>(graph, "PhotoImports")
         val decoder get() = property<SourceDecoder>(graph, "Decoder")
+        val renderer get() = renderer(graph)
         suspend fun open() { current = runtime(services(context, budget, provider)) }
         suspend fun reopen() { close(); current = null; open() }
         fun inventory(): Map<String, String> = File(root, "files/store").walkTopDown().filter { it.isFile }.associate { it.relativeTo(root).path to MessageDigest.getInstance("SHA-256").digest(it.readBytes()).joinToString("") { b -> "%02x".format(b.toInt() and 255) } }
@@ -239,6 +282,7 @@ class ApplicationCompositionTest {
     }
 
     private companion object {
+        fun renderer(graph: Any): RenderCoordinator = try { property(graph,"Renderer") } catch (_: NoSuchMethodException) { throw AssertionError("Application-scoped render coordinator is absent") }
         @Suppress("UNCHECKED_CAST") fun <T> property(receiver: Any, name: String): T = receiver.javaClass.getMethod("get$name").invoke(receiver) as T
         fun type(name: String): Class<*> = try { Class.forName(name) } catch (_: ClassNotFoundException) { throw AssertionError("Application-scoped composition is absent: $name") }
         fun services(context: Context, budget: ImageAllocationBudget, provider: SourceInput): Any = type("app.pristinepage.ApplicationServices").getConstructor(Context::class.java, ImageAllocationBudget::class.java, SourceInput::class.java).newInstance(context, budget, provider)

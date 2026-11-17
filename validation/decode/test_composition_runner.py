@@ -7,7 +7,7 @@ from run_application_composition import ApplicationCompositionRun
 
 
 class CompositionRunnerTest(unittest.TestCase):
-    def test_inventory_requires_all_eight_consumer_cases_and_eight_existing_picker_cases(self):
+    def test_inventory_accepts_all_ten_consumer_cases_and_eight_existing_picker_cases(self):
         runner = object.__new__(ApplicationCompositionRun)
         expected = Counter(("app.pristinepage.ApplicationCompositionTest", name) for name in (
             "orderedMixedResultsSurviveReopenWithoutReopeningAProvider",
@@ -18,6 +18,8 @@ class CompositionRunnerTest(unittest.TestCase):
             "installedApplicationOwnsTheServicesRatherThanEachActivity",
             "failedRecoveryDoesNotCacheReadinessAndTheSameRootCanRetry",
             "cancellationDuringIoDeliveryLeavesNoCachedCanceledGraphAndAllowsRetry",
+            "applicationRendererRetainsTheSharedAllowanceAndReadsOnlyCommittedSources",
+            "concurrentApplicationConsumersShareOneRendererNotIndependentProcessingQueues",
         ))
         expected.update(("app.pristinepage.PhotoPickerContractTest", name) for name in (
             "imageIntentUsesInstalledAndroidXAvailabilityAndOpenableFallbackWithoutBroadPermissions",
@@ -31,6 +33,7 @@ class CompositionRunnerTest(unittest.TestCase):
         ))
         self.assertTrue(callable(getattr(runner, "expected_tests", None)), "Named-case inventory boundary is absent")
         self.assertEqual(expected, runner.expected_tests())
+        self.assertEqual(len(expected), runner.case_count, "The default runner must accept its complete named inventory before starting Android")
 
 
 if __name__ == "__main__":

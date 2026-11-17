@@ -9,7 +9,7 @@ from run_picker_adapter import ADB, ROOT, PickerAdapterRun
 
 class ApplicationCompositionRun(PickerAdapterRun):
     classes = ("app.pristinepage.PhotoPickerContractTest", "app.pristinepage.ApplicationCompositionTest")
-    case_count = 16
+    case_count = 18
     missing_marker = "Application-scoped composition is absent"
 
     def expected_tests(self):
