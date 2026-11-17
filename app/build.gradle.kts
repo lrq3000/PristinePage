@@ -28,6 +28,9 @@ android {
         compose = true
         buildConfig = true
     }
+    // Pure validation-only scope checks execute identically in host regressions and instrumentation, never in either production or debug application artifacts.
+    sourceSets.getByName("test").java.srcDir("src/sharedTest/kotlin")
+    sourceSets.getByName("androidTest").java.srcDir("src/sharedTest/kotlin")
     val localDevelopmentSigning = signingConfigs.create("localDevelopment") {
         // S-01 approves this disposable local identity only. Never fall back to Android's global debug key or apply this configuration to release.
         storeFile = rootProject.file(".local-signing/debug.keystore")
