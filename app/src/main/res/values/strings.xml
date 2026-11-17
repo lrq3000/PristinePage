@@ -49,7 +49,14 @@
     <string name="editor_open_selected">Edit page %1$d</string>
     <string name="editor_opening">Opening saved page…</string>
     <string name="editor_heading">Page editor</string>
-    <string name="editor_scope_notice">Preview only, not full-resolution detail. Camera, shape controls, comparisons, batch editing and export are still in development.</string>
+    <string name="editor_scope_notice">Preview only, not full-resolution detail. Camera, shape controls, synchronized zoom, batch editing and export are still in development.</string>
+    <string name="editor_view_result">Result</string>
+    <string name="editor_view_input">Input after shape</string>
+    <string name="editor_view_original">Original photograph</string>
+    <string name="editor_requested_view">Requested view: %1$s</string>
+    <string name="editor_input_description">Geometry input preview, before all appearance and finishing</string>
+    <string name="editor_original_description">Original photograph preview, uncropped and without user rotation</string>
+    <string name="editor_previous_description">Previous completed preview, not the requested comparison</string>
     <string name="editor_retry_load">Retry opening page</string>
     <string name="editor_unsaved">Unsaved recipe changes</string>
     <string name="editor_saving">Saving recipe…</string>

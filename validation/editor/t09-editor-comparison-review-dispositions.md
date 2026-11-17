@@ -1,0 +1,23 @@
+# Q — original comparison source review disposition
+
+Original Q-COMPARISON-R SHA`878f442c6b3d9ef8d86f912633b77f0693144855192e8b7ea84dafacdd578be0` remains PASS WITH LIMITATIONS0Critical/0Important/3Minor. Parent read all123lines and checks the seven frozen product/test identities before commit. Its verified99host/nativeUNRUN cutoff remains distinct from [later parent874reports/two actual native cases](t09-editor-comparison-receipt.md). No demonstrated consequential defect, product fix or recursive reviewer rerun.
+
+Final: minor (deferred): Q-M1 — new screen current/previous labeling lacks a direct held/failing/late comparison consumer. Current exact-request/recipe predicate is correct by inspection; settled-success native descriptions do not certify those branches. Extend the existing private Compose/converter boundary at the next coherent UI batch, not a new renderer or heap-exhaustion experiment.
+
+Final: minor (deferred): Q-M2 — current literal fixtures use None geometry plus turns and do not directly distinguish uncropping from turn removal or unavailable geometry from source-only Original. Retain a non-fullframe Perspective/ManualCurve/input-refusal versus Original consumer before claiming those broader reference cases; do not redo unchanged numerical proofs or substitute a learned method.
+
+Final: minor (deferred): Q-M3 — current host cases do not directly cover populated Undo/Redo branches, delayed/rejected save with comparison commands, or selecting a different view while inactive. Existing branches are correct by inspection and inherited lifetime tests remain narrower. Add comparison-specific state interleavings in a later affected-host batch.
+
+Final: Ruling: D1/D17 current all-module/build/SDK/install/native/harness/ownership evidence is parent-executed and authenticated separately, not reviewer execution or an independent runtime audit — exact874cached reports/prior99fresh/two named current-APK outcomes and original player/VM exits stand — cost if wrong is false freshness or cleanup evidence. Existing operational transcript end-timestamp limitation remains.
+
+Final: Ruling: D2/D3 pending/failure/late/non-None/capped/aspect/unavailable comparisons remain bounded coverage limits Q-M1/M2, not established unsafe publication or newly accepted numerical behavior — keep exact source/request guards and no substitute — cost if wrong is a misleading view or omitted original content; add those consuming regressions without labeling current settled-success evidence broader.
+
+Final: Ruling: D4/D5 comparison-specific real recreation/background/fresh-process and TalkBack/focus/announcements/SwitchAccess/fonts/contrast/measured targets remain unperformed beyond inherited O/P/private-case coverage — ephemeral view state is not process-death draft recovery — cost if wrong is lost context or accessibility failure. Minimum48dp source/settled descriptions do not close those gates.
+
+Final: Ruling: D6/D7 synchronized pan/zoom/division, full-target100percent Detail, Shape/crop/curve/magnifier controls, carousel/neighbors/debounce/cache/Info/provenance/completeDetail remain mandatory unfinished — PREVIEW1024 and three tap views are narrower — cost if wrong is incomplete editor functionality or false full-resolution claims; keep T09 unaccepted.
+
+Final: Ruling: D8/D9/D10 U04 cumulative album batch, camera/full picker/grants/revocation/default-library comparison/multi-page command UX/export/sharing and genuine U01 geometry/appearance methods remain required — individual-page comparison cannot satisfy them — cost if wrong is omitted requested capabilities, unreviewed publication or false learned output. No asset/runtime acquisition or external destination operation follows.
+
+Final: Ruling: D11/D12/D13 prior math/map/filter/decoder/API26/27, raw SQL/save-CAS/schema/migration, durable masks/execution/DEGRADED/source pins/GC/recovery/Undo/delete/process/file durability and O/P deferred issues stand as earlier separate interfaces/gates — Q does not reaccept or rewrite them — cost if wrong is concealed numerical/integrity/ownership failure. Original O-M2/P-M1/M2/M3 remain explicit and no cleanup is authorized by a comparison.
+
+Final: Ruling: D14/D15/D16 physical/OEM/graphics/PSS/GC/performance/latency/battery/minimum fit, representative-page/color/faint/protected fidelity/visual approval/rights and whole offline/cold-start/privacy/security/distribution/signing/release remain separate — emulator synthetic pixels/logical allowance are not those measurements or final artifact acceptance — cost if wrong is overstated safety/quality/compatibility/rights. Personal phone, spending, sharing/publication/push/merge/destructive operations remain excluded.

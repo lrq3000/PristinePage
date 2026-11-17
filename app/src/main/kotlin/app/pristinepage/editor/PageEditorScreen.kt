@@ -40,6 +40,13 @@ class PageEditorScreen : EditorContent {
         LaunchedEffect(session, state.exitReady) { if (state.exitReady) exit() }
         BackHandler(enabled = !state.exitReady) { session.requestBack() }
         val editable = state.page != null && !state.loading && !state.saving && !state.exitReady
+        val expected = state.draft?.let { EditorViews.recipe(it,state.view) }
+        val showingCurrent = !preview.previous && preview.display?.request == preview.request && preview.display?.request?.recipe == expected
+        val viewLabel = when (state.view) {
+            EditorView.RESULT -> R.string.editor_view_result
+            EditorView.GEOMETRY_INPUT -> R.string.editor_view_input
+            EditorView.ORIGINAL -> R.string.editor_view_original
+        }
         Column(Modifier.fillMaxSize().safeDrawingPadding().verticalScroll(rememberScrollState()).padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
             Button(onClick = session::requestBack, enabled = !state.saving, modifier = control("editor-back")) { Text(stringResource(R.string.editor_back)) }
             Text(stringResource(R.string.editor_heading), style = MaterialTheme.typography.headlineMedium)
@@ -51,9 +58,18 @@ class PageEditorScreen : EditorContent {
             }
             if (state.dirty) Text(stringResource(R.string.editor_unsaved), modifier = Modifier.testTag("editor-unsaved"))
             if (state.saving) Text(stringResource(R.string.editor_saving))
-            if (preview.previous) Text(stringResource(R.string.editor_previous), modifier = Modifier.testTag("editor-previous"))
+            Text(stringResource(R.string.editor_requested_view,stringResource(viewLabel)))
+            listOf("result" to R.string.editor_view_result, "input" to R.string.editor_view_input, "original" to R.string.editor_view_original).forEach { (id, label) ->
+                OutlinedButton(onClick = { session.showView(id) }, enabled = editable, modifier = control("editor-view-$id").semantics { selected = state.view == EditorViews.parse(id) }) { Text(stringResource(label)) }
+            }
+            if (preview.display != null && !showingCurrent) Text(stringResource(R.string.editor_previous), modifier = Modifier.testTag("editor-previous"))
             preview.display?.let { display ->
-                Image(display.bitmap.asImageBitmap(), stringResource(R.string.editor_preview_description), modifier = Modifier.fillMaxWidth().height(300.dp).testTag("editor-preview"), contentScale = ContentScale.Fit)
+                val description = if (!showingCurrent) R.string.editor_previous_description else when (state.view) {
+                    EditorView.RESULT -> R.string.editor_preview_description
+                    EditorView.GEOMETRY_INPUT -> R.string.editor_input_description
+                    EditorView.ORIGINAL -> R.string.editor_original_description
+                }
+                Image(display.bitmap.asImageBitmap(), stringResource(description), modifier = Modifier.fillMaxWidth().height(300.dp).testTag("editor-preview"), contentScale = ContentScale.Fit)
             }
             if (preview.processing) CircularProgressIndicator(Modifier.testTag("editor-processing"))
             preview.failure?.let { status ->

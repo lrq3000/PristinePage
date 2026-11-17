@@ -52,8 +52,20 @@ class EditorSession @JvmOverloads constructor(documentId: String, pageId: String
 
     fun edit(recipe: Recipe) {
         val edits = editable() ?: return
-        if (!edits.replace(recipe)) return
+        if (!edits.replace(recipe)) {
+            // Choosing an already-selected recipe while looking at a reference still returns to its Result, without inventing another history entry or a dirty draft.
+            if (current.value.view != EditorView.RESULT) { current.value = current.value.copy(view = EditorView.RESULT); renderDraft() }
+            return
+        }
         updateDraft(); renderDraft()
+    }
+
+    fun showView(id: String) {
+        if (editable() == null) return
+        val view = EditorViews.parse(id)
+        if (current.value.view == view) return
+        current.value = current.value.copy(view = view)
+        renderDraft()
     }
 
     fun rotateClockwise() { editable()?.current?.let { edit(it.copy(geometry = it.geometry.withOutputQuarterTurns((it.geometry.outputQuarterTurns + 1) % 4))) } }
@@ -64,13 +76,14 @@ class EditorSession @JvmOverloads constructor(documentId: String, pageId: String
 
     private fun updateDraft() {
         val edits = checkNotNull(history)
-        current.value = current.value.copy(draft = edits.current, dirty = edits.dirty, canUndo = edits.canUndo, canRedo = edits.canRedo, error = null, confirmExit = false)
+        current.value = current.value.copy(draft = edits.current, dirty = edits.dirty, canUndo = edits.canUndo, canRedo = edits.canRedo, error = null, confirmExit = false, view = EditorView.RESULT)
     }
 
     private fun renderDraft() {
         if (closed || !active) return
         val page = current.value.page ?: return
-        val recipe = current.value.draft ?: return
+        val draft = current.value.draft ?: return
+        val recipe = EditorViews.recipe(draft, current.value.view)
         try {
             generation = Math.addExact(generation, 1)
             val output = GeometrySizing.output(recipe.geometry, RenderPurpose.PREVIEW, 1024)
