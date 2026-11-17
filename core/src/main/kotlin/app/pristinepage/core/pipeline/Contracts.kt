@@ -7,6 +7,7 @@ import app.pristinepage.core.recipe.DenoiseRecipe
 import app.pristinepage.core.recipe.DetailRecipe
 import app.pristinepage.core.recipe.GeometryRecipe
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.Collections
 import kotlinx.serialization.Serializable
 
 @Serializable data class PixelSize(val width: Int, val height: Int) {
@@ -42,11 +43,16 @@ import kotlinx.serialization.Serializable
 data class RenderRequest(val sourceId: String, val sourcePixelHash: String, val pageId: String, val recipeRevision: Long, val recipe: Recipe, val output: OutputSpec, val generation: Long, val protectionMaskId: String?, val fallback: FallbackPolicy)
 enum class RenderStatus { OK, DEGRADED, INVALID_INPUT, UNAVAILABLE, INVALID_MAP, PROCESSING_FAILED, CANCELED, RESOURCE_LIMIT, STORAGE_FAILED }
 data class StageRecord(val stageId: String, val version: Int, val provider: ProviderIdentity?, val outcome: String, val inputSize: PixelSize, val outputSize: PixelSize, val warningCodes: List<String>)
+/** Published execution metadata must not alias caller lists or expose a mutable Java backing list. StageRecord itself remains a convenient input value; each result takes this nested snapshot. */
+object StageRecords {
+    fun snapshot(stages: List<StageRecord>): List<StageRecord> = immutableList(stages.map { it.copy(warningCodes = immutableList(it.warningCodes)) })
+}
+private fun <T> immutableList(values: List<T>): List<T> = Collections.unmodifiableList(ArrayList(values))
 /** The raster is borrowed from this closeable result. Retaining it independently requires an explicit accounting transfer; generated data-class copies would alias an ownership lifetime and are deliberately unavailable. */
 class RenderResult(val request: RenderRequest, val status: RenderStatus, val image: RgbImage?, stages: List<StageRecord>, warnings: List<String>, private val ownership: AutoCloseable? = null) : AutoCloseable {
     private val closed = AtomicBoolean(false)
-    val stages: List<StageRecord> = stages.toList()
-    val warnings: List<String> = warnings.toList()
+    val stages: List<StageRecord> = StageRecords.snapshot(stages)
+    val warnings: List<String> = immutableList(warnings)
     init { require((status == RenderStatus.OK || status == RenderStatus.DEGRADED) == (image != null)) { "Only a complete successful or explicitly degraded result may carry pixels" } }
     override fun close() {
         if (closed.compareAndSet(false, true)) {

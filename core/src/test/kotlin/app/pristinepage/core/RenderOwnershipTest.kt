@@ -58,4 +58,31 @@ class RenderOwnershipTest {
             assertThrows(IllegalArgumentException::class.java) { owned(null, status, AutoCloseable {}) }
         }
     }
+
+    @Test fun publishedStageWarningsDoNotAliasCallerOwnedNestedLists() {
+        val inputWarnings = mutableListOf("FIRST", "SECOND")
+        val inputStages = mutableListOf(StageRecord("test", 1, null, "OK", PixelSize(1, 1), PixelSize(1, 1), inputWarnings))
+        RgbImage(1, 1, 3, byteArrayOf(1, 2, 3)).use { image ->
+            RenderResult(request(), RenderStatus.OK, image, inputStages, emptyList()).use { result ->
+                inputWarnings[0] = "CHANGED_AFTER_PUBLICATION"
+                inputStages.clear()
+                assertEquals(listOf("FIRST", "SECOND"), result.stages.single().warningCodes)
+            }
+        }
+    }
+
+    @Test fun publishedProvenanceCannotBeRewrittenThroughMutableListViews() {
+        val stage = StageRecord("test", 1, null, "OK", PixelSize(1, 1), PixelSize(1, 1), listOf("FIRST", "SECOND"))
+        RgbImage(1, 1, 3, byteArrayOf(1, 2, 3)).use { image ->
+            RenderResult(request(), RenderStatus.OK, image, listOf(stage, stage.copy(stageId = "next")), listOf("TOP_FIRST", "TOP_SECOND")).use { result ->
+                // Kotlin's read-only List type alone does not stop a Java consumer/cast mutating its backing ArrayList. Either refuse that mutation or return an independent view; the published record must remain intact.
+                try { (result.stages.single { it.stageId == "test" }.warningCodes as MutableList<String>).clear() } catch (_: UnsupportedOperationException) { }
+                try { (result.stages as MutableList<StageRecord>).clear() } catch (_: UnsupportedOperationException) { }
+                try { (result.warnings as MutableList<String>).clear() } catch (_: UnsupportedOperationException) { }
+                assertEquals(listOf("test", "next"), result.stages.map { it.stageId })
+                assertEquals(listOf("FIRST", "SECOND"), result.stages.first().warningCodes)
+                assertEquals(listOf("TOP_FIRST", "TOP_SECOND"), result.warnings)
+            }
+        }
+    }
 }
