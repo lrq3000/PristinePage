@@ -8,6 +8,8 @@ Final: minor (deferred): O-M1 — returning from the editor resets the library-l
 
 Final: minor (deferred): O-M2 — the editor conflict text asks for Refresh although the loaded editor cannot refresh. Draft/CAS safety remains correct; the current recovery requires explicit discard/leave/reopen. Improve the guidance or implement explicit draft-preserving conflict review without silently adopting the newer expected revision.
 
+Later P resolution of O-M1: [default-library receipt](t09-default-library-journey-receipt.md) records an actual default Activity page2/Apply/recreation/DiscardBack selection-loss RED, five host state REDs, retained-ID correction and868recordedJVM/two currentAPI28cases GREEN. Its new independent source review is0C/0I/3M with separate dispositions. This resolves the earlier deferred context-loss item through a new coherent milestone; it does not rewrite O's original review/verdict/cutoff or imply O-M2 is fixed.
+
 Final: Ruling: earlier geometry/appearance numerical reviews, N raw/source guard corrections and their Minors stand as consumed prerequisites, not reaccepted mathematics or a comprehensive storage audit — O does not change those algorithms/schema/save implementation — cost if wrong is hidden fidelity/integrity regression; current inherited cases and their open numerical/reader coverage remain mandatory.
 
 Final: Ruling: lookup/display does not authorize source GC, pin release, deletion or broad store/job/WAL/power recovery — no new reclaim feature is enabled — cost if wrong is premature source loss; retain all ownership/recovery/deletion gates and no cleanup permission inference.

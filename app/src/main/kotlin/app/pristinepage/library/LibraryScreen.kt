@@ -16,9 +16,6 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
-import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.remember
-import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
@@ -69,15 +66,14 @@ import app.pristinepage.image.preview.OriginalPreviewBitmap
             Text(message)
         }
         state.document?.let { overview ->
-            var selectedPage by remember(session, overview.document.documentId) { mutableStateOf<PageId?>(null) }
-            val selected = overview.pages.firstOrNull { it.pageId == selectedPage } ?: overview.pages.firstOrNull()
+            val selected = overview.pages.firstOrNull { it.pageId == state.selectedPage } ?: overview.pages.firstOrNull()
             Column(Modifier.fillMaxWidth().testTag("document-overview"), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 Text(overview.document.title, style = MaterialTheme.typography.titleLarge)
                 Text(stringResource(R.string.saved_page_count, overview.document.pageCount))
                 if (overview.pages.isEmpty()) Text(stringResource(R.string.no_saved_pages))
                 overview.pages.forEach { page ->
                     val isSelected = page.pageId == selected?.pageId
-                    Button(onClick = { selectedPage = page.pageId }, modifier = actionModifier().testTag("original-page-${page.pageId.value}").semantics { this.selected = isSelected }) { Text(stringResource(if (isSelected) R.string.page_number_selected else R.string.page_number, page.ordinal + 1)) }
+                    Button(onClick = { session.accept(LibraryEvent.SelectPage(page.pageId)) }, modifier = actionModifier().testTag("original-page-${page.pageId.value}").semantics { this.selected = isSelected }) { Text(stringResource(if (isSelected) R.string.page_number_selected else R.string.page_number, page.ordinal + 1)) }
                 }
                 if (selected != null && onEdit != null) Button(onClick = { onEdit(overview.document.documentId, selected.pageId) }, enabled = !state.loading && state.request == null, modifier = actionModifier().testTag("edit-selected-page")) { Text(stringResource(R.string.editor_open_selected, selected.ordinal + 1)) }
                 if (selected != null && loadOriginal != null) {

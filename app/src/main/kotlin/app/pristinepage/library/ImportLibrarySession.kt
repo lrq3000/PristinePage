@@ -17,7 +17,7 @@ import kotlinx.coroutines.sync.withLock
 
 /** Main-confined state owned by a lifecycle-retained scope, not by one Activity registration. IO is delegated to the existing Application graph; only opaque IDs are restorable. No selected provider reference enters StateFlow, a saved identity or an error. */
 class ImportLibrarySession(private val actions: LibraryActions, restored: LibraryIdentity, private val scope: CoroutineScope) : LibrarySession {
-    private val current = MutableStateFlow(LibraryState(selectedId = restored.selected, request = restored.pending?.let { PhotoImportRequest(it.value) }, phase = restored.pending?.let { ImportPhase.INTERRUPTED }))
+    private val current = MutableStateFlow(LibraryState(selectedId = restored.selected, selectedPage = restored.selectedPage, request = restored.pending?.let { PhotoImportRequest(it.value) }, phase = restored.pending?.let { ImportPhase.INTERRUPTED }))
     override val state: StateFlow<LibraryState> = current.asStateFlow()
     private val initialization = Mutex()
     private var started = false
@@ -27,7 +27,7 @@ class ImportLibrarySession(private val actions: LibraryActions, restored: Librar
 
     init { refresh(true) }
 
-    override fun identity() = LibraryIdentity(current.value.selectedId, current.value.request?.let { ImportSessionId(it.batchId) })
+    override fun identity() = LibraryIdentity(current.value.selectedId, current.value.request?.let { ImportSessionId(it.batchId) }, current.value.selectedPage)
 
     override fun claimPickerLaunch(batchId: ImportSessionId): Boolean {
         val value = current.value
@@ -40,15 +40,19 @@ class ImportLibrarySession(private val actions: LibraryActions, restored: Librar
         when (event) {
             is LibraryEvent.Open -> {
                 ++navigation
-                current.value = current.value.copy(selectedId = event.id, document = null, loading = true, error = null)
+                current.value = current.value.copy(selectedId = event.id, selectedPage = current.value.selectedPage.takeIf { current.value.selectedId == event.id }, document = null, loading = true, error = null)
                 refresh(true, includeList = false)
+            }
+            is LibraryEvent.SelectPage -> {
+                val value = current.value
+                if (value.document?.pages?.any { it.pageId == event.id } == true) current.value = value.copy(selectedPage = event.id)
             }
             is LibraryEvent.NewDocument -> if (!current.value.loading && (!event.importAfterCreate || (!current.value.preparingImport && current.value.request == null))) {
                 current.value = current.value.copy(loading = true, error = null, preparingImport = current.value.preparingImport || event.importAfterCreate)
                 run(onFailure = { error -> if (event.importAfterCreate) current.value = current.value.copy(preparingImport = false); failed(error) }) {
                     try {
                         val id = actions.create(event.title); ++navigation
-                        current.value = current.value.copy(selectedId = id, document = null)
+                        current.value = current.value.copy(selectedId = id, selectedPage = null, document = null)
                         refresh(true).join()
                         if (event.importAfterCreate) reserveFor(id)
                     } finally { if (event.importAfterCreate) current.value = current.value.copy(preparingImport = false) }
@@ -153,7 +157,8 @@ class ImportLibrarySession(private val actions: LibraryActions, restored: Librar
         val discover = id != null && document?.document?.hasPendingImport == true && current.value.request == null && !current.value.preparingImport
         val pending = if (discover) actions.activeImport(id) ?: throw RepositoryFailure(OperationError(OperationErrorCode.INTEGRITY_FAILED, false, "pending_import_identity_missing", id.value)) else null
         if (token == metadataGeneration && nav == navigation && current.value.selectedId == id) {
-            val value = current.value
+            // Read the newest Main-confined choice after IO. A refresh started before a tap must not restore its older captured selection; membership is still revalidated against this returned overview.
+            val value = current.value.copy(selectedPage = current.value.selectedPage?.takeIf { page -> document?.pages?.any { it.pageId == page } == true })
             current.value = if (pending != null && value.request == null) value.copy(document = document, loading = false, request = PhotoImportRequest(pending.value), launchPending = false, phase = ImportPhase.INTERRUPTED)
             else value.copy(document = document, loading = false)
         }

@@ -17,7 +17,9 @@ interface LibraryActions {
 }
 
 /** Only opaque identity may be placed in app saved state. A restored batch is not permission to relaunch a picker, reopen a URI, or infer a successful import. */
-data class LibraryIdentity(val selected: DocumentId? = null, val pending: ImportSessionId? = null)
+data class LibraryIdentity @JvmOverloads constructor(val selected: DocumentId? = null, val pending: ImportSessionId? = null, val selectedPage: PageId? = null) {
+    init { require(selected != null || selectedPage == null) { "A selected page needs its document identity" } }
+}
 /** Transient process-private handoff, never saved UI state or scheduler data. URI-specific parsing/grants stay at the Activity/Android adapter; the session owns only immediate consumption lifetime. */
 sealed interface LibraryPhotoResult {
     data class Selected(val references: List<String>, val offeredReadFlags: Int) : LibraryPhotoResult
@@ -39,10 +41,12 @@ data class LibraryState(
     val results: List<IngestResult> = emptyList(),
     val recovery: RecoveryReport? = null,
     val error: OperationError? = null,
+    val selectedPage: PageId? = null,
 )
 
 sealed interface LibraryEvent {
     data class Open(val id: DocumentId) : LibraryEvent
+    data class SelectPage(val id: PageId) : LibraryEvent
     data class NewDocument(val title: String, val importAfterCreate: Boolean = false) : LibraryEvent
     data object More : LibraryEvent
     data object Refresh : LibraryEvent

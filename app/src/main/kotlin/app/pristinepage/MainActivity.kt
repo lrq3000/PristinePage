@@ -125,6 +125,7 @@ class MainActivity : ComponentActivity() {
             outState.putBundle(SAVED, Bundle().apply {
                 identity.selected?.let { putString(SELECTED, it.value) }
                 identity.pending?.let { putString(PENDING, it.value) }
+                identity.selectedPage?.let { putString(PAGE, it.value) }
             })
         }
         editor?.state?.value?.identity?.let { identity ->
@@ -151,7 +152,7 @@ class MainActivity : ComponentActivity() {
             val raw = saved?.get(SAVED) ?: return LibraryIdentity()
             require(raw is Bundle)
             fun id(key: String): String? = if (raw.containsKey(key)) (raw.get(key) as? String ?: throw IllegalArgumentException("Invalid saved identity")) else null
-            return LibraryIdentity(id(SELECTED)?.let(::DocumentId), id(PENDING)?.let(::ImportSessionId))
+            return LibraryIdentity(id(SELECTED)?.let(::DocumentId), id(PENDING)?.let(::ImportSessionId), id(PAGE)?.let(::PageId))
         }
     }
 }
