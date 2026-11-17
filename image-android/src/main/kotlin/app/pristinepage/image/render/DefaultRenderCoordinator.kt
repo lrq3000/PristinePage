@@ -15,7 +15,7 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 
-/** Ordinary FAIL-policy source-to-raster prerequisite. One application-owned instance serializes expensive processing and reuses the existing two-lane image dispatcher. The caller retains a durable page/history/snapshot source owner; this queue is neither a GC lease nor a current-generation UI publisher. */
+/** Classical source-to-raster composition with explicit FAIL/KEEP_STAGE_INPUT semantics. One application-owned instance serializes processing on the existing image dispatcher. Caller retains a durable source owner; this queue is not a GC lease, generation publisher or durable accepted-degraded export record. */
 class DefaultRenderCoordinator @JvmOverloads constructor(private val decoder: SourceDecoder, private val geometry: GeometryEngine, private val appearance: AppearanceEngine, private val dispatcher: CoroutineDispatcher = PreviewProcessing.dispatcher) : RenderCoordinator {
     private val queue = Mutex()
 
@@ -55,27 +55,45 @@ class DefaultRenderCoordinator @JvmOverloads constructor(private val decoder: So
             var transferred = false
             try {
                 active = "source_decode_v1"
-                decoder.decode(request.sourceId, request.output).use { decoded ->
+                val decoded = decoder.decode(request.sourceId, request.output)
+                var sourceTransferred = false
+                try {
                     checkpoint()
                     val info = decoded.inspection
                     val actual = SourceBinding(info.sourcePixelHash, info.normalizedSize, info.conversionFingerprint)
                     if (actual != request.recipe.geometry.source || actual.sourcePixelHash != request.sourcePixelHash) refuse(OperationErrorCode.INVALID_INPUT, "render_source_binding_mismatch")
                     records.add(StageRecord("source_decode_v1", 1, null, "OK", info.encodedSize, info.normalizedSize, listOf("SOURCE_BYTES_VERIFIED", "SOURCE_PIXELS_VERIFIED")))
-                    active = "geometry_${request.recipe.geometry.mode.name.lowercase()}_v1"
+                    active = when (request.recipe.geometry) {
+                        is GeometryRecipe.None -> "geometry_none_v1"
+                        is GeometryRecipe.Perspective -> "perspective_v1"
+                        is GeometryRecipe.ManualCurve -> "manual_ruled_v1"
+                        is GeometryRecipe.RoughCropDewarp -> "rough_crop_dewarp_v1"
+                    }
                     inputSize = info.normalizedSize; outputSize = request.output.size
-                    geometry.render(decoded.image, actual, request.recipe.geometry, request.output, null, null, checkpoint).use { shaped ->
+                    val shaped = try { geometry.render(decoded.image, actual, request.recipe.geometry, request.output, null, null, checkpoint) }
+                    catch (error: Exception) {
+                        val failure = StageFallback.failure(error, request.fallback, "geometry_processing_failed")
+                        val omissions = listOf("KEEP_STAGE_INPUT", "GEOMETRY_OUTPUT_OMITTED", "OUTPUT_ROTATION_OMITTED_${request.recipe.geometry.outputQuarterTurns}", failure.safeMessageKey)
+                        records.add(StageRecord(checkNotNull(active), 1, null, "FAILED_${failure.code.name}", inputSize, inputSize, omissions))
+                        records.addAll(appearance.skippedStages(request.recipe, inputSize))
+                        checkpoint()
+                        // Geometry never completed: preserve the ACTUAL unrotated full stage input, not its requested resized/rotated destination. Transfer the WHOLE decoder permit so these pixels remain charged until the result closes.
+                        return RenderResult(request, RenderStatus.DEGRADED, decoded.image, records, omissions, decoded).also { sourceTransferred = true }
+                    }
+                    shaped.use {
                         records.add(shaped.stage)
                         active = "appearance_graph_v1"
                         inputSize = PixelSize(shaped.image.width, shaped.image.height); outputSize = inputSize
-                        final = appearance.render(shaped.image, request.recipe, shaped.protection, checkpoint)
+                        final = appearance.render(shaped.image, request.recipe, shaped.protection, request.fallback, checkpoint)
                         records.addAll(final.stages)
                         checkpoint()
                     }
-                }
+                } finally { if (!sourceTransferred) decoded.close() }
                 // Only the final packed output survives. Keep the COMPLETE AppearanceRaster as owner, rather than retaining RGB after its permit or decode owner's scope ends.
                 checkpoint()
                 val raster = checkNotNull(final)
-                return RenderResult(request, RenderStatus.OK, raster.image, records, emptyList(), raster).also { transferred = true }
+                val failure = raster.failure
+                return RenderResult(request, if (failure == null) RenderStatus.OK else RenderStatus.DEGRADED, raster.image, records, if (failure == null) emptyList() else listOf("KEEP_STAGE_INPUT", failure.safeMessageKey), raster).also { transferred = true }
             } finally { if (!transferred) final?.close() }
         }
 
@@ -99,9 +117,8 @@ class DefaultRenderCoordinator @JvmOverloads constructor(private val decoder: So
         val longEdgeLimit = when (request.output.purpose) { RenderPurpose.CARD -> 224; RenderPurpose.PREVIEW -> 1024; else -> null }
         if (longEdgeLimit != null && maxOf(size.width, size.height) > longEdgeLimit) refuse(OperationErrorCode.INVALID_INPUT, "invalid_render_output_purpose")
         GeometryEngine.validateOutput(target, size, request.recipe.geometry !is GeometryRecipe.None)
-        AppearanceEngine.preflight(request.recipe, request.protectionMaskId != null)
+        AppearanceEngine.preflight(request.recipe, request.protectionMaskId != null, request.fallback)
         if (request.protectionMaskId != null) refuse(OperationErrorCode.PROVIDER_UNAVAILABLE, "durable_render_mask_not_implemented")
-        if (request.fallback != FallbackPolicy.FAIL) refuse(OperationErrorCode.PROVIDER_UNAVAILABLE, "render_fallback_not_implemented")
         if (request.recipe.geometry is GeometryRecipe.RoughCropDewarp) refuse(OperationErrorCode.PROVIDER_UNAVAILABLE, "geometry_map_not_implemented")
         if (request.output.purpose == RenderPurpose.DETAIL_CROP && size != target) refuse(OperationErrorCode.PROVIDER_UNAVAILABLE, "detail_context_not_implemented")
     }

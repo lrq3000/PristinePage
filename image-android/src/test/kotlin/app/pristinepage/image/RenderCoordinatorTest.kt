@@ -145,8 +145,76 @@ class RenderCoordinatorTest {
     @Test fun unavailableGraphFallbackAndMaskCapabilitiesAreNotSilentlyIgnored() = runTest {
         val f = Fixture(); val coordinator = f.coordinator(UnconfinedTestDispatcher(testScheduler))
         val provider = AppearanceRecipe.ProviderAppearanceV1("not-installed", 1, "d".repeat(64), "test", "e".repeat(64), 0.0)
-        for (r in listOf(f.request(Recipe(geometry = GeometryRecipe.None(f.binding), appearance = provider)), f.request().copy(fallback = FallbackPolicy.KEEP_STAGE_INPUT), f.request().copy(protectionMaskId = UUID.randomUUID().toString()))) coordinator.render(r).use { assertEquals(RenderStatus.UNAVAILABLE, it.status); assertNull(it.image) }
+        for (r in listOf(f.request(Recipe(geometry = GeometryRecipe.None(f.binding), appearance = provider)), f.request().copy(protectionMaskId = UUID.randomUUID().toString()))) coordinator.render(r).use { assertEquals(RenderStatus.UNAVAILABLE, it.status); assertNull(it.image) }
         assertEquals(0, f.loads); assertEquals(0L, f.budget.usedBytes)
+    }
+
+    @Test fun failedManualKeepPolicyTransfersWholeUnrotatedSourceWithoutResizingOrAppearance() = runTest {
+        val f = Fixture(101,101)
+        val full = QuadPx(PointPx(0.0,0.0), PointPx(1.0,0.0), PointPx(1.0,1.0), PointPx(0.0,1.0))
+        val manual = GeometryRecipe.ManualCurve(f.binding, full, PointPx(.5,.9), PointPx(.5,.1), outputQuarterTurns = 1)
+        val request = f.request(Recipe(geometry = manual, appearance = AppearanceRecipe.PaperGainV1(), binary = BinaryRecipe.SauvolaV1()), PixelSize(21,21)).copy(fallback = FallbackPolicy.KEEP_STAGE_INPUT)
+        f.coordinator(UnconfinedTestDispatcher(testScheduler)).render(request).use {
+            assertEquals(RenderStatus.DEGRADED, it.status); assertSame(request, it.request)
+            assertSame(f.lastDecoded, it.image); assertArrayEquals(f.pixels, it.image!!.toPackedByteArray())
+            assertEquals(101, it.image!!.width); assertTrue(f.budget.usedBytes > 0)
+            assertTrue(it.warnings.contains("OUTPUT_ROTATION_OMITTED_1"))
+            assertEquals(listOf("source_decode_v1", "manual_ruled_v1", "paper_gain_v1", "sauvola_v1"), it.stages.map { s -> s.stageId })
+            assertEquals(listOf("OK", "FAILED_INVALID_MAP", "SKIPPED_AFTER_STAGE_FAILURE", "SKIPPED_AFTER_STAGE_FAILURE"), it.stages.map { s -> s.outcome })
+        }
+        assertEquals(0L, f.budget.usedBytes); assertThrows(IllegalStateException::class.java) { f.lastDecoded!!.toPackedByteArray() }
+    }
+
+    @Test fun unavailableAppearanceKeepPolicyRetainsRotatedGeometryAndSkipsBinaryAtZeroStrength() = runTest {
+        val f = Fixture()
+        val missing = AppearanceRecipe.ProviderAppearanceV1("missing",1,"d".repeat(64),"test","e".repeat(64),0.0)
+        val request = f.request(Recipe(geometry = GeometryRecipe.None(f.binding, outputQuarterTurns = 1), appearance = missing, binary = BinaryRecipe.SauvolaV1()), PixelSize(2,3)).copy(fallback = FallbackPolicy.KEEP_STAGE_INPUT)
+        f.coordinator(UnconfinedTestDispatcher(testScheduler)).render(request).use {
+            assertEquals(RenderStatus.DEGRADED, it.status)
+            assertArrayEquals(byteArrayOf(10,11,12,1,2,3,13,14,15,4,5,6,16,17,18,7,8,9), it.image!!.toPackedByteArray())
+            assertEquals(listOf("OK", "EXACT_PERMUTATION", "FAILED_PROVIDER_UNAVAILABLE", "SKIPPED_AFTER_STAGE_FAILURE"), it.stages.map { s -> s.outcome })
+            assertEquals("missing", it.stages[2].provider!!.id)
+            assertThrows(IllegalStateException::class.java) { f.lastDecoded!!.toPackedByteArray() }
+            assertTrue(f.budget.usedBytes > 0)
+        }
+        assertEquals(0L, f.budget.usedBytes)
+    }
+
+    @Test fun successfulKeepRequestReturnsOkButNeverConvertsLateAppearanceAdmissionIntoPixels() = runTest {
+        val f = Fixture(capacity = 1_180_000); val coordinator = f.coordinator(UnconfinedTestDispatcher(testScheduler))
+        val request = f.request().copy(fallback = FallbackPolicy.KEEP_STAGE_INPUT)
+        f.budget.reserve(65_752).use {
+            coordinator.render(request).use { result ->
+                assertEquals(RenderStatus.RESOURCE_LIMIT, result.status); assertNull(result.image)
+                assertEquals(listOf("source_decode_v1", "geometry_none_v1", "appearance_graph_v1"), result.stages.map { s -> s.stageId })
+                assertEquals(listOf("OK", "EXACT_PERMUTATION", "FAILED_RESOURCE_LIMIT"), result.stages.map { s -> s.outcome })
+            }
+            assertEquals(65_752L, f.budget.usedBytes); assertThrows(IllegalStateException::class.java) { f.lastDecoded!!.toPackedByteArray() }
+        }
+        coordinator.render(request.copy(generation = 6)).use { assertEquals(RenderStatus.OK, it.status); assertArrayEquals(f.pixels, it.image!!.toPackedByteArray()) }
+        assertEquals(0L, f.budget.usedBytes)
+    }
+
+    @Test fun keepPolicyStillRejectsInvalidMaskedGraphAndSourceErrorsWithoutFallback() = runTest {
+        val f = Fixture(); val coordinator = f.coordinator(UnconfinedTestDispatcher(testScheduler))
+        val request = f.request(Recipe(geometry = GeometryRecipe.None(f.binding), detail = DetailRecipe.LumaDetail7V1(strength = 0.0))).copy(fallback = FallbackPolicy.KEEP_STAGE_INPUT, protectionMaskId = UUID.randomUUID().toString())
+        coordinator.render(request).use { assertEquals(RenderStatus.INVALID_INPUT, it.status); assertNull(it.image) }
+        assertEquals(0, f.loads); assertEquals(0, f.decodes); assertEquals(0L, f.budget.usedBytes)
+        f.beforeDecode = { throw RepositoryFailure(OperationError(OperationErrorCode.PROCESSING_FAILED, false, "synthetic_decode_failure", null)) }
+        coordinator.render(f.request().copy(fallback = FallbackPolicy.KEEP_STAGE_INPUT)).use { assertEquals(RenderStatus.PROCESSING_FAILED, it.status); assertNull(it.image) }
+        assertEquals(0L, f.budget.usedBytes)
+    }
+
+    @Test fun canceledDeliveryOfDegradedSourceClosesItsTransferredDecoderOwner() = runTest {
+        val f = Fixture(101,101); val worker = QueuedDispatcher()
+        val full = QuadPx(PointPx(0.0,0.0), PointPx(1.0,0.0), PointPx(1.0,1.0), PointPx(0.0,1.0))
+        val manual = GeometryRecipe.ManualCurve(f.binding, full, PointPx(.5,.9), PointPx(.5,.1))
+        val request = f.request(Recipe(geometry = manual), PixelSize(21,21)).copy(fallback = FallbackPolicy.KEEP_STAGE_INPUT)
+        var delivered = false
+        val job = launch(start = CoroutineStart.UNDISPATCHED) { f.coordinator(worker).render(request).use { delivered = true } }
+        worker.runOne(); assertTrue(f.budget.usedBytes > 0); assertFalse(delivered)
+        job.cancel(); runCurrent(); job.join()
+        assertFalse(delivered); assertEquals(0L, f.budget.usedBytes); assertThrows(IllegalStateException::class.java) { f.lastDecoded!!.toPackedByteArray() }
     }
 
     @Test fun invalidManualMapAndAdmissionReturnNoPixelsAndCloseDecodedOwners() = runTest {

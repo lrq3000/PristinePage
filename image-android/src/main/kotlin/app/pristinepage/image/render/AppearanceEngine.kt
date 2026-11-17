@@ -5,6 +5,8 @@ import app.pristinepage.core.pipeline.PixelSize
 import app.pristinepage.core.pipeline.Recipe
 import app.pristinepage.core.pipeline.StageRecord
 import app.pristinepage.core.pipeline.StageRecords
+import app.pristinepage.core.pipeline.FallbackPolicy
+import app.pristinepage.core.pipeline.ProviderIdentity
 import app.pristinepage.core.recipe.*
 import app.pristinepage.data.model.OperationError
 import app.pristinepage.data.model.OperationErrorCode
@@ -13,7 +15,7 @@ import app.pristinepage.image.decode.ImageAllocationBudget
 import java.util.concurrent.atomic.AtomicBoolean
 
 /** The final packed image does not borrow the caller's possibly padded source storage. Its conservative peak reservation stays live until the whole output closes, not just until its algorithm returns. */
-class AppearanceRaster internal constructor(val image: RgbImage, stages: List<StageRecord>, private val reservation: AutoCloseable) : AutoCloseable {
+class AppearanceRaster internal constructor(val image: RgbImage, stages: List<StageRecord>, private val reservation: AutoCloseable, val failure: OperationError? = null) : AutoCloseable {
     val stages: List<StageRecord> = StageRecords.snapshot(stages)
     private val closed = AtomicBoolean(false)
     override fun close() {
@@ -24,6 +26,11 @@ class AppearanceRaster internal constructor(val image: RgbImage, stages: List<St
 /** Synchronous off-UI-thread consumer of an ALREADY geometrically completed raster. Existing adapters own candidate clipping and the single blend; this layer preflights, orders, accounts, snapshots and detaches, never rotates or blends their output again. */
 class AppearanceEngine(private val budget: ImageAllocationBudget) {
     fun render(input: RgbImage, recipe: Recipe, protection: ProtectionMask?, checkpoint: () -> Unit): AppearanceRaster {
+        return render(input, recipe, protection, FallbackPolicy.FAIL, checkpoint)
+    }
+
+    /** Opt-in fallback retains the exact input of the FIRST failed internal stage. The default entry still fails without pixels, and caller input ownership is never transferred through this overload. */
+    fun render(input: RgbImage, recipe: Recipe, protection: ProtectionMask?, fallback: FallbackPolicy, checkpoint: () -> Unit): AppearanceRaster {
         checkpoint()
         val size = PixelSize(input.width, input.height)
         try {
@@ -33,11 +40,11 @@ class AppearanceEngine(private val budget: ImageAllocationBudget) {
         catch (_: IllegalStateException) { refuse(OperationErrorCode.INVALID_INPUT, "closed_appearance_input") }
         val n = size.pixelCount
         if (size.width > 12000 || size.height > 12000 || n > 48_000_000 || n > (Int.MAX_VALUE - 8L) / 3) refuse(OperationErrorCode.RESOURCE_LIMIT, "appearance_raster_extent")
-        preflight(recipe, protection != null)
+        preflight(recipe, protection != null, fallback)
         val steps = steps(recipe, size)
         var peak = 6L * n
         var priorOutput = false
-        for (step in steps) if (step.kind != Kind.NONE) {
+        for (step in steps) if (step.kind != Kind.NONE && step.kind != Kind.UNAVAILABLE) {
             peak = maxOf(peak, step.workspace + if (priorOutput) 3L * n else 0L)
             priorOutput = true
         }
@@ -50,17 +57,24 @@ class AppearanceEngine(private val budget: ImageAllocationBudget) {
         var delivered = false
         try {
             val records = ArrayList<StageRecord>(steps.size)
-            for (step in steps) {
+            var failure: OperationError? = null
+            for ((index, step) in steps.withIndex()) {
                 checkpoint()
                 if (step.kind != Kind.NONE) {
-                    val next = step.apply(current, recipe, protection, checkpoint)
+                    val next = try { step.apply(current, recipe, protection, checkpoint) }
+                    catch (error: Exception) {
+                        failure = StageFallback.failure(error, fallback, "appearance_processing_failed")
+                        records.add(StageRecord(step.id, 1, step.provider, "FAILED_${failure.code.name}", size, size, step.warnings + failure.safeMessageKey))
+                        for (skipped in steps.drop(index + 1)) records.add(StageRecord(skipped.id, 1, skipped.provider, "SKIPPED_AFTER_STAGE_FAILURE", size, size, emptyList()))
+                        break
+                    }
                     val old = intermediate
                     intermediate = next
                     current = next
                     old?.close()
                 }
                 checkpoint()
-                records.add(StageRecord(step.id, 1, null, step.outcome, size, size, step.warnings))
+                records.add(StageRecord(step.id, 1, step.provider, step.outcome, size, size, step.warnings))
             }
             // Core exact-off/flat paths may legally retain their input. Always detach the final packed image so an AppearanceRaster cannot outlive an untransferred decoder/geometry permit or retain arbitrary row padding behind a3N charge.
             val packed = ByteArray((3L * n).toInt())
@@ -70,14 +84,14 @@ class AppearanceEngine(private val budget: ImageAllocationBudget) {
             }
             detached = RgbImage(size.width, size.height, size.width * 3, packed)
             checkpoint()
-            return AppearanceRaster(detached, records, reservation).also { delivered = true }
+            return AppearanceRaster(detached, records, reservation, failure).also { delivered = true }
         } finally {
             try { intermediate?.close(); if (!delivered) detached?.close() } finally { if (!delivered) reservation.close() }
         }
     }
 
-    private enum class Kind { NONE, PAPER, NATURAL, BILATERAL, DETAIL, GRAYSCALE, SAUVOLA }
-    private class Step(val kind: Kind, val id: String, val workspace: Long, val outcome: String = "OK", val warnings: List<String> = emptyList()) {
+    private enum class Kind { NONE, PAPER, NATURAL, BILATERAL, DETAIL, GRAYSCALE, SAUVOLA, UNAVAILABLE }
+    private class Step(val kind: Kind, val id: String, val workspace: Long, val outcome: String = "OK", val warnings: List<String> = emptyList(), val provider: ProviderIdentity? = null) {
         fun apply(input: RgbImage, recipe: Recipe, protection: ProtectionMask?, checkpoint: () -> Unit): RgbImage = when (kind) {
             Kind.PAPER -> PaperGain.apply(input, recipe.appearance as AppearanceRecipe.PaperGainV1, protection, checkpoint)
             Kind.NATURAL -> NaturalLightness.apply(input, recipe.appearance as AppearanceRecipe.NaturalLV1, protection, checkpoint)
@@ -86,6 +100,7 @@ class AppearanceEngine(private val budget: ImageAllocationBudget) {
             Kind.GRAYSCALE -> Grayscale.apply(input, protection, checkpoint)
             Kind.SAUVOLA -> Sauvola.apply(input, recipe.binary as BinaryRecipe.SauvolaV1, protection, checkpoint)
             Kind.NONE -> error("Identity is recorded without an intermediate allocation")
+            Kind.UNAVAILABLE -> refuse(OperationErrorCode.PROVIDER_UNAVAILABLE, "appearance_method_not_implemented")
         }
     }
 
@@ -97,7 +112,8 @@ class AppearanceEngine(private val budget: ImageAllocationBudget) {
             AppearanceRecipe.NoneV1 -> Step(Kind.NONE, "none_v1", 0, "EXACT_IDENTITY")
             is AppearanceRecipe.PaperGainV1 -> Step(Kind.PAPER, "paper_gain_v1", PaperGain.workspaceBytes(w, h), outcome(appearance.strength == 0.0))
             is AppearanceRecipe.NaturalLV1 -> Step(Kind.NATURAL, "natural_l_v1", NaturalLightness.workspaceBytes(w, h), outcome(appearance.strength == 0.0 || appearance.lightnessBlend == 0.0))
-            else -> refuse(OperationErrorCode.PROVIDER_UNAVAILABLE, "appearance_method_not_implemented")
+            is AppearanceRecipe.LocalMaxGainV1 -> Step(Kind.UNAVAILABLE, "local_max_gain_v1", 0)
+            is AppearanceRecipe.ProviderAppearanceV1 -> Step(Kind.UNAVAILABLE, "provider_appearance_v1", 0, provider = ProviderIdentity(appearance.providerId, appearance.contractVersion, appearance.assetSha256, "unavailable", "unavailable"))
         })
         recipe.denoise?.let { result.add(Step(Kind.BILATERAL, "bilateral_luma_v1", LumaDenoise.workspaceBytes(w, h), outcome((it as DenoiseRecipe.BilateralLumaV1).strength == 0.0))) }
         recipe.detail?.let { val detail = it as DetailRecipe.LumaDetail7V1; result.add(Step(Kind.DETAIL, "luma_detail7_v1", LumaDetail.workspaceBytes(w, h), outcome(detail.amount == 0.0 || detail.maxDelta == 0 || detail.strength == 0.0))) }
@@ -109,11 +125,14 @@ class AppearanceEngine(private val budget: ImageAllocationBudget) {
         return result
     }
 
+    /** Reuse the requested graph's stage identities when an upstream geometry failure prevents ALL photometric execution. No stage is run and no success diagnostics are fabricated. */
+    internal fun skippedStages(recipe: Recipe, size: PixelSize): List<StageRecord> = steps(recipe, size).map { StageRecord(it.id, 1, it.provider, "SKIPPED_AFTER_STAGE_FAILURE", size, size, emptyList()) }
+
     companion object {
         /** Shared graph/capability check before expensive source decode, and again at direct adapter entry. Zero-strength settings do not make an incompatible or unavailable graph valid. Size/buffer admission remains the actual raster consumer's responsibility. */
-        fun preflight(recipe: Recipe, protectionPresent: Boolean) {
+        fun preflight(recipe: Recipe, protectionPresent: Boolean, fallback: FallbackPolicy = FallbackPolicy.FAIL) {
             if (protectionPresent && (recipe.detail != null || recipe.binary != null)) refuse(OperationErrorCode.INVALID_INPUT, "invalid_appearance_graph")
-            if (recipe.appearance is AppearanceRecipe.ProviderAppearanceV1 || recipe.appearance is AppearanceRecipe.LocalMaxGainV1) refuse(OperationErrorCode.PROVIDER_UNAVAILABLE, "appearance_method_not_implemented")
+            if (fallback == FallbackPolicy.FAIL && (recipe.appearance is AppearanceRecipe.ProviderAppearanceV1 || recipe.appearance is AppearanceRecipe.LocalMaxGainV1)) refuse(OperationErrorCode.PROVIDER_UNAVAILABLE, "appearance_method_not_implemented")
         }
         private fun refuse(code: OperationErrorCode, key: String): Nothing = throw RepositoryFailure(OperationError(code, false, key, null))
     }

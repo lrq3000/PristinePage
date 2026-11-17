@@ -83,7 +83,7 @@ class RenderCoordinatorIntegrationTest {
         }
     }
 
-    @Test fun realDecodeSharesFinalOwnerCapacityAndNeverSubstitutesForUnsupportedFallback() = runBlocking {
+    @Test fun realDecodeSharesFinalOwnerCapacityAndSuccessfulKeepPolicyRemainsOk() = runBlocking {
         Fixture(3, 1, intArrayOf(gray(0),gray(10),gray(0))).use { f ->
             f.ingest(); f.forbidProvider = true
             val recipe = Recipe(geometry = GeometryRecipe.None(f.binding), denoise = DenoiseRecipe.BilateralLumaV1(), binary = BinaryRecipe.SauvolaV1())
@@ -98,8 +98,38 @@ class RenderCoordinatorIntegrationTest {
                 }
                 assertEquals(owned, f.budget.usedBytes)
             }
-            coordinator.render(request.copy(fallback = FallbackPolicy.KEEP_STAGE_INPUT)).use { assertEquals(RenderStatus.UNAVAILABLE, it.status); assertNull(it.image) }
+            coordinator.render(request.copy(fallback = FallbackPolicy.KEEP_STAGE_INPUT)).use { assertEquals(RenderStatus.OK, it.status); assertArrayEquals(neutrals(255,255,255), it.image!!.toPackedByteArray()) }
             assertEquals(0L, f.budget.usedBytes); assertArrayEquals(f.png, f.original())
+        }
+    }
+
+    @Test fun realManualFailureKeepsUnrotatedFullDecodedSourceAndOmittedStageMetadata() = runBlocking {
+        Fixture(101,101,IntArray(10201) { n -> (0xff shl 24) or ((n%101) shl 16) or ((n/101) shl 8) or 37 }).use { f ->
+            f.ingest(); f.forbidProvider = true
+            val full = QuadPx(PointPx(0.0,0.0),PointPx(1.0,0.0),PointPx(1.0,1.0),PointPx(0.0,1.0))
+            val manual = GeometryRecipe.ManualCurve(f.binding,full,PointPx(.5,.9),PointPx(.5,.1),outputQuarterTurns = 1)
+            val request = f.request(Recipe(geometry = manual, appearance = AppearanceRecipe.PaperGainV1(), binary = BinaryRecipe.SauvolaV1()),PixelSize(21,21)).copy(fallback = FallbackPolicy.KEEP_STAGE_INPUT)
+            f.coordinator().render(request).use {
+                assertEquals(RenderStatus.DEGRADED,it.status); val image = checkNotNull(it.image)
+                assertEquals(101,image.width); assertEquals(101,image.height)
+                assertEquals(12,image.getUnsigned(12,27,0)); assertEquals(27,image.getUnsigned(12,27,1)); assertEquals(37,image.getUnsigned(12,27,2))
+                assertTrue(it.warnings.contains("OUTPUT_ROTATION_OMITTED_1")); assertTrue(f.budget.usedBytes > 0)
+                assertEquals(listOf("OK","FAILED_INVALID_MAP","SKIPPED_AFTER_STAGE_FAILURE","SKIPPED_AFTER_STAGE_FAILURE"),it.stages.map { s -> s.outcome })
+            }
+            assertEquals(0L,f.budget.usedBytes); assertArrayEquals(f.png,f.original())
+        }
+    }
+
+    @Test fun realUnavailableAppearanceFallbackKeepsRotatedGeometryInsteadOfRawOrBinaryPixels() = runBlocking {
+        Fixture(3,2,intArrayOf(gray(5),gray(15),gray(25),gray(35),gray(45),gray(55))).use { f ->
+            f.ingest(); f.forbidProvider = true
+            val missing = AppearanceRecipe.ProviderAppearanceV1("missing",1,"d".repeat(64),"test","e".repeat(64),0.0)
+            val recipe = Recipe(geometry = GeometryRecipe.None(f.binding,outputQuarterTurns = 1),appearance = missing,binary = BinaryRecipe.SauvolaV1())
+            f.coordinator().render(f.request(recipe,PixelSize(2,3)).copy(fallback = FallbackPolicy.KEEP_STAGE_INPUT)).use {
+                assertEquals(RenderStatus.DEGRADED,it.status); assertArrayEquals(neutrals(35,5,45,15,55,25),it.image!!.toPackedByteArray())
+                assertEquals(listOf("OK","EXACT_PERMUTATION","FAILED_PROVIDER_UNAVAILABLE","SKIPPED_AFTER_STAGE_FAILURE"),it.stages.map { s -> s.outcome })
+            }
+            assertEquals(0L,f.budget.usedBytes); assertArrayEquals(f.png,f.original())
         }
     }
 

@@ -6,6 +6,7 @@ import app.pristinepage.core.image.RgbImage
 import app.pristinepage.core.pipeline.*
 import app.pristinepage.core.recipe.*
 import app.pristinepage.data.model.OperationErrorCode
+import app.pristinepage.data.model.OperationError
 import app.pristinepage.data.model.RepositoryFailure
 import app.pristinepage.image.decode.ImageAllocationBudget
 import app.pristinepage.image.render.AppearanceEngine
@@ -19,6 +20,22 @@ import org.junit.runner.RunWith
 class AppearancePipelineIntegrationTest {
     private fun recipe(w: Int, appearance: AppearanceRecipe = AppearanceRecipe.NoneV1, denoise: DenoiseRecipe? = null, detail: DetailRecipe? = null, binary: BinaryRecipe? = null) = Recipe(geometry = GeometryRecipe.None(SourceBinding("d".repeat(64), PixelSize(w, 1), "test-srgb-v1")), appearance = appearance, denoise = denoise, detail = detail, binary = binary)
     private fun neutrals(vararg v: Int) = RgbImage(v.size, 1, 3 * v.size, ByteArray(v.size * 3) { v[it / 3].toByte() })
+
+    @Test fun packagedLateStageFailureKeepsEnhancedInputAndStopsBinaryExecution() {
+        val budget = ImageAllocationBudget(2_000_000); val engine = AppearanceEngine(budget)
+        neutrals(200,200,200,195).use { input ->
+            val prefix = recipe(4, AppearanceRecipe.PaperGainV1(strength = .5)); var prefixCalls = 0
+            engine.render(input, prefix, null) { prefixCalls++ }.close()
+            var calls = 0
+            val request = prefix.copy(denoise = DenoiseRecipe.BilateralLumaV1(), binary = BinaryRecipe.SauvolaV1())
+            engine.render(input, request, null, FallbackPolicy.KEEP_STAGE_INPUT) { if (++calls == prefixCalls) throw RepositoryFailure(OperationError(OperationErrorCode.PROCESSING_FAILED,false,"synthetic_stage_failure",null)) }.use {
+                assertArrayEquals(ByteArray(12) { intArrayOf(223,223,223,217)[it/3].toByte() }, it.image.toPackedByteArray())
+                assertEquals(OperationErrorCode.PROCESSING_FAILED, it.failure!!.code)
+                assertEquals(listOf("OK", "FAILED_PROCESSING_FAILED", "SKIPPED_AFTER_STAGE_FAILURE"), it.stages.map { s -> s.outcome })
+            }
+            assertEquals(0L, budget.usedBytes); assertEquals(195, input.getUnsigned(3,0,0))
+        }
+    }
 
     @Test fun packagedPaperAndNaturalAdaptersMatchLiteralSingleBlendOracles() {
         val budget = ImageAllocationBudget(2_000_000); val engine = AppearanceEngine(budget)
