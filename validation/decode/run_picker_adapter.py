@@ -211,7 +211,8 @@ class PickerAdapterRun:
         assert len(paths) == 1 and re.fullmatch(r"package:/data/app/[^\s]+/base.apk", paths[0])
         return self.command([ADB, "-s", self.serial, "shell", "sha256sum", paths[0][8:]]).split()[0]
 
-    def install_and_test(self):
+    def install_pair(self):
+        """Verify the owned runtime and exact installed pair without starting instrumentation. P-06 reuses these guards for its real-picker journey rather than replaying unrelated suites."""
         record = self.owned()
         row = self.exact(self.inventory())
         assert [int(row[5]), int(row[6])] == [identity[0] for identity in record["runtime_processes"]]
@@ -236,6 +237,9 @@ class PickerAdapterRun:
         self.path("registry.txt").write_text(registry, encoding="utf-8")
         assert "instrumentation:app.pristinepage.debug.test/androidx.test.runner.AndroidJUnitRunner (target=app.pristinepage.debug)" in registry
         self.save(self.path("install.json"), installs)
+
+    def install_and_test(self):
+        self.install_pair()
         output = self.command([ADB, "-s", self.serial, "shell", "am", "instrument", "-w", "-r", "-e", "class", TEST_CLASS, "app.pristinepage.debug.test/androidx.test.runner.AndroidJUnitRunner"], 180)
         self.path("instrumentation.txt").write_text(output, encoding="utf-8")
         expected = Counter((TEST_CLASS, name) for name in re.findall(r"@Test\s+fun\s+(\w+)", (ROOT / "app/src/androidTest/kotlin/app/pristinepage/PhotoPickerContractTest.kt").read_text()))
@@ -309,13 +313,17 @@ class PickerAdapterRun:
         finally:
             self.lock.rmdir()
 
-    def run(self):
+    def verify_inputs(self):
+        """Read-only identity checks must finish before a claim or emulator mutation, including callers that do not run the adapter instrumentation."""
         for path, expected in self.input["sources"].items():
             assert sha(ROOT / path) == expected, path
         for role, artifact in self.input["artifacts"].items():
             assert artifact["certificateSha256"] == SIGNER
             assert artifact["metadata"]["applicationId"] == "app.pristinepage.debug" + (".test" if role == "test" else "")
             assert sha(Path(artifact["apk"])) == sha(Path(artifact["retained"])) == artifact["sha256"]
+
+    def run(self):
+        self.verify_inputs()
         try:
             self.claim()
             self.install_and_test()
