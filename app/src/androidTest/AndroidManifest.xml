@@ -1,0 +1,10 @@
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <application>
+        <!-- Test APK only. System document UI may enumerate it; other apps need a selected URI grant. No production provider or storage permission is added. -->
+        <provider android:name="app.pristinepage.testing.SyntheticDocumentsProvider" android:authorities="app.pristinepage.debug.test.documents" android:exported="true" android:grantUriPermissions="true" android:permission="android.permission.MANAGE_DOCUMENTS">
+            <intent-filter>
+                <action android:name="android.content.action.DOCUMENTS_PROVIDER" />
+            </intent-filter>
+        </provider>
+    </application>
+</manifest>
