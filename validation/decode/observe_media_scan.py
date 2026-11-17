@@ -49,7 +49,7 @@ class ObservedMediaScan(MediaProviderProbe):
         assert re.fullmatch(r"[1-9][0-9]*", pid), pid
         baseline = self.command(args + ["logcat", "-d", "-v", "threadtime", "--pid", pid, "-t", "80", "MediaScannerReceiver:D", "MediaScannerService:D", "*:S"])
         if any("Row:" in value for value in before.values()):
-            self.save(self.path("observation.json"), {"before": before, "pid": pid, "scanCount": 0, "reason": "Exact retained row already exists; do not scan again"})
+            self.save(self.path(getattr(self, "observation_name", "observation.json")), {"before": before, "pid": pid, "scanCount": 0, "reason": "Exact retained row already exists; do not scan again"})
             return
         assert all(value.strip() == "No result found." for value in before.values()), before
         self.command(args + ["shell", "am", "broadcast", "-n", "com.android.providers.media/.MediaScannerReceiver", "-a", "android.intent.action.MEDIA_SCANNER_SCAN_FILE", "-d", "file://" + self.fixture], timeout=30)
@@ -64,7 +64,7 @@ class ObservedMediaScan(MediaProviderProbe):
             # Condition-based bounded registration polling, not repeated scan requests.
             time.sleep(.5)
         logs = self.command(args + ["logcat", "-d", "-v", "threadtime", "--pid", pid, "-t", "80", "MediaScannerReceiver:D", "MediaScannerService:D", "*:S"])
-        self.save(self.path("observation.json"), {"before": before, "pid": pid, "scanCount": 1, "after": after, "newLogLines": [line for line in logs.splitlines() if line not in baseline.splitlines()], "registeredImage": "Row:" in rows["images/media"], "limitations": "One exact-file reproduction; log silence does not establish non-delivery or a cause"})
+        self.save(self.path(getattr(self, "observation_name", "observation.json")), {"before": before, "pid": pid, "scanCount": 1, "after": after, "newLogLines": [line for line in logs.splitlines() if line not in baseline.splitlines()], "registeredImage": "Row:" in rows["images/media"], "limitations": "One exact-file reproduction; log silence does not establish non-delivery or a cause"})
         print(json.dumps({"scanCount": 1, "registeredImage": "Row:" in rows["images/media"], "newLogLines": [line for line in logs.splitlines() if line not in baseline.splitlines()]}), flush=True)
 
 
