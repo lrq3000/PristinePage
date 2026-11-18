@@ -16,10 +16,23 @@ import app.pristinepage.data.model.JobId
 import app.pristinepage.data.model.OperationError
 import app.pristinepage.data.model.OperationErrorCode
 import app.pristinepage.data.model.OrdinaryExportProfile
+import app.pristinepage.data.model.PersistentRenderIdentity
 import app.pristinepage.data.model.RenderJobIdentity
 import app.pristinepage.data.model.RepositoryFailure
 import app.pristinepage.data.model.SourceInspection
 import app.pristinepage.data.model.requireOpaqueId
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonElement
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
+
+internal data class FrozenRenderJobIdentityRow(
+    val jobId: String,
+    val kind: String,
+    val idempotenceKey: String,
+    val canonicalInputSha256: String,
+    val input: ByteArray,
+)
 
 /** Checks immutable render identity and the supplied JOB pin, not committed bytes, transitive ownership, current state, or authority to run. */
 internal object FrozenRenderJobProof {
@@ -34,10 +47,30 @@ internal object FrozenRenderJobProof {
         pinnedSource: ExportSourceBinding?,
         profile: OrdinaryExportProfile,
     ) {
+        if (row.snapshotId != null || row.pageOrdinal != null) invalid(expectedJobId)
+        val expected = prepare(expectedJobId, page, profile, acceptHistoricalIdentity = false)
+        val pin = pins.singleOrNull() ?: invalid(expectedJobId)
+        if (pin.ownerType != "JOB" || pin.ownerId != row.jobId) invalid(expectedJobId)
+        expected.verify(FrozenRenderJobIdentityRow(row.jobId, row.kind, row.idempotenceKey, row.canonicalInputSha256, row.input), pin.sourceId, pinnedSource)
+    }
+
+    /** Prepare before entering Room so the raw guard binds the actual canonical byte extent. A retained profile is used only to verify identity, never to select a runtime. */
+    fun prepare(
+        expectedJobId: JobId,
+        page: ExportPageSnapshot,
+        runtime: OrdinaryExportProfile,
+        acceptHistoricalIdentity: Boolean = true,
+        parseDescriptor: (String) -> JsonElement = Json.Default::parseToJsonElement,
+    ): Expected {
         try {
             require(page.fallbackPolicy == FallbackPolicy.FAIL && page.acceptedRenderId == null && page.acceptedExecutionHash == null)
             require(page.masks.contentEquals(emptyMasks) && page.assetSetHash == OrdinaryExportProfile.emptyAssetSetHash)
-            require(page.rendererVersion == profile.rendererVersion && page.providers.contentEquals(profile.providerDescriptor()))
+            val descriptor = page.providers
+            val historical = page.rendererVersion != runtime.rendererVersion || !descriptor.contentEquals(runtime.providerDescriptor())
+            val profile = if (historical) {
+                require(acceptHistoricalIdentity)
+                retainedProfile(page.rendererVersion, descriptor, parseDescriptor)
+            } else runtime
             val output = page.output
             require(output == page.requestedOutput && output.purpose == RenderPurpose.EXPORT)
 
@@ -48,20 +81,86 @@ internal object FrozenRenderJobProof {
             require(recipe.geometry.source == SourceBinding(page.pixelHash, page.sourceSize, page.conversionFingerprint))
             val request = RenderRequest(page.sourceId.value, page.pixelHash, page.pageId.value, page.recipeRevision, recipe, output, 0, null, FallbackPolicy.FAIL)
             val expected = RenderJobIdentity.create(request, emptyMap(), page.assetSetHash, page.conversionFingerprint, profile.rendererVersion, profile.encodingVersion, profile.backend, profile.precision)
-
-            // Comparing with the rebuilt identity, not with a hash of row.input alone, rejects an internally consistent job for the wrong page.
-            require(row.jobId == expectedJobId.value && row.kind == "PAGE_RENDER" && row.snapshotId == null && row.pageOrdinal == null)
-            require(row.idempotenceKey == expected.idempotenceKey && row.canonicalInputSha256 == expected.canonicalInputSha256 && row.input.contentEquals(expected.canonicalInput))
-            verifyPin(page, row, pins, pinnedSource)
+            return Expected(expectedJobId, page, expected, historical)
         } catch (_: IllegalArgumentException) {
-            throw RepositoryFailure(OperationError(OperationErrorCode.INTEGRITY_FAILED, false, "frozen_render_job_invalid", expectedJobId.value))
+            invalid(expectedJobId)
         }
     }
 
-    private fun verifyPin(page: ExportPageSnapshot, row: JobRow, pins: List<SourceReferenceRow>, binding: ExportSourceBinding?) {
-        val pin = requireNotNull(pins.singleOrNull())
+    private fun retainedProfile(rendererVersion: String, descriptor: ByteArray, parseDescriptor: (String) -> JsonElement): OrdinaryExportProfile {
+        // The canonical encoder can emit at most six ASCII bytes per UTF-16 unit of each version token plus a small fixed JSON envelope.
+        require(descriptor.size in 1..(3 * 128 * 6 + 128))
+        val text = descriptor.decodeToString()
+        requireShallowDescriptor(text)
+        val json = parseDescriptor(text) as? JsonObject ?: throw IllegalArgumentException()
+        fun text(name: String): String {
+            val value = json[name] as? JsonPrimitive ?: throw IllegalArgumentException()
+            require(value.isString)
+            return value.content
+        }
+        val profile = OrdinaryExportProfile(rendererVersion, text("encodingVersion"), text("backend"), text("precision"))
+        // Exact re-encoding also rejects malformed UTF-8, duplicate or unknown fields, nonempty providers, and any other descriptor version.
+        require(descriptor.contentEquals(profile.providerDescriptor()))
+        return profile
+    }
+
+    private fun requireShallowDescriptor(text: String) {
+        // A byte cap cannot bound parser recursion. Outside quoted strings, allow only the root object and literal empty arrays; the parser and exact re-encoding still enforce grammar and the single providers field.
+        require(text.startsWith('{') && text.endsWith('}'))
+        var quoted = false
+        var escaped = false
+        var index = 1
+        while (index < text.lastIndex) {
+            val char = text[index++]
+            if (quoted) {
+                when {
+                    escaped -> escaped = false
+                    char == '\\' -> escaped = true
+                    char == '"' -> quoted = false
+                }
+            } else {
+                when (char) {
+                    '"' -> quoted = true
+                    '[' -> {
+                        require(index < text.lastIndex && text[index] == ']')
+                        index++
+                    }
+                    '{', '}', ']' -> throw IllegalArgumentException()
+                }
+            }
+        }
+        require(!quoted)
+    }
+
+    class Expected internal constructor(
+        private val jobId: JobId,
+        private val page: ExportPageSnapshot,
+        identity: PersistentRenderIdentity,
+        val historical: Boolean,
+    ) {
+        private val input = identity.canonicalInput
+        private val key = identity.idempotenceKey
+        private val digest = identity.canonicalInputSha256
+        val inputBytes: Int get() = input.size
+
+        /** Both entry points use the same exact proof; compare against the rebuilt bytes, not the row's self-reported digest. */
+        fun verify(row: FrozenRenderJobIdentityRow, pinSourceId: String, pinnedSource: ExportSourceBinding?) {
+            try {
+                require(row.jobId == jobId.value && row.kind == "PAGE_RENDER")
+                require(row.idempotenceKey == key && row.canonicalInputSha256 == digest && row.input.contentEquals(input))
+                verifyPin(page, pinSourceId, pinnedSource)
+            } catch (_: IllegalArgumentException) {
+                invalid(jobId)
+            }
+        }
+    }
+
+    private fun invalid(jobId: JobId): Nothing =
+        throw RepositoryFailure(OperationError(OperationErrorCode.INTEGRITY_FAILED, false, "frozen_render_job_invalid", jobId.value))
+
+    private fun verifyPin(page: ExportPageSnapshot, pinSourceId: String, binding: ExportSourceBinding?) {
         val (source, blob) = requireNotNull(binding)
-        require(pin.ownerType == "JOB" && pin.ownerId == row.jobId && pin.sourceId == source.sourceId)
+        require(pinSourceId == source.sourceId)
         requireOpaqueId(source.sourceId)
         require(source.sourceBlobId == blob.sourceBlobId)
         requireOpaqueId(blob.sourceBlobId)

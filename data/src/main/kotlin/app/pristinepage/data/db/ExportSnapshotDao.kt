@@ -6,6 +6,7 @@ import androidx.room.OnConflictStrategy
 import androidx.room.Query
 import app.pristinepage.data.repository.AssemblyJobIdentityRow
 import app.pristinepage.data.repository.ExportSnapshotQueries
+import app.pristinepage.data.repository.FrozenRenderJobIdentityRow
 
 @Dao abstract class ExportSnapshotDao : ExportSnapshotQueries {
     // Return only a scalar before Room extracts any settings bytes. SQLite length(BLOB) reads its byte count, not a Kotlin ByteArray; type checks prevent coercion of corrupt storage classes.
@@ -56,6 +57,23 @@ import app.pristinepage.data.repository.ExportSnapshotQueries
     // Only use after admission in the same transaction; no state/checkpoint/lease fields or typed ordinal cross this boundary.
     @Query("SELECT jobId, kind, idempotenceKey, canonicalInputSha256, snapshotId, input FROM Job WHERE jobId=:jobId")
     internal abstract fun assemblyJobIdentity(jobId: String): AssemblyJobIdentityRow?
+
+    // The caller binds the exact nonzero v1 byte extent rebuilt from one authenticated frozen page, not the assembly envelope or a recipe cap. CASE preserves corrupt-present versus absent.
+    @Query("""SELECT CASE WHEN (:expectedInputBytes>0 AND typeof(input)='blob' AND length(input)=:expectedInputBytes)
+        AND (typeof(jobId)='text' AND length(CAST(jobId AS BLOB))=36 AND length(jobId)=36)
+        AND (typeof(kind)='text' AND length(CAST(kind AS BLOB))=11 AND kind='PAGE_RENDER')
+        AND (typeof(idempotenceKey)='text' AND length(CAST(idempotenceKey AS BLOB))=79 AND length(idempotenceKey)=79 AND substr(idempotenceKey,1,15)='page-render-v1:')
+        AND (typeof(canonicalInputSha256)='text' AND length(CAST(canonicalInputSha256 AS BLOB))=64 AND length(canonicalInputSha256)=64)
+        AND (snapshotId IS NULL AND pageOrdinal IS NULL) THEN 1 ELSE 0 END FROM Job WHERE jobId=:jobId""")
+    internal abstract fun renderJobReadIsBounded(jobId: String, expectedInputBytes: Int): Boolean?
+
+    @Query("SELECT jobId, kind, idempotenceKey, canonicalInputSha256, input FROM Job WHERE jobId=:jobId")
+    internal abstract fun renderJobIdentity(jobId: String): FrozenRenderJobIdentityRow?
+
+    // The indexed JOB owner predicate fixes both owner fields. Preserve invalid source IDs as a bounded sentinel, rather than filtering away evidence of a corrupt or second pin.
+    @Query("""SELECT CASE WHEN (typeof(sourceId)='text' AND length(CAST(sourceId AS BLOB))=36 AND length(sourceId)=36) THEN sourceId ELSE '' END
+        FROM SourceReference WHERE ownerType='JOB' AND ownerId=:jobId LIMIT 2""")
+    internal abstract fun boundedRenderJobPinSourceIds(jobId: String): List<String>
 
     @Query("SELECT * FROM Job WHERE idempotenceKey=:key") abstract override fun renderJobByKey(key: String): JobRow?
     // Ordinary page jobs have exactly one source owner. A second row is sufficient to expose invalid cardinality without loading an unbounded corrupt owner set.
