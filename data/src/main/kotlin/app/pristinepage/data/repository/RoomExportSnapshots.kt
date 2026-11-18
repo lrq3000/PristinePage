@@ -88,17 +88,15 @@ class RoomExportSnapshots @JvmOverloads constructor(private val metadata: Metada
                     val recipe = RecipeCodec.decode(page.recipe)
                     val request = RenderRequest(page.sourceId, page.pixelSha256, page.originalPageId, page.recipeRevision, recipe, settings.pages[page.ordinal].output, 0, null, FallbackPolicy.FAIL)
                     val identity = RenderJobIdentity.create(request, emptyMap(), page.assetSetSha256, page.conversionFingerprint, rendererVersion, encodingVersion, backend, precision)
-                    val existing = queries.renderJobByKey(identity.idempotenceKey)
+                    val input = identity.canonicalInput
+                    val existing = queries.renderJobIdByKey(identity.idempotenceKey)
                     val jobId = if (existing == null) {
                         val id = uuid()
-                        queries.insertExportJob(job(id, "PAGE_RENDER", identity.idempotenceKey, identity.canonicalInputSha256, identity.canonicalInput, null, now))
+                        queries.insertExportJob(job(id, "PAGE_RENDER", identity.idempotenceKey, identity.canonicalInputSha256, input, null, now))
                         pin("JOB", id, page.sourceId, now); id
                     } else {
-                        if (existing.kind != "PAGE_RENDER" || existing.snapshotId != null || existing.pageOrdinal != null || existing.canonicalInputSha256 != identity.canonicalInputSha256 || !existing.input.contentEquals(identity.canonicalInput)) reject(OperationErrorCode.INTEGRITY_FAILED, "render_job_identity_mismatch", existing.jobId)
-                        requireOpaqueId(existing.jobId)
-                        verifyJobSource(existing, page)
-                        // A byte-identical render may be shared by equivalent source-row owners. Its immutable input source is retained by its original JOB pin; each export page independently pins its own source.
-                        existing.jobId
+                        verifyReusedJob(existing, identity, input, snapshot.pages[page.ordinal])
+                        existing
                     }
                     jobIds += JobId(jobId)
                 }
@@ -182,11 +180,37 @@ class RoomExportSnapshots @JvmOverloads constructor(private val metadata: Metada
     }
 
     private fun sameBindings(before: List<ExportSourceBinding>, after: List<ExportSourceBinding>): Boolean = before.size == after.size && before.zip(after).all { (a, b) -> a.source.copy(refCount = 0) == b.source.copy(refCount = 0) && a.blob.copy(sourceCount = 0) == b.blob.copy(sourceCount = 0) }
-    private fun verifyJobSource(job: JobRow, page: ExportPageRow) {
-        val reference = queries.jobSourceReferences(job.jobId).singleOrNull() ?: reject(OperationErrorCode.INTEGRITY_FAILED, "render_job_source_missing", job.jobId)
-        val source = q.source(reference.sourceId) ?: reject(OperationErrorCode.INTEGRITY_FAILED, "render_job_source_missing", job.jobId)
-        val blob = q.sourceBlob(source.sourceBlobId) ?: reject(OperationErrorCode.INTEGRITY_FAILED, "render_job_source_missing", job.jobId)
-        if (reference.ownerType != "JOB" || reference.ownerId != job.jobId || source.sourceId != reference.sourceId || source.state != "READY" || blob.state != "READY" || source.pixelSha256 != page.pixelSha256 || source.width != page.width || source.height != page.height || source.conversionFingerprint != page.conversionFingerprint) reject(OperationErrorCode.INTEGRITY_FAILED, "render_job_source_mismatch", job.jobId)
+    private fun verifyReusedJob(jobId: String, identity: PersistentRenderIdentity, input: ByteArray, page: ExportPageSnapshot) {
+        fun mismatch(id: String?): Nothing = reject(OperationErrorCode.INTEGRITY_FAILED, "render_job_identity_mismatch", id)
+        try { requireOpaqueId(jobId) } catch (_: IllegalArgumentException) { mismatch(null) }
+        if (queries.renderJobReadIsBounded(jobId, input.size) != true) mismatch(jobId)
+        val row = queries.renderJobIdentity(jobId) ?: mismatch(jobId)
+        if (row.jobId != jobId || row.kind != "PAGE_RENDER" || row.idempotenceKey != identity.idempotenceKey ||
+            row.canonicalInputSha256 != identity.canonicalInputSha256 || !row.input.contentEquals(input)) mismatch(jobId)
+
+        fun missing(): Nothing = reject(OperationErrorCode.INTEGRITY_FAILED, "render_job_source_missing", jobId)
+        fun invalid(): Nothing = reject(OperationErrorCode.INTEGRITY_FAILED, "render_job_source_mismatch", jobId)
+        val pins = queries.boundedRenderJobPinSourceIds(jobId)
+        if (pins.isEmpty()) missing()
+        val pinId = pins.singleOrNull() ?: invalid()
+        try { requireOpaqueId(pinId) } catch (_: IllegalArgumentException) { invalid() }
+        val bounds = q as? EditablePageQueries ?: invalid()
+        // The joined scalar admits both rows before either typed projection. Only a definite missing row/link keeps the missing diagnostic.
+        when (bounds.sourceReadIsBounded(pinId)) {
+            null -> missing()
+            false -> if (bounds.sourceBlobLinkIsMissing(pinId) == true) missing() else invalid()
+            true -> Unit
+        }
+        val source = q.source(pinId) ?: invalid()
+        if (source.sourceId != pinId) invalid()
+        try { requireOpaqueId(source.sourceBlobId) } catch (_: IllegalArgumentException) { invalid() }
+        val blob = q.sourceBlob(source.sourceBlobId) ?: invalid()
+        try {
+            // Equivalent normalized originals can share a render without transferring its original JOB pin.
+            FrozenRenderJobProof.verifyPin(page, pinId, ExportSourceBinding(source, blob))
+        } catch (_: IllegalArgumentException) {
+            invalid()
+        }
     }
     private fun value(id: ExportSnapshotId, document: DocumentId, revision: Long, settings: ExportSettings, prepared: Prepared, now: Long) = ExportSnapshot(id, document, revision, prepared.identity.snapshotHash, settings, prepared.rows.map(::ExportPageSnapshot), now)
     private fun pin(type: String, owner: String, source: String, now: Long) {

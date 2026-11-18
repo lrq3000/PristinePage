@@ -60,6 +60,11 @@ import app.pristinepage.data.repository.RenderIntentQueries
     @Query("SELECT jobId, kind, idempotenceKey, canonicalInputSha256, snapshotId, input FROM Job WHERE jobId=:jobId")
     internal abstract fun assemblyJobIdentity(jobId: String): AssemblyJobIdentityRow?
 
+    // Only a missing exact key may authorize an insert. Project an invalid ID as a sentinel rather than filtering the match or returning SQL NULL.
+    @Query("""SELECT CASE WHEN (typeof(jobId)='text' AND length(CAST(jobId AS BLOB))=36 AND length(jobId)=36) THEN jobId ELSE '' END
+        FROM Job WHERE idempotenceKey=:key""")
+    abstract override fun renderJobIdByKey(key: String): String?
+
     // The caller binds the exact nonzero v1 byte extent rebuilt from one authenticated frozen page, not the assembly envelope or a recipe cap. CASE preserves corrupt-present versus absent.
     @Query("""SELECT CASE WHEN (:expectedInputBytes>0 AND typeof(input)='blob' AND length(input)=:expectedInputBytes)
         AND (typeof(jobId)='text' AND length(CAST(jobId AS BLOB))=36 AND length(jobId)=36)
@@ -67,15 +72,15 @@ import app.pristinepage.data.repository.RenderIntentQueries
         AND (typeof(idempotenceKey)='text' AND length(CAST(idempotenceKey AS BLOB))=79 AND length(idempotenceKey)=79 AND substr(idempotenceKey,1,15)='page-render-v1:')
         AND (typeof(canonicalInputSha256)='text' AND length(CAST(canonicalInputSha256 AS BLOB))=64 AND length(canonicalInputSha256)=64)
         AND (snapshotId IS NULL AND pageOrdinal IS NULL) THEN 1 ELSE 0 END FROM Job WHERE jobId=:jobId""")
-    internal abstract fun renderJobReadIsBounded(jobId: String, expectedInputBytes: Int): Boolean?
+    abstract override fun renderJobReadIsBounded(jobId: String, expectedInputBytes: Int): Boolean?
 
     @Query("SELECT jobId, kind, idempotenceKey, canonicalInputSha256, input FROM Job WHERE jobId=:jobId")
-    internal abstract fun renderJobIdentity(jobId: String): FrozenRenderJobIdentityRow?
+    abstract override fun renderJobIdentity(jobId: String): FrozenRenderJobIdentityRow?
 
     // The indexed JOB owner predicate fixes both owner fields. Preserve invalid source IDs as a bounded sentinel, rather than filtering away evidence of a corrupt or second pin.
     @Query("""SELECT CASE WHEN (typeof(sourceId)='text' AND length(CAST(sourceId AS BLOB))=36 AND length(sourceId)=36) THEN sourceId ELSE '' END
         FROM SourceReference WHERE ownerType='JOB' AND ownerId=:jobId LIMIT 2""")
-    internal abstract fun boundedRenderJobPinSourceIds(jobId: String): List<String>
+    abstract override fun boundedRenderJobPinSourceIds(jobId: String): List<String>
 
     // Supplement renderJobReadIsBounded before invoking the existing full JobLeaseDao projection. That guard owns input, immutable TEXT and the raw-null ordinal; every other projected field is admitted here.
     @Query("""SELECT CASE WHEN (typeof(state)='text' AND length(CAST(state AS BLOB)) BETWEEN 1 AND 32)
@@ -202,8 +207,5 @@ import app.pristinepage.data.repository.RenderIntentQueries
                 row.executionSha256, row.relativePath, row.byteSha256, row.rasterPixelSha256, row.byteCount, row.width, row.height)
     }
 
-    @Query("SELECT * FROM Job WHERE idempotenceKey=:key") abstract override fun renderJobByKey(key: String): JobRow?
-    // Ordinary page jobs have exactly one source owner. A second row is sufficient to expose invalid cardinality without loading an unbounded corrupt owner set.
-    @Query("SELECT * FROM SourceReference WHERE ownerType='JOB' AND ownerId=:jobId LIMIT 2") abstract override fun jobSourceReferences(jobId: String): List<SourceReferenceRow>
     @Insert(onConflict = OnConflictStrategy.ABORT) abstract override fun insertExportJob(row: JobRow)
 }

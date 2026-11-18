@@ -26,7 +26,7 @@ class ExportAssemblyInputTest {
             check(f.metadata.inTransaction)
             when (method.name) {
                 "insertSnapshot", "insertExportPage" -> Unit
-                "renderJobByKey" -> null
+                "renderJobIdByKey" -> jobs.singleOrNull { it.idempotenceKey == args[0] }?.jobId
                 "insertExportJob" -> { jobs += args.single() as JobRow; Unit }
                 else -> error("Unexpected query: ${method.name}")
             }

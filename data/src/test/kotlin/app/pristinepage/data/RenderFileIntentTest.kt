@@ -337,8 +337,10 @@ class RenderFileIntentTest {
             val snapshots = object : ExportSnapshotQueries {
                 override fun insertSnapshot(row: ExportSnapshotRow) = Unit
                 override fun insertExportPage(row: ExportPageRow) = Unit
-                override fun renderJobByKey(key: String) = jobs.values.singleOrNull { it.idempotenceKey == key }
-                override fun jobSourceReferences(jobId: String) = catalog.references.values.filter { it.ownerType == "JOB" && it.ownerId == jobId }
+                override fun renderJobIdByKey(key: String) = jobs.values.singleOrNull { it.idempotenceKey == key }?.jobId
+                override fun renderJobReadIsBounded(jobId: String, expectedInputBytes: Int): Boolean? = error("Fixture only freezes fresh jobs")
+                override fun renderJobIdentity(jobId: String): FrozenRenderJobIdentityRow? = error("Fixture only freezes fresh jobs")
+                override fun boundedRenderJobPinSourceIds(jobId: String): List<String> = error("Fixture only freezes fresh jobs")
                 override fun insertExportJob(row: JobRow) { check(jobs.putIfAbsent(row.jobId, row) == null) }
                 override fun snapshotMetadataIsBounded(snapshotId: String): Boolean? = error("Not a snapshot reader")
                 override fun exportPagesAreBounded(snapshotId: String): Boolean = error("Not a snapshot reader")

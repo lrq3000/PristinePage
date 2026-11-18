@@ -45,6 +45,12 @@ class ExportSnapshotTest {
         var failPageInsertAt: Int? = null
         var snapshotBounded = true
         var pagesBounded = true
+        var refusedJob: String? = null
+        var missingJobIdentity: String? = null
+        var forbiddenSource: SourceRow? = null
+        val reuseReads = mutableListOf<String>()
+        val jobBoundsReads = mutableListOf<Pair<String, Int>>()
+        private var admittedJob: String? = null
         private var pageInserts = 0
         var settings = ExportSettings(ExportFormat.PNG, f.pageIds.map { PageOutputSettings(it, OutputSpec(PixelSize(3, 2), RenderPurpose.EXPORT)) }, null, null, emptyList())
         private val catalog = object : CatalogQueries by f.metadata, EditablePageQueries by f.metadata {
@@ -55,7 +61,8 @@ class ExportSnapshotTest {
             override fun documentReadIsBounded(documentId: String) = guard("document", f.metadata.documentReadIsBounded(documentId))
             override fun activePagesReadIsBounded(documentId: String) = guard("pages", f.metadata.activePagesReadIsBounded(documentId)) == true
             override fun sourceReadIsBounded(id: String) =
-                guard("source/blob", f.metadata.sourceReadIsBounded(id)).also { sourceGuardResults += id to it }
+                guard(if (id == f.source.value) "source/blob" else "retained-blob", f.metadata.sourceReadIsBounded(id))
+                    .also { sourceGuardResults += id to it }
             override fun sourceBlobLinkIsMissing(id: String) =
                 f.metadata.sourceBlobLinkIsMissing(id).also { missingBlobLinkReads += id }
             override fun recipeReadIsBounded(pageId: String, revision: Long): Boolean? {
@@ -70,8 +77,14 @@ class ExportSnapshotTest {
                 f.metadata.recipeBlobByteCount(pageId, revision).also { extentReads += pageId to revision }
             override fun document(id: String) = f.metadata.document(id).also { typedReads += "document" }
             override fun activePages(documentId: String) = f.metadata.activePages(documentId).also { typedReads += "pages" }
-            override fun source(id: String) = f.metadata.source(id).also { typedReads += "source" }
-            override fun sourceBlob(id: String) = f.metadata.sourceBlob(id).also { typedReads += "blob" }
+            override fun source(id: String): SourceRow? {
+                assertNotEquals("Unadmitted retained Source was projected", forbiddenSource?.sourceId, id)
+                return f.metadata.source(id).also { typedReads += "source" }
+            }
+            override fun sourceBlob(id: String): SourceBlobRow? {
+                assertNotEquals("Unadmitted retained Blob was projected", forbiddenSource?.sourceBlobId, id)
+                return f.metadata.sourceBlob(id).also { typedReads += "blob" }
+            }
             override fun recipe(pageId: String, revision: Long) = f.metadata.recipe(pageId, revision).also { recipeReads += pageId to revision }
             override fun recipeMasks(pageId: String, revision: Long) = f.metadata.recipeMasks(pageId, revision).also { typedReads += "masks" }
             override fun insertReference(row: SourceReferenceRow) = f.metadata.insertReference(row).also { writes += "pin" }
@@ -104,8 +117,33 @@ class ExportSnapshotTest {
                         if (++pageInserts == failPageInsertAt) throw IOException("content://private-provider/snapshot-write-fault")
                         val row = args[0] as ExportPageRow; check(pages.putIfAbsent(row.snapshotId to row.ordinal, row) == null); Unit
                     }
-                    "renderJobByKey" -> jobs.values.singleOrNull { it.idempotenceKey == args[0] }
-                    "jobSourceReferences" -> f.metadata.references.values.filter { it.ownerType == "JOB" && it.ownerId == args[0] }
+                    "renderJobIdByKey" -> {
+                        reuseReads += "id"
+                        admittedJob = null
+                        jobs.values.singleOrNull { it.idempotenceKey == args[0] }?.jobId
+                    }
+                    "renderJobReadIsBounded" -> {
+                        reuseReads += "bounds"
+                        val id = args[0] as String
+                        val extent = args[1] as Int
+                        jobBoundsReads += id to extent
+                        jobs[id]?.let { row ->
+                            (id != refusedJob && row.kind == "PAGE_RENDER" && row.snapshotId == null && row.pageOrdinal == null &&
+                                extent > 0 && row.input.size == extent).also { admitted -> if (admitted) admittedJob = id }
+                        }
+                    }
+                    "renderJobIdentity" -> {
+                        reuseReads += "identity"
+                        val id = args[0] as String
+                        assertEquals("Unadmitted Job identity was projected", admittedJob, id)
+                        jobs[id]?.takeUnless { id == missingJobIdentity }?.let {
+                            FrozenRenderJobIdentityRow(it.jobId, it.kind, it.idempotenceKey, it.canonicalInputSha256, it.input)
+                        }
+                    }
+                    "boundedRenderJobPinSourceIds" -> {
+                        reuseReads += "pins"
+                        jobPins(args[0] as String).map { it.sourceId }
+                    }
                     "insertExportJob" -> { val row = args[0] as JobRow; check(jobs.values.none { it.idempotenceKey == row.idempotenceKey }); check(jobs.putIfAbsent(row.jobId, row) == null); Unit }
                     else -> error("Unexpected snapshot query ${method.name}")
                 }
@@ -136,6 +174,25 @@ class ExportSnapshotTest {
             }
         }
         fun nonSnapshotState(): List<Any> = with(f.metadata) { listOf(documents.toMap(), pages.toMap(), sources.toMap(), blobs.toMap(), recipes.toMap(), references.toMap(), undos.toMap(), masks.toMap(), associations.toMap(), maskReferences.toMap()) }
+        fun pageJobs() = jobs.values.filter { it.kind == "PAGE_RENDER" }
+        fun jobPins(id: String) = f.metadata.references.values.filter { it.ownerType == "JOB" && it.ownerId == id }.take(2)
+        fun retainEquivalentSource(): SourceRow {
+            val current = f.metadata.sources.getValue(f.source.value)
+            val blobId = "00000000-0000-0000-0000-0000000000a1"
+            val blob = f.metadata.blobs.getValue(current.sourceBlobId)
+            f.metadata.blobs[blobId] = blob.copy(sourceBlobId = blobId, byteSha256 = "c".repeat(64), byteCount = 7,
+                encodedWidth = 2, encodedHeight = 3, relativePath = "sources/$blobId/original.bin")
+            return current.copy(sourceId = "00000000-0000-0000-0000-0000000000a2", sourceBlobId = blobId, exifOrientation = 6, refCount = 0)
+                .also { f.metadata.sources[it.sourceId] = it }
+        }
+        fun addJobPin(jobId: String, sourceId: String) = with(f.metadata) {
+            references[Triple("JOB", jobId, sourceId)] = SourceReferenceRow("JOB", jobId, sourceId, Long.MIN_VALUE)
+            sources[sourceId]?.let { sources[sourceId] = it.copy(refCount = countSourceReferences(sourceId)) }
+        }
+        fun removeJobPin(jobId: String, sourceId: String) = with(f.metadata) {
+            checkNotNull(references.remove(Triple("JOB", jobId, sourceId)))
+            sources[sourceId]?.let { sources[sourceId] = it.copy(refCount = countSourceReferences(sourceId)) }
+        }
         suspend fun canonical(configured: Boolean, document: DocumentId = f.document): ExportSnapshot {
             val repository = if (configured) {
                 val constructor = RoomDocumentRepository::class.java.constructors.singleOrNull { it.parameterCount == 6 }
@@ -455,6 +512,164 @@ class ExportSnapshotTest {
         assertEquals(10L, h.f.metadata.sources.getValue(h.f.source.value).refCount)
     }
 
+    @Test fun refusedRawJobNeverReachesIdentityProjectionOrFreshJobInsertion() = runTest {
+        val h = Harness(1); h.freeze()
+        val job = h.pageJobs().single()
+        // The raw cell (e.g. a same-size TEXT input) can look valid after conversion to the typed row.
+        h.refusedJob = job.jobId
+        h.writes.clear()
+        h.reuseReads.clear()
+
+        assertEquals(OperationErrorCode.INTEGRITY_FAILED, h.freezeError()?.code)
+        assertEquals(listOf("id", "bounds"), h.reuseReads)
+        assertEquals(listOf(job.jobId to job.input.size), h.jobBoundsReads)
+        assertFalse("An invalid match must not reinsert", "insertExportJob" in h.writes)
+        assertSame(job, h.pageJobs().single())
+    }
+
+    @Test fun matchedButUnprojectableJobIsNotTreatedAsAbsent() = runTest {
+        val h = Harness(1); h.freeze()
+        val job = h.pageJobs().single()
+        h.missingJobIdentity = job.jobId
+        h.writes.clear()
+        h.reuseReads.clear()
+
+        assertEquals(OperationErrorCode.INTEGRITY_FAILED, h.freezeError()?.code)
+        assertEquals(listOf("id", "bounds", "identity"), h.reuseReads)
+        assertFalse("A lost projection must not insert a replacement", "insertExportJob" in h.writes)
+        assertEquals(1, h.snapshots.size)
+    }
+
+    @Test fun noncanonicalJobIdsRefuseBeforeAnyByIdRead() = runTest {
+        for (malformedId in listOf("", "00000000-0000-0000-0000-0000000000AA")) {
+            val h = Harness(1); h.freeze()
+            val job = h.pageJobs().single()
+            h.jobs.remove(job.jobId)
+            h.jobs[malformedId] = job.copy(jobId = malformedId)
+            h.writes.clear()
+            h.reuseReads.clear()
+
+            val error = h.freezeError()
+
+            assertEquals(OperationErrorCode.INTEGRITY_FAILED, error?.code)
+            assertNull("Do not return an untrusted job ID in the error", error?.affectedId)
+            assertEquals(listOf("id"), h.reuseReads)
+            assertFalse("insertExportJob" in h.writes)
+        }
+    }
+
+    @Test fun sameExtentWrongInputOrDigestRefusesBeforePinLookup() = runTest {
+        for (changeInput in listOf(true, false)) {
+            val h = Harness(1); h.freeze()
+            val job = h.pageJobs().single()
+            h.jobs[job.jobId] = if (changeInput) job.copy(input = job.input.copyOf().also { it[it.lastIndex] = 0 })
+            else job.copy(canonicalInputSha256 = "0".repeat(64))
+            h.reuseReads.clear()
+
+            assertEquals(OperationError(OperationErrorCode.INTEGRITY_FAILED, false, "render_job_identity_mismatch", job.jobId), h.freezeError())
+            assertEquals(listOf("id", "bounds", "identity"), h.reuseReads)
+            assertEquals(1, h.snapshots.size)
+        }
+    }
+
+    @Test fun invalidOrExtraJobPinsRefuseWithoutReadingTheirSourceOrBlob() = runTest {
+        for (extra in listOf(false, true)) {
+            val h = Harness(1); h.freeze()
+            val id = h.pageJobs().single().jobId
+            val alternate = h.retainEquivalentSource()
+            h.forbiddenSource = alternate
+            if (!extra) h.removeJobPin(id, h.f.source.value)
+            // A malformed key can still have an exact Source parent in the raw database.
+            h.addJobPin(id, if (extra) alternate.sourceId else alternate.sourceId.uppercase())
+            h.sourceGuardResults.clear()
+            h.reuseReads.clear()
+
+            assertEquals(OperationError(OperationErrorCode.INTEGRITY_FAILED, false, "render_job_source_mismatch", id), h.freezeError())
+            assertEquals(listOf("id", "bounds", "identity", "pins"), h.reuseReads)
+            assertFalse(h.sourceGuardResults.any { (source, _) -> source != h.f.source.value })
+        }
+    }
+
+    @Test fun reusedSourceChainRefusesMissingAndMalformedBeforeEitherTypedRead() = runTest {
+        for ((fault, reason) in listOf("source" to "render_job_source_missing", "link" to "render_job_source_missing", "blob" to "render_job_source_mismatch")) {
+            val h = Harness(1); h.freeze()
+            val id = h.pageJobs().single().jobId
+            val alternate = h.retainEquivalentSource()
+            h.removeJobPin(id, h.f.source.value)
+            h.addJobPin(id, alternate.sourceId)
+            when (fault) {
+                "source" -> h.f.metadata.sources.remove(alternate.sourceId)
+                "link" -> h.f.metadata.blobs.remove(alternate.sourceBlobId)
+                else -> {
+                    val blob = h.f.metadata.blobs.getValue(alternate.sourceBlobId)
+                    // Same valid typed dimensions can appear after narrowing an inadmissible raw integer.
+                    h.refusedGuard = "retained-blob"
+                    check(blob.encodedWidth == 2)
+                }
+            }
+            h.forbiddenSource = alternate
+
+            assertEquals(OperationError(OperationErrorCode.INTEGRITY_FAILED, false, reason, id), h.freezeError())
+            assertEquals(alternate.sourceId to (if (fault == "source") null else false), h.sourceGuardResults.last())
+            assertEquals(if (fault == "source") emptyList() else listOf(alternate.sourceId), h.missingBlobLinkReads)
+        }
+    }
+
+    @Test fun equivalentRetainedOwnerIsNotRepinnedAndAssemblyRemainsInFrozenOrder() = runTest {
+        val h = Harness(); h.freeze()
+        val (first, second) = h.pageJobs()
+        val alt = h.retainEquivalentSource()
+        h.removeJobPin(first.jobId, h.f.source.value)
+        h.addJobPin(first.jobId, alt.sourceId)
+        val retained = h.jobPins(first.jobId).single()
+        // Excluded payload must not veto reuse or be rewritten by a repeat freeze.
+        val existing = first.copy(state = "CANCELED", attempt = 3, checkpoint = ByteArray(524_289), errorCode = "old".repeat(200), createdAt = Long.MIN_VALUE)
+        h.jobs[first.jobId] = existing
+        val proofSources = mutableListOf<String>()
+        h.fileProof = ExportSourceProof { proofSources += it.source.sourceId }
+
+        val frozen = h.canonical(true)
+
+        assertEquals(h.f.pageIds, frozen.pages.map { it.pageId })
+        assertEquals(listOf(h.f.source.value), proofSources)
+        assertEquals(listOf(existing, second), h.pageJobs())
+        assertEquals(listOf(retained), h.jobPins(first.jobId))
+        assertEquals(1L, h.f.metadata.sources.getValue(alt.sourceId).refCount)
+        val assembly = h.jobs.values.single { it.snapshotId == frozen.snapshotId.value }
+        // Independently read the two v1 UUID fields in assembly order, not job insertion order.
+        assertEquals(first.jobId, assembly.input.decodeToString(148, 184))
+        assertEquals(second.jobId, assembly.input.decodeToString(188, 224))
+        for (page in frozen.pages) {
+            val owner = "export-page-v1/${frozen.snapshotId.value}/${page.ordinal}"
+            assertTrue(Triple("EXPORT_PAGE", owner, h.f.source.value) in h.f.metadata.references)
+        }
+    }
+
+    @Test fun lateJobRefusalRollsBackEarlierFreshJobSnapshotPagesPinsAndCounters() = runTest {
+        val h = Harness(); h.freeze()
+        val (first, second) = h.pageJobs()
+        h.jobs.remove(first.jobId)
+        h.removeJobPin(first.jobId, h.f.source.value)
+        h.refusedJob = second.jobId
+        val metadata = h.nonSnapshotState()
+        val jobs = h.jobs.toMap()
+        val snapshots = h.snapshots.toMap()
+        val pages = h.pages.toMap()
+        h.writes.clear()
+        h.reuseReads.clear()
+
+        assertEquals(OperationErrorCode.INTEGRITY_FAILED, h.freezeError()?.code)
+
+        assertEquals(listOf("id", "id", "bounds"), h.reuseReads)
+        assertEquals(2, h.writes.count { it == "insertExportPage" })
+        assertEquals(1, h.writes.count { it == "insertExportJob" })
+        assertEquals(3, h.writes.count { it == "pin" }) // Two EXPORT_PAGE pins and the earlier fresh JOB pin, all rolled back.
+        assertEquals(metadata, h.nonSnapshotState())
+        assertEquals(jobs, h.jobs)
+        assertEquals(pages, h.pages)
+        assertEquals(snapshots, h.snapshots)
+    }
+
     @Test fun cancellationFromAdmissionCannotStartTheFreezeTransactionWrites() = runTest {
         val h = Harness(); val before = h.nonSnapshotState(); val job = Job(); h.onAdmission = { job.cancel(); null }
         var canceled = false
@@ -487,7 +702,8 @@ class ExportSnapshotTest {
         h.f.metadata.references.entries.removeIf { it.value.ownerType == "JOB" && it.value.ownerId == job.jobId }
         val before = h.nonSnapshotState()
         val error = try { h.freeze(); throw AssertionError("Unowned reused render job was accepted") } catch (failure: RepositoryFailure) { failure.error }
-        assertEquals(OperationErrorCode.INTEGRITY_FAILED, error.code); assertEquals(1, h.snapshots.size); assertEquals(before, h.nonSnapshotState())
+        assertEquals(OperationError(OperationErrorCode.INTEGRITY_FAILED, false, "render_job_source_missing", job.jobId), error)
+        assertEquals(1, h.snapshots.size); assertEquals(before, h.nonSnapshotState())
     }
 
     @Test fun publicSnapshotListsAndBlobCopiesCannotRewriteFrozenRows() = runTest {

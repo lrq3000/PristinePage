@@ -11,8 +11,12 @@ interface ExportSnapshotQueries {
     fun exportPages(snapshotId: String): List<ExportPageRow>
     fun insertSnapshot(row: ExportSnapshotRow)
     fun insertExportPage(row: ExportPageRow)
-    fun renderJobByKey(key: String): JobRow?
-    fun jobSourceReferences(jobId: String): List<SourceReferenceRow>
+    /** Null is an exact key miss; an invalid matched ID is returned as a non-null sentinel. */
+    fun renderJobIdByKey(key: String): String?
+    fun renderJobReadIsBounded(jobId: String, expectedInputBytes: Int): Boolean?
+    /** Only after the exact by-ID guard admits the row in this transaction. */
+    fun renderJobIdentity(jobId: String): FrozenRenderJobIdentityRow?
+    fun boundedRenderJobPinSourceIds(jobId: String): List<String>
     fun insertExportJob(row: JobRow)
 }
 

@@ -179,14 +179,16 @@ class FrozenRenderReadTest {
             references = ExportAssemblyInput.verify(JobId(assembly.jobId), snapshot, assembly)
             val id = references.first()
             val source = fixture.metadata.sources.getValue(fixture.source.value)
-            assertEquals(listOf(source.sourceId), jobSourceReferences(id.value).map { it.sourceId })
+            assertEquals(listOf(source.sourceId), fixture.metadata.references.values.filter { it.ownerType == "JOB" && it.ownerId == id.value }.map { it.sourceId })
             return Reference(id, snapshot.pages.first(), jobs.getValue(id.value), ExportSourceBinding(source, fixture.metadata.blobs.getValue(source.sourceBlobId)))
         }
 
         override fun insertSnapshot(row: ExportSnapshotRow) = Unit
         override fun insertExportPage(row: ExportPageRow) { pages += row }
-        override fun renderJobByKey(key: String) = jobs.values.singleOrNull { it.idempotenceKey == key }
-        override fun jobSourceReferences(jobId: String) = fixture.metadata.references.values.filter { it.ownerType == "JOB" && it.ownerId == jobId }.take(2)
+        override fun renderJobIdByKey(key: String) = jobs.values.singleOrNull { it.idempotenceKey == key }?.jobId
+        override fun renderJobReadIsBounded(jobId: String, expectedInputBytes: Int): Boolean? = error("Fixture only freezes fresh jobs")
+        override fun renderJobIdentity(jobId: String): FrozenRenderJobIdentityRow? = error("Fixture only freezes fresh jobs")
+        override fun boundedRenderJobPinSourceIds(jobId: String): List<String> = error("Fixture only freezes fresh jobs")
         override fun insertExportJob(row: JobRow) { check(jobs.putIfAbsent(row.jobId, row) == null) }
         override fun snapshotMetadataIsBounded(snapshotId: String): Boolean? = error("Not a snapshot read fixture")
         override fun exportPagesAreBounded(snapshotId: String): Boolean = error("Not a snapshot read fixture")

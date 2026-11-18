@@ -212,8 +212,22 @@ class FrozenRenderJobProofTest {
 
         override fun insertSnapshot(row: ExportSnapshotRow) { check(repository.metadata.inTransaction) }
         override fun insertExportPage(row: ExportPageRow) { check(repository.metadata.inTransaction); pages += row }
-        override fun renderJobByKey(key: String): JobRow? { check(repository.metadata.inTransaction); return jobs.values.singleOrNull { it.idempotenceKey == key } }
-        override fun jobSourceReferences(jobId: String): List<SourceReferenceRow> { check(repository.metadata.inTransaction); return pins(jobs.getValue(jobId)) }
+        override fun renderJobIdByKey(key: String): String? {
+            check(repository.metadata.inTransaction)
+            return jobs.values.singleOrNull { it.idempotenceKey == key }?.jobId
+        }
+        override fun renderJobReadIsBounded(jobId: String, expectedInputBytes: Int): Boolean? {
+            check(repository.metadata.inTransaction)
+            return jobs[jobId]?.let { it.kind == "PAGE_RENDER" && it.snapshotId == null && it.pageOrdinal == null && expectedInputBytes > 0 && it.input.size == expectedInputBytes }
+        }
+        override fun renderJobIdentity(jobId: String): FrozenRenderJobIdentityRow? {
+            check(repository.metadata.inTransaction)
+            return jobs[jobId]?.let { FrozenRenderJobIdentityRow(it.jobId, it.kind, it.idempotenceKey, it.canonicalInputSha256, it.input) }
+        }
+        override fun boundedRenderJobPinSourceIds(jobId: String): List<String> {
+            check(repository.metadata.inTransaction)
+            return pins(jobs.getValue(jobId)).map { it.sourceId }
+        }
         override fun insertExportJob(row: JobRow) { check(repository.metadata.inTransaction); check(jobs.putIfAbsent(row.jobId, row) == null) }
         override fun snapshotMetadataIsBounded(snapshotId: String): Boolean? = error("Not a load fixture")
         override fun exportPagesAreBounded(snapshotId: String): Boolean = error("Not a load fixture")

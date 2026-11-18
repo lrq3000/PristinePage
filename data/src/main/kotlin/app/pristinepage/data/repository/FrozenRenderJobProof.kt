@@ -26,7 +26,8 @@ import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 
-internal data class FrozenRenderJobIdentityRow(
+/** Restricted metadata projection used after raw admission; this is not a full job or a lease. */
+data class FrozenRenderJobIdentityRow(
     val jobId: String,
     val kind: String,
     val idempotenceKey: String,
@@ -158,7 +159,7 @@ internal object FrozenRenderJobProof {
     private fun invalid(jobId: JobId): Nothing =
         throw RepositoryFailure(OperationError(OperationErrorCode.INTEGRITY_FAILED, false, "frozen_render_job_invalid", jobId.value))
 
-    private fun verifyPin(page: ExportPageSnapshot, pinSourceId: String, binding: ExportSourceBinding?) {
+    fun verifyPin(page: ExportPageSnapshot, pinSourceId: String, binding: ExportSourceBinding?) {
         val (source, blob) = requireNotNull(binding)
         require(pinSourceId == source.sourceId)
         requireOpaqueId(source.sourceId)
