@@ -1,6 +1,7 @@
 package app.pristinepage.data.repository
 
 import app.pristinepage.data.db.PristineDatabase
+import app.pristinepage.data.db.JobRow
 import app.pristinepage.data.model.ExportPageSnapshot
 import app.pristinepage.data.model.JobId
 import app.pristinepage.data.model.OperationError
@@ -33,7 +34,37 @@ internal class RoomFrozenRenderReads(
         runtime,
     )
 
-    suspend fun verify(jobId: JobId, page: ExportPageSnapshot): Unit = withContext(dispatcher) {
+    suspend fun verify(jobId: JobId, page: ExportPageSnapshot) {
+        authenticate(jobId, page)
+    }
+
+    suspend fun verified(jobId: JobId, page: ExportPageSnapshot): Verified = Verified.read(this, jobId, page)
+
+    /** This is an immutable binding, not a lease or a live pin. Keep the canonical bytes private and compare them again before writing. */
+    class Verified private constructor(
+        val jobId: JobId,
+        val page: ExportPageSnapshot,
+        val pinSourceId: String,
+        identity: FrozenRenderJobIdentityRow,
+    ) {
+        private val input = identity.input
+        private val key = identity.idempotenceKey
+        val canonicalInputSha256: String = identity.canonicalInputSha256
+        val inputBytes: Int get() = input.size
+
+        fun matches(row: JobRow): Boolean =
+            row.jobId == jobId.value && row.kind == "PAGE_RENDER" && row.snapshotId == null && row.pageOrdinal == null &&
+                row.idempotenceKey == key && row.canonicalInputSha256 == canonicalInputSha256 && row.input.contentEquals(input)
+
+        companion object {
+            suspend fun read(reader: RoomFrozenRenderReads, jobId: JobId, page: ExportPageSnapshot): Verified {
+                val (row, pin) = reader.authenticate(jobId, page)
+                return Verified(jobId, page, pin, row)
+            }
+        }
+    }
+
+    private suspend fun authenticate(jobId: JobId, page: ExportPageSnapshot): Pair<FrozenRenderJobIdentityRow, String> = withContext(dispatcher) {
         coroutineContext.ensureActive()
         val expected = FrozenRenderJobProof.prepare(jobId, page, runtime)
         coroutineContext.ensureActive()
@@ -65,10 +96,13 @@ internal class RoomFrozenRenderReads(
             refuse(jobId, OperationErrorCode.STORAGE_FAILED, "frozen_render_job_read_failed", retryable = true)
         }
         coroutineContext.ensureActive()
-        expected.verify(job, pinId, binding)
+        if (job.input.size != expected.inputBytes) invalidMetadata(jobId)
+        val owned = job.copy(input = job.input.copyOf())
+        expected.verify(owned, pinId, binding)
         coroutineContext.ensureActive()
         // Mismatches in the retained job/pin chain must not be hidden by a runtime difference.
         if (expected.historical) refuse(jobId, OperationErrorCode.PROVIDER_UNAVAILABLE, "frozen_render_profile_unavailable")
+        owned to pinId
     }
 
     private fun validateId(id: String, jobId: JobId) {
