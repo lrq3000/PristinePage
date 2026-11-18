@@ -1,0 +1,44 @@
+# PristinePage Parallel Execution Plan
+
+> **For agentic workers:** Use `dispatching-parallel-agents` for disjoint assignments and `subagent-driven-development` for test-first implementation and independent reviews. This is an execution schedule for the [accepted implementation plan](IMPLEMENTATION_PLAN.md), not a second product or implementation authority. The [operational plan](OPERATIONAL_PLAN.md), live [task claims](TODO.md), and [progress ledger](../../validation/progress.md) control permissions, current ownership and evidence.
+
+**Goal:** Finish the import → edit → save → reopen → verified export journey first, then deliver the remaining T-01–T-12 requirements, including batch editing and genuinely learned geometry and appearance.
+
+**Approach:** Split at tested interfaces. Serial execution would leave preparation idle during each Gradle run. One worker per feature would create overlapping changes to navigation, composition and persistence. Instead, one worker owns the critical path while another handles a disjoint package or independently verifies an existing boundary. Kotlin/JVM, Room, Android/Compose and the existing `image-android` module are unchanged by this schedule.
+
+## Coordination
+
+- [ ] Record the exact base, local branch and worktree, attempt ID, write set, consumed/produced interfaces, check commands and report path before dispatch. At most two active children, including reviewers. Retain existing worker worktrees and handoffs; use fresh worktrees below `.worktrees/` for new assignments.
+- [ ] Grant the one build/test slot to one owner at a time. Active workers without it may inspect, review, prepare tests or implement only behavior with an already demonstrated RED on compatible inputs. Use the approved isolated cache/distribution, strict offline commands, maximum four Gradle workers, 4 GiB heap and 8 GiB disk floor. If a run times out or is interrupted, keep the slot fenced until exact process ownership and exit are reconciled.
+- [ ] Keep `ApplicationServices.kt`, `MainActivity.kt`, shared contracts, manifest/build settings, schemas and dependency versions coordinator-owned. Do not create a second renderer, job fence, budget, or batch-save transaction. LDPlayer is separately gated and serialized; no personal-phone use.
+- [ ] Require a local PR-style Explicit Intention Transfer handoff with motivation, achieved behavior, rationale and reproduction details, exact base and full included commit descriptions/authorship, agent stack, executed checks, open gaps and adaptation guidance. At reception, verify the candidate and evidence, obtain independent boundary review, reconcile against the live destination, record apply/adapt/already-satisfied dispositions and rerun affected checks. Integrate verified candidates only on `feat/paperlight-v1`; no automatic push, remote PR, merge into `main`, history rewrite or pruning.
+
+## Initial parallel work
+
+### P1 — Derived-file boundary (Gradle slot owner)
+
+**Scope:** `data/src/main/kotlin/app/pristinepage/data/files/{DerivedFiles,PrivateStorePaths,SourceFiles}.kt`, `data/src/test/kotlin/app/pristinepage/data/{DerivedFilesTest,DerivedFilesRecoveryTest}.kt`, and `validation/export/derived-files-parallel-handoff.md`. Keep the original committed test bytes and the original recovery worktree intact. If a seam or additional path must change, request coordinator review. No Room transaction or export-ready change in this assignment.
+
+- [ ] From untouched baseline, run `gradlew.bat --offline --no-daemon --console=plain --max-workers=4 --dependency-verification=strict :data:testDebugUnitTest --tests *DerivedFilesTest`. Confirm eight current JUnit failures for the missing protocol, not a compilation or transport failure. Then bring over the five authenticated recovery witnesses when compatible and observe their intended missing-feature failures before implementing their behavior.
+- [ ] Implement the file boundary described in [the readiness receipt](../../validation/export/derived-files-contract-readiness.md): exclusive bounded stream, opaque fixed RENDER/EXPORT targets, closed and verified seals, repeatable no-clobber move/recovery, both copies checked if present, and no publication on partial or stale input. Preserve the original layout, seal encoding and source behavior. Use a focused run for both classes, then `:data:testDebugUnitTest`; retain reports and request the independent file/persistence review.
+
+### P2 — PNG/JPEG test preparation (no build slot initially)
+
+**Scope:** proposed `image-android/src/androidTest/kotlin/app/pristinepage/image/export/ImageExportCodecTest.kt` and `validation/export/image-codec-parallel-handoff.md`. No production, Room, app, configuration, dependencies or emulator operation in initial preparation. The test-facing seam is provisional until the coordinator reconciles it against the encoder implementation plan.
+
+- [ ] Prepare actual codec/readback witnesses independent of the file protocol: asymmetric opaque sRGB fixture and exact dimensions/RGB after full PNG decode; real JPEG format, dimensions, full decode, actual SOF sampling checked against the declared policy and content/color checks against separately reviewed tolerances; reject corrupt/truncated or mismatched readback. Verify written artifact identities and no copying of source metadata. Do not claim that stock platform JPEG is 4:4:4 or that a successful `compress()` call proves output.
+- [ ] Leave a bounded test-only handoff with expected failing behavior, independent oracles, exact future build/test commands and a list of unrun gates. The next codec implementation receives the slot only after explicit coordinator release. No custom codec or PDF implementation in preparation.
+
+## Follow-on work and joins
+
+| Priority | Critical path and coordinator joins | Independent work eligible in the other seat |
+|---|---|---|
+| Classical export | P1 → reuse existing snapshot and lease ports → wire Application freeze and its existing shared renderer → compose exact fenced checkpoints with verified encoders and complete artifact-set `PRIVATE_READY` → review/export UI, publication and sharing. | P2 → tested PNG/JPEG → measured, admitted PDF assembly and independent page count/order/placement/raster verification. PDF and file-layer acceptance are distinct. |
+| Classical end-to-end | Obtain current, exact source/build and authorized LDPlayer readiness evidence; verify import → edit → save → reopen → frozen export with real artifacts. Do not infer external receipt from private verification. | Audit the two owned picker fixtures and its current guard/compile evidence; prepare or address disjoint decoder compatibility/refusal tests, preserving API26/27 and broader profile/WebP limits until verified. |
+| User journeys after classical checkpoint | Land batch/session/library and camera navigation separately under coordinator-owned wiring. | Batch/editor worker first reuses the unrun album draft and existing `applyBatchRecipes`/document Undo; verify A:q1, B/C:q2, D unchanged and Done with an empty selection. Continue editor Shape/Detail/strength/carousel/Info/zoom and missing library controls. Independent camera worker owns capture lifecycle/permission/orientation/private handoff, not original storage. |
+| Genuine neural methods | Acquire only after the concrete rights/runtime/asset amendment is separately approved. Set a common registry/admission/provenance contract before adapter work; confirm exact assets and offline performance. | Learned geometry and appearance adapter work may overlap after their interfaces are stable. Each requires source/export/device numerical parity, correct output layout/range, memory and fidelity checks; no classical substitute or detected corners alone. |
+| Acceptance | One serialized current-build LDPlayer sequence, cleanly released, then exact APK verification and final independent review. | Audit reproducible build, source/model/dependency notices, cross-requirement coverage, accessibility/offline and fidelity evidence. Report blocked physical target, representative-page or rights gates, rather than passing them by inference. |
+
+## Review focus
+
+Reject a matching export copy that hides same-length corruption in the other copy (P1); refuse output with wrong pixel/channel order or unverified JPEG sampling (P2); demonstrate that changes to live recipes/order cannot change a frozen export (classical join); verify that batch Done includes deselected edited pages (batch join); and keep learned geometry/appearance and actual handset/fidelity validation distinct from a registry or emulator pass (neural and final joins).
