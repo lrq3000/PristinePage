@@ -8,6 +8,7 @@ import app.pristinepage.data.model.*
 import app.pristinepage.data.repository.*
 import java.io.IOException
 import java.nio.ByteBuffer
+import java.security.MessageDigest
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.test.runTest
@@ -15,6 +16,17 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class RenderFileIntentTest {
+    @Test fun completeV1IntentEnvelopeMatchesIndependentGolden() {
+        val intent = RenderFileIntent(TransactionId(id(1)), RenderId(id(2)), JobId(id(3)), id(4), 7, 7,
+            "a".repeat(64), PageId(id(5)), SourceId(id(6)), SourceBlobId(id(7)), SourceId(id(8)),
+            "b".repeat(64), "c".repeat(64), 9, "d".repeat(64), OutputSpec(PixelSize(3, 2), RenderPurpose.EXPORT))
+        val envelope = intent.journalPayload()
+        assertEquals(615, envelope.size)
+        // Independent oracle: ASCII tag/NUL, UUIDs 1–4, BE64(7,7), a*64, UUIDs 5–8, b*64, c*64, BE64(9), d*64, BE32(3,2).
+        val hash = MessageDigest.getInstance("SHA-256").digest(envelope).joinToString("") { "%02x".format(it.toInt() and 255) }
+        assertEquals("eccb44fbcbf8a085b00004f12c5f25c00b587a04b7c864ae41169b6b2fbaa56f", hash)
+    }
+
     @Test fun committedIntentHasFixedPrivatePathsAndStableReplayWithoutNewIds() = runTest {
         val f = Fixture()
         val first = f.prepare()

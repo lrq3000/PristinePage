@@ -7,6 +7,7 @@ import androidx.room.Query
 import app.pristinepage.data.repository.AssemblyJobIdentityRow
 import app.pristinepage.data.repository.ExportSnapshotQueries
 import app.pristinepage.data.repository.FrozenRenderJobIdentityRow
+import app.pristinepage.data.repository.RenderCompletionQueries
 import app.pristinepage.data.repository.RenderIntentQueries
 
 @Dao abstract class ExportSnapshotDao : ExportSnapshotQueries, RenderIntentQueries {
@@ -140,6 +141,66 @@ import app.pristinepage.data.repository.RenderIntentQueries
             previous.stagingPath, previous.finalPath, previous.payload, previous.updatedAt, next.updatedAt, next.state,
             previous.sealSha256, previous.expectedByteSha256, previous.expectedByteCount,
             next.sealSha256, next.expectedByteSha256, next.expectedByteCount)
+
+    // Completion is deliberately not an additional file-executor phase edge. The separate join controls when this CAS can run.
+    @Query("""UPDATE FileTransaction SET state='COMMITTED', updatedAt=:updatedAt
+        WHERE transactionId=:transactionId AND kind='RENDER' AND ownerId=:jobId AND attempt=:attempt
+        AND (state='MOVED' AND updatedAt=:previousUpdatedAt AND errorCode IS NULL)
+        AND (stagingPath=:stagingPath AND finalPath=:finalPath AND payload=:payload)
+        AND (sealSha256=:seal AND expectedByteSha256=:hash AND expectedByteCount=:count AND :count>0)""")
+    internal abstract fun commitMovedRender(
+        transactionId: String, jobId: String, attempt: Long, stagingPath: String?, finalPath: String?,
+        payload: ByteArray, previousUpdatedAt: Long, updatedAt: Long, seal: String?, hash: String?, count: Long?,
+    ): Int
+
+    // Each EXISTS uses an existing key/index and returns only a scalar, even if the colliding row is malformed or huge.
+    @Query("""SELECT EXISTS(SELECT 1 FROM RenderedPage WHERE renderId=:renderId)
+        OR EXISTS(SELECT 1 FROM RenderedPage WHERE jobId=:jobId)
+        OR EXISTS(SELECT 1 FROM RenderedPage WHERE cacheKey=:cacheKey)
+        OR EXISTS(SELECT 1 FROM RenderedPage WHERE relativePath=:relativePath)""")
+    internal abstract fun renderCompletionOccupied(renderId: String, jobId: String, cacheKey: String, relativePath: String): Boolean
+
+    @Query("""INSERT INTO RenderedPage (renderId,jobId,sourceId,pageId,recipeRevision,cacheKey,execution,executionSha256,
+        relativePath,byteSha256,rasterPixelSha256,byteCount,width,height,renderStatus,state)
+        VALUES (:renderId,:jobId,:sourceId,:pageId,:recipeRevision,:cacheKey,:execution,:executionSha256,
+        :relativePath,:byteSha256,:rasterPixelSha256,:byteCount,:width,:height,'OK','READY')""")
+    internal abstract fun insertReadyRender(
+        renderId: String, jobId: String, sourceId: String, pageId: String, recipeRevision: Long, cacheKey: String,
+        execution: ByteArray, executionSha256: String, relativePath: String, byteSha256: String, rasterPixelSha256: String,
+        byteCount: Long, width: Int, height: Int,
+    )
+
+    @Query("""SELECT EXISTS(SELECT 1 FROM RenderedPage WHERE renderId=:renderId
+        AND (jobId=:jobId AND sourceId=:sourceId AND pageId=:pageId AND cacheKey=:cacheKey)
+        AND (typeof(recipeRevision)='integer' AND recipeRevision=:recipeRevision)
+        AND (typeof(execution)='blob' AND execution=:execution AND executionSha256=:executionSha256)
+        AND (relativePath=:relativePath AND byteSha256=:byteSha256 AND rasterPixelSha256=:rasterPixelSha256)
+        AND (typeof(byteCount)='integer' AND byteCount=:byteCount)
+        AND (typeof(width)='integer' AND width=:width AND typeof(height)='integer' AND height=:height)
+        AND (renderStatus='OK' AND state='READY'))
+        AND NOT EXISTS(SELECT 1 FROM RenderedPage WHERE jobId=:jobId AND renderId<>:renderId)""")
+    internal abstract fun readyRenderMatches(
+        renderId: String, jobId: String, sourceId: String, pageId: String, recipeRevision: Long, cacheKey: String,
+        execution: ByteArray, executionSha256: String, relativePath: String, byteSha256: String, rasterPixelSha256: String,
+        byteCount: Long, width: Int, height: Int,
+    ): Boolean
+
+    internal fun renderCompletionQueries(): RenderCompletionQueries = object : RenderCompletionQueries {
+        override fun renderCompletionOccupied(renderId: String, jobId: String, cacheKey: String, relativePath: String): Boolean =
+            this@ExportSnapshotDao.renderCompletionOccupied(renderId, jobId, cacheKey, relativePath)
+
+        override fun commitMovedRender(previous: FileTransactionRow, updatedAt: Long): Int =
+            commitMovedRender(previous.transactionId, previous.ownerId, previous.attempt, previous.stagingPath, previous.finalPath,
+                previous.payload, previous.updatedAt, updatedAt, previous.sealSha256, previous.expectedByteSha256, previous.expectedByteCount)
+
+        override fun insertReadyRender(row: RenderedPageRow) =
+            insertReadyRender(row.renderId, row.jobId, row.sourceId, row.pageId, row.recipeRevision, row.cacheKey, row.execution,
+                row.executionSha256, row.relativePath, row.byteSha256, row.rasterPixelSha256, row.byteCount, row.width, row.height)
+
+        override fun readyRenderMatches(row: RenderedPageRow): Boolean =
+            readyRenderMatches(row.renderId, row.jobId, row.sourceId, row.pageId, row.recipeRevision, row.cacheKey, row.execution,
+                row.executionSha256, row.relativePath, row.byteSha256, row.rasterPixelSha256, row.byteCount, row.width, row.height)
+    }
 
     @Query("SELECT * FROM Job WHERE idempotenceKey=:key") abstract override fun renderJobByKey(key: String): JobRow?
     // Ordinary page jobs have exactly one source owner. A second row is sufficient to expose invalid cardinality without loading an unbounded corrupt owner set.

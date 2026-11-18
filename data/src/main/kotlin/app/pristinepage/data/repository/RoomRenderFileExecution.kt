@@ -13,6 +13,7 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.withContext
 
 /** Joins one exact committed intent to private bytes, through MOVED only. The caller retains the verified frozen owners, the current acquired same-boot lease and exclusive stable store/transaction/target ownership across every boundary, including recovery. */
@@ -34,8 +35,73 @@ internal class RoomRenderFileExecution(
         maxBytes: Long,
         writer: (OutputStream) -> Unit,
         readback: (File, () -> Unit) -> String?,
-    ): Unit = withContext(dispatcher) {
-        val active = { coroutineContext.ensureActive() }
+    ) {
+        withContext(dispatcher) {
+            verifyMoved(proof, lease, intent, maxBytes, writer, readback, { coroutineContext.ensureActive() })
+        }
+    }
+
+    /** Only issued and consumed within the completion attempt after byte, semantic and exact MOVED verification. */
+    class VerifiedMoved private constructor(
+        private val authority: RoomRenderIntents,
+        val proof: RoomFrozenRenderReads.Verified, val lease: JobLease, val intent: RenderFileIntent,
+        val phase: RenderFilePhase, val rasterSha256: String, val execution: OrdinaryRenderExecution, val active: () -> Unit,
+    ) {
+        // This is a synchronous borrow, not a portable proof. Even an internal consumer cannot take it into a later transaction or use another database authority.
+        private var borrower: Thread? = Thread.currentThread()
+
+        fun claim(intents: RoomRenderIntents) {
+            check(intents === authority && borrower === Thread.currentThread())
+            borrower = null
+        }
+
+        /** One owner-retained memory scope. A fresh scope cannot adopt an existing file checkpoint, even when its result has equal pixels and provenance. */
+        class Attempt internal constructor(private val executor: RoomRenderFileExecution, private val rows: RenderCompletionQueries) {
+            private class Producing(val lease: JobLease, val intent: RenderFileIntent, val execution: OrdinaryRenderExecution)
+
+            private val gate = Mutex()
+            private var producing: Producing? = null
+
+            suspend fun complete(
+                proof: RoomFrozenRenderReads.Verified, lease: JobLease, intent: RenderFileIntent,
+                candidate: OrdinaryRenderExecution, maxBytes: Long, writer: (OutputStream) -> Unit, readback: (File, () -> Unit) -> String?,
+            ): RenderId = withContext(executor.dispatcher) {
+                val active = { coroutineContext.ensureActive() }
+                active()
+                if (!gate.tryLock()) executor.refuse(lease, OperationErrorCode.REVISION_CONFLICT, "render_completion_in_use")
+                try {
+                    val retained = producing
+                    if (retained != null && (retained.lease != lease || retained.intent != intent ||
+                            !retained.execution.sameExecution(candidate))) executor.invalid(lease)
+                    val execution = retained?.execution ?: candidate
+                    val (phase, raster) = executor.verifyMoved(proof, lease, intent, maxBytes, writer,
+                        readback = { file, checkpoint -> readback(file, checkpoint)?.takeIf { it == execution.rasterSha256 } },
+                        active = active,
+                        admitPhase = { state ->
+                            // A fresh write grant is the only source of provenance. A bound scope may only continue that grant, never redo it.
+                            if ((state == FileTransactionState.INTENT) != (retained == null)) executor.invalid(lease)
+                        },
+                        copyingGranted = { producing = Producing(lease, intent, execution) },
+                    )
+                    active()
+                    val receipt = VerifiedMoved(executor.intents, proof, lease, intent, phase, raster, checkNotNull(producing).execution, active)
+                    executor.intents.commitMoved(receipt, rows)
+                    intent.renderId
+                } finally {
+                    gate.unlock()
+                }
+            }
+        }
+    }
+
+    internal fun completionAttempt(rows: RenderCompletionQueries): VerifiedMoved.Attempt = VerifiedMoved.Attempt(this, rows)
+
+    private fun verifyMoved(
+        proof: RoomFrozenRenderReads.Verified, lease: JobLease, intent: RenderFileIntent,
+        maxBytes: Long, writer: (OutputStream) -> Unit, readback: (File, () -> Unit) -> String?, active: () -> Unit,
+        admitPhase: (FileTransactionState) -> Unit = {},
+        copyingGranted: () -> Unit = {},
+    ): Pair<RenderFilePhase, String> {
         active()
         if (maxBytes <= 0) refuse(lease, OperationErrorCode.INVALID_INPUT, "render_file_invalid_cap")
         fun fence(expected: RenderFilePhase? = null, next: FileTransactionState? = null, seal: RenderSealIdentity? = null) =
@@ -43,6 +109,7 @@ internal class RoomRenderFileExecution(
 
         try {
             var admission = fence()
+            admitPhase(admission.phase.state)
             val target = DerivedFileTarget(DerivedKind.RENDER, intent.renderId.value)
             // A domain tag and the exact unchanged v1 envelope bind a successful closed raster readback to this job, attempt and target. Byte hash and extent are already part of the canonical DerivedFiles seal.
             val prefix = SEAL_TAG + intent.journalPayload()
@@ -56,6 +123,8 @@ internal class RoomRenderFileExecution(
 
             val sealed = if (admission.phase.state == FileTransactionState.INTENT) {
                 admission = fence(admission.phase, FileTransactionState.COPYING)
+                // The transaction returned successfully, and no stage file or encoder has been opened yet.
+                copyingGranted()
                 val checkpoint = admission.checkpoint
                 val staged = files.stage(intent.transactionId.value, target, maxBytes, writer, checkpoint)
                 val rasterHash = files.readStaged(staged, checkpoint) { verify(it, checkpoint) }
@@ -83,7 +152,7 @@ internal class RoomRenderFileExecution(
                 admission = fence(admission.phase, FileTransactionState.SEALED, identity)
             }
             val phase = admission.phase
-            if (phase.state == FileTransactionState.MOVED) {
+            val moved = if (phase.state == FileTransactionState.MOVED) {
                 // MOVED replay requires the exact surviving final; it never repairs or records another transition.
                 fence(phase)
             } else {
@@ -92,6 +161,7 @@ internal class RoomRenderFileExecution(
                 fence(phase, FileTransactionState.MOVED, identity)
             }
             active()
+            return moved.phase to sealed.metadata.decodeToString(startIndex = prefix.size)
         } catch (canceled: CancellationException) {
             throw canceled
         } catch (failure: RepositoryFailure) {

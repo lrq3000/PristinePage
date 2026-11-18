@@ -222,6 +222,60 @@ class RenderFileExecutionTest {
         assertArrayEquals(bytes, f.final.readBytes())
     }
 
+    @Test fun postMoveCasAuditOnlyMismatchRollsBackToSealed() = runTest {
+        val f = fixture()
+        var observed: FileTransactionRow? = null
+        f.afterTransition = {
+            if (f.row.state == "MOVED") {
+                observed = f.row
+                f.row = f.row.copy(updatedAt = f.row.updatedAt + 1)
+            }
+        }
+        f.refuses(OperationErrorCode.INTEGRITY_FAILED) { f.execute() }
+        assertNotNull(observed)
+        assertEquals("SEALED", f.row.state)
+        assertEquals(observed!!.sealSha256, f.row.sealSha256)
+        assertArrayEquals(bytes, f.final.readBytes())
+    }
+
+    @Test fun movedReplayRefusesChangedSemanticHashEvenWithExactEncodedBytes() = runTest {
+        val f = fixture()
+        f.execute()
+        val moved = f.row
+        val seal = f.seal.readBytes()
+        var decoded = false
+        f.refuses(OperationErrorCode.INTEGRITY_FAILED) {
+            f.execute(writer = { error("No second writer") }, readback = { file, _ ->
+                assertEquals(f.final, file)
+                assertArrayEquals(bytes, file.readBytes())
+                decoded = true
+                "ac".repeat(32)
+            })
+        }
+        assertTrue(decoded)
+        assertSame(moved, f.row)
+        assertArrayEquals(seal, f.seal.readBytes())
+        assertArrayEquals(bytes, f.final.readBytes())
+    }
+
+    @Test fun recoveredCheckpointStopsAfterSealAuthenticationBeforeBadPayloadExtent() = runTest {
+        val f = fixture()
+        f.execute()
+        f.final.writeBytes(bytes.copyOf(3))
+        var authenticated = false
+        val stop = kotlinx.coroutines.CancellationException("stop before opening recovered payload")
+        val failure = assertThrows(kotlinx.coroutines.CancellationException::class.java) {
+            f.files.recoverBound(f.intent.transactionId.value, f.row.sealSha256,
+                app.pristinepage.data.files.DerivedFileTarget(app.pristinepage.data.files.DerivedKind.RENDER, f.intent.renderId.value), 4,
+                requireFinal = true, checkpoint = { if (authenticated) throw stop },
+                authenticate = { _, _, _ -> authenticated = true }, readback = { _, _ -> error("Must not decode") })
+        }
+        assertSame(stop, failure)
+        assertTrue(authenticated)
+        assertEquals("MOVED", f.row.state)
+        assertArrayEquals(bytes.copyOf(3), f.final.readBytes())
+    }
+
     @Test fun recoveryRejectsPersistedTargetAndProvenanceSubstitutionBeforeSemanticRead() = runTest {
         val f = fixture()
         f.onForce = { throw IOException("failed seal force") }
@@ -313,9 +367,9 @@ class RenderFileExecutionTest {
         assertArrayEquals(bytes, f.final.readBytes())
     }
 
-    private suspend fun fixture() = Fixture().apply { initialize() }
+    private suspend fun fixture() = RenderFileFixture().apply { initialize() }
 
-    private class Fixture {
+    internal class RenderFileFixture {
         // Keep real .part/seal/final files for each fault witness without performing any external-store cleanup.
         private val root = Files.createTempDirectory(File("build").toPath(), "render-file-test-").toFile().canonicalFile
         private val repo = RepositoryFixture()
@@ -329,6 +383,12 @@ class RenderFileExecutionTest {
             get() = checkNotNull(stored)
             set(value) { stored = value }
         var elapsed = 100L
+        var ownerState = LeaseOwnerState.ALIVE
+        var jobIsBounded = true
+        var jobReads = 0
+        var onPinRead: () -> Unit = {}
+        var onLeaseWrite: (JobRow) -> Boolean = { true }
+        var phaseCasAllowed: (FileTransactionRow) -> Boolean = { true }
         var pinOverride: List<String>? = null
         var afterTransition: () -> Unit = {}
         var onForce: () -> Unit = {}
@@ -338,30 +398,43 @@ class RenderFileExecutionTest {
         val seal get() = File(stage.parentFile, "derived-seal.json")
         val final get() = File(root, intent.finalPath)
 
+        val records = mutableListOf<RenderedPageRow>()
+        var onRecordInsert: () -> Unit = {}
+        fun retainedPins() = repo.metadata.references.values.toList()
+        fun clearJobPins() { repo.metadata.references.entries.removeAll { it.value.ownerType == "JOB" && it.value.ownerId == job.jobId } }
         private val metadata = object : MetadataAccess {
             override val queries: CatalogQueries = repo.metadata
             override fun <T> transaction(action: () -> T): T {
                 val before = stored
+                val beforeJob = if (::job.isInitialized) job else null
+                val beforeRecords = records.toList()
                 return try { repo.metadata.transaction(action) }
-                catch (e: Throwable) { stored = before; throw e }
+                catch (e: Throwable) {
+                    stored = before
+                    beforeJob?.let { job = it }
+                    records.clear()
+                    records.addAll(beforeRecords)
+                    throw e
+                }
             }
         }
         private val leases = object : JobLeaseQueries {
-            override fun job(id: String): JobRow? { check(inTransaction); return job.takeIf { it.jobId == id } }
+            override fun job(id: String): JobRow? { check(inTransaction); jobReads++; return job.takeIf { it.jobId == id } }
             override fun updateLease(row: JobRow, expectedGeneration: Long): Int {
                 check(inTransaction)
                 if (row.jobId != job.jobId || job.leaseGeneration != expectedGeneration) return 0
                 job = row
-                return 1
+                return if (onLeaseWrite(row)) 1 else 0
             }
         }
         private fun pins(id: String): List<String> {
             check(inTransaction)
+            onPinRead()
             return pinOverride ?: repo.metadata.references.values.filter { it.ownerType == "JOB" && it.ownerId == id }.map { it.sourceId }
         }
         private fun current(id: String, attempt: Long) = stored?.takeIf { it.kind == "RENDER" && it.ownerId == id && it.attempt == attempt }
         private val port = object : RenderIntentQueries {
-            override fun renderJobLeaseReadIsBounded(jobId: String): Boolean? { check(inTransaction); return true.takeIf { jobId == job.jobId } }
+            override fun renderJobLeaseReadIsBounded(jobId: String): Boolean? { check(inTransaction); return jobIsBounded.takeIf { jobId == job.jobId } }
             override fun renderIntentReadIsBounded(jobId: String, attempt: Long, expectedPayloadBytes: Int): Boolean? {
                 check(inTransaction)
                 return current(jobId, attempt)?.let { it.payload.size == expectedPayloadBytes }
@@ -380,24 +453,49 @@ class RenderFileExecutionTest {
                 check(inTransaction)
                 val old = current(previous.ownerId, previous.attempt) ?: return 0
                 if (!old.payload.contentEquals(previous.payload) || old.copy(payload = previous.payload) != previous) return 0
+                if (!phaseCasAllowed(next)) return 0
                 row = next
                 afterTransition()
                 return 1
             }
         }
-        private val alive = LeaseOwnerLiveness { if (it == owner) LeaseOwnerState.ALIVE else LeaseOwnerState.UNKNOWN }
+        private val alive = LeaseOwnerLiveness { if (it == owner) ownerState else LeaseOwnerState.UNKNOWN }
         private var nextAudit = 1000L
         private val audit = { nextAudit++ }
         private val ids = listOf(id(20), id(21)).iterator()
         private val intents = RoomRenderIntents(metadata, leases, port,
             { id, size -> check(inTransaction); job.takeIf { it.jobId == id }?.let { it.input.size == size } },
             ::pins, alive, audit, { elapsed }, ids::next, Dispatchers.Unconfined)
-        private val files = DerivedFiles(root, DirectorySync { directory ->
+        val files = DerivedFiles(root, DirectorySync { directory ->
             check(!inTransaction)
             onDirectorySync(directory)
             if (::intent.isInitialized && final.isFile) onFinalSync()
             true
         }, { channel -> check(!inTransaction); onForce(); channel.force(true) })
+        val executor = RoomRenderFileExecution(intents, files, Dispatchers.Unconfined)
+        val completionRows: RenderCompletionQueries = object : RenderCompletionQueries {
+            override fun renderCompletionOccupied(renderId: String, jobId: String, cacheKey: String, relativePath: String): Boolean {
+                check(inTransaction)
+                return records.any { it.renderId == renderId || it.jobId == jobId || it.cacheKey == cacheKey || it.relativePath == relativePath }
+            }
+
+            override fun insertReadyRender(row: RenderedPageRow) {
+                check(inTransaction && !renderCompletionOccupied(row.renderId, row.jobId, row.cacheKey, row.relativePath))
+                records += row.copy(execution = row.execution.copyOf())
+                onRecordInsert()
+            }
+
+            override fun readyRenderMatches(row: RenderedPageRow): Boolean {
+                check(inTransaction)
+                val stored = records.singleOrNull { it.jobId == row.jobId } ?: return false
+                return stored.execution.contentEquals(row.execution) && stored.copy(execution = row.execution) == row
+            }
+
+            override fun commitMovedRender(previous: FileTransactionRow, updatedAt: Long): Int {
+                check(previous.state == "MOVED")
+                return port.advanceRenderFilePhase(previous, previous.copy(state = "COMMITTED", updatedAt = updatedAt))
+            }
+        }
 
         suspend fun initialize() {
             val jobs = mutableListOf<JobRow>()
@@ -432,7 +530,7 @@ class RenderFileExecutionTest {
                 checkpoint()
                 pixels.takeIf { file.readBytes().contentEquals(bytes) }
             }) {
-            RoomRenderFileExecution(intents, files, Dispatchers.Unconfined).execute(proof, lease, intent, cap, writer, readback)
+            executor.execute(proof, lease, intent, cap, writer, readback)
         }
 
         suspend fun refuses(code: OperationErrorCode, action: suspend () -> Unit) {

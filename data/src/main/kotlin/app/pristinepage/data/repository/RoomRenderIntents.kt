@@ -3,7 +3,9 @@ package app.pristinepage.data.repository
 import android.os.SystemClock
 import app.pristinepage.core.pipeline.requireSha256
 import app.pristinepage.data.db.FileTransactionRow
+import app.pristinepage.data.db.JobRow
 import app.pristinepage.data.db.PristineDatabase
+import app.pristinepage.data.db.RenderedPageRow
 import app.pristinepage.data.model.*
 import java.util.UUID
 import kotlinx.coroutines.CancellationException
@@ -81,6 +83,44 @@ internal class RoomRenderIntents(
 
     internal class ExecutionAdmission(val phase: RenderFilePhase, val checkpoint: () -> Unit)
 
+    /** Consume the verifier's exact live MOVED borrow. Only JobLeaseTransactions starts a transaction; these same-DB participants do bounded SQL and local checks only. */
+    internal fun commitMoved(
+        moved: RoomRenderFileExecution.VerifiedMoved, records: RenderCompletionQueries,
+    ) {
+        moved.claim(this)
+        val (proof, lease, intent) = Triple(moved.proof, moved.lease, moved.intent)
+        val seal = checkNotNull(moved.phase.seal)
+        val execution = moved.execution
+        if (!execution.matches(proof, moved.rasterSha256)) corrupt(lease)
+        val ready = RenderedPageRow(intent.renderId.value, intent.jobId.value, intent.sourceId.value, intent.pageId.value, intent.recipeRevision,
+            execution.cacheKey, execution.bytes(), execution.sha256, intent.finalPath, seal.byteSha256, moved.rasterSha256,
+            seal.byteCount, execution.size.width, execution.size.height, "OK", "READY")
+        val active = moved.active
+        JobLeaseTransactions(metadata, jobs, auditClock, leaseClock).completeGuarded(lease,
+            readAdmitted = {
+                val row = readJob(proof, lease)
+                if (row.attempt != lease.generation || pinSourceIds(lease.jobId.value).singleOrNull() != proof.pinSourceId) corrupt(lease)
+                row
+            },
+            live = { liveness.state(lease.owner) == LeaseOwnerState.ALIVE }, active = active,
+            commitMetadata = {
+                val before = read(proof, lease) ?: lost(lease)
+                if (executionBinding(proof, lease, intent, before) != moved.phase) lost(lease)
+                if (records.renderCompletionOccupied(ready.renderId, ready.jobId, ready.cacheKey, ready.relativePath)) corrupt(lease)
+                val updatedAt = auditClock()
+                active()
+                records.insertReadyRender(ready)
+                active()
+                if (records.commitMovedRender(before, updatedAt) != 1) lost(lease)
+                before.copy(state = "COMMITTED", updatedAt = updatedAt)
+            },
+            verifyMetadata = { expected ->
+                val written = read(proof, lease) ?: corrupt(lease)
+                if (!sameJournal(written, expected) || !records.readyRenderMatches(ready)) corrupt(lease)
+            },
+        )
+    }
+
     /** Synchronous on the executor's IO context. The returned checkpoint captures only the bounded admitted row; it does not query Room. */
     fun executionPhase(
         proof: RoomFrozenRenderReads.Verified, lease: JobLease, intent: RenderFileIntent, active: () -> Unit,
@@ -99,7 +139,7 @@ internal class RoomRenderIntents(
             requireCurrent(proof, lease, active)
             if (journal.advanceRenderFilePhase(before, after) != 1) lost(lease)
             val stored = read(proof, lease) ?: corrupt(lease)
-            if (!stored.payload.contentEquals(after.payload) || stored.copy(payload = after.payload) != after) corrupt(lease)
+            if (!sameJournal(stored, after)) corrupt(lease)
             val written = executionBinding(proof, lease, intent, stored)
             ExecutionAdmission(written, requireCurrent(proof, lease, active))
         }
@@ -155,7 +195,7 @@ internal class RoomRenderIntents(
             refuse(lease, OperationErrorCode.STORAGE_FAILED, "render_intent_storage_failed", retryable = true)
         }
 
-    private fun requireCurrent(proof: RoomFrozenRenderReads.Verified, lease: JobLease, active: () -> Unit = {}): () -> Unit {
+    private fun readJob(proof: RoomFrozenRenderReads.Verified, lease: JobLease): JobRow {
         val id = lease.jobId.value
         when (jobBounds(id, proof.inputBytes)) {
             null -> lost(lease)
@@ -166,15 +206,16 @@ internal class RoomRenderIntents(
         val row = jobs.job(id) ?: corrupt(lease)
         if (!proof.matches(row)) corrupt(lease)
         if (row.state == "CANCELED") canceled(lease)
-        // Use the real bounded row with the existing fence; a second SELECT * is unnecessary.
-        val admitted = object : JobLeaseQueries by jobs {
-            override fun job(id: String) = row.takeIf { it.jobId == id }
-        }
-        val pinMatches = pinSourceIds(id).singleOrNull() == proof.pinSourceId
+        return row
+    }
+
+    private fun requireCurrent(proof: RoomFrozenRenderReads.Verified, lease: JobLease, active: () -> Unit = {}): () -> Unit {
+        val row = readJob(proof, lease)
+        val pinMatches = pinSourceIds(lease.jobId.value).singleOrNull() == proof.pinSourceId
         // Sample after the last SQL read, but report stale lease before pin/attempt mismatches. Room COMMIT still follows this sample.
         val checkpoint: () -> Unit = {
             if (liveness.state(lease.owner) != LeaseOwnerState.ALIVE) lost(lease)
-            if (JobLeaseFence.current(admitted, lease, leaseClock()) == null) lost(lease)
+            if (JobLeaseFence.current(row, lease, leaseClock()) == null) lost(lease)
             active()
         }
         checkpoint()
@@ -182,6 +223,9 @@ internal class RoomRenderIntents(
         if (row.attempt != lease.generation || !pinMatches) corrupt(lease)
         return checkpoint
     }
+
+    private fun sameJournal(actual: FileTransactionRow, expected: FileTransactionRow): Boolean =
+        actual.payload.contentEquals(expected.payload) && actual.copy(payload = expected.payload) == expected
 
     private fun read(proof: RoomFrozenRenderReads.Verified, lease: JobLease): FileTransactionRow? {
         val attempt = lease.generation

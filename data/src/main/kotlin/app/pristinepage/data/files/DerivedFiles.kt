@@ -254,6 +254,7 @@ class DerivedFiles internal constructor(
         require(attrs.isRegularFile && attrs.size() in 1L..SEAL_LIMIT.toLong()) { "Invalid derived seal extent" }
         // A readable seal may be left behind by a failed force. For durable recovery, force the same descriptor that supplied the authenticated bytes, without creation, truncation or rewriting.
         val options = if (durable) arrayOf<OpenOption>(READ, WRITE, NOFOLLOW_LINKS) else arrayOf<OpenOption>(READ, NOFOLLOW_LINKS)
+        checkpoint()
         val observed = FileChannel.open(file.toPath(), *options).use { channel ->
             val bytes = readSeal(channel, attrs.size().toInt(), checkpoint)
             val observed = verifySealAndPayloads(transactionId, expectedSealSha256, bytes, checkpoint, beforePayloads, requireFinal, readback)
@@ -302,7 +303,9 @@ class DerivedFiles internal constructor(
         require(bytes.contentEquals(encode(canonical))) { "Noncanonical derived seal" }
         val staged = StagedDerived(paths.root, transactionId, target, record.byteSha256, record.byteCount)
         beforePayloads?.invoke(staged, metadata)
+        checkpoint()
         val stage = stagingFile(transactionId)
+        checkpoint()
         val final = finalFile(target)
         val stageAttrs = attributes(stage)
         val finalAttrs = attributes(final)
@@ -314,7 +317,9 @@ class DerivedFiles internal constructor(
             checkpoint()
             // Both copies already matched; decode one, then re-resolve both paths. Readback cannot add or remove a copy, or change its bytes.
             readback(if (finalAttrs != null) final else stage, metadata)
+            checkpoint()
             verifyUnchangedCopy(stagingFile(transactionId), stageAttrs != null, staged, checkpoint)
+            checkpoint()
             verifyUnchangedCopy(finalFile(target), finalAttrs != null, staged, checkpoint)
         }
         return Observation(ObservedDerivedSeal(staged, metadata, hash), stage, final, finalAttrs != null)
@@ -330,6 +335,7 @@ class DerivedFiles internal constructor(
         require(attrs != null && attrs.isRegularFile && attrs.size() == staged.byteCount) { "Derived payload extent mismatch" }
         val digest = MessageDigest.getInstance("SHA-256")
         var remaining = staged.byteCount
+        checkpoint()
         FileChannel.open(file.toPath(), READ, NOFOLLOW_LINKS).use { channel ->
             val buffer = ByteBuffer.allocate(BUFFER_SIZE)
             while (remaining > 0) {

@@ -48,13 +48,13 @@ internal class RoomFrozenRenderReads(
         identity: FrozenRenderJobIdentityRow,
     ) {
         private val input = identity.input
-        private val key = identity.idempotenceKey
+        internal val preExecutionKey = identity.idempotenceKey
         val canonicalInputSha256: String = identity.canonicalInputSha256
         val inputBytes: Int get() = input.size
 
         fun matches(row: JobRow): Boolean =
             row.jobId == jobId.value && row.kind == "PAGE_RENDER" && row.snapshotId == null && row.pageOrdinal == null &&
-                row.idempotenceKey == key && row.canonicalInputSha256 == canonicalInputSha256 && row.input.contentEquals(input)
+                row.idempotenceKey == preExecutionKey && row.canonicalInputSha256 == canonicalInputSha256 && row.input.contentEquals(input)
 
         companion object {
             suspend fun read(reader: RoomFrozenRenderReads, jobId: JobId, page: ExportPageSnapshot): Verified {

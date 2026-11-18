@@ -28,6 +28,46 @@ class JobLeaseTransactions @JvmOverloads constructor(private val metadata: Metad
         catch (_: Exception) { throw RepositoryFailure(OperationError(OperationErrorCode.STORAGE_FAILED, true, "job_lease_write_failed", lease.jobId.value)) }
     }
 
+    /** Specialization for a bounded, exact reader. The last check uses the original live row because the still-uncommitted success write consumes its owner/deadline. No old caller changes ordering or read semantics. */
+    internal fun <T : Any> completeGuarded(
+        lease: JobLease,
+        readAdmitted: () -> JobRow,
+        live: () -> Boolean,
+        active: () -> Unit,
+        commitMetadata: () -> T,
+        verifyMetadata: (T) -> Unit,
+    ): T {
+        fun fence(row: JobRow) {
+            if (!live() || JobLeaseFence.current(row, lease, leaseClock()) == null) lostLease(lease)
+            active()
+        }
+        try {
+            return metadata.transaction {
+                active()
+                val original = readAdmitted()
+                fence(original)
+                val result = commitMetadata()
+                val current = readAdmitted()
+                fence(current)
+                if (!sameJob(original, current)) lostLease(lease)
+                val succeeded = current.copy(state = "SUCCEEDED", leaseOwner = null, leaseUntil = null, updatedAt = auditClock())
+                active()
+                if (jobs.updateLease(succeeded, lease.generation) != 1) lostLease(lease)
+                verifyMetadata(result)
+                if (!sameJob(succeeded, readAdmitted())) lostLease(lease)
+                // After all SQL, including final bounded row and pin verification. SQLite COMMIT still follows this local observation.
+                fence(original)
+                result
+            }
+        } catch (canceled: CancellationException) { throw canceled }
+        catch (failure: RepositoryFailure) { throw failure }
+        catch (_: Exception) { throw RepositoryFailure(OperationError(OperationErrorCode.STORAGE_FAILED, true, "job_lease_write_failed", lease.jobId.value)) }
+    }
+
+    private fun sameJob(expected: JobRow, actual: JobRow): Boolean =
+        actual.input.contentEquals(expected.input) && actual.checkpoint.contentEquals(expected.checkpoint) &&
+            actual.copy(input = expected.input, checkpoint = expected.checkpoint) == expected
+
     private fun lostLease(lease: JobLease): Nothing = throw RepositoryFailure(OperationError(OperationErrorCode.REVISION_CONFLICT, false, "job_lease_lost", lease.jobId.value))
 }
 
@@ -35,6 +75,9 @@ class JobLeaseTransactions @JvmOverloads constructor(private val metadata: Metad
 internal object JobLeaseFence {
     fun current(jobs: JobLeaseQueries, lease: JobLease, now: Long): JobRow? {
         val job = jobs.job(lease.jobId.value) ?: return null
-        return job.takeIf { it.leaseOwner == lease.owner && it.leaseGeneration == lease.generation && it.state in setOf("RUNNING", "CHECKPOINTED") && (it.leaseUntil ?: Long.MIN_VALUE) > now }
+        return current(job, lease, now)
     }
+
+    fun current(job: JobRow, lease: JobLease, now: Long): JobRow? =
+        job.takeIf { it.leaseOwner == lease.owner && it.leaseGeneration == lease.generation && it.state in setOf("RUNNING", "CHECKPOINTED") && (it.leaseUntil ?: Long.MIN_VALUE) > now }
 }
