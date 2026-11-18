@@ -2,6 +2,14 @@
 
 This checklist is the live PristinePage application task-state authority, not the historical documentation receipt. The operator approved local implementation under [P-01](OPERATIONAL_PLAN.md) on 2026-11-14. All acceptance checkboxes remain unimplemented/unverified at setup. Use [IMPLEMENTATION_PLAN.md](IMPLEMENTATION_PLAN.md) for exact files, interfaces, test steps and commands. Claim metadata belongs here; cross-file requirements/test links belong in [REQUIREMENTS_TRACEABILITY.md](REQUIREMENTS_TRACEABILITY.md).
 
+### Current coordination: transition to `main`
+
+- [x] Operator approved the local fast-forward and `main`-based PR/handoff cadence; see [operational authority](OPERATIONAL_PLAN.md) and [queue rules](PARALLEL_EXECUTION_PLAN.md#coordination). Earlier branch/base references below describe their historical claims.
+- Only the exact committed transition is eligible for the root fast-forward. All existing auxiliary worktrees and the terminal execution assignment retain their original bases and pending evidence; no unfinished candidate is implicitly adopted.
+- [ ] Build and verify the single active `main` documentation index after the 9 GiB MemPalace disk preflight succeeds; the transition observed about 7.46 GiB. Use canonical documents directly until then.
+- [ ] Reconcile the terminal worker's serial build slot and verify the 8 GiB floor after the observed 7.46 GiB preflight. Only then copy the approved debug key and produce a labeled, SDK-verified preview APK and receipt from exact `main`; no preview is delivered by the fast-forward itself.
+- [ ] In a separately authorized LDPlayer run on a single current APK, complete the uninterrupted import → edit → save → reopen → verified export acceptance milestone.
+
 User amendment U-01 in live PRD requires multiple actual neural methods, including learned geometry and appearance, before completion. Original optional-model defaults do not authorize finishing with every model deferred. Provider selection/assets/runtime and amended T-08/T-12 acceptance need a separately approved concrete plan; no neural download is included in P-02. This blocks only dependent provider/release acceptance, not the approved foundation/classical slice.
 
 U-04/FR-17 now mandates [cumulative album batch editing](BATCH_EDITING.md), explicitly approved for design/requirement recording2026-11-15. Select all/subsets, preserve independent accumulated turns/settings across selection changes and save all effectively edited pages on one Done, with previews, Undo/Redo, Cancel and one atomic recipe save. This supplements T-02/T-03/T-09/T-10, not a replacement implementation plan or completed feature. [Independent design review](../../validation/reviews/batch-editing-design-review.md) passed its documentation/builder scope; implementation precautions were made explicit. T-02's rotation contract/checks now exist; the actual batch feature remains unimplemented.

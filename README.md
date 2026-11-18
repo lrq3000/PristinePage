@@ -4,6 +4,8 @@ Native offline Android document/photo scanner under active implementation. Confi
 
 ## Authorities and scope
 
+`X:\local-workspace` on `main` is the canonical application and documentation checkout. The original development worktree `X:\local-workspace\.worktrees\paperlight-v1` and its worker branches are retained history; do not start new assignments from them. New PRs target `main`; with no remote configured, use the local PR-style queue in the [parallel execution plan](docs/specs/PARALLEL_EXECUTION_PLAN.md#coordination). See [the main transition](docs/specs/OPERATIONAL_PLAN.md) for the verified-index rule and operational gates.
+
 T-01/T-02 have bounded acceptance only; their [identity](validation/bootstrap/identity-receipt.md), [runtime](validation/bootstrap/ldplayer-receipt.md) and [contract](validation/contracts/t02-receipt.md) receipts remain historical. The [default library/editor](validation/editor/t09-default-library-journey-receipt.md) and [comparison](validation/editor/t09-editor-comparison-receipt.md) receipts record earlier runtime scope. The [render-intent receipt](validation/storage/export-render-intent-integration-receipt.md) records 482 fresh data JVM tests and five focused host SQLite checks on the feature branch; these are affected-module host tests, not an app-wide rerun or a completed export.
 
 **Host and device gates are separate.** The [historical Gradle worker failure](validation/export/derived-files-blocker-receipt.md) preceded the operator's Windows restart. Its exact process identities were reconciled, and [subsequent host tests ran successfully](validation/export/derived-files-integration-receipt.md). [LDPlayer real-picker testing](validation/decode/ldplayer-post-restart-readiness-handoff.md) remains paused before installation or instrumentation, pending the separate readiness-only decision. The personal phone is excluded.
@@ -25,12 +27,12 @@ The first-acquisition commands in [P-02](validation/bootstrap/acquisition-plan.m
 ```text
 JAVA_HOME=C:\Program Files\Android\Android Studio\jbr
 ANDROID_HOME=C:\Users\local-user\AppData\Local\Android\Sdk
-ANDROID_USER_HOME=X:\local-workspace\.worktrees\paperlight-v1\.android-user-home
+ANDROID_USER_HOME=X:\local-workspace\.android-user-home
 GRADLE_USER_HOME=C:\Users\local-user\AppData\Local\Temp\opencode\paperlight-build-cache\gradle
 ANDROID_SDK_HOME must be unset for the build process
 ```
 
-Run from an approved worktree only, when holding the sole reconciled test slot. Use the affected-module command in the current claim for focused checks. At a coherent app integration boundary, the normal integration command is:
+Run from the authorized checkout only, when holding the sole reconciled test slot. Build the coordinated preview from the canonical `main` checkout; workers run focused checks from their own authorized worktrees with their own local ignored Android preferences. At a coherent app integration boundary, the normal integration command is:
 
 ```text
 gradlew.bat --offline --no-daemon --console=plain --max-workers=4 --dependency-verification=strict :core:test :test-fixtures:test :data:testDebugUnitTest :image-android:testDebugUnitTest :app:testDebugUnitTest :app:lintDebug :app:compileDebugAndroidTestKotlin
@@ -38,7 +40,7 @@ gradlew.bat --offline --no-daemon --console=plain --max-workers=4 --dependency-v
 
 Only after relevant checks pass, approved S-01 debug assembly uses `gradlew.bat --offline --no-daemon --console=plain --max-workers=4 --dependency-verification=strict :app:assembleDebug :app:assembleDebugAndroidTest`. Expected paths are `app/build/outputs/apk/debug/app-debug.apk` and `app/build/outputs/apk/androidTest/debug/app-debug-androidTest.apk`; assembly is not installation or final acceptance. These are documented commands, not newly executed checks. Do not use `clean`, forced task reruns, release signing or connected-device tasks to bypass the current blocker.
 
-Actual retained files are still the historical Q main (`d8d80c5f…`) and compiled-but-unrun S test (`4edc1edf…`), not a current goal-complete APK. `dist/` contains only older bootstrap APKs. [Artifact reception](validation/export/derived-files-contract-readiness.md#actual-retained-artifact-reception-not-current-build-delivery) records exact hashes, sizes and stale-input limits; do not rename these into a final delivery.
+Historical Q app (`d8d80c5f…`), compiled-but-unrun S test (`4edc1edf…`) and older bootstrap APKs remain in the former worktree, not a current delivery. [Artifact reception](validation/export/derived-files-contract-readiness.md#actual-retained-artifact-reception-not-current-build-delivery) records their identities and limitations. The next deliverable is a clearly labeled development preview in canonical `dist/`, with its exact `main` commit and SHA-256 after offline checks and Android SDK artifact verification. It is not a completed scanner. The next acceptance milestone is one uninterrupted import → edit → save → reopen → verified export journey on a single current APK in LDPlayer, subject to the separate readiness gate.
 
 ## Signing, devices and release
 
