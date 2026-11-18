@@ -1,12 +1,15 @@
 package app.pristinepage.data.repository
 
-import app.pristinepage.data.db.PristineDatabase
+import app.pristinepage.core.pipeline.PixelSize
 import app.pristinepage.data.db.JobRow
+import app.pristinepage.data.db.PristineDatabase
+import app.pristinepage.data.db.RenderedPageRow
 import app.pristinepage.data.model.ExportPageSnapshot
 import app.pristinepage.data.model.JobId
 import app.pristinepage.data.model.OperationError
 import app.pristinepage.data.model.OperationErrorCode
 import app.pristinepage.data.model.OrdinaryExportProfile
+import app.pristinepage.data.model.OrdinaryRenderExecutionRead
 import app.pristinepage.data.model.RepositoryFailure
 import app.pristinepage.data.model.requireOpaqueId
 import kotlinx.coroutines.CancellationException
@@ -18,10 +21,10 @@ import kotlinx.coroutines.withContext
 /** Verifies one ordinary authenticated frozen page and its JobId at the matching verified assembly ordinal. The caller retains the snapshot/job ownership and separately proves lease, runtime and file availability; no rows are returned. */
 internal class RoomFrozenRenderReads(
     private val metadata: MetadataAccess,
-    private val jobBounds: (String, Int) -> Boolean?,
-    private val jobIdentity: (String) -> FrozenRenderJobIdentityRow?,
-    private val pinSourceIds: (String) -> List<String>,
-    private val sourceBounds: (String) -> Boolean?,
+    jobBounds: (String, Int) -> Boolean?,
+    jobIdentity: (String) -> FrozenRenderJobIdentityRow?,
+    pinSourceIds: (String) -> List<String>,
+    sourceBounds: (String) -> Boolean?,
     private val runtime: OrdinaryExportProfile,
     private val dispatcher: CoroutineDispatcher = Dispatchers.IO,
 ) {
@@ -34,11 +37,13 @@ internal class RoomFrozenRenderReads(
         runtime,
     )
 
+    private val projection = Projection(metadata.queries, jobBounds, jobIdentity, pinSourceIds, sourceBounds)
+
     suspend fun verify(jobId: JobId, page: ExportPageSnapshot) {
         authenticate(jobId, page)
     }
 
-    suspend fun verified(jobId: JobId, page: ExportPageSnapshot): Verified = Verified.read(this, jobId, page)
+    suspend fun verified(jobId: JobId, page: ExportPageSnapshot): Verified = authenticate(jobId, page)
 
     /** This is an immutable binding, not a lease or a live pin. Keep the canonical bytes private and compare them again before writing. */
     class Verified private constructor(
@@ -56,38 +61,51 @@ internal class RoomFrozenRenderReads(
             row.jobId == jobId.value && row.kind == "PAGE_RENDER" && row.snapshotId == null && row.pageOrdinal == null &&
                 row.idempotenceKey == preExecutionKey && row.canonicalInputSha256 == canonicalInputSha256 && row.input.contentEquals(input)
 
-        companion object {
-            suspend fun read(reader: RoomFrozenRenderReads, jobId: JobId, page: ExportPageSnapshot): Verified {
-                val (row, pin) = reader.authenticate(jobId, page)
-                return Verified(jobId, page, pin, row)
+        /** Keep the exact page and JobId that produced Expected together through final authentication. Construct outside Room. */
+        class Prepared(private val jobId: JobId, private val page: ExportPageSnapshot, runtime: OrdinaryExportProfile) {
+            private val expected = FrozenRenderJobProof.prepare(jobId, page, runtime)
+            val inputBytes: Int get() = expected.inputBytes
+
+            fun authenticate(snapshot: Projection.JobSnapshot, active: () -> Unit): Verified {
+                val row = snapshot.authenticate(expected)
+                active()
+                requireAvailable()
+                return Verified(jobId, page, snapshot.pinId, row)
             }
+
+            fun <T> authenticateTerminal(snapshot: Projection.JobSnapshot, active: () -> Unit, validate: (TerminalProof) -> T): T {
+                val row = snapshot.authenticate(expected)
+                active()
+                // Retained execution is readable as metadata, but an unchecked historical Verified must not reach execution callers.
+                val terminal = validate(TerminalProof(Verified(jobId, page, snapshot.pinId, row)))
+                active()
+                requireAvailable()
+                return terminal
+            }
+
+            private fun requireAvailable() {
+                if (expected.historical) refuse(jobId, OperationErrorCode.PROVIDER_UNAVAILABLE, "frozen_render_profile_unavailable")
+            }
+        }
+
+        /** Only the fields and pure parser needed by the terminal validator; never a runnable frozen-job proof. */
+        class TerminalProof internal constructor(private val proof: Verified) {
+            val jobId: JobId get() = proof.jobId
+            val page: ExportPageSnapshot get() = proof.page
+            val pinSourceId: String get() = proof.pinSourceId
+            val canonicalInputSha256: String get() = proof.canonicalInputSha256
+
+            fun readExecution(row: RenderedPageRow, size: PixelSize): OrdinaryRenderExecutionRead =
+                OrdinaryRenderExecutionRead.read(row.execution, proof, row.executionSha256, row.cacheKey, row.rasterPixelSha256, size)
         }
     }
 
-    private suspend fun authenticate(jobId: JobId, page: ExportPageSnapshot): Pair<FrozenRenderJobIdentityRow, String> = withContext(dispatcher) {
+    private suspend fun authenticate(jobId: JobId, page: ExportPageSnapshot): Verified = withContext(dispatcher) {
         coroutineContext.ensureActive()
-        val expected = FrozenRenderJobProof.prepare(jobId, page, runtime)
+        val prepared = Verified.Prepared(jobId, page, runtime)
         coroutineContext.ensureActive()
-        val (job, pinId, binding) = try {
-            metadata.transaction {
-                when (jobBounds(jobId.value, expected.inputBytes)) {
-                    null -> refuse(jobId, OperationErrorCode.SOURCE_UNAVAILABLE, "frozen_render_job_unavailable")
-                    false -> invalidMetadata(jobId)
-                    true -> Unit
-                }
-                coroutineContext.ensureActive()
-                val row = jobIdentity(jobId.value) ?: invalidMetadata(jobId)
-                val pin = pinSourceIds(jobId.value).singleOrNull() ?: invalidMetadata(jobId)
-                validateId(pin, jobId)
-                // A missing Source behind an existing JOB pin is corruption, not an absent job. The reused scalar also guards the corresponding SourceBlob before either projection.
-                if (sourceBounds(pin) != true) invalidMetadata(jobId)
-                coroutineContext.ensureActive()
-                val source = metadata.queries.source(pin) ?: invalidMetadata(jobId)
-                if (source.sourceId != pin) invalidMetadata(jobId)
-                validateId(source.sourceBlobId, jobId)
-                val blob = metadata.queries.sourceBlob(source.sourceBlobId) ?: invalidMetadata(jobId)
-                Triple(row, pin, ExportSourceBinding(source, blob))
-            }
+        val snapshot = try {
+            metadata.transaction { projection.job(jobId, prepared.inputBytes) { coroutineContext.ensureActive() } }
         } catch (canceled: CancellationException) {
             throw canceled
         } catch (failure: RepositoryFailure) {
@@ -96,26 +114,79 @@ internal class RoomFrozenRenderReads(
             refuse(jobId, OperationErrorCode.STORAGE_FAILED, "frozen_render_job_read_failed", retryable = true)
         }
         coroutineContext.ensureActive()
-        if (job.input.size != expected.inputBytes) invalidMetadata(jobId)
-        val owned = job.copy(input = job.input.copyOf())
-        expected.verify(owned, pinId, binding)
-        coroutineContext.ensureActive()
-        // Mismatches in the retained job/pin chain must not be hidden by a runtime difference.
-        if (expected.historical) refuse(jobId, OperationErrorCode.PROVIDER_UNAVAILABLE, "frozen_render_profile_unavailable")
-        owned to pinId
+        prepared.authenticate(snapshot) { coroutineContext.ensureActive() }
     }
 
-    private fun validateId(id: String, jobId: JobId) {
-        try {
-            requireOpaqueId(id)
-        } catch (_: IllegalArgumentException) {
-            invalidMetadata(jobId)
+    /** Only bounded projections; no transaction opener, file or lease. Use these queries inside the caller's one same-database transaction. */
+    class Projection(
+        private val catalog: CatalogQueries,
+        private val jobBounds: (String, Int) -> Boolean?,
+        private val jobIdentity: (String) -> FrozenRenderJobIdentityRow?,
+        private val pinSourceIds: (String) -> List<String>,
+        private val sourceBounds: (String) -> Boolean?,
+    ) {
+        fun job(jobId: JobId, inputBytes: Int, active: () -> Unit): JobSnapshot = JobSnapshot.capture(this, jobId, inputBytes, active)
+
+        class JobSnapshot private constructor(
+            private val row: FrozenRenderJobIdentityRow, val pinId: String, private val binding: ExportSourceBinding,
+            private val jobId: JobId, private val inputBytes: Int,
+        ) {
+            /** Opt in before transaction exit when composing with other borrowed projections. The legacy standalone reader authenticates a copy only after Room returns. */
+            fun detached(): JobSnapshot = JobSnapshot(copyBoundedInput(), pinId, binding, jobId, inputBytes)
+
+            fun authenticate(expected: FrozenRenderJobProof.Expected): FrozenRenderJobIdentityRow {
+                val owned = copyBoundedInput()
+                expected.verify(owned, pinId, binding)
+                return owned
+            }
+
+            private fun copyBoundedInput(): FrozenRenderJobIdentityRow {
+                if (row.input.size != inputBytes) invalidMetadata(jobId)
+                return row.copy(input = row.input.copyOf())
+            }
+
+            companion object {
+                fun capture(projection: Projection, jobId: JobId, inputBytes: Int, active: () -> Unit): JobSnapshot {
+                    when (projection.jobBounds(jobId.value, inputBytes)) {
+                        null -> refuse(jobId, OperationErrorCode.SOURCE_UNAVAILABLE, "frozen_render_job_unavailable")
+                        false -> invalidMetadata(jobId)
+                        true -> Unit
+                    }
+                    active()
+                    val row = projection.jobIdentity(jobId.value) ?: invalidMetadata(jobId)
+                    val pin = projection.pinSourceIds(jobId.value).singleOrNull() ?: invalidMetadata(jobId)
+                    return JobSnapshot(row, pin, projection.source(pin, jobId, active), jobId, inputBytes)
+                }
+            }
+        }
+
+        fun source(id: String, jobId: JobId, active: () -> Unit): ExportSourceBinding {
+            validateId(id, jobId)
+            // A missing Source behind a retained reference is corruption. This scalar also guards its exact Blob before either projection.
+            if (sourceBounds(id) != true) invalidMetadata(jobId)
+            active()
+            val source = catalog.source(id) ?: invalidMetadata(jobId)
+            if (source.sourceId != id) invalidMetadata(jobId)
+            validateId(source.sourceBlobId, jobId)
+            val blob = catalog.sourceBlob(source.sourceBlobId) ?: invalidMetadata(jobId)
+            if (blob.sourceBlobId != source.sourceBlobId) invalidMetadata(jobId)
+            return ExportSourceBinding(source, blob)
+        }
+
+        private fun validateId(id: String, jobId: JobId) {
+            try {
+                requireOpaqueId(id)
+            } catch (_: IllegalArgumentException) {
+                invalidMetadata(jobId)
+            }
         }
     }
 
-    private fun invalidMetadata(jobId: JobId): Nothing =
-        refuse(jobId, OperationErrorCode.INTEGRITY_FAILED, "frozen_render_job_metadata_invalid")
+    private companion object {
+        fun invalidMetadata(jobId: JobId): Nothing =
+            refuse(jobId, OperationErrorCode.INTEGRITY_FAILED, "frozen_render_job_metadata_invalid")
 
-    private fun refuse(jobId: JobId, code: OperationErrorCode, key: String, retryable: Boolean = false): Nothing =
-        throw RepositoryFailure(OperationError(code, retryable, key, jobId.value))
+        fun refuse(jobId: JobId, code: OperationErrorCode, key: String, retryable: Boolean = false): Nothing =
+            throw RepositoryFailure(OperationError(code, retryable, key, jobId.value))
+    }
 }

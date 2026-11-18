@@ -102,6 +102,17 @@ class FrozenRenderReadTest {
         assertEquals(completeRead, read.events)
     }
 
+    @Test fun inconsistentTypedJobExtentIsRefusedAfterTheGuardedPinRead() = runTest {
+        val frozen = Frozen().freeze()
+        val read = Read(frozen).apply {
+            // A contradictory port admits the raw extent but returns a shorter materialized BLOB.
+            job = frozen.job.copy(input = frozen.job.input.copyOf(frozen.job.input.size - 1))
+        }
+        val failure = read.refuses(OperationErrorCode.INTEGRITY_FAILED)
+        assertEquals("frozen_render_job_metadata_invalid", failure.error.safeMessageKey)
+        assertEquals(completeRead, read.events)
+    }
+
     @Test fun verifiedHistoricalProfileIsUnavailableButCorruptHistoricalBindingIsNot() = runTest {
         val profile = OrdinaryExportProfile("renderer-older-v1", "rgb8-old\\", "older\"[[[}}\\", "float{[]}")
         val history = Frozen(profile).freeze()

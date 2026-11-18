@@ -12,7 +12,6 @@ import app.pristinepage.core.recipe.RecipeCodec
 import app.pristinepage.data.repository.RoomFrozenRenderReads
 import java.io.ByteArrayOutputStream
 import java.io.DataOutputStream
-import java.nio.ByteBuffer
 import java.security.MessageDigest
 
 /** A detached v1 record of what the retained result actually did. The canonical pre-execution digest binds the recipe bytes, masks and runtime profile without duplicating them here. */
@@ -35,19 +34,39 @@ internal class OrdinaryRenderExecution private constructor(
             preExecutionKey == proof.preExecutionKey && rasterSha256 == raster
 
     companion object {
-        private const val TOKEN_LIMIT = 128
-        private const val LIST_LIMIT = 16
+        const val TOKEN_LIMIT = 128
+        const val LIST_LIMIT = 16
+        const val MIN_STAGES = 3
+        const val ENVELOPE_TAG = "pristinepage-ordinary-render-execution-v1\u0000"
         private const val JOB_KEY_TAG = "page-render-v1:"
-        private val token = Regex("[A-Za-z0-9_.:-]+")
         private val successfulOutcomes = setOf("OK", "EXACT_IDENTITY", "EXACT_PERMUTATION")
-        private val rasterDomain = "pristinepage-ordinary-render-rgb8-v1\u0000".encodeToByteArray()
+
+        // All lengths are bytes (the writer accepts only ASCII). Include each length/count prefix and today's fixed-width v1 identities, not database or image allocation limits.
+        private fun textExtent(length: Int) = Int.SIZE_BYTES + length
+        private val warningsExtent = Int.SIZE_BYTES + LIST_LIMIT * textExtent(TOKEN_LIMIT)
+        private val stageExtent = textExtent(TOKEN_LIMIT) + Int.SIZE_BYTES + textExtent(successfulOutcomes.maxOf { it.length }) +
+            4 * Int.SIZE_BYTES + warningsExtent
+        val maxEnvelopeBytes = ENVELOPE_TAG.length + textExtent(JOB_KEY_TAG.length + 64) + 3 * textExtent(36) +
+            4 * textExtent(64) + Long.SIZE_BYTES + 4 * Int.SIZE_BYTES + textExtent(RenderPurpose.EXPORT.name.length) +
+            textExtent(FallbackPolicy.FAIL.name.length) + textExtent(RenderStatus.OK.name.length) + Int.SIZE_BYTES +
+            LIST_LIMIT * stageExtent + warningsExtent
+
+        fun isTokenChar(c: Char): Boolean = c in 'A'..'Z' || c in 'a'..'z' || c in '0'..'9' || c in "_.:-"
+        fun isSuccessfulOutcome(value: String): Boolean = value in successfulOutcomes
+
+        fun requirePreExecutionKey(value: String) {
+            require(value.startsWith(JOB_KEY_TAG) && value.length == JOB_KEY_TAG.length + 64)
+            requireSha256(value.substring(JOB_KEY_TAG.length))
+        }
+
+        fun cacheKey(preExecutionKey: String, executionHash: String): String =
+            "render-cache-v1:" + sha256(("pristinepage-ordinary-render-cache-v1\u0000" + preExecutionKey + executionHash).encodeToByteArray())
 
         /** Borrow only. Run outside Room; never retain the raster, rederive stage results from a recipe, or close the result owner here. */
         fun capture(proof: RoomFrozenRenderReads.Verified, result: RenderResult, checkpoint: () -> Unit): OrdinaryRenderExecution {
             val page = proof.page
             val preExecutionKey = proof.preExecutionKey
-            require(preExecutionKey.startsWith(JOB_KEY_TAG) && preExecutionKey.length == JOB_KEY_TAG.length + 64)
-            requireSha256(preExecutionKey.substring(JOB_KEY_TAG.length))
+            requirePreExecutionKey(preExecutionKey)
             val expected = RenderRequest(page.sourceId.value, page.pixelHash, page.pageId.value, page.recipeRevision,
                 RecipeCodec.decode(page.canonicalRecipe), page.output, 0, null, FallbackPolicy.FAIL)
             require(page.output == page.requestedOutput && page.output.purpose == RenderPurpose.EXPORT && page.fallbackPolicy == FallbackPolicy.FAIL)
@@ -56,12 +75,12 @@ internal class OrdinaryRenderExecution private constructor(
             val size = PixelSize(image.width, image.height)
             require(size == expected.output.size)
             val stages = result.stages
-            require(stages.size in 3..LIST_LIMIT && stages.first().outputSize == page.sourceSize && stages.last().outputSize == size)
+            require(stages.size in MIN_STAGES..LIST_LIMIT && stages.first().outputSize == page.sourceSize && stages.last().outputSize == size)
             val bytes = ByteArrayOutputStream()
             val raster: String
             DataOutputStream(bytes).use { out ->
                 fun text(value: String) {
-                    require(value.length in 1..TOKEN_LIMIT && token.matches(value))
+                    require(value.length in 1..TOKEN_LIMIT && value.all(::isTokenChar))
                     val field = value.encodeToByteArray()
                     out.writeInt(field.size)
                     out.write(field)
@@ -73,7 +92,7 @@ internal class OrdinaryRenderExecution private constructor(
                     codes.forEach(::text)
                 }
 
-                out.write("pristinepage-ordinary-render-execution-v1\u0000".encodeToByteArray())
+                out.write(ENVELOPE_TAG.encodeToByteArray())
                 text(preExecutionKey)
                 text(expected.pageId); text(expected.sourceId); text(page.sourceBlobId.value); text(page.byteHash); text(expected.sourcePixelHash)
                 out.writeLong(expected.recipeRevision); text(page.recipeHash)
@@ -83,7 +102,7 @@ internal class OrdinaryRenderExecution private constructor(
                 var previous: PixelSize? = null
                 for (stage in stages) {
                     // This bounded ordinary envelope has no provider assets and cannot record a failed/omitted stage as a successful result.
-                    require(stage.version > 0 && stage.provider == null && stage.outcome in successfulOutcomes)
+                    require(stage.version > 0 && stage.provider == null && isSuccessfulOutcome(stage.outcome))
                     require(previous == null || stage.inputSize == previous)
                     text(stage.stageId); out.writeInt(stage.version); text(stage.outcome)
                     dimensions(stage.inputSize); dimensions(stage.outputSize); warnings(stage.warningCodes)
@@ -95,31 +114,24 @@ internal class OrdinaryRenderExecution private constructor(
             }
             val envelope = bytes.toByteArray()
             val hash = sha256(envelope)
-            val key = "render-cache-v1:" + sha256(("pristinepage-ordinary-render-cache-v1\u0000" + preExecutionKey + hash).encodeToByteArray())
+            val key = cacheKey(preExecutionKey, hash)
             return OrdinaryRenderExecution(page.sourceId, page.sourceBlobId, page.byteHash, preExecutionKey, envelope, hash, key, raster, size)
         }
 
-        /** The future closed-file verifier hashes its decoded RGB in this same domain. No stride padding or second full raster enters the identity. */
+        /** Hash only active samples of the retained raster, using the same row digest as closed-file verification. */
         fun rasterSha256(image: RgbImage, checkpoint: () -> Unit): String {
-            val digest = MessageDigest.getInstance("SHA-256")
-            digest.update(rasterDomain)
-            digest.update(ByteBuffer.allocate(8).putInt(image.width).putInt(image.height).array())
-            val chunk = ByteArray(3 * minOf(image.width, 4096))
+            val digest = OrdinaryRasterDigest(image.width, image.height)
             for (y in 0 until image.height) {
-                var x = 0
-                while (x < image.width) {
-                    checkpoint()
-                    val count = minOf(image.width - x, chunk.size / 3)
-                    for (dx in 0 until count) for (c in 0..2) chunk[dx * 3 + c] = image.getUnsigned(x + dx, y, c).toByte()
-                    digest.update(chunk, 0, count * 3)
-                    x += count
+                digest.appendRow(image.width, checkpoint) { x ->
+                    (255 shl 24) or (image.getUnsigned(x, y, 0) shl 16) or
+                        (image.getUnsigned(x, y, 1) shl 8) or image.getUnsigned(x, y, 2)
                 }
             }
             checkpoint()
-            return hex(digest.digest())
+            return digest.finish()
         }
 
-        private fun sha256(bytes: ByteArray) = hex(MessageDigest.getInstance("SHA-256").digest(bytes))
+        fun sha256(bytes: ByteArray) = hex(MessageDigest.getInstance("SHA-256").digest(bytes))
         private fun hex(bytes: ByteArray) = bytes.joinToString("") { "%02x".format(it.toInt() and 255) }
     }
 }

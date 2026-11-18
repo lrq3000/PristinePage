@@ -94,6 +94,45 @@ import app.pristinepage.data.repository.RenderIntentQueries
         THEN 1 ELSE 0 END FROM Job WHERE jobId=:jobId""")
     abstract override fun renderJobLeaseReadIsBounded(jobId: String): Boolean?
 
+    // Immutable job admission is separate. Read only the exact successful lease-free attempt, never JobRow or its checkpoint.
+    @Query("""SELECT attempt FROM Job WHERE jobId=:jobId
+        AND (typeof(kind)='text' AND kind='PAGE_RENDER')
+        AND (typeof(state)='text' AND state='SUCCEEDED')
+        AND (typeof(attempt)='integer' AND attempt>0 AND typeof(leaseGeneration)='integer' AND leaseGeneration=attempt)
+        AND (leaseOwner IS NULL AND leaseUntil IS NULL AND errorCode IS NULL)""")
+    internal abstract fun terminalRenderAttempt(jobId: String): Long?
+
+    // Keep every matching sibling eligible for the two-ID result, including non-READY rows. The sentinel preserves a malformed row for cardinality checks; UUID grammar is checked by the consumer.
+    @Query("""SELECT CASE WHEN (typeof(renderId)='text' AND length(CAST(renderId AS BLOB))=36 AND length(renderId)=36)
+        THEN renderId ELSE '' END FROM RenderedPage WHERE jobId=:jobId LIMIT 2""")
+    internal abstract fun terminalRenderIds(jobId: String): List<String>
+
+    // A present mismatch returns false, not absence. Check raw storage before Room can narrow dimensions or extract the execution BLOB; use the caller's writer-derived bound.
+    @Query("""SELECT CASE WHEN (typeof(renderId)='text' AND length(CAST(renderId AS BLOB))=36 AND length(renderId)=36)
+        AND (typeof(jobId)='text' AND length(CAST(jobId AS BLOB))=36 AND length(jobId)=36 AND jobId=:jobId)
+        AND (typeof(pageId)='text' AND length(CAST(pageId AS BLOB))=36 AND length(pageId)=36 AND pageId=:pageId)
+        AND (typeof(sourceId)='text' AND length(CAST(sourceId AS BLOB))=36 AND length(sourceId)=36)
+        AND (typeof(recipeRevision)='integer' AND recipeRevision>0 AND recipeRevision=:recipeRevision)
+        AND (typeof(width)='integer' AND width>0 AND width=:width)
+        AND (typeof(height)='integer' AND height>0 AND height=:height)
+        AND (typeof(cacheKey)='text' AND length(CAST(cacheKey AS BLOB))=80 AND length(cacheKey)=80 AND substr(cacheKey,1,16)='render-cache-v1:')
+        AND (typeof(executionSha256)='text' AND length(CAST(executionSha256 AS BLOB))=64 AND length(executionSha256)=64)
+        AND (typeof(byteSha256)='text' AND length(CAST(byteSha256 AS BLOB))=64 AND length(byteSha256)=64)
+        AND (typeof(rasterPixelSha256)='text' AND length(CAST(rasterPixelSha256 AS BLOB))=64 AND length(rasterPixelSha256)=64)
+        AND (typeof(relativePath)='text' AND relativePath=('renders/' || renderId || '/page.bin'))
+        AND (typeof(byteCount)='integer' AND byteCount>0)
+        AND (typeof(state)='text' AND state='READY')
+        AND (typeof(renderStatus)='text' AND renderStatus='OK')
+        AND (typeof(execution)='blob' AND length(execution) BETWEEN 1 AND :maxExecutionBytes)
+        THEN 1 ELSE 0 END FROM RenderedPage WHERE renderId=:renderId""")
+    internal abstract fun terminalRenderReadIsBounded(
+        renderId: String, jobId: String, pageId: String, recipeRevision: Long, width: Int, height: Int, maxExecutionBytes: Int,
+    ): Boolean?
+
+    // Only after a unique canonical ID and a successful raw guard for that same ID in the same Room transaction; no admission is performed by this projection.
+    @Query("SELECT * FROM RenderedPage WHERE renderId=:renderId")
+    internal abstract fun terminalRenderRow(renderId: String): RenderedPageRow?
+
     // kind and ownerId exactly match a bounded ASCII literal/argument in the binary unique key. Guard attempt's actual INTEGER class and every other field before SELECT *.
     @Query("""SELECT CASE WHEN (typeof(transactionId)='text' AND length(CAST(transactionId AS BLOB))=36 AND length(transactionId)=36)
         AND (typeof(state)='text' AND length(CAST(state AS BLOB)) BETWEEN 1 AND 32)

@@ -165,6 +165,23 @@ class DerivedFiles internal constructor(
     fun inspectSeal(transactionId: String, expectedSealSha256: String?, checkpoint: () -> Unit = {}): ObservedDerivedSeal? =
         inspect(transactionId, expectedSealSha256, checkpoint, durable = false)?.seal
 
+    /** Observe an existing final outside Room under the caller's stable store/target ownership. The callbacks borrow independent metadata snapshots and readback must not write or retain the file. No durability or publication authority is returned. */
+    @Synchronized
+    internal fun inspectBoundFinal(
+        transactionId: String, expectedSealSha256: String, target: DerivedFileTarget, maxBytes: Long,
+        checkpoint: () -> Unit, authenticate: (String, Long, ByteArray) -> Unit, readback: (File, ByteArray) -> Unit,
+    ): ObservedDerivedSeal? {
+        require(maxBytes > 0) { "Invalid derived byte admission limit" }
+        return inspect(transactionId, expectedSealSha256, checkpoint, durable = false,
+            beforePayloads = { staged, metadata ->
+                require(staged.target == target) { "Derived target binding mismatch" }
+                if (staged.byteCount > maxBytes) throw DerivedByteLimitExceeded()
+                authenticate(staged.byteSha256, staged.byteCount, metadata.copyOf())
+            }, requireFinal = true,
+            readback = { file, metadata -> readback(file, metadata.copyOf()) },
+        )?.seal
+    }
+
     /** Under the caller's exact exclusive lease, authenticate the known intent and re-establish the seal barriers before returning an actionable receipt. A null expected hash is only for a lagging journal. */
     @JvmOverloads
     @Synchronized
