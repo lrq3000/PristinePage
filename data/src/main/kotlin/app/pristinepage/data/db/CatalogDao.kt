@@ -66,6 +66,14 @@ private const val ACTIVE_DOCUMENT_IDS_SQL = """SELECT CASE WHEN (typeof(document
             AND ((typeof(b.sourceCount)='integer' AND b.sourceCount>=0) AND (typeof(b.ingestTransactionId)='text' AND length(b.ingestTransactionId)=36 AND length(CAST(b.ingestTransactionId AS BLOB))=36) AND typeof(b.createdAt)='integer'))
         THEN 1 ELSE 0 END FROM Source s WHERE s.sourceId=:id""")
     abstract override fun sourceReadIsBounded(id: String): Boolean?
+    // Diagnose a false joined guard without reading either row. A present Blob at the exact key still leaves a failed guard invalid; only a canonical lowercase UUID link may report a missing Blob.
+    @Query("""SELECT CASE WHEN
+        ((typeof(s.sourceBlobId)='text' AND length(s.sourceBlobId)=36 AND length(CAST(s.sourceBlobId AS BLOB))=36)
+        AND (s.sourceBlobId GLOB '????????-????-????-????-????????????'
+            AND length(replace(s.sourceBlobId,'-',''))=32 AND replace(s.sourceBlobId,'-','') NOT GLOB '*[^0-9a-f]*'))
+        THEN NOT EXISTS(SELECT 1 FROM SourceBlob b WHERE b.sourceBlobId=s.sourceBlobId)
+        ELSE 0 END FROM Source s WHERE s.sourceId=:id""")
+    abstract override fun sourceBlobLinkIsMissing(id: String): Boolean?
     // Bound the retained recipe before Room allocates its BLOB or narrows schemaVersion to Int. Future positive Int-range schemas reach explicit unsupported handling; aliases such as 2^32+1 never masquerade as v1. NUL-terminated TEXT length is not a byte bound.
     @Query("""SELECT CASE WHEN
         ((typeof(pageId)='text' AND length(pageId)=36 AND length(CAST(pageId AS BLOB))=36) AND (typeof(sourceId)='text' AND length(sourceId)=36 AND length(CAST(sourceId AS BLOB))=36))
@@ -74,6 +82,8 @@ private const val ACTIVE_DOCUMENT_IDS_SQL = """SELECT CASE WHEN (typeof(document
         AND ((parentRevision IS NULL OR (typeof(parentRevision)='integer' AND parentRevision>=1 AND parentRevision<recipeRevision)) AND typeof(createdAt)='integer')
         THEN 1 ELSE 0 END FROM RecipeRevision WHERE pageId=:pageId AND recipeRevision=:revision""")
     abstract override fun recipeReadIsBounded(pageId: String, revision: Long): Boolean?
+    @Query("SELECT CASE WHEN typeof(canonicalRecipe)='blob' THEN length(canonicalRecipe) ELSE -1 END FROM RecipeRevision WHERE pageId=:pageId AND recipeRevision=:revision")
+    abstract override fun recipeBlobByteCount(pageId: String, revision: Long): Long?
     @Query("SELECT EXISTS(SELECT 1 FROM RecipeMask WHERE pageId=:pageId AND recipeRevision=:revision)")
     abstract override fun recipeHasMasks(pageId: String, revision: Long): Boolean
     @Query("SELECT * FROM Document WHERE documentId=:id") abstract override fun document(id: String): DocumentRow?

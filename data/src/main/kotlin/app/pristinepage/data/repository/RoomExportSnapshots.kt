@@ -112,13 +112,55 @@ class RoomExportSnapshots @JvmOverloads constructor(private val metadata: Metada
     }
 
     private fun prepare(snapshotId: ExportSnapshotId, documentId: DocumentId, revision: Long, settings: ExportSettings): Prepared {
-        val document = q.document(documentId.value) ?: reject(OperationErrorCode.SOURCE_UNAVAILABLE, "document_unavailable", documentId.value)
+        val q = metadata.queries
+        val bounds = q as? EditablePageQueries ?: reject(OperationErrorCode.PROVIDER_UNAVAILABLE, "metadata_guards_unavailable", documentId.value)
+        when (bounds.documentReadIsBounded(documentId.value)) {
+            null -> reject(OperationErrorCode.SOURCE_UNAVAILABLE, "document_unavailable", documentId.value)
+            false -> reject(OperationErrorCode.INTEGRITY_FAILED, "export_document_metadata_invalid", documentId.value)
+            true -> Unit
+        }
+        val document = q.document(documentId.value) ?: reject(OperationErrorCode.INTEGRITY_FAILED, "export_document_metadata_invalid", documentId.value)
+        if (document.documentId != documentId.value) reject(OperationErrorCode.INTEGRITY_FAILED, "export_document_metadata_invalid", documentId.value)
         if (document.lifecycle != "ACTIVE" || document.documentRevision != revision || q.hasPendingImport(documentId.value)) reject(OperationErrorCode.REVISION_CONFLICT, "export_document_changed", documentId.value)
+        val count = bounds.activePageCount(documentId.value)
+        if (count !in 1L..100L) reject(OperationErrorCode.INVALID_INPUT, "invalid_export_pages", documentId.value)
+        if (!bounds.activePagesReadIsBounded(documentId.value)) reject(OperationErrorCode.INTEGRITY_FAILED, "export_page_metadata_invalid", documentId.value)
+        if (count != settings.pages.size.toLong()) reject(OperationErrorCode.INVALID_INPUT, "invalid_export_pages", documentId.value)
         val pages = q.activePages(documentId.value)
-        if (pages.size !in 1..100 || pages.size != settings.pages.size || pages.map { it.pageId }.toSet().size != pages.size) reject(OperationErrorCode.INVALID_INPUT, "invalid_export_pages", documentId.value)
+        if (pages.size.toLong() != count || pages.map { it.pageId }.toSet().size != pages.size) reject(OperationErrorCode.INTEGRITY_FAILED, "export_page_metadata_invalid", documentId.value)
+
+        val masks = "[]".toByteArray()
+        val providers = profile.providerDescriptor()
+        val budget = ExportSnapshotIdentity.MetadataBudget(ExportSettingsCodec.encode(settings).size)
+        // Both preparations run this bounded pass inside their own transaction. Admit the entire exact reviewed set before the first recipe BLOB projection; indexed revision lookups neither scan nor count retained history.
+        for ((ordinal, page) in pages.withIndex()) {
+            if (page.documentId != documentId.value || page.state != "ACTIVE" || page.ordinal != ordinal || page.currentRecipeRevision < 1) reject(OperationErrorCode.INTEGRITY_FAILED, "export_page_metadata_invalid", documentId.value)
+            if (page.pageId != settings.pages[ordinal].pageId.value) reject(OperationErrorCode.REVISION_CONFLICT, "export_pages_changed", documentId.value)
+            try { requireOpaqueId(page.sourceId) } catch (_: IllegalArgumentException) { reject(OperationErrorCode.INTEGRITY_FAILED, "export_page_metadata_invalid", documentId.value) }
+            when (bounds.sourceReadIsBounded(page.sourceId)) {
+                null -> reject(OperationErrorCode.INTEGRITY_FAILED, "source_unavailable", page.sourceId)
+                false -> {
+                    val reason = if (bounds.sourceBlobLinkIsMissing(page.sourceId) == true) "source_unavailable" else "export_source_metadata_invalid"
+                    reject(OperationErrorCode.INTEGRITY_FAILED, reason, page.sourceId)
+                }
+                true -> Unit
+            }
+            when (bounds.recipeReadIsBounded(page.pageId, page.currentRecipeRevision)) {
+                null -> reject(OperationErrorCode.INTEGRITY_FAILED, "recipe_history_missing", page.pageId)
+                false -> reject(OperationErrorCode.INTEGRITY_FAILED, "export_recipe_metadata_invalid", page.pageId)
+                true -> Unit
+            }
+            val extent = bounds.recipeBlobByteCount(page.pageId, page.currentRecipeRevision)
+                ?: reject(OperationErrorCode.INTEGRITY_FAILED, "recipe_history_missing", page.pageId)
+            try {
+                budget.addPage(extent, masks.size, providers.size)
+            } catch (_: IllegalArgumentException) {
+                reject(OperationErrorCode.INTEGRITY_FAILED, "export_metadata_invalid", documentId.value)
+            }
+        }
+
         val bindings = ArrayList<ExportSourceBinding>()
         val rows = pages.mapIndexed { ordinal, page ->
-            if (page.documentId != documentId.value || page.state != "ACTIVE" || page.ordinal != ordinal || page.pageId != settings.pages[ordinal].pageId.value || page.currentRecipeRevision < 1) reject(OperationErrorCode.REVISION_CONFLICT, "export_pages_changed", documentId.value)
             val source = q.source(page.sourceId) ?: reject(OperationErrorCode.INTEGRITY_FAILED, "source_unavailable", page.sourceId)
             val blob = q.sourceBlob(source.sourceBlobId) ?: reject(OperationErrorCode.INTEGRITY_FAILED, "source_unavailable", page.sourceId)
             if (source.state != "READY" || blob.state != "READY" || source.sourceId != page.sourceId || blob.sourceBlobId != source.sourceBlobId || source.refCount < 0 || blob.sourceCount < 1) reject(OperationErrorCode.INTEGRITY_FAILED, "source_not_ready", page.sourceId)
@@ -128,12 +170,12 @@ class RoomExportSnapshots @JvmOverloads constructor(private val metadata: Metada
             val recipe = try { RecipeCodec.decode(stored.canonicalRecipe) } catch (_: IllegalArgumentException) { reject(OperationErrorCode.UNSUPPORTED_VERSION, "stored_recipe_unreadable", page.pageId) }
             if (stored.pageId != page.pageId || stored.sourceId != source.sourceId || stored.recipeRevision != page.currentRecipeRevision) reject(OperationErrorCode.INTEGRITY_FAILED, "recipe_binding_invalid", page.pageId)
             // Do not omit masks/assets or rerun an accepted failure because their full proof/pin-transfer protocols are not wired in this first ordinary path.
-            if (q.recipeMasks(page.pageId, page.currentRecipeRevision).isNotEmpty()) reject(OperationErrorCode.PROVIDER_UNAVAILABLE, "export_mask_freeze_unavailable", page.pageId)
+            if (bounds.recipeHasMasks(page.pageId, page.currentRecipeRevision)) reject(OperationErrorCode.PROVIDER_UNAVAILABLE, "export_mask_freeze_unavailable", page.pageId)
             if (recipe.geometry is GeometryRecipe.RoughCropDewarp || recipe.appearance is AppearanceRecipe.ProviderAppearanceV1) reject(OperationErrorCode.PROVIDER_UNAVAILABLE, "export_provider_freeze_unavailable", page.pageId)
             val output = settings.pages[ordinal]
             if (output.fallbackPolicy != FallbackPolicy.FAIL) reject(OperationErrorCode.PROVIDER_UNAVAILABLE, "accepted_render_freeze_unavailable", page.pageId)
             bindings += ExportSourceBinding(source, blob)
-            ExportPageRow(snapshotId.value, ordinal, page.pageId, source.sourceId, blob.sourceBlobId, blob.byteSha256, source.pixelSha256, source.width, source.height, source.conversionFingerprint, stored.recipeRevision, stored.recipeSchemaVersion, stored.canonicalRecipe.copyOf(), stored.recipeSha256, "[]".toByteArray(), profile.providerDescriptor(), OrdinaryExportProfile.emptyAssetSetHash, rendererVersion, output.requestedOutput.size.width, output.requestedOutput.size.height, output.output.size.width, output.output.size.height, output.fallbackPolicy.name, null, null)
+            ExportPageRow(snapshotId.value, ordinal, page.pageId, source.sourceId, blob.sourceBlobId, blob.byteSha256, source.pixelSha256, source.width, source.height, source.conversionFingerprint, stored.recipeRevision, stored.recipeSchemaVersion, stored.canonicalRecipe.copyOf(), stored.recipeSha256, masks.copyOf(), providers.copyOf(), OrdinaryExportProfile.emptyAssetSetHash, rendererVersion, output.requestedOutput.size.width, output.requestedOutput.size.height, output.output.size.width, output.output.size.height, output.fallbackPolicy.name, null, null)
         }
         val identity = try { ExportSnapshotIdentity.create(documentId, revision, settings, rows) } catch (_: IllegalArgumentException) { reject(OperationErrorCode.INTEGRITY_FAILED, "export_metadata_invalid", documentId.value) }
         return Prepared(rows, bindings, identity)

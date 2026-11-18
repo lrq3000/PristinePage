@@ -3,11 +3,15 @@ package app.pristinepage.data
 import app.pristinepage.core.pipeline.*
 import app.pristinepage.core.recipe.RecipeCodec
 import app.pristinepage.data.db.*
+import app.pristinepage.data.files.SourceFiles
 import app.pristinepage.data.model.*
 import app.pristinepage.data.repository.*
+import java.io.File
 import java.io.IOException
 import java.lang.reflect.InvocationTargetException
 import java.lang.reflect.Proxy
+import java.nio.file.Files
+import java.security.MessageDigest
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -19,20 +23,62 @@ import org.junit.Test
 
 /** Real freeze business logic; only unavailable Room and external file/capability checks are projected. A native transaction/file-proof gate must follow before freeze acceptance. No rendering or source file is fabricated by these metadata tests. */
 class ExportSnapshotTest {
-    private class Harness {
-        val f = RepositoryFixture()
+    private class Harness(count: Int = 2, private val backend: String = "reference") {
+        val f = RepositoryFixture(count)
         val snapshots = linkedMapOf<String, ExportSnapshotRow>()
         val pages = linkedMapOf<Pair<String, Int>, ExportPageRow>()
         val jobs = linkedMapOf<String, JobRow>()
         var onProof: (() -> Unit)? = null
         var onAdmission: (() -> OperationError?)? = null
+        var fileProof: ExportSourceProof? = null
+        var refusedGuard: String? = null
+        var refusedRecipe: Pair<String, Long>? = null
+        val falseGuards = mutableListOf<String>()
+        val falseRecipeKeys = mutableListOf<Pair<String, Long>>()
+        val sourceGuardResults = mutableListOf<Pair<String, Boolean?>>()
+        val missingBlobLinkReads = mutableListOf<String>()
+        val recipeGuardResults = mutableListOf<Pair<Pair<String, Long>, Boolean?>>()
+        val typedReads = mutableListOf<String>()
+        val recipeReads = mutableListOf<Pair<String, Long>>()
+        val extentReads = mutableListOf<Pair<String, Long>>()
+        val writes = mutableListOf<String>()
         var failPageInsertAt: Int? = null
         var snapshotBounded = true
         var pagesBounded = true
         private var pageInserts = 0
         var settings = ExportSettings(ExportFormat.PNG, f.pageIds.map { PageOutputSettings(it, OutputSpec(PixelSize(3, 2), RenderPurpose.EXPORT)) }, null, null, emptyList())
+        private val catalog = object : CatalogQueries by f.metadata, EditablePageQueries by f.metadata {
+            private fun guard(kind: String, real: Boolean?): Boolean? {
+                check(f.metadata.inTransaction)
+                return if (kind == refusedGuard && real == true) false.also { falseGuards += kind } else real
+            }
+            override fun documentReadIsBounded(documentId: String) = guard("document", f.metadata.documentReadIsBounded(documentId))
+            override fun activePagesReadIsBounded(documentId: String) = guard("pages", f.metadata.activePagesReadIsBounded(documentId)) == true
+            override fun sourceReadIsBounded(id: String) =
+                guard("source/blob", f.metadata.sourceReadIsBounded(id)).also { sourceGuardResults += id to it }
+            override fun sourceBlobLinkIsMissing(id: String) =
+                f.metadata.sourceBlobLinkIsMissing(id).also { missingBlobLinkReads += id }
+            override fun recipeReadIsBounded(pageId: String, revision: Long): Boolean? {
+                val real = f.metadata.recipeReadIsBounded(pageId, revision)
+                val key = pageId to revision
+                // Model the raw INTEGER alias while retaining the same valid typed row. An earlier refusal cannot credit this exact false branch.
+                val result = if (key == refusedRecipe && real == true) false.also { falseRecipeKeys += key } else real
+                recipeGuardResults += key to result
+                return result
+            }
+            override fun recipeBlobByteCount(pageId: String, revision: Long) =
+                f.metadata.recipeBlobByteCount(pageId, revision).also { extentReads += pageId to revision }
+            override fun document(id: String) = f.metadata.document(id).also { typedReads += "document" }
+            override fun activePages(documentId: String) = f.metadata.activePages(documentId).also { typedReads += "pages" }
+            override fun source(id: String) = f.metadata.source(id).also { typedReads += "source" }
+            override fun sourceBlob(id: String) = f.metadata.sourceBlob(id).also { typedReads += "blob" }
+            override fun recipe(pageId: String, revision: Long) = f.metadata.recipe(pageId, revision).also { recipeReads += pageId to revision }
+            override fun recipeMasks(pageId: String, revision: Long) = f.metadata.recipeMasks(pageId, revision).also { typedReads += "masks" }
+            override fun insertReference(row: SourceReferenceRow) = f.metadata.insertReference(row).also { writes += "pin" }
+            override fun setSourceRefCount(sourceId: String, count: Long) = f.metadata.setSourceRefCount(sourceId, count).also { writes += "source-count" }
+        }
         private val metadata = object : MetadataAccess {
-            override val queries: CatalogQueries get() = f.metadata
+            override val queries: CatalogQueries get() = catalog
             override fun <T> transaction(action: () -> T): T = f.metadata.transaction {
                 val s = snapshots.toMap(); val p = pages.toMap(); val j = jobs.toMap()
                 try { action() } catch (failure: Throwable) {
@@ -47,6 +93,7 @@ class ExportSnapshotTest {
             val implementation = type("RoomExportSnapshots")
             val queries = Proxy.newProxyInstance(type("ExportSnapshotQueries").classLoader, arrayOf(type("ExportSnapshotQueries"))) { _, method, args ->
                 check(f.metadata.inTransaction) { "Snapshot/job query must use the original metadata transaction" }
+                if (method.name.startsWith("insert")) writes += method.name
                 when (method.name) {
                     "snapshotMetadataIsBounded" -> if (args[0] in snapshots) snapshotBounded else null
                     "exportPagesAreBounded" -> pagesBounded
@@ -63,13 +110,16 @@ class ExportSnapshotTest {
                     else -> error("Unexpected snapshot query ${method.name}")
                 }
             }
-            val proof = Proxy.newProxyInstance(type("ExportSourceProof").classLoader, arrayOf(type("ExportSourceProof"))) { _, _, _ ->
-                check(!f.metadata.inTransaction); onProof?.invoke(); Unit
+            val proof = ExportSourceProof { binding ->
+                assertFalse("Source proof must run outside the transaction", f.metadata.inTransaction)
+                fileProof?.verify(binding)
+                onProof?.invoke()
             }
-            val admission = Proxy.newProxyInstance(type("ExportAdmission").classLoader, arrayOf(type("ExportAdmission"))) { _, _, _ ->
-                check(!f.metadata.inTransaction); onAdmission?.invoke()
+            val admission = ExportAdmission {
+                assertFalse("Admission must run outside the transaction", f.metadata.inTransaction)
+                onAdmission?.invoke()
             }
-            return implementation.constructors.single { it.parameterCount == 10 }.newInstance(metadata, queries, proof, admission, "renderer-v1", "rgb8-v1", "reference", "binary64", { 1000L }, Dispatchers.Unconfined)
+            return implementation.constructors.single { it.parameterCount == 10 }.newInstance(metadata, queries, proof, admission, "renderer-v1", "rgb8-v1", backend, "binary64", { 1000L }, Dispatchers.Unconfined)
         }
         suspend fun freeze(expected: Long = 1): Any {
             val service = service(); val method = service.javaClass.methods.single { it.name.startsWith("freezeExport") }
@@ -86,7 +136,7 @@ class ExportSnapshotTest {
             }
         }
         fun nonSnapshotState(): List<Any> = with(f.metadata) { listOf(documents.toMap(), pages.toMap(), sources.toMap(), blobs.toMap(), recipes.toMap(), references.toMap(), undos.toMap(), masks.toMap(), associations.toMap(), maskReferences.toMap()) }
-        suspend fun canonical(configured: Boolean): ExportSnapshot {
+        suspend fun canonical(configured: Boolean, document: DocumentId = f.document): ExportSnapshot {
             val repository = if (configured) {
                 val constructor = RoomDocumentRepository::class.java.constructors.singleOrNull { it.parameterCount == 6 }
                     ?: throw AssertionError("Canonical export snapshot injection is absent")
@@ -95,8 +145,16 @@ class ExportSnapshotTest {
             val method = DocumentRepository::class.java.methods.singleOrNull { it.name.startsWith("freezeExport") }
                 ?: throw AssertionError("Canonical export freeze is absent")
             return suspendCoroutineUninterceptedOrReturn { continuation ->
-                try { method.invoke(repository, f.document.value, 1L, settings, continuation) } catch (failure: InvocationTargetException) { throw failure.targetException }
+                try { method.invoke(repository, document.value, 1L, settings, continuation) } catch (failure: InvocationTargetException) { throw failure.targetException }
             }
+        }
+        suspend fun freezeError(document: DocumentId = f.document): OperationError? =
+            try { canonical(true, document); null } catch (failure: RepositoryFailure) { failure.error }
+
+        fun assertNoWrites(before: List<Any>) {
+            assertEquals("No attempted write (not just no surviving write)", emptyList<String>(), writes)
+            assertTrue(snapshots.isEmpty()); assertTrue(pages.isEmpty()); assertTrue(jobs.isEmpty())
+            assertEquals(before, nonSnapshotState())
         }
     }
     private fun get(target: Any, name: String) = target.javaClass.methods.single { it.name.startsWith(name) && it.parameterCount == 0 }.invoke(target)
@@ -143,6 +201,225 @@ class ExportSnapshotTest {
         h.onProof = { throw RepositoryFailure(error) }; h.onAdmission = { throw AssertionError("Admission cannot run after failed source proof") }
         val failure = try { h.freeze(); throw AssertionError("Unverified source froze") } catch (failure: RepositoryFailure) { failure.error }
         assertEquals(error, failure); assertTrue(h.snapshots.isEmpty()); assertTrue(h.jobs.isEmpty()); assertEquals(before, h.nonSnapshotState())
+    }
+
+    @Test fun unboundedRecipeRefusesBeforeTypedReadOrSourceProof() = runTest {
+        val h = Harness()
+        val key = h.f.pageIds.first().value to 1L
+        h.refusedRecipe = key
+        val before = h.nonSnapshotState()
+        var proofs = 0
+        var admissions = 0
+        h.onProof = { proofs++ }
+        h.onAdmission = { admissions++; null }
+
+        val error = h.freezeError()
+
+        assertEquals("Typed recipe read despite a failed raw bound", emptyList<Pair<String, Long>>(), h.recipeReads)
+        assertEquals("The selected raw guard must actually return false", listOf(key), h.falseRecipeKeys)
+        assertEquals(0, proofs); assertEquals(0, admissions)
+        assertEquals(OperationErrorCode.INTEGRITY_FAILED, error?.code)
+        assertFalse(checkNotNull(error).retryable)
+        h.assertNoWrites(before)
+    }
+
+    @Test fun malformedPresentDocumentMembershipAndSourceChainStopTheirTypedReads() = runTest {
+        for ((guard, forbidden) in listOf("document" to setOf("document"), "pages" to setOf("pages"), "source/blob" to setOf("source", "blob"))) {
+            val h = Harness()
+            h.refusedGuard = guard
+            val before = h.nonSnapshotState()
+            h.onProof = { throw AssertionError("$guard refusal reached proof") }
+            h.onAdmission = { throw AssertionError("$guard refusal reached admission") }
+
+            val error = h.freezeError()
+
+            assertTrue("$guard projected ${h.typedReads}", forbidden.none { it in h.typedReads })
+            assertEquals(listOf(guard), h.falseGuards)
+            assertEquals(OperationErrorCode.INTEGRITY_FAILED, error?.code)
+            assertFalse(checkNotNull(error).retryable)
+            h.assertNoWrites(before)
+        }
+    }
+
+    @Test fun missingDocumentRefusesWithoutProjectionOrProof() = runTest {
+        val h = Harness()
+        val before = h.nonSnapshotState()
+        h.onProof = { throw AssertionError("Missing document reached proof") }
+        h.onAdmission = { throw AssertionError("Missing document reached admission") }
+
+        val error = h.freezeError(DocumentId("00000000-0000-0000-0000-000000000099"))
+
+        assertEquals(OperationErrorCode.SOURCE_UNAVAILABLE, error?.code)
+        assertFalse(checkNotNull(error).retryable)
+        assertTrue("An absent document needs no typed fallback", h.typedReads.isEmpty())
+        h.assertNoWrites(before)
+    }
+
+    @Test fun missingSelectedRecipePreservesHistoryMissingBeforeTypedRead() = runTest {
+        val h = Harness()
+        val key = h.f.pageIds.first().value to 1L
+        val decoy = h.f.pageIds.last().value to 1L
+        checkNotNull(h.f.metadata.recipes.remove(key))
+        assertTrue(decoy in h.f.metadata.recipes)
+        val before = h.nonSnapshotState()
+        h.onProof = { throw AssertionError("Missing recipe reached source proof") }
+        h.onAdmission = { throw AssertionError("Missing recipe reached admission") }
+
+        val error = h.freezeError()
+
+        assertEquals(listOf(key to null), h.recipeGuardResults)
+        assertTrue(h.recipeReads.isEmpty()); assertTrue(h.extentReads.isEmpty())
+        h.assertNoWrites(before)
+        assertEquals(OperationError(OperationErrorCode.INTEGRITY_FAILED, false, "recipe_history_missing", key.first), error)
+    }
+
+    @Test fun malformedPresentRecipeStaysInvalidRatherThanMissingBeforeTypedRead() = runTest {
+        val h = Harness()
+        val key = h.f.pageIds.first().value to 1L
+        val row = h.f.metadata.recipes.getValue(key)
+        h.f.metadata.recipes[key] = row.copy(canonicalRecipe = byteArrayOf())
+        val before = h.nonSnapshotState()
+        h.onProof = { throw AssertionError("Malformed recipe reached source proof") }
+        h.onAdmission = { throw AssertionError("Malformed recipe reached admission") }
+
+        val error = h.freezeError()
+
+        assertEquals(listOf(key to false), h.recipeGuardResults)
+        assertTrue(h.recipeReads.isEmpty()); assertTrue(h.extentReads.isEmpty())
+        h.assertNoWrites(before)
+        assertEquals(OperationError(OperationErrorCode.INTEGRITY_FAILED, false, "export_recipe_metadata_invalid", key.first), error)
+    }
+
+    @Test fun missingSelectedSourcePreservesSourceUnavailableBeforeTypedRead() = runTest {
+        val h = Harness()
+        checkNotNull(h.f.metadata.sources.remove(h.f.source.value))
+        h.assertRefusedSourceChain(null, "source_unavailable")
+    }
+
+    @Test fun missingExactlyLinkedBlobPreservesSourceUnavailableBeforeTypedRead() = runTest {
+        val h = Harness()
+        val source = h.f.metadata.sources.getValue(h.f.source.value)
+        val missing = "00000000-0000-0000-0000-0000000000a1"
+        check(missing !in h.f.metadata.blobs && source.sourceBlobId in h.f.metadata.blobs)
+        h.f.metadata.sources[source.sourceId] = source.copy(sourceBlobId = missing)
+        h.assertRefusedSourceChain(false, "source_unavailable")
+    }
+
+    @Test fun malformedPresentBlobStaysInvalidRatherThanMissingBeforeTypedRead() = runTest {
+        val h = Harness()
+        val blob = h.f.metadata.blobs.values.single()
+        h.f.metadata.blobs[blob.sourceBlobId] = blob.copy(byteCount = 0)
+        h.assertRefusedSourceChain(false, "export_source_metadata_invalid")
+    }
+
+    @Test fun noncanonicalBlobLinkStaysInvalidEvenWithoutAMatchingBlob() = runTest {
+        val h = Harness()
+        val source = h.f.metadata.sources.getValue(h.f.source.value)
+        val malformed = "00000000-0000-0000-0000-0000000000A1"
+        check(malformed !in h.f.metadata.blobs)
+        h.f.metadata.sources[source.sourceId] = source.copy(sourceBlobId = malformed)
+        h.assertRefusedSourceChain(false, "export_source_metadata_invalid")
+    }
+
+    private suspend fun Harness.assertRefusedSourceChain(guard: Boolean?, key: String) {
+        val before = nonSnapshotState()
+        onProof = { throw AssertionError("$key reached source proof") }
+        onAdmission = { throw AssertionError("$key reached admission") }
+
+        val error = freezeError()
+
+        assertEquals(listOf(f.source.value to guard), sourceGuardResults)
+        assertEquals(if (guard == false) listOf(f.source.value) else emptyList(), missingBlobLinkReads)
+        assertFalse("Source/Blob projected before refusal: $typedReads", typedReads.any { it == "source" || it == "blob" })
+        assertTrue(recipeReads.isEmpty())
+        assertNoWrites(before)
+        assertEquals(OperationError(OperationErrorCode.INTEGRITY_FAILED, false, key, f.source.value), error)
+    }
+
+    @Test fun validSourceAndRecipeGuardsReachAnIndependentNoWriteAdmissionVeto() = runTest {
+        val h = Harness()
+        val before = h.nonSnapshotState()
+        val keys = h.f.pageIds.map { it.value to 1L }
+        val veto = OperationError(OperationErrorCode.RESOURCE_LIMIT, false, "fixture_valid_chain_veto", h.f.document.value)
+        var proofs = 0
+        var admissions = 0
+        h.onProof = { proofs++ }
+        h.onAdmission = { admissions++; veto }
+
+        val error = h.freezeError()
+
+        assertEquals(setOf(h.f.source.value to true), h.sourceGuardResults.toSet())
+        assertTrue(h.missingBlobLinkReads.isEmpty())
+        assertEquals(keys.map { it to true }, h.recipeGuardResults)
+        assertEquals(keys, h.recipeReads)
+        assertEquals(1, proofs); assertEquals(1, admissions)
+        h.assertNoWrites(before)
+        assertEquals(veto, error)
+    }
+
+    @Test fun finalPrepareRejectsRawAliasIntroducedAfterRealFileProofAndAdmission() = runTest {
+        val h = Harness()
+        val keys = h.f.pageIds.map { it.value to 1L }
+        val fixtureRoot = File("build/freeze-prepare-fixtures").apply { mkdirs() }
+        val files = SourceFiles(Files.createTempDirectory(fixtureRoot.toPath(), "original-proof-").toFile())
+        val blob = h.f.metadata.blobs.values.single()
+        val bytes = byteArrayOf(1, 2, 3, 4)
+        val digest = MessageDigest.getInstance("SHA-256").digest(bytes).joinToString("") { "%02x".format(it.toInt() and 255) }
+        files.finalFile(blob.sourceBlobId).apply { checkNotNull(parentFile).mkdirs(); writeBytes(bytes) }
+        h.f.metadata.blobs[blob.sourceBlobId] = blob.copy(byteSha256 = digest)
+        val clean = h.nonSnapshotState()
+        h.fileProof = FileExportSourceProof(files, Dispatchers.Unconfined)
+        var verified = 0
+        var admitted = 0
+        h.onProof = { verified++ }
+        h.onAdmission = {
+            assertEquals(1, verified) // Both pages have the same original and only count a completed real file proof.
+            assertEquals(keys, h.recipeReads)
+            assertTrue(h.falseRecipeKeys.isEmpty())
+            h.assertNoWrites(clean)
+            admitted++
+            h.refusedRecipe = keys.first()
+            null
+        }
+
+        val error = h.freezeError()
+
+        assertEquals(1, admitted); assertEquals(1, verified)
+        assertEquals("Final prepare accepted or misclassified indistinguishable typed data", OperationErrorCode.INTEGRITY_FAILED, error?.code)
+        assertFalse(checkNotNull(error).retryable)
+        assertEquals(listOf(keys.first()), h.falseRecipeKeys)
+        assertEquals("Final preparation must not re-project the selected recipe", keys, h.recipeReads)
+        h.assertNoWrites(clean)
+    }
+
+    @Test fun aggregateMetadataAdmitsOneBelowAndExactlyAtLimitButNeverProjectsAboveIt() = runTest {
+        // A non-default backend changes the provider descriptor extent; the fixture math does not call the production encoder or budget.
+        val backend = "reference-longer-backend"
+        val descriptorBytes = """{"backend":"reference-longer-backend","encodingVersion":"rgb8-v1","precision":"binary64","providers":[],"version":1}""".length
+        val count = 16
+        val settingsBytes = 49 + 64 * count // PNG header/trailer + UUID, dimensions and FAIL text per reviewed page.
+        val recipeAllowance = 8 * 1024 * 1024 - (4096 + settingsBytes + count * (4096 + 2 + descriptorBytes))
+        for (delta in -1..1) {
+            val h = Harness(count, backend)
+            val full = ByteArray(524288)
+            val keys = h.f.pageIds.map { it.value to 1L }
+            for ((i, key) in keys.withIndex()) {
+                val bytes = if (i < count - 1) full else ByteArray(recipeAllowance - (count - 1) * full.size + delta)
+                h.f.metadata.recipes[key] = h.f.metadata.recipes.getValue(key).copy(canonicalRecipe = bytes)
+            }
+            val before = h.nonSnapshotState()
+            h.onProof = { throw AssertionError("Undecodable synthetic recipe reached file proof") }
+            h.onAdmission = { throw AssertionError("Undecodable synthetic recipe reached admission") }
+
+            val error = h.freezeError()
+
+            // The in-bound fixture deliberately contains undecodable bytes, so the first typed read is a discriminator, not a claimed valid freeze.
+            assertEquals("Typed recipe projection at limit $delta", if (delta > 0) emptyList() else keys.take(1), h.recipeReads)
+            assertEquals("Charge exactly the selected revisions", keys, h.extentReads)
+            assertEquals(if (delta > 0) OperationErrorCode.INTEGRITY_FAILED else OperationErrorCode.UNSUPPORTED_VERSION, error?.code)
+            assertFalse(checkNotNull(error).retryable)
+            h.assertNoWrites(before)
+        }
     }
 
     @Test fun unsupportedCapabilityRejectsTheEntireReviewedExportWithoutSubstitution() = runTest {
@@ -236,6 +513,7 @@ class ExportSnapshotTest {
             }
             val before = h.nonSnapshotState(); h.onProof = { throw AssertionError("Unimplemented retention path reached file proof") }
             val error = try { h.freeze(); throw AssertionError("Unimplemented path silently dropped dependencies") } catch (failure: RepositoryFailure) { failure.error }
+            if (kind == "MASK") assertFalse("Mask capability requires only association presence", "masks" in h.typedReads)
             assertEquals(OperationErrorCode.PROVIDER_UNAVAILABLE, error.code); assertTrue(h.snapshots.isEmpty()); assertTrue(h.jobs.isEmpty()); assertEquals(before, h.nonSnapshotState())
         }
     }

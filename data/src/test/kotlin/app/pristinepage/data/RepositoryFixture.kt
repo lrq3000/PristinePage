@@ -75,9 +75,18 @@ internal class MemoryMetadata : MetadataAccess, CatalogQueries, EditablePageQuer
                 b != null && id(b.sourceBlobId) && b.state == "READY" && b.byteSha256.length == 64 && text(b.byteSha256,64) && b.byteCount in 1..104857600L && b.mime in setOf("image/png","image/jpeg","image/webp") && b.encodedWidth in 1..12000 && b.encodedHeight in 1..12000 && b.encodedWidth.toLong()*b.encodedHeight <= 48_000_000 && b.relativePath == "sources/${b.sourceBlobId}/original.bin" && b.sourceCount >= 0 && id(b.ingestTransactionId)
         }
     }
+    override fun sourceBlobLinkIsMissing(id: String): Boolean? {
+        check(inTransaction)
+        val key = sources[id]?.sourceBlobId ?: return null
+        return runCatching { requireOpaqueId(key) }.isSuccess && key !in blobs
+    }
     override fun recipeReadIsBounded(pageId: String, revision: Long): Boolean? {
         check(inTransaction)
         return recipes[pageId to revision]?.let { id(it.pageId) && id(it.sourceId) && it.recipeRevision > 0 && it.recipeSchemaVersion > 0 && it.canonicalRecipe.size in 1..524288 && it.recipeSha256.length == 64 && text(it.recipeSha256,64) && (it.parentRevision == null || (it.parentRevision > 0 && it.parentRevision < it.recipeRevision)) }
+    }
+    override fun recipeBlobByteCount(pageId: String, revision: Long): Long? {
+        check(inTransaction)
+        return recipes[pageId to revision]?.canonicalRecipe?.size?.toLong()
     }
     override fun recipeHasMasks(pageId: String, revision: Long): Boolean { check(inTransaction); return associations.values.any { it.pageId == pageId && it.recipeRevision == revision } }
     override fun activePageCount(documentId: String): Long { check(inTransaction); return activePages(documentId).size.toLong() }

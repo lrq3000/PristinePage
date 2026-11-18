@@ -16,20 +16,28 @@ internal class FrozenExportIdentity(input: ByteArray, val snapshotHash: String) 
 
 /** Internal identity of fully prepared frozen content, not freeze admission or a render cache key. Descriptor bytes are hashed exactly; their canonical schema, rights/provider readiness and retained file/lease proofs belong to the consuming freeze preflight. Random snapshot IDs and wall dates are not content. */
 internal object ExportSnapshotIdentity {
-    private const val MAX_BLOB = 524288
+    private const val MAX_BLOB = 524288L
     private const val MAX_CONTENT = 8L * 1024 * 1024
+    private const val FIELD_OVERHEAD = 4096L
+
+    /** Same v1 charge for raw SQL extents and typed identity inputs. This bounds metadata content, not SQLite/Room allocations, total heap, raster or PDF memory. */
+    class MetadataBudget(settingsBytes: Int) {
+        private var charge = Math.addExact(settingsBytes.toLong(), FIELD_OVERHEAD)
+
+        fun addPage(recipeBytes: Long, maskBytes: Int, providerBytes: Int) {
+            require(recipeBytes in 1..MAX_BLOB && maskBytes.toLong() in 1..MAX_BLOB && providerBytes.toLong() in 1..MAX_BLOB)
+            charge = Math.addExact(charge, recipeBytes + maskBytes + providerBytes + FIELD_OVERHEAD)
+            require(charge <= MAX_CONTENT) { "Snapshot metadata exceeds limit" }
+        }
+    }
 
     fun create(documentId: DocumentId, documentRevision: Long, settings: ExportSettings, pages: List<ExportPageRow>): FrozenExportIdentity {
         requireOpaqueId(documentId.value); require(documentRevision > 0)
         require(pages.size in 1..100 && pages.size == settings.pages.size)
         val settingsBytes = ExportSettingsCodec.encode(settings)
         // Charge bounded field overhead as well as all three BLOBs before taking owned copies or growing the identity stream. This is a metadata cap, not measured image/PDF memory admission.
-        var charge = Math.addExact(settingsBytes.size.toLong(), 4096L)
-        for (page in pages) {
-            require(page.recipe.size in 1..MAX_BLOB && page.masks.size in 1..MAX_BLOB && page.providers.size in 1..MAX_BLOB)
-            charge = Math.addExact(charge, page.recipe.size.toLong() + page.masks.size + page.providers.size + 4096L)
-            require(charge <= MAX_CONTENT) { "Snapshot metadata exceeds limit" }
-        }
+        val budget = MetadataBudget(settingsBytes.size)
+        for (page in pages) budget.addPage(page.recipe.size.toLong(), page.masks.size, page.providers.size)
         val owned = pages.map { it.copy(recipe = it.recipe.copyOf(), masks = it.masks.copyOf(), providers = it.providers.copyOf()) }
         val accepted = settings.acceptedDegraded.associateBy { it.pageId.value }
         for ((ordinal, page) in owned.withIndex()) {
