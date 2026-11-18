@@ -188,6 +188,20 @@ class RoomFrozenRenderAdmissionTest {
         f.assertStored(afterExternalChange.copy(job = afterExternalChange.job.copy(state = "ADMITTED", updatedAt = admissionTime)))
     }
 
+    @Test fun zeroSourceReferenceCountAfterPreflightRefusesBeforeCas() = runTest {
+        fixture().refusesAfterPreflight("frozen_render_job_invalid") {
+            val (source, _) = bindingFor(pinIds().single())
+            catalog.sources[source.sourceId] = source.copy(refCount = 0)
+        }
+    }
+
+    @Test fun zeroBlobSourceCountAfterPreflightRefusesBeforeCas() = runTest {
+        fixture().refusesAfterPreflight("frozen_render_job_invalid") {
+            val (_, blob) = bindingFor(pinIds().single())
+            catalog.blobs[blob.sourceBlobId] = blob.copy(sourceCount = 0)
+        }
+    }
+
     @Test fun replayReturnsFalseFromZeroRowCasWithoutTouchingPriorAdmission() = runTest {
         val f = fixture()
         assertTrue(f.admit())

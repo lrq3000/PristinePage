@@ -51,15 +51,32 @@ internal class RoomFrozenRenderReads(
         val page: ExportPageSnapshot,
         val pinSourceId: String,
         identity: FrozenRenderJobIdentityRow,
+        private val pinnedBinding: ExportSourceBinding,
     ) {
         private val input = identity.input
         internal val preExecutionKey = identity.idempotenceKey
         val canonicalInputSha256: String = identity.canonicalInputSha256
         val inputBytes: Int get() = input.size
 
-        fun matches(row: JobRow): Boolean =
-            row.jobId == jobId.value && row.kind == "PAGE_RENDER" && row.snapshotId == null && row.pageOrdinal == null &&
-                row.idempotenceKey == preExecutionKey && row.canonicalInputSha256 == canonicalInputSha256 && row.input.contentEquals(input)
+        fun matches(row: JobRow): Boolean = row.snapshotId == null && row.pageOrdinal == null &&
+            matchesIdentity(row.jobId, row.kind, row.idempotenceKey, row.canonicalInputSha256, row.input)
+
+        private fun matchesIdentity(id: String, kind: String, key: String, digest: String, bytes: ByteArray): Boolean =
+            id == jobId.value && kind == "PAGE_RENDER" && key == preExecutionKey && digest == canonicalInputSha256 && bytes.contentEquals(input)
+
+        internal fun requireUnchangedForLease(row: FrozenRenderJobIdentityRow, pinId: String, binding: ExportSourceBinding) {
+            if (!matchesIdentity(row.jobId, row.kind, row.idempotenceKey, row.canonicalInputSha256, row.input)) {
+                refuse(jobId, OperationErrorCode.INTEGRITY_FAILED, "frozen_render_job_invalid")
+            }
+            try {
+                FrozenRenderJobProof.verifyPin(page, pinId, binding)
+            } catch (_: IllegalArgumentException) {
+                refuse(jobId, OperationErrorCode.INTEGRITY_FAILED, "frozen_render_job_invalid")
+            }
+            if (pinId != pinSourceId || !binding.sameImmutableBindingAs(pinnedBinding)) {
+                refuse(jobId, OperationErrorCode.INTEGRITY_FAILED, "frozen_render_lease_binding_changed")
+            }
+        }
 
         /** Keep the exact page and JobId that produced Expected together through final authentication. Construct outside Room. */
         class Prepared(private val jobId: JobId, private val page: ExportPageSnapshot, runtime: OrdinaryExportProfile) {
@@ -70,7 +87,7 @@ internal class RoomFrozenRenderReads(
                 val row = snapshot.authenticate(expected)
                 active()
                 requireAvailable()
-                return Verified(jobId, page, snapshot.pinId, row)
+                return Verified(jobId, page, snapshot.pinId, row, snapshot.binding)
             }
 
             /** Only for the writer transaction, after the detached initial binding has authenticated and preflight has completed. */
@@ -86,7 +103,7 @@ internal class RoomFrozenRenderReads(
                 val row = snapshot.authenticate(expected)
                 active()
                 // Retained execution is readable as metadata, but an unchecked historical Verified must not reach execution callers.
-                val terminal = validate(TerminalProof(Verified(jobId, page, snapshot.pinId, row)))
+                val terminal = validate(TerminalProof(Verified(jobId, page, snapshot.pinId, row, snapshot.binding)))
                 active()
                 requireAvailable()
                 return terminal
@@ -159,14 +176,16 @@ internal class RoomFrozenRenderReads(
                 // The prepared expectation owns the canonical bytes. The live borrowed row is checked and consumed in this transaction only.
                 val owned = copyBoundedInput()
                 expected.verify(owned, pinId, binding)
-                if (pinId != initial.pinId ||
-                    binding.source.copy(refCount = initial.binding.source.refCount) != initial.binding.source ||
-                    binding.blob.copy(sourceCount = initial.binding.blob.sourceCount) != initial.binding.blob
-                ) {
+                if (pinId != initial.pinId || !binding.sameImmutableBindingAs(initial.binding)) {
                     refuse(jobId, OperationErrorCode.INTEGRITY_FAILED, "frozen_render_admission_binding_changed")
                 }
                 active()
                 return write(owned.jobId, owned.idempotenceKey, owned.canonicalInputSha256, owned.input, updatedAt)
+            }
+
+            internal fun requireUnchangedForLease(proof: Verified) {
+                if (row.input.size != inputBytes) invalidMetadata(jobId)
+                proof.requireUnchangedForLease(row, pinId, binding)
             }
 
             private fun copyBoundedInput(): FrozenRenderJobIdentityRow {
@@ -212,6 +231,11 @@ internal class RoomFrozenRenderReads(
     }
 
     private companion object {
+        // Each view separately proves the counters are positive; other legitimate owners may change the counts.
+        fun ExportSourceBinding.sameImmutableBindingAs(other: ExportSourceBinding): Boolean =
+            source.copy(refCount = other.source.refCount) == other.source &&
+                blob.copy(sourceCount = other.blob.sourceCount) == other.blob
+
         fun invalidMetadata(jobId: JobId): Nothing =
             refuse(jobId, OperationErrorCode.INTEGRITY_FAILED, "frozen_render_job_metadata_invalid")
 

@@ -1,6 +1,7 @@
 package app.pristinepage.data.repository
 
 import android.os.SystemClock
+import app.pristinepage.data.db.JobRow
 import app.pristinepage.data.db.PristineDatabase
 import app.pristinepage.data.model.*
 import kotlinx.coroutines.CancellationException
@@ -14,13 +15,23 @@ class RoomJobLeases @JvmOverloads constructor(private val metadata: MetadataAcce
     constructor(database: PristineDatabase, liveness: LeaseOwnerLiveness) : this(RoomMetadataAccess(database), database.jobLeases(), liveness)
     private val completion = JobLeaseTransactions(metadata, jobs, auditClock, leaseClock)
 
-    override suspend fun acquireAdmitted(jobId: JobId, owner: String, durationMillis: Long): AcquireLeaseResult = withContext(dispatcher) {
+    override suspend fun acquireAdmitted(jobId: JobId, owner: String, durationMillis: Long): AcquireLeaseResult =
+        acquire(jobId, owner, durationMillis)
+
+    private suspend fun acquire(
+        jobId: JobId,
+        owner: String,
+        durationMillis: Long,
+        guardedRenderRead: ((active: () -> Unit) -> JobRow)? = null,
+    ): AcquireLeaseResult = withContext(dispatcher) {
         try {
             try { requireOpaqueId(owner); require(durationMillis in 1..86_400_000L) }
             catch (_: IllegalArgumentException) { reject(OperationErrorCode.INVALID_INPUT, "invalid_job_lease", jobId.value) }
             coroutineContext.ensureActive()
             metadata.transaction {
-                val job = jobs.job(jobId.value) ?: reject(OperationErrorCode.INVALID_INPUT, "job_unavailable", jobId.value)
+                val job = if (guardedRenderRead == null) {
+                    jobs.job(jobId.value) ?: reject(OperationErrorCode.INVALID_INPUT, "job_unavailable", jobId.value)
+                } else guardedRenderRead { coroutineContext.ensureActive() }
                 if (job.leaseGeneration < 0 || job.attempt < 0) reject(OperationErrorCode.INTEGRITY_FAILED, "invalid_job_lease", jobId.value)
                 val now = leaseClock()
                 when (job.state) {
@@ -40,12 +51,57 @@ class RoomJobLeases @JvmOverloads constructor(private val metadata: MetadataAcce
                 catch (_: ArithmeticException) { reject(OperationErrorCode.RESOURCE_LIMIT, "job_lease_limit", jobId.value) }
                 coroutineContext.ensureActive()
                 val running = job.copy(state = "RUNNING", leaseOwner = owner, leaseUntil = until, leaseGeneration = generation, attempt = attempt, errorCode = null, updatedAt = auditClock())
+                // Fence known cancellation through the last clock sample for the guarded route, without changing legacy acquisition timing.
+                if (guardedRenderRead != null) coroutineContext.ensureActive()
                 if (jobs.updateLease(running, job.leaseGeneration) != 1) return@transaction AcquireLeaseResult.Busy(job.state)
                 AcquireLeaseResult.Granted(JobLease(jobId, owner, generation))
             }
         } catch (canceled: CancellationException) { throw canceled }
         catch (failure: RepositoryFailure) { AcquireLeaseResult.Rejected(failure.error) }
         catch (_: Exception) { AcquireLeaseResult.Rejected(OperationError(OperationErrorCode.STORAGE_FAILED, true, "job_lease_write_failed", jobId.value)) }
+    }
+
+    /** The ordinary render entry uses one database for the guarded projections and existing lease writer. Call only after separate resource admission; Verified is not a live JOB pin. */
+    internal class FrozenRenderAcquisition(
+        metadata: MetadataAccess,
+        private val jobs: JobLeaseQueries,
+        liveness: LeaseOwnerLiveness,
+        jobBounds: (String, Int) -> Boolean?,
+        jobIdentity: (String) -> FrozenRenderJobIdentityRow?,
+        pinSourceIds: (String) -> List<String>,
+        sourceBounds: (String) -> Boolean?,
+        private val leaseBounds: (String) -> Boolean?,
+        auditClock: () -> Long = System::currentTimeMillis,
+        leaseClock: () -> Long = SystemClock::elapsedRealtime,
+        dispatcher: CoroutineDispatcher = Dispatchers.IO,
+    ) {
+        constructor(database: PristineDatabase, liveness: LeaseOwnerLiveness) : this(
+            RoomMetadataAccess(database), database.jobLeases(), liveness,
+            database.exportSnapshots()::renderJobReadIsBounded,
+            database.exportSnapshots()::renderJobIdentity,
+            database.exportSnapshots()::boundedRenderJobPinSourceIds,
+            database.catalog()::sourceReadIsBounded,
+            database.exportSnapshots()::renderJobLeaseReadIsBounded,
+        )
+
+        private val projection = RoomFrozenRenderReads.Projection(metadata.queries, jobBounds, jobIdentity, pinSourceIds, sourceBounds)
+        private val leases = RoomJobLeases(metadata, jobs, liveness, auditClock, leaseClock, dispatcher)
+
+        suspend fun acquire(proof: RoomFrozenRenderReads.Verified, owner: String, durationMillis: Long): AcquireLeaseResult =
+            leases.acquire(proof.jobId, owner, durationMillis) { active ->
+                val jobId = proof.jobId
+                // Revalidate the exact narrow identity and live binding before admitting the remaining fields for SELECT *.
+                projection.job(jobId, proof.inputBytes, active).requireUnchangedForLease(proof)
+                if (leaseBounds(jobId.value) != true) {
+                    leases.reject(OperationErrorCode.INTEGRITY_FAILED, "frozen_render_job_metadata_invalid", jobId.value)
+                }
+                active()
+                val row = jobs.job(jobId.value)
+                if (row == null || !proof.matches(row)) {
+                    leases.reject(OperationErrorCode.INTEGRITY_FAILED, "frozen_render_job_invalid", jobId.value)
+                }
+                row
+            }
     }
 
     override suspend fun checkpoint(lease: JobLease, checkpoint: ByteArray): Boolean = withContext(dispatcher) {
