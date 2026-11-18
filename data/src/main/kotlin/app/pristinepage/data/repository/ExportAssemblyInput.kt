@@ -40,9 +40,17 @@ internal object ExportAssemblyInput {
 
     /** Bind an already materialized row to a separately verified snapshot and expected job ID. This is not a raw storage guard, admission check, state transition or lease fence. */
     fun verify(expectedJobId: JobId, snapshot: ExportSnapshot, row: JobRow): List<JobId> {
+        if (row.pageOrdinal != null) invalid(expectedJobId)
+        return verifyProjection(expectedJobId, snapshot, AssemblyJobIdentityRow(
+            row.jobId, row.kind, row.idempotenceKey, row.canonicalInputSha256, row.snapshotId, row.input,
+        ))
+    }
+
+    // The narrow SQL projection omits pageOrdinal because the reader requires raw NULL before materializing it.
+    fun verifyProjection(expectedJobId: JobId, snapshot: ExportSnapshot, row: AssemblyJobIdentityRow): List<JobId> {
         try {
             require(row.jobId == expectedJobId.value && row.kind == "EXPORT_ASSEMBLY")
-            require(row.idempotenceKey == key(snapshot.snapshotId) && row.snapshotId == snapshot.snapshotId.value && row.pageOrdinal == null)
+            require(row.idempotenceKey == key(snapshot.snapshotId) && row.snapshotId == snapshot.snapshotId.value)
             require(row.input.size in sizeFor(1)..sizeFor(MAX_PAGES))
             // Verify and parse the same bounded copy of the materialized Room BLOB; do not retain it or allocate from a declared length.
             val bytes = row.input.copyOf()
@@ -59,9 +67,13 @@ internal object ExportAssemblyInput {
             require(jobs.toSet().size == count)
             return Collections.unmodifiableList(jobs)
         } catch (_: IllegalArgumentException) {
-            throw RepositoryFailure(OperationError(OperationErrorCode.INTEGRITY_FAILED, false, "export_assembly_input_invalid", expectedJobId.value))
+            invalid(expectedJobId)
         }
     }
+
+    private fun invalid(jobId: JobId): Nothing = throw RepositoryFailure(
+        OperationError(OperationErrorCode.INTEGRITY_FAILED, false, "export_assembly_input_invalid", jobId.value),
+    )
 
     private fun sizeFor(count: Int) = headerBytes + JOB_BYTES * count
 

@@ -4,6 +4,7 @@ import androidx.room.Dao
 import androidx.room.Insert
 import androidx.room.OnConflictStrategy
 import androidx.room.Query
+import app.pristinepage.data.repository.AssemblyJobIdentityRow
 import app.pristinepage.data.repository.ExportSnapshotQueries
 
 @Dao abstract class ExportSnapshotDao : ExportSnapshotQueries {
@@ -42,6 +43,20 @@ import app.pristinepage.data.repository.ExportSnapshotQueries
     @Query("SELECT * FROM ExportPage WHERE snapshotId=:snapshotId ORDER BY ordinal LIMIT 101") abstract override fun exportPages(snapshotId: String): List<ExportPageRow>
     @Insert(onConflict = OnConflictStrategy.ABORT) abstract override fun insertSnapshot(row: ExportSnapshotRow)
     @Insert(onConflict = OnConflictStrategy.ABORT) abstract override fun insertExportPage(row: ExportPageRow)
+
+    // A canonical ASCII JobId matched by the binary primary key already bounds jobId. Check other projected TEXT in bytes (SQLite length(TEXT) stops at NUL), and check the raw ordinal without narrowing it. Wire grammar and binding are verified separately.
+    @Query("""SELECT CASE WHEN (typeof(input)='blob' AND length(input) BETWEEN 184 AND 4144)
+        AND (typeof(kind)='text' AND length(CAST(kind AS BLOB))=15 AND length(kind)=15)
+        AND (typeof(idempotenceKey)='text' AND length(CAST(idempotenceKey AS BLOB))=55 AND length(idempotenceKey)=55)
+        AND (typeof(canonicalInputSha256)='text' AND length(CAST(canonicalInputSha256 AS BLOB))=64 AND length(canonicalInputSha256)=64)
+        AND (typeof(snapshotId)='text' AND length(CAST(snapshotId AS BLOB))=36 AND length(snapshotId)=36)
+        AND pageOrdinal IS NULL THEN 1 ELSE 0 END FROM Job WHERE jobId=:jobId""")
+    internal abstract fun assemblyJobReadIsBounded(jobId: String): Boolean?
+
+    // Only use after admission in the same transaction; no state/checkpoint/lease fields or typed ordinal cross this boundary.
+    @Query("SELECT jobId, kind, idempotenceKey, canonicalInputSha256, snapshotId, input FROM Job WHERE jobId=:jobId")
+    internal abstract fun assemblyJobIdentity(jobId: String): AssemblyJobIdentityRow?
+
     @Query("SELECT * FROM Job WHERE idempotenceKey=:key") abstract override fun renderJobByKey(key: String): JobRow?
     // Ordinary page jobs have exactly one source owner. A second row is sufficient to expose invalid cardinality without loading an unbounded corrupt owner set.
     @Query("SELECT * FROM SourceReference WHERE ownerType='JOB' AND ownerId=:jobId LIMIT 2") abstract override fun jobSourceReferences(jobId: String): List<SourceReferenceRow>
