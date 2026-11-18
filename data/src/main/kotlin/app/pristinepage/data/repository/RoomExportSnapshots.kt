@@ -6,9 +6,6 @@ import app.pristinepage.core.recipe.GeometryRecipe
 import app.pristinepage.core.recipe.RecipeCodec
 import app.pristinepage.data.db.*
 import app.pristinepage.data.model.*
-import java.io.ByteArrayOutputStream
-import java.io.DataOutputStream
-import java.security.MessageDigest
 import java.util.UUID
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineDispatcher
@@ -84,7 +81,7 @@ class RoomExportSnapshots @JvmOverloads constructor(private val metadata: Metada
                 // Capture the owning coroutine context, not a newly-created Job. Known cancellation during preflight cannot cause an invisible snapshot publication.
                 coroutineContext.ensureActive()
                 queries.insertSnapshot(ExportSnapshotRow(snapshotId.value, documentId.value, expectedDocumentRevision, prepared.identity.snapshotHash, ExportSettingsCodec.encode(settings), "FROZEN", now, Long.MAX_VALUE))
-                val jobIds = ArrayList<String>()
+                val jobIds = ArrayList<JobId>()
                 for (page in prepared.rows) {
                     queries.insertExportPage(page)
                     pin("EXPORT_PAGE", "export-page-v1/${snapshotId.value}/${page.ordinal}", page.sourceId, now)
@@ -103,10 +100,10 @@ class RoomExportSnapshots @JvmOverloads constructor(private val metadata: Metada
                         // A byte-identical render may be shared by equivalent source-row owners. Its immutable input source is retained by its original JOB pin; each export page independently pins its own source.
                         existing.jobId
                     }
-                    jobIds += jobId
+                    jobIds += JobId(jobId)
                 }
-                val input = assemblyInput(snapshotId, prepared.identity.snapshotHash, jobIds)
-                queries.insertExportJob(job(uuid(), "EXPORT_ASSEMBLY", "export-assembly-v1/${snapshotId.value}", sha(input), input, snapshotId.value, now))
+                val input = ExportAssemblyInput.encode(snapshotId, prepared.identity.snapshotHash, jobIds)
+                queries.insertExportJob(job(uuid(), "EXPORT_ASSEMBLY", ExportAssemblyInput.key(snapshotId), ExportAssemblyInput.digest(input), input, snapshotId.value, now))
                 snapshot
             }
         } catch (canceled: CancellationException) { throw canceled }
@@ -155,18 +152,7 @@ class RoomExportSnapshots @JvmOverloads constructor(private val metadata: Metada
         val count = q.countSourceReferences(source)
         if (count < 1 || q.setSourceRefCount(source, count) != 1) reject(OperationErrorCode.INTEGRITY_FAILED, "source_unavailable", source)
     }
-    private fun assemblyInput(snapshot: ExportSnapshotId, hash: String, jobs: List<String>): ByteArray {
-        val bytes = ByteArrayOutputStream()
-        DataOutputStream(bytes).use { output ->
-            fun text(value: String) { val data = value.toByteArray(Charsets.UTF_8); output.writeInt(data.size); output.write(data) }
-            output.write("pristinepage-export-assembly-v1\u0000".toByteArray()); text(snapshot.value); text(hash); output.writeInt(jobs.size); jobs.forEach(::text)
-        }
-        return bytes.toByteArray()
-    }
     private fun job(id: String, kind: String, key: String, hash: String, input: ByteArray, snapshot: String?, now: Long) = JobRow(id, kind, key, hash, snapshot, null, input, "PENDING", 0, null, null, 0, null, null, now, now)
     private fun uuid() = UUID.randomUUID().toString()
     private fun reject(code: OperationErrorCode, key: String, id: String? = null, retryable: Boolean = false): Nothing = throw RepositoryFailure(OperationError(code, retryable, key, id))
-    private companion object {
-        fun sha(bytes: ByteArray): String = MessageDigest.getInstance("SHA-256").digest(bytes).joinToString("") { "%02x".format(it.toInt() and 255) }
-    }
 }
