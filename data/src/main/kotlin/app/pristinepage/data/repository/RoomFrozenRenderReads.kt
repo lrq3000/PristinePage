@@ -73,6 +73,15 @@ internal class RoomFrozenRenderReads(
                 return Verified(jobId, page, snapshot.pinId, row)
             }
 
+            /** Only for the writer transaction, after the detached initial binding has authenticated and preflight has completed. */
+            internal fun admitUnchanged(
+                initial: Projection.JobSnapshot,
+                live: Projection.JobSnapshot,
+                updatedAt: Long,
+                active: () -> Unit,
+                write: (String, String, String, ByteArray, Long) -> Int,
+            ): Int = live.admitUnchanged(expected, initial, updatedAt, active, write)
+
             fun <T> authenticateTerminal(snapshot: Projection.JobSnapshot, active: () -> Unit, validate: (TerminalProof) -> T): T {
                 val row = snapshot.authenticate(expected)
                 active()
@@ -128,7 +137,7 @@ internal class RoomFrozenRenderReads(
         fun job(jobId: JobId, inputBytes: Int, active: () -> Unit): JobSnapshot = JobSnapshot.capture(this, jobId, inputBytes, active)
 
         class JobSnapshot private constructor(
-            private val row: FrozenRenderJobIdentityRow, val pinId: String, private val binding: ExportSourceBinding,
+            private val row: FrozenRenderJobIdentityRow, val pinId: String, internal val binding: ExportSourceBinding,
             private val jobId: JobId, private val inputBytes: Int,
         ) {
             /** Opt in before transaction exit when composing with other borrowed projections. The legacy standalone reader authenticates a copy only after Room returns. */
@@ -138,6 +147,26 @@ internal class RoomFrozenRenderReads(
                 val owned = copyBoundedInput()
                 expected.verify(owned, pinId, binding)
                 return owned
+            }
+
+            internal fun admitUnchanged(
+                expected: FrozenRenderJobProof.Expected,
+                initial: JobSnapshot,
+                updatedAt: Long,
+                active: () -> Unit,
+                write: (String, String, String, ByteArray, Long) -> Int,
+            ): Int {
+                // The prepared expectation owns the canonical bytes. The live borrowed row is checked and consumed in this transaction only.
+                val owned = copyBoundedInput()
+                expected.verify(owned, pinId, binding)
+                if (pinId != initial.pinId ||
+                    binding.source.copy(refCount = initial.binding.source.refCount) != initial.binding.source ||
+                    binding.blob.copy(sourceCount = initial.binding.blob.sourceCount) != initial.binding.blob
+                ) {
+                    refuse(jobId, OperationErrorCode.INTEGRITY_FAILED, "frozen_render_admission_binding_changed")
+                }
+                active()
+                return write(owned.jobId, owned.idempotenceKey, owned.canonicalInputSha256, owned.input, updatedAt)
             }
 
             private fun copyBoundedInput(): FrozenRenderJobIdentityRow {
