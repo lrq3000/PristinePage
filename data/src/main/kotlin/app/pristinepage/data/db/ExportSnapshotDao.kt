@@ -77,6 +77,19 @@ import app.pristinepage.data.repository.RenderIntentQueries
     @Query("SELECT jobId, kind, idempotenceKey, canonicalInputSha256, input FROM Job WHERE jobId=:jobId")
     abstract override fun renderJobIdentity(jobId: String): FrozenRenderJobIdentityRow?
 
+    // Bind the canonical UUID, v1 key/hash and detached input rebuilt from the frozen page. Require renderJobReadIsBounded to pass on that exact ID and input extent in the same writer transaction before comparing the BLOB; SQL AND order is not an extent guard. JOB pin and resource/lease proofs are separate.
+    @Query("""UPDATE Job SET state='ADMITTED', updatedAt=:updatedAt
+        WHERE jobId=:jobId AND (kind='PAGE_RENDER' AND state='PENDING')
+        AND (idempotenceKey=:idempotenceKey AND canonicalInputSha256=:canonicalInputSha256 AND typeof(input)='blob' AND input=:input)
+        AND (snapshotId IS NULL AND pageOrdinal IS NULL)
+        AND (typeof(attempt)='integer' AND attempt=0 AND typeof(leaseGeneration)='integer' AND leaseGeneration=0)
+        AND (leaseOwner IS NULL AND leaseUntil IS NULL AND checkpoint IS NULL AND errorCode IS NULL)
+        AND NOT EXISTS(SELECT 1 FROM RenderedPage WHERE jobId=:jobId)
+        AND NOT EXISTS(SELECT 1 FROM FileTransaction WHERE kind='RENDER' AND ownerId=:jobId)""")
+    internal abstract fun admitPendingRender(
+        jobId: String, idempotenceKey: String, canonicalInputSha256: String, input: ByteArray, updatedAt: Long,
+    ): Int
+
     // The indexed JOB owner predicate fixes both owner fields. Preserve invalid source IDs as a bounded sentinel, rather than filtering away evidence of a corrupt or second pin.
     @Query("""SELECT CASE WHEN (typeof(sourceId)='text' AND length(CAST(sourceId AS BLOB))=36 AND length(sourceId)=36) THEN sourceId ELSE '' END
         FROM SourceReference WHERE ownerType='JOB' AND ownerId=:jobId LIMIT 2""")
