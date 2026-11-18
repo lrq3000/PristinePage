@@ -1,0 +1,116 @@
+package app.pristinepage.data.repository
+
+import app.pristinepage.core.pipeline.requireSha256
+import app.pristinepage.data.db.PristineDatabase
+import app.pristinepage.data.files.DerivedByteLimitExceeded
+import app.pristinepage.data.files.DerivedFileTarget
+import app.pristinepage.data.files.DerivedFiles
+import app.pristinepage.data.files.DerivedKind
+import app.pristinepage.data.model.*
+import java.io.File
+import java.io.OutputStream
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineDispatcher
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.withContext
+
+/** Joins one exact committed intent to private bytes, through MOVED only. The caller retains the verified frozen owners, the current acquired same-boot lease and exclusive stable store/transaction/target ownership across every boundary, including recovery. */
+internal class RoomRenderFileExecution(
+    private val intents: RoomRenderIntents,
+    private val files: DerivedFiles,
+    private val dispatcher: CoroutineDispatcher = Dispatchers.IO,
+) {
+    constructor(database: PristineDatabase, liveness: LeaseOwnerLiveness, files: DerivedFiles) :
+        this(RoomRenderIntents(database, liveness), files)
+
+    /**
+     * Call outside Room. The writer borrows only the synchronous output stream. Trusted readback borrows the closed File read-only, without retaining it, verifies complete lossless content against the exact frozen request and returns its canonical raster SHA-256 (null rejects). It may use the supplied local checkpoint between decode steps; it must supply its own decode/allocation admission. Recovery never calls the writer, and uses the same readback contract to match the recorded semantic identity.
+     */
+    suspend fun execute(
+        proof: RoomFrozenRenderReads.Verified,
+        lease: JobLease,
+        intent: RenderFileIntent,
+        maxBytes: Long,
+        writer: (OutputStream) -> Unit,
+        readback: (File, () -> Unit) -> String?,
+    ): Unit = withContext(dispatcher) {
+        val active = { coroutineContext.ensureActive() }
+        active()
+        if (maxBytes <= 0) refuse(lease, OperationErrorCode.INVALID_INPUT, "render_file_invalid_cap")
+        fun fence(expected: RenderFilePhase? = null, next: FileTransactionState? = null, seal: RenderSealIdentity? = null) =
+            intents.executionPhase(proof, lease, intent, active, expected, next, seal)
+
+        try {
+            var admission = fence()
+            val target = DerivedFileTarget(DerivedKind.RENDER, intent.renderId.value)
+            // A domain tag and the exact unchanged v1 envelope bind a successful closed raster readback to this job, attempt and target. Byte hash and extent are already part of the canonical DerivedFiles seal.
+            val prefix = SEAL_TAG + intent.journalPayload()
+            fun verify(file: File, checkpoint: () -> Unit): String {
+                checkpoint()
+                val hash = readback(file, checkpoint) ?: invalid(lease)
+                checkpoint()
+                requireSha256(hash)
+                return hash
+            }
+
+            val sealed = if (admission.phase.state == FileTransactionState.INTENT) {
+                admission = fence(admission.phase, FileTransactionState.COPYING)
+                val checkpoint = admission.checkpoint
+                val staged = files.stage(intent.transactionId.value, target, maxBytes, writer, checkpoint)
+                val rasterHash = files.readStaged(staged, checkpoint) { verify(it, checkpoint) }
+                files.seal(staged, prefix + rasterHash.encodeToByteArray(), checkpoint)
+            } else {
+                val phase = admission.phase
+                val recorded = phase.seal
+                val checkpoint = admission.checkpoint
+                if (recorded != null && recorded.byteCount > maxBytes) throw DerivedByteLimitExceeded()
+                files.recoverBound(intent.transactionId.value, recorded?.sealSha256, target, maxBytes,
+                    requireFinal = phase.state == FileTransactionState.MOVED, checkpoint = checkpoint,
+                    authenticate = { byteHash, count, metadata ->
+                        if (recorded != null && (recorded.byteSha256 != byteHash || recorded.byteCount != count)) invalid(lease)
+                        if (metadata.size != prefix.size + 64 || !metadata.copyOf(prefix.size).contentEquals(prefix)) invalid(lease)
+                        requireSha256(metadata.decodeToString(startIndex = prefix.size))
+                    },
+                    readback = { file, metadata ->
+                        if (verify(file, checkpoint) != metadata.decodeToString(startIndex = prefix.size)) invalid(lease)
+                    },
+                ) ?: invalid(lease)
+            }
+
+            val identity = RenderSealIdentity(sealed.sealSha256, sealed.staged.byteSha256, sealed.staged.byteCount)
+            if (admission.phase.state == FileTransactionState.COPYING) {
+                admission = fence(admission.phase, FileTransactionState.SEALED, identity)
+            }
+            val phase = admission.phase
+            if (phase.state == FileTransactionState.MOVED) {
+                // MOVED replay requires the exact surviving final; it never repairs or records another transition.
+                fence(phase)
+            } else {
+                check(phase.state == FileTransactionState.SEALED && phase.seal == identity)
+                files.moveWithFence(sealed, admission.checkpoint) { fence(phase) }
+                fence(phase, FileTransactionState.MOVED, identity)
+            }
+            active()
+        } catch (canceled: CancellationException) {
+            throw canceled
+        } catch (failure: RepositoryFailure) {
+            throw failure
+        } catch (_: DerivedByteLimitExceeded) {
+            refuse(lease, OperationErrorCode.RESOURCE_LIMIT, "render_file_byte_cap")
+        } catch (_: IllegalArgumentException) {
+            invalid(lease)
+        } catch (_: Exception) {
+            refuse(lease, OperationErrorCode.STORAGE_FAILED, "render_file_storage_failed", retryable = true)
+        }
+    }
+
+    private fun invalid(lease: JobLease): Nothing = refuse(lease, OperationErrorCode.INTEGRITY_FAILED, "render_file_binding_invalid")
+
+    private fun refuse(lease: JobLease, code: OperationErrorCode, key: String, retryable: Boolean = false): Nothing =
+        throw RepositoryFailure(OperationError(code, retryable, key, lease.jobId.value))
+
+    private companion object {
+        val SEAL_TAG = "pristinepage-ordinary-render-readback-v1\u0000".encodeToByteArray()
+    }
+}

@@ -391,6 +391,8 @@ class RenderFileIntentTest {
                 writes++; afterWrite()
                 return 1
             }
+            override fun advanceRenderFilePhase(previous: FileTransactionRow, next: FileTransactionRow): Int =
+                error("Intent tests do not execute file phases")
         }
 
         private val intents = RoomRenderIntents(metadata, leases, port,

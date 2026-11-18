@@ -117,6 +117,30 @@ import app.pristinepage.data.repository.RenderIntentQueries
     @Query("UPDATE FileTransaction SET state='COPYING', updatedAt=:updatedAt WHERE transactionId=:transactionId AND kind='RENDER' AND ownerId=:jobId AND attempt=:attempt AND state='INTENT'")
     abstract override fun markRenderIntentCopying(transactionId: String, jobId: String, attempt: Long, updatedAt: Long): Int
 
+    // Same-transaction raw admission and typed checking precede this exact CAS. Only the first seal can set the triplet; MOVED must retain it verbatim.
+    @Query("""UPDATE FileTransaction SET state=:nextState, sealSha256=:seal, expectedByteSha256=:hash, expectedByteCount=:count, updatedAt=:updatedAt
+        WHERE transactionId=:transactionId AND kind='RENDER' AND ownerId=:jobId AND attempt=:attempt
+        AND (state=:previousState AND updatedAt=:previousUpdatedAt AND errorCode IS NULL)
+        AND (stagingPath=:stagingPath AND finalPath=:finalPath AND payload=:payload)
+        AND (sealSha256 IS :previousSeal AND expectedByteSha256 IS :previousHash AND expectedByteCount IS :previousCount)
+        AND (
+            ((state='INTENT' OR state='COPYING') AND (sealSha256 IS NULL AND expectedByteSha256 IS NULL AND expectedByteCount IS NULL)
+                AND ((state='INTENT' AND :nextState='COPYING' AND (:seal IS NULL AND :hash IS NULL AND :count IS NULL))
+                  OR (state='COPYING' AND :nextState='SEALED' AND (:seal IS NOT NULL AND :hash IS NOT NULL AND :count>0))))
+            OR (state='SEALED' AND :nextState='MOVED' AND (sealSha256=:seal AND expectedByteSha256=:hash AND expectedByteCount=:count AND :count>0))
+        )""")
+    internal abstract fun advanceRenderFilePhase(
+        transactionId: String, jobId: String, attempt: Long, previousState: String,
+        stagingPath: String?, finalPath: String?, payload: ByteArray, previousUpdatedAt: Long, updatedAt: Long, nextState: String,
+        previousSeal: String?, previousHash: String?, previousCount: Long?, seal: String?, hash: String?, count: Long?,
+    ): Int
+
+    override fun advanceRenderFilePhase(previous: FileTransactionRow, next: FileTransactionRow): Int =
+        advanceRenderFilePhase(previous.transactionId, previous.ownerId, previous.attempt, previous.state,
+            previous.stagingPath, previous.finalPath, previous.payload, previous.updatedAt, next.updatedAt, next.state,
+            previous.sealSha256, previous.expectedByteSha256, previous.expectedByteCount,
+            next.sealSha256, next.expectedByteSha256, next.expectedByteCount)
+
     @Query("SELECT * FROM Job WHERE idempotenceKey=:key") abstract override fun renderJobByKey(key: String): JobRow?
     // Ordinary page jobs have exactly one source owner. A second row is sufficient to expose invalid cardinality without loading an unbounded corrupt owner set.
     @Query("SELECT * FROM SourceReference WHERE ownerType='JOB' AND ownerId=:jobId LIMIT 2") abstract override fun jobSourceReferences(jobId: String): List<SourceReferenceRow>

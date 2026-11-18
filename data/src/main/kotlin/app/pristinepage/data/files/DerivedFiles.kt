@@ -75,6 +75,9 @@ private data class DerivedSeal(
     val metadataBase64: String,
 )
 
+/** A bounded writer failure is still an IOException to existing callers. */
+internal class DerivedByteLimitExceeded : IOException("Derived byte admission limit exceeded")
+
 /**
  * File-only checkpoint protocol. The caller journals intent first and retains exclusive transaction and target ownership, including across instances/processes, for the entire operation. Run IO outside Room. An atomic move is not a race-proof no-replace primitive: only that caller precondition and the preexisting-target check make replay non-clobbering.
  *
@@ -168,16 +171,48 @@ class DerivedFiles internal constructor(
     fun recover(transactionId: String, expectedSealSha256: String?, checkpoint: () -> Unit = {}): SealedDerived? =
         inspect(transactionId, expectedSealSha256, checkpoint, durable = true)?.let { SealedDerived(it.seal) }
 
+    /** Borrow the exact closed private payload for synchronous, read-only semantic verification. seal() checks it again before writing anything. */
+    @Synchronized
+    internal fun <T> readStaged(staged: StagedDerived, checkpoint: () -> Unit, readback: (File) -> T): T {
+        staged.requireStore(paths.root)
+        val payload = stagingFile(staged.transactionId)
+        verifyPayload(payload, attributes(payload), staged, checkpoint)
+        checkpoint()
+        val result = readback(payload)
+        checkpoint()
+        return result
+    }
+
+    /** Check the canonical header against caller-owned identities before resolving/opening its payload paths. Then check every surviving copy and re-establish seal durability. */
+    @Synchronized
+    internal fun recoverBound(
+        transactionId: String, expectedSealSha256: String?, target: DerivedFileTarget, maxBytes: Long, requireFinal: Boolean,
+        checkpoint: () -> Unit, authenticate: (String, Long, ByteArray) -> Unit, readback: (File, ByteArray) -> Unit,
+    ): SealedDerived? = inspect(transactionId, expectedSealSha256, checkpoint, durable = true,
+        beforePayloads = { staged, metadata ->
+            require(staged.target == target) { "Derived target binding mismatch" }
+            if (staged.byteCount > maxBytes) throw DerivedByteLimitExceeded()
+            authenticate(staged.byteSha256, staged.byteCount, metadata)
+        }, requireFinal = requireFinal, readback = readback)?.let { SealedDerived(it.seal) }
+
     /** Match the receipt, check every present copy and re-establish the seal barriers before touching the final path. Reuse a verified existing final without rewriting or removing either copy. */
     @JvmOverloads
     @Synchronized
-    fun move(sealed: SealedDerived, checkpoint: () -> Unit = {}): File {
+    fun move(sealed: SealedDerived, checkpoint: () -> Unit = {}): File =
+        moveWithFence(sealed, checkpoint) {}
+
+    /** The metadata-only authorization callback fences destination setup after seal re-verification, and fences rename or final reuse again after setup. */
+    @Synchronized
+    internal fun moveWithFence(sealed: SealedDerived, checkpoint: () -> Unit, authorize: () -> Unit): File {
         val staged = sealed.staged
         staged.requireStore(paths.root)
         val observed = checkNotNull(inspect(staged.transactionId, sealed.sealSha256, checkpoint, durable = true, expected = sealed.observation)) { "Derived seal is missing" }
         val targetParent = checkNotNull(observed.target.parentFile)
         val stageParent = checkNotNull(observed.stage.parentFile)
+        authorize()
         paths.createDirectories(targetParent, ::syncDirectory)
+        checkpoint()
+        authorize()
         checkpoint()
         if (!observed.finalPresent) {
             val target = finalFile(staged.target)
@@ -207,6 +242,9 @@ class DerivedFiles internal constructor(
         checkpoint: () -> Unit,
         durable: Boolean,
         expected: ObservedDerivedSeal? = null,
+        beforePayloads: ((StagedDerived, ByteArray) -> Unit)? = null,
+        requireFinal: Boolean = false,
+        readback: ((File, ByteArray) -> Unit)? = null,
     ): Observation? {
         requireOpaqueId(transactionId)
         expectedSealSha256?.let(::requireSha256)
@@ -218,7 +256,7 @@ class DerivedFiles internal constructor(
         val options = if (durable) arrayOf<OpenOption>(READ, WRITE, NOFOLLOW_LINKS) else arrayOf<OpenOption>(READ, NOFOLLOW_LINKS)
         val observed = FileChannel.open(file.toPath(), *options).use { channel ->
             val bytes = readSeal(channel, attrs.size().toInt(), checkpoint)
-            val observed = verifySealAndPayloads(transactionId, expectedSealSha256, bytes, checkpoint)
+            val observed = verifySealAndPayloads(transactionId, expectedSealSha256, bytes, checkpoint, beforePayloads, requireFinal, readback)
             require(expected == null || expected.matches(observed.seal)) { "Derived seal binding mismatch" }
             if (durable) {
                 checkpoint()
@@ -246,6 +284,9 @@ class DerivedFiles internal constructor(
         expectedSealSha256: String?,
         bytes: ByteArray,
         checkpoint: () -> Unit,
+        beforePayloads: ((StagedDerived, ByteArray) -> Unit)?,
+        requireFinal: Boolean,
+        readback: ((File, ByteArray) -> Unit)?,
     ): Observation {
         val hash = sha256(bytes)
         require(expectedSealSha256 == null || expectedSealSha256 == hash) { "Derived seal integrity mismatch" }
@@ -259,15 +300,30 @@ class DerivedFiles internal constructor(
         // Requiring our exact encoding also rejects duplicate keys, noncanonical Base64 and malformed UTF-8 repaired by decoding.
         val canonical = record.copy(metadataBase64 = Base64.getEncoder().encodeToString(metadata))
         require(bytes.contentEquals(encode(canonical))) { "Noncanonical derived seal" }
+        val staged = StagedDerived(paths.root, transactionId, target, record.byteSha256, record.byteCount)
+        beforePayloads?.invoke(staged, metadata)
         val stage = stagingFile(transactionId)
         val final = finalFile(target)
         val stageAttrs = attributes(stage)
         val finalAttrs = attributes(final)
         require(stageAttrs != null || finalAttrs != null) { "Sealed derived payload is missing" }
-        val staged = StagedDerived(paths.root, transactionId, target, record.byteSha256, record.byteCount)
+        require(!requireFinal || finalAttrs != null) { "Moved derived payload is missing" }
         if (stageAttrs != null) verifyPayload(stage, stageAttrs, staged, checkpoint)
         if (finalAttrs != null) verifyPayload(final, finalAttrs, staged, checkpoint)
+        if (readback != null) {
+            checkpoint()
+            // Both copies already matched; decode one, then re-resolve both paths. Readback cannot add or remove a copy, or change its bytes.
+            readback(if (finalAttrs != null) final else stage, metadata)
+            verifyUnchangedCopy(stagingFile(transactionId), stageAttrs != null, staged, checkpoint)
+            verifyUnchangedCopy(finalFile(target), finalAttrs != null, staged, checkpoint)
+        }
         return Observation(ObservedDerivedSeal(staged, metadata, hash), stage, final, finalAttrs != null)
+    }
+
+    private fun verifyUnchangedCopy(file: File, wasPresent: Boolean, staged: StagedDerived, checkpoint: () -> Unit) {
+        val attrs = attributes(file)
+        require((attrs != null) == wasPresent) { "Derived copy presence changed during readback" }
+        if (wasPresent) verifyPayload(file, attrs, staged, checkpoint)
     }
 
     private fun verifyPayload(file: File, attrs: BasicFileAttributes?, staged: StagedDerived, checkpoint: () -> Unit) {
@@ -338,7 +394,7 @@ class DerivedFiles internal constructor(
 
         private fun writeBytes(b: ByteArray, off: Int, len: Int) {
             if (off < 0 || len < 0 || off > b.size - len) throw IndexOutOfBoundsException()
-            if (len.toLong() > limit - byteCount) throw IOException("Derived byte admission limit exceeded")
+            if (len.toLong() > limit - byteCount) throw DerivedByteLimitExceeded()
             var offset = off
             val end = off + len
             while (offset < end) {

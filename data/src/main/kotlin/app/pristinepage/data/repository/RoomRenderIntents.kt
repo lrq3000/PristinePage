@@ -1,6 +1,7 @@
 package app.pristinepage.data.repository
 
 import android.os.SystemClock
+import app.pristinepage.core.pipeline.requireSha256
 import app.pristinepage.data.db.FileTransactionRow
 import app.pristinepage.data.db.PristineDatabase
 import app.pristinepage.data.model.*
@@ -19,9 +20,14 @@ internal interface RenderIntentQueries {
     fun renderIntentRow(jobId: String, attempt: Long): FileTransactionRow?
     fun insertRenderIntent(row: FileTransactionRow)
     fun markRenderIntentCopying(transactionId: String, jobId: String, attempt: Long, updatedAt: Long): Int
+    fun advanceRenderFilePhase(previous: FileTransactionRow, next: FileTransactionRow): Int
 }
 
-/** The caller retains the already verified frozen owners and the acquired same-boot runner scope. Invoke outside other transactions. Neither method touches files, changes job state, nor admits resource usage. */
+internal data class RenderSealIdentity(val sealSha256: String, val byteSha256: String, val byteCount: Long)
+
+internal data class RenderFilePhase(val state: FileTransactionState, val updatedAt: Long, val seal: RenderSealIdentity?)
+
+/** The caller retains the already verified frozen owners and the acquired same-boot runner scope. Invoke outside other transactions. No method touches files, changes job state, or admits resource usage. */
 internal class RoomRenderIntents(
     private val metadata: MetadataAccess,
     private val jobs: JobLeaseQueries,
@@ -73,14 +79,73 @@ internal class RoomRenderIntents(
         finish(proof, lease, intent, "COPYING", now, active)
     }
 
+    internal class ExecutionAdmission(val phase: RenderFilePhase, val checkpoint: () -> Unit)
+
+    /** Synchronous on the executor's IO context. The returned checkpoint captures only the bounded admitted row; it does not query Room. */
+    fun executionPhase(
+        proof: RoomFrozenRenderReads.Verified, lease: JobLease, intent: RenderFileIntent, active: () -> Unit,
+        expected: RenderFilePhase? = null, advanceTo: FileTransactionState? = null, seal: RenderSealIdentity? = null,
+    ): ExecutionAdmission = transact(proof, lease, active) {
+        val before = read(proof, lease) ?: lost(lease)
+        val phase = executionBinding(proof, lease, intent, before)
+        if (expected != null && phase != expected) lost(lease)
+        if (advanceTo == null) {
+            ExecutionAdmission(phase, requireCurrent(proof, lease, active))
+        } else {
+            // Readback must match every field (including the v1 payload bytes). Throw inside the transaction on any failure after CAS.
+            checkNotNull(expected)
+            val after = before.copy(state = advanceTo.name, updatedAt = auditClock(), sealSha256 = seal?.sealSha256,
+                expectedByteSha256 = seal?.byteSha256, expectedByteCount = seal?.byteCount)
+            requireCurrent(proof, lease, active)
+            if (journal.advanceRenderFilePhase(before, after) != 1) lost(lease)
+            val stored = read(proof, lease) ?: corrupt(lease)
+            if (!stored.payload.contentEquals(after.payload) || stored.copy(payload = after.payload) != after) corrupt(lease)
+            val written = executionBinding(proof, lease, intent, stored)
+            ExecutionAdmission(written, requireCurrent(proof, lease, active))
+        }
+    }
+
+    private fun executionBinding(
+        proof: RoomFrozenRenderReads.Verified, lease: JobLease, intent: RenderFileIntent, row: FileTransactionRow,
+    ): RenderFilePhase {
+        if (authenticateBinding(proof, lease, row) != intent) corrupt(lease)
+        val seal = when (row.state) {
+            "INTENT", "COPYING" -> {
+                requireUnsealed(lease, row)
+                null
+            }
+            "SEALED", "MOVED" -> {
+                val count = row.expectedByteCount ?: corrupt(lease)
+                if (row.errorCode != null || count <= 0) corrupt(lease)
+                val sealHash = row.sealSha256 ?: corrupt(lease)
+                val byteHash = row.expectedByteSha256 ?: corrupt(lease)
+                try {
+                    requireSha256(sealHash)
+                    requireSha256(byteHash)
+                } catch (_: IllegalArgumentException) {
+                    corrupt(lease)
+                }
+                RenderSealIdentity(sealHash, byteHash, count)
+            }
+            "CANCELED" -> canceled(lease)
+            "COMMITTED", "RETRYABLE", "QUARANTINED", "FAILED" -> lost(lease)
+            else -> corrupt(lease)
+        }
+        return RenderFilePhase(FileTransactionState.valueOf(row.state), row.updatedAt, seal)
+    }
+
     private suspend fun <T> guarded(proof: RoomFrozenRenderReads.Verified, lease: JobLease, block: (() -> Unit) -> T): T = withContext(dispatcher) {
         val active: () -> Unit = { coroutineContext.ensureActive() }
+        transact(proof, lease, active) { block(active) }
+    }
+
+    private fun <T> transact(proof: RoomFrozenRenderReads.Verified, lease: JobLease, active: () -> Unit, block: () -> T): T =
         try {
             active()
             if (proof.jobId != lease.jobId) lost(lease)
             metadata.transaction {
-                requireCurrent(proof, lease)
-                block(active)
+                requireCurrent(proof, lease, active)
+                block()
             }
         } catch (canceled: CancellationException) {
             throw canceled
@@ -89,9 +154,8 @@ internal class RoomRenderIntents(
         } catch (_: Exception) {
             refuse(lease, OperationErrorCode.STORAGE_FAILED, "render_intent_storage_failed", retryable = true)
         }
-    }
 
-    private fun requireCurrent(proof: RoomFrozenRenderReads.Verified, lease: JobLease) {
+    private fun requireCurrent(proof: RoomFrozenRenderReads.Verified, lease: JobLease, active: () -> Unit = {}): () -> Unit {
         val id = lease.jobId.value
         when (jobBounds(id, proof.inputBytes)) {
             null -> lost(lease)
@@ -108,10 +172,15 @@ internal class RoomRenderIntents(
         }
         val pinMatches = pinSourceIds(id).singleOrNull() == proof.pinSourceId
         // Sample after the last SQL read, but report stale lease before pin/attempt mismatches. Room COMMIT still follows this sample.
-        if (liveness.state(lease.owner) != LeaseOwnerState.ALIVE) lost(lease)
-        if (JobLeaseFence.current(admitted, lease, leaseClock()) == null) lost(lease)
+        val checkpoint: () -> Unit = {
+            if (liveness.state(lease.owner) != LeaseOwnerState.ALIVE) lost(lease)
+            if (JobLeaseFence.current(admitted, lease, leaseClock()) == null) lost(lease)
+            active()
+        }
+        checkpoint()
         // The ordinary producer initializes both counters to zero; the unchanged grant advances both together. No other attempt is carried by a JobLease value.
         if (row.attempt != lease.generation || !pinMatches) corrupt(lease)
+        return checkpoint
     }
 
     private fun read(proof: RoomFrozenRenderReads.Verified, lease: JobLease): FileTransactionRow? {
@@ -124,6 +193,21 @@ internal class RoomRenderIntents(
     }
 
     private fun authenticate(proof: RoomFrozenRenderReads.Verified, lease: JobLease, row: FileTransactionRow): RenderFileIntent {
+        val intent = authenticateBinding(proof, lease, row)
+        when (row.state) {
+            "CANCELED" -> canceled(lease)
+            "INTENT", "COPYING" -> requireUnsealed(lease, row)
+            "SEALED", "MOVED", "COMMITTED", "RETRYABLE", "QUARANTINED", "FAILED" -> lost(lease)
+            else -> corrupt(lease)
+        }
+        return intent
+    }
+
+    private fun requireUnsealed(lease: JobLease, row: FileTransactionRow) {
+        if (row.sealSha256 != null || row.expectedByteSha256 != null || row.expectedByteCount != null || row.errorCode != null) corrupt(lease)
+    }
+
+    private fun authenticateBinding(proof: RoomFrozenRenderReads.Verified, lease: JobLease, row: FileTransactionRow): RenderFileIntent {
         val intent = try {
             val path = checkNotNull(row.finalPath)
             bind(proof, lease, TransactionId(row.transactionId), RenderId(path.removePrefix("renders/").removeSuffix("/page.bin")))
@@ -134,12 +218,6 @@ internal class RoomRenderIntents(
         }
         if (row.kind != "RENDER" || row.ownerId != lease.jobId.value || row.attempt != intent.attempt ||
             row.stagingPath != intent.stagingPath || row.finalPath != intent.finalPath || !row.payload.contentEquals(intent.journalPayload())) corrupt(lease)
-        when (row.state) {
-            "CANCELED" -> canceled(lease)
-            "INTENT", "COPYING" -> if (row.sealSha256 != null || row.expectedByteSha256 != null || row.expectedByteCount != null || row.errorCode != null) corrupt(lease)
-            "SEALED", "MOVED", "COMMITTED", "RETRYABLE", "QUARANTINED", "FAILED" -> lost(lease)
-            else -> corrupt(lease)
-        }
         return intent
     }
 
