@@ -25,7 +25,7 @@ class SealedSource internal constructor(val staged: StagedSource, metadata: Byte
 
 /** Only private store bytes live here. The repository must persist intent and hold its fenced journal lease before calling this protocol. Filesystem completion never makes a page visible; the subsequent Room transaction does that. Failed/partial files are retained for explicit recovery, never auto-deleted. */
 class SourceFiles @JvmOverloads constructor(root: File, private val directorySync: DirectorySync = PlatformDirectorySync) {
-    private val root = root.canonicalFile
+    private val paths = PrivateStorePaths(root)
     private val json = Json { encodeDefaults = true; ignoreUnknownKeys = false }
     private val inputLimit = 100L * 1024 * 1024
     private val metadataLimit = 524288
@@ -141,31 +141,8 @@ class SourceFiles @JvmOverloads constructor(root: File, private val directorySyn
         require(staged.byteCount in 1..inputLimit && staged.stagingFile == staging(staged.transactionId)) { "Mismatched staging ownership" }
     }
 
-    private fun beneath(relative: String): File {
-        val path = root.toPath().resolve(relative).normalize()
-        require(path.startsWith(root.toPath()) && path != root.toPath()) { "Unsafe private path" }
-        var current = root.toPath()
-        for (part in root.toPath().relativize(path)) {
-            current = current.resolve(part)
-            require(!Files.isSymbolicLink(current)) { "Private path is a symbolic link" }
-            if (Files.exists(current)) require(current.toFile().canonicalFile.toPath() == current) { "Private path redirects outside its owned location" }
-        }
-        return path.toFile()
-    }
-
-    private fun createDirectories(directory: File) {
-        require(directory.toPath().startsWith(root.toPath()))
-        Files.createDirectories(directory.toPath())
-        require(directory.canonicalFile == directory && directory.isDirectory) { "Invalid private directory" }
-        // Persist the links, not just eventual leaf contents. Revisit the bounded ancestry even on replay: a previous operation may have created a directory and failed before its parent was forced. The store's containing directory is app-owned by the constructor contract.
-        var child = directory
-        while (child.toPath().startsWith(root.toPath())) {
-            val parent = checkNotNull(child.parentFile)
-            syncDirectory(parent)
-            if (child == root) break
-            child = parent
-        }
-    }
+    private fun beneath(relative: String): File = paths.beneath(relative)
+    private fun createDirectories(directory: File) = paths.createDirectories(directory, ::syncDirectory)
 
     private fun verify(file: File, length: Long, expectedHash: String, checkpoint: () -> Unit = {}) {
         require(file.isFile && file.length() == length) { "Source length mismatch" }
