@@ -72,7 +72,7 @@ class RoomExportSnapshots private constructor(
     /** Already raw-admitted, detached frozen rows. Authenticate outside the writer; compare bounded exact fields inside it without parsing or hashing again. */
     internal class SnapshotRead private constructor(
         private val id: ExportSnapshotId,
-        private val record: ExportSnapshotRow,
+        internal val record: ExportSnapshotRow,
         private val pages: List<ExportPageRow>,
     ) {
         fun authenticate(): ExportSnapshot {

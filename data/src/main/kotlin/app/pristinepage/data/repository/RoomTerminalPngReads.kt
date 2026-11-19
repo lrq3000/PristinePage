@@ -100,7 +100,12 @@ internal class RoomTerminalPngReads(
         suspend fun readAcquiredSet(acquired: RoomFreshExportAssembly.Acquired): List<Receipt> =
             AcquiredSetReader.start(this, acquired)
 
-        /** Host-only checkpoint. The Room composition cannot request a copy without a future in-scope co-commit. */
+        /** Dormant internal entry. Consume only the live issuer's claim; transfer no file, metadata port or completion grant. */
+        @JvmSynthetic
+        internal suspend fun completeAcquiredSet(acquired: RoomFreshExportAssembly.Acquired) =
+            AcquiredSetReader.complete(this, acquired)
+
+        /** Host-only checkpoint. The Room composition cannot request a copy without the in-scope co-commit. */
         @JvmSynthetic
         @RoomPngExportItemWrites.SyntheticJournal
         internal suspend fun copyAcquiredForSyntheticTests(acquired: RoomFreshExportAssembly.Acquired) =
@@ -108,17 +113,23 @@ internal class RoomTerminalPngReads(
 
         private sealed interface ExportJournal {
             class Room(store: PrivateImportStore.ExportComposition) : ExportJournal {
-                val writes by lazy { RoomPngExportItemWrites(store.database) }
+                val completion by lazy { RoomPngPrivateCompletion(store) }
             }
 
-            class Synthetic(val writes: RoomPngExportItemWrites) : ExportJournal
+            class Synthetic(val writes: RoomPngExportItemWrites, val completion: RoomPngPrivateCompletion?) : ExportJournal
         }
 
         // Only this final, privately constructed bridge receives the owned operations. It has no factory or callback that can hand them (or itself) to another consumer.
         internal class AcquiredSetReader private constructor(
             private val retained: Retained,
-            private val syntheticCopy: RoomPngExportItemWrites?,
+            private val writes: RoomPngExportItemWrites?,
+            private val completion: RoomPngPrivateCompletion? = null,
         ) {
+            @JvmSynthetic
+            internal fun requireCompletion(participant: RoomPngPrivateCompletion) {
+                check(completion === participant)
+            }
+
             @JvmSynthetic
             internal suspend fun read(
                 prepared: RoomFreshExportAssembly.Prepared,
@@ -126,12 +137,24 @@ internal class RoomTerminalPngReads(
                 checkSet: (CoroutineContext) -> () -> Unit,
                 checkAttempt: (CoroutineContext) -> Unit,
                 copyTransaction: (CoroutineContext, Boolean, (Long, () -> Unit) -> Unit) -> Unit,
-            ): List<Receipt> = retained.readWithRunningFences(prepared, lease, checkSet, checkAttempt, syntheticCopy, copyTransaction)
+                finish: (CoroutineContext, RoomPngPrivateCompletion.Set) -> Unit,
+            ): List<Receipt> = retained.readWithRunningFences(prepared, lease, checkSet, checkAttempt, writes, copyTransaction,
+                completion?.let { participant -> { assembly, items -> participant.prepare(this, assembly, items) } }, finish)
 
             companion object {
                 @JvmSynthetic
                 internal suspend fun start(retained: Retained, acquired: RoomFreshExportAssembly.Acquired): List<Receipt> =
                     acquired.readRetainedTerminalSet(AcquiredSetReader(retained, null))
+
+                @JvmSynthetic
+                internal suspend fun complete(retained: Retained, acquired: RoomFreshExportAssembly.Acquired) {
+                    val completion = when (val journal = retained.journal) {
+                        is ExportJournal.Room -> journal.completion
+                        is ExportJournal.Synthetic -> journal.completion
+                        null -> null
+                    } ?: retained.reader.refuse(acquired.lease.jobId, OperationErrorCode.PROVIDER_UNAVAILABLE, "png_private_completion_unavailable")
+                    acquired.readRetainedTerminalSet(AcquiredSetReader(retained, completion.writes, completion))
+                }
 
                 @JvmSynthetic
                 @RoomPngExportItemWrites.SyntheticJournal
@@ -150,6 +173,8 @@ internal class RoomTerminalPngReads(
             checkAttempt: (CoroutineContext) -> Unit,
             writes: RoomPngExportItemWrites?,
             copyTransaction: (CoroutineContext, Boolean, (Long, () -> Unit) -> Unit) -> Unit,
+            prepareCompletion: ((PngExportItemIntent.Assembly, List<RoomPngPrivateCompletion.MovedItem>) -> RoomPngPrivateCompletion.Set)?,
+            finish: (CoroutineContext, RoomPngPrivateCompletion.Set) -> Unit,
         ): List<Receipt> = withContext(reader.dispatcher) {
             coroutineContext.ensureActive()
             val assembly = prepared.jobId
@@ -192,7 +217,8 @@ internal class RoomTerminalPngReads(
                         checkSet(context)
                         Collections.unmodifiableList(verified.map { it.receipt })
                     } else {
-                        copyWithinLane(prepared, lease, verified, writes, active) { full, action -> copyTransaction(context, full, action) }
+                        copyWithinLane(prepared, lease, verified, writes, active, prepareCompletion,
+                            { full, action -> copyTransaction(context, full, action) }, { finish(context, it) })
                         emptyList() // This branch cannot return a copy result, file grant, or completion authorization.
                     }
                 }
@@ -202,11 +228,13 @@ internal class RoomTerminalPngReads(
         private data class TerminalSlot(val job: JobId, val page: ExportPageSnapshot, val cap: Long)
         private data class VerifiedSlot(val slot: TerminalSlot, val source: RoomTerminalRenderReads.Metadata, val receipt: Receipt)
 
-        /** This remains a step of the owning traversal; a future co-commit belongs at its last in-lane transaction, not after this returns. */
+        /** All file effects finish before the same issuer's final short transaction, while the lane and borrow still belong to this traversal. */
         private fun copyWithinLane(
             prepared: RoomFreshExportAssembly.Prepared, lease: JobLease, verified: List<VerifiedSlot>,
             writes: RoomPngExportItemWrites, active: () -> Unit,
+            prepareCompletion: ((PngExportItemIntent.Assembly, List<RoomPngPrivateCompletion.MovedItem>) -> RoomPngPrivateCompletion.Set)?,
             transaction: (Boolean, (Long, () -> Unit) -> Unit) -> Unit,
+            finish: (RoomPngPrivateCompletion.Set) -> Unit,
         ) {
             val job = prepared.jobId
             val assembly = PngExportItemIntent.Assembly(prepared.snapshot.snapshotId, prepared.snapshot.snapshotHash,
@@ -264,10 +292,14 @@ internal class RoomTerminalPngReads(
                         transaction(false) { _, _ -> writes.authenticate(plan, "SEALED", lastAudit, seal) }
                     }
                     advance("SEALED", "MOVED", seal)
-                    RoomPngExportItemReads.ExpectedMove(item, seal, plan.cap)
+                    RoomPngPrivateCompletion.MovedItem(plan, source, seal, lastAudit)
                 }
-                val checkMoved = writes.movedCheck(assembly, moves)
-                transaction(true) { _, _ -> checkMoved() }
+                if (prepareCompletion != null) {
+                    finish(prepareCompletion(assembly, moves))
+                } else {
+                    val checkMoved = writes.movedCheck(assembly, moves.map { RoomPngExportItemReads.ExpectedMove(it.plan.item, it.seal, it.plan.cap) })
+                    transaction(true) { _, _ -> checkMoved() }
+                }
             } catch (canceled: CancellationException) {
                 throw canceled
             } catch (failure: RepositoryFailure) {
@@ -308,8 +340,12 @@ internal class RoomTerminalPngReads(
             internal fun forSyntheticCopyTests(
                 reader: RoomTerminalPngReads, owners: FileOperationOwners, store: RoomPngExportItemWrites.SyntheticStore,
                 lifetime: OrdinaryExportLifetime, setVerification: AcquiredSetVerification?,
-            ): Retained = Retained(reader, owners, lifetime, { prepared, ordinal -> prepared.terminalSlot(store, lifetime, ordinal) },
-                setVerification, ExportJournal.Synthetic(RoomPngExportItemWrites.forSyntheticTests(store)))
+            ): Retained {
+                require(reader.metadata.usesSyntheticStore(store))
+                val completion = (store as? RoomPngPrivateCompletion.SyntheticStore)?.let(RoomPngPrivateCompletion::forSyntheticTests)
+                return Retained(reader, owners, lifetime, { prepared, ordinal -> prepared.terminalSlot(store, lifetime, ordinal) },
+                    setVerification, ExportJournal.Synthetic(completion?.writes ?: RoomPngExportItemWrites.forSyntheticTests(store), completion))
+            }
         }
     }
 

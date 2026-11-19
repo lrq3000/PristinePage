@@ -431,29 +431,60 @@ class OrdinaryPngTargetRetentionTest {
         var afterExportWrite: (FileTransactionRow) -> Unit = {}
         var afterCopyingCommit: ((FileTransactionRow) -> Unit)? = null
         var duringExportSync: (File) -> Unit = {}
+        val artifacts = linkedMapOf<Int, ExportArtifactRow>()
+        var afterAllMoves: () -> Unit = {}
+        var duringFinalJobRead: () -> Unit = {}
+        var afterFinalCommit: () -> Unit = {}
+        var onJournalCommit: (Int) -> Int = { 1 }
+        var onHeaderCommit: () -> Int = { 1 }
+        var onArtifactInsert: (ExportArtifactRow) -> ExportArtifactRow = { it }
+        var terminalExecutionDrift = false
+        var published: SavedCompletion? = null
+            private set
+
+        data class SavedCompletion(val header: ExportSnapshotRow, val job: JobRow,
+            val journals: List<FileTransactionRow>, val artifacts: List<ExportArtifactRow>, val extraIds: List<String>)
+
+        private fun saved() = SavedCompletion(header, assemblyRow, exportRows.values.toList(), artifacts.values.toList(), artifactIds.toList())
+
+        fun observeCompletion(): SavedCompletion = store.transaction { saved() }
+
         val inTransaction get() = catalog.inTransaction
         lateinit var prepared: RoomFreshExportAssembly.Prepared
             private set
-        private val store = object : RoomPngExportItemWrites.SyntheticStore(), MetadataAccess by catalog {
+        private val store = object : RoomPngPrivateCompletion.SyntheticStore(), MetadataAccess by catalog {
             private val key = ExportAssemblyInput.key(snapshotId)
             private val admittedKeys = mutableSetOf<String>()
             private var freshInventoryRead = false
 
             override fun <T> transaction(action: () -> T): T {
                 var copyingEdge: FileTransactionRow? = null
+                var allMoved = false
+                var completed = false
                 val result = catalog.transaction {
                     val before = if (this@TerminalStore::assemblyRow.isInitialized) assemblyRow else null
+                    val beforeHeader = if (this@TerminalStore::header.isInitialized) header else null
                     val beforeExports = exportRows.toMap()
+                    val beforeArtifacts = artifacts.toMap()
+                    val beforeExtraIds = artifactIds.toList()
                     try {
                         action().also {
+                            allMoved = beforeExports.count { it.value.state == "MOVED" } == 1 &&
+                                exportRows.values.count { it.state == "MOVED" } == 2
+                            completed = before?.state == "RUNNING" && assemblyRow.state == "SUCCEEDED"
                             if (afterCopyingCommit != null) copyingEdge = exportRows.values.singleOrNull {
                                 it.state == "COPYING" && beforeExports[it.ownerId]?.state == "INTENT"
                             }
                         }
                     } catch (failure: Throwable) {
                         if (before != null) assemblyRow = before
+                        if (beforeHeader != null) header = beforeHeader
                         exportRows.clear()
                         exportRows.putAll(beforeExports)
+                        artifacts.clear()
+                        artifacts.putAll(beforeArtifacts)
+                        artifactIds.clear()
+                        artifactIds.addAll(beforeExtraIds)
                         throw failure
                     } finally {
                         admittedKeys.clear()
@@ -462,6 +493,11 @@ class OrdinaryPngTargetRetentionTest {
                 }
                 // Model a separate metadata writer winning once the exact COPYING transition has committed, not a mutation inside that transaction.
                 copyingEdge?.let { row -> catalog.transaction { afterCopyingCommit?.invoke(row) } }
+                if (allMoved) afterAllMoves()
+                if (completed) {
+                    published = saved()
+                    afterFinalCommit()
+                }
                 return result
             }
 
@@ -469,7 +505,7 @@ class OrdinaryPngTargetRetentionTest {
                 check(snapshotId == header.snapshotId && limit == 3)
                 if (exportRows.isEmpty()) beforeFreshCheck()
                 freshInventoryRead = true
-                artifactIds.take(limit)
+                (artifacts.toSortedMap().values.map { it.artifactId } + artifactIds).take(limit)
             }
 
             override fun bounds(key: String, attempt: Long, payloadBytes: Int) = query {
@@ -531,6 +567,38 @@ class OrdinaryPngTargetRetentionTest {
                 afterExportWrite(row)
             }
 
+            override fun commitMoved(transaction: String, key: String, attempt: Long, oldAudit: Long, audit: Long,
+                stage: String, final: String, payload: ByteArray, seal: String, hash: String, count: Long) = query {
+                check(key in admittedKeys)
+                val old = exportRows.getValue(key)
+                check(old.transactionId == transaction && old.ownerId == key && old.attempt == attempt &&
+                    old.state == "MOVED" && old.updatedAt == oldAudit && old.stagingPath == stage &&
+                    old.finalPath == final && old.payload.contentEquals(payload) && old.sealSha256 == seal &&
+                    old.expectedByteSha256 == hash && old.expectedByteCount == count && old.errorCode == null)
+                val rows = onJournalCommit(key.substringAfterLast(':').toInt())
+                if (rows != 0) putExport(old.copy(state = "COMMITTED", updatedAt = audit))
+                rows
+            }
+
+            override fun insertReady(artifact: String, snapshot: String, ordinal: Int, hash: String, count: Long, audit: Long) = query {
+                check(ordinal !in artifacts)
+                artifacts[ordinal] = onArtifactInsert(readyArtifact(artifact, snapshot, ordinal, hash, count, audit))
+            }
+
+            override fun readyMatches(artifact: String, snapshot: String, ordinal: Int, hash: String, count: Long, audit: Long) = query {
+                artifacts[ordinal] == readyArtifact(artifact, snapshot, ordinal, hash, count, audit)
+            }
+
+            override fun markPrivateReady(snapshot: String, document: String, revision: Long, hash: String, settings: ByteArray,
+                created: Long, retention: Long, now: Long) = query {
+                check(header.snapshotId == snapshot && header.documentId == document && header.documentRevision == revision &&
+                    header.snapshotSha256 == hash && header.settings.contentEquals(settings) && header.createdAt == created &&
+                    header.retainedUntil == retention && header.state == "FROZEN" && now in 0 until retention)
+                val rows = onHeaderCommit()
+                if (rows != 0) header = header.copy(state = "PRIVATE_READY")
+                rows
+            }
+
             override fun snapshotMetadataIsBounded(snapshotId: String) = query { true.takeIf { snapshotId == header.snapshotId } }
             override fun snapshot(id: String) = query {
                 snapshotReads++
@@ -575,7 +643,11 @@ class OrdinaryPngTargetRetentionTest {
                 assemblyRow = assemblyRow.copy(state = "ADMITTED", updatedAt = updatedAt)
                 1
             }
-            override fun job(id: String) = query { fullJobReads++; assemblyRow.takeIf { it.jobId == id } }
+            override fun job(id: String) = query {
+                fullJobReads++
+                if (assemblyRow.state == "SUCCEEDED") duringFinalJobRead()
+                assemblyRow.takeIf { it.jobId == id }
+            }
             override fun updateLease(row: JobRow, expectedGeneration: Long) = query {
                 if (row.jobId != assemblyRow.jobId || assemblyRow.leaseGeneration != expectedGeneration) return@query 0
                 assemblyRow = row
@@ -635,7 +707,13 @@ class OrdinaryPngTargetRetentionTest {
                 job(key)?.row?.let { it.renderId == render && it.pageId == page && it.recipeRevision == rev &&
                     it.width == width && it.height == height && it.execution.size in 1..cap }
             } },
-            { render -> query { slots.singleOrNull { it.row.renderId == render }?.row } },
+            { render -> query {
+                slots.singleOrNull { it.row.renderId == render }?.let {
+                    if (terminalExecutionDrift && it.frozen.ordinal == 1) {
+                        it.row.copy(execution = it.row.execution.copyOf().apply { this[lastIndex] = (last().toInt() xor 1).toByte() })
+                    } else it.row
+                }
+            } },
             { key, attempt, extent -> query { job(key)?.journal?.takeIf { it.attempt == attempt }?.let { it.payload.size == extent } } },
             { key, attempt -> query { duringTerminalJournal(); job(key)?.journal?.takeIf { it.attempt == attempt } } },
         )
@@ -725,6 +803,10 @@ class OrdinaryPngTargetRetentionTest {
         fun changeFrozenRecipeRevision() {
             frozenPages = listOf(frozenPages.first(), frozenPages.last().copy(recipeRevision = 2))
         }
+
+        private fun readyArtifact(artifact: String, snapshot: String, ordinal: Int, hash: String, count: Long, audit: Long) =
+            ExportArtifactRow(artifact, snapshot, ordinal, "image/png", "exports/$snapshot/$artifact.bin", hash, count,
+                1, "ORDINARY_PNG_ENCODED_AND_RGB_V1", "READY", audit)
 
         suspend fun load(slot: Int) = reader.load(prepared.orderedJobIds[slot], prepared.snapshot.pages[slot], cap, readback(slot))
 

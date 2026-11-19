@@ -188,7 +188,46 @@ internal class RoomFreshExportAssembly private constructor(
         /** The final reader is constructed privately by the existing retained entry; this is not an arbitrary callback or an attempt handle. */
         @JvmSynthetic
         internal suspend fun readRetainedTerminalSet(reader: RoomTerminalPngReads.Retained.AcquiredSetReader): List<RoomTerminalPngReads.Receipt> =
-            reader.read(admitted.prepared, lease, ::checkTerminalSet, ::checkTerminalAttempt, ::copyTransaction)
+            reader.read(admitted.prepared, lease, ::checkTerminalSet, ::checkTerminalAttempt, ::copyTransaction, ::finishPrivateSet)
+
+        private fun finishPrivateSet(context: CoroutineContext, completion: RoomPngPrivateCompletion.Set) {
+            val service = issuingService
+            val prepared = admitted.prepared
+            val id = lease.jobId.value
+            val active = { context.ensureActive() }
+            lateinit var before: SnapshotRead
+            var after: SnapshotRead? = null
+            JobLeaseTransactions(service.store, service.store, service.auditClock, service.leaseClock).completeGuarded(lease,
+                readAdmitted = {
+                    if (after != null) {
+                        service.readJob(prepared, "SUCCEEDED", running.attempt, active = active, afterWrite = true)
+                    } else {
+                        service.readJob(prepared, "RUNNING", running.attempt, running.leaseOwner, running.leaseUntil, active).also {
+                            if (!sameRow(running, it)) conflict(id)
+                        }
+                    }
+                },
+                live = {
+                    // Checked again after the exact SUCCEEDED read, before the helper checks the original unconsumed deadline and owning context.
+                    after?.requireRetained(service.auditClock())
+                    service.liveness.state(lease.owner) == LeaseOwnerState.ALIVE
+                },
+                active = active,
+                commitMetadata = {
+                    before = service.liveSnapshot(prepared)
+                    completion.write(before.record, service.auditClock) { checkTerminalClocks(before, context) }
+                },
+                verifyMetadata = { audit ->
+                    completion.verify(audit, active)
+                    val final = SnapshotRead.capture(service.store, prepared.snapshot.snapshotId, service.auditClock)
+                    prepared.requireSameSnapshot(final)
+                    if (final.record.state != "PRIVATE_READY" || final.record.retainedUntil != before.record.retainedUntil) invalid(id)
+                    after = final
+                },
+            )
+            // Delivery is separate from the transaction: cancellation here cannot roll back saved state.
+            active()
+        }
 
         private fun checkTerminalSet(context: CoroutineContext): () -> Unit {
             val service = issuingService

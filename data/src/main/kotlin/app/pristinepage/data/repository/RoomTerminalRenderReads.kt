@@ -28,10 +28,10 @@ internal class RoomTerminalRenderReads(
     private val metadata: MetadataAccess,
     private val runtime: OrdinaryExportProfile,
     private val dispatcher: CoroutineDispatcher,
-    jobBounds: (String, Int) -> Boolean?,
-    jobIdentity: (String) -> FrozenRenderJobIdentityRow?,
-    pinSourceIds: (String) -> List<String>,
-    sourceBounds: (String) -> Boolean?,
+    private val jobBounds: (String, Int) -> Boolean?,
+    private val jobIdentity: (String) -> FrozenRenderJobIdentityRow?,
+    private val pinSourceIds: (String) -> List<String>,
+    private val sourceBounds: (String) -> Boolean?,
     private val attempt: (String) -> Long?,
     private val renderIds: (String) -> List<String>,
     private val renderBounds: (String, String, String, Long, Int, Int, Int) -> Boolean?,
@@ -48,7 +48,7 @@ internal class RoomTerminalRenderReads(
         database.exportSnapshots()::renderIntentReadIsBounded, database.exportSnapshots()::renderIntentRow,
     )
 
-    private val projection = RoomFrozenRenderReads.Projection(metadata.queries, jobBounds, jobIdentity, pinSourceIds, sourceBounds)
+    internal fun usesSyntheticStore(store: RoomFreshExportAssembly.SyntheticStore) = metadata === store
 
     suspend fun load(jobId: JobId, page: ExportPageSnapshot): Metadata = withContext(dispatcher) {
         val active: () -> Unit = { coroutineContext.ensureActive() }
@@ -68,7 +68,7 @@ internal class RoomTerminalRenderReads(
         // Hash, parse, and recompose only after releasing Room. The guarded, copied BLOBs refer to the same transaction as the scalars and source identities.
         prepared.authenticateTerminal(snapshot.job, active) { proof ->
             try {
-                authenticate(proof, snapshot)
+                authenticate(proof, snapshot, active)
             } catch (_: IllegalArgumentException) {
                 invalid(jobId)
             }
@@ -76,40 +76,52 @@ internal class RoomTerminalRenderReads(
     }
 
     private fun project(jobId: JobId, page: ExportPageSnapshot, inputBytes: Int, active: () -> Unit): Snapshot {
+        lateinit var identity: FrozenRenderJobIdentityRow
+        val projection = RoomFrozenRenderReads.Projection(metadata.queries, jobBounds, { id ->
+            jobIdentity(id)?.let {
+                if (it.input.size != inputBytes) invalid(jobId)
+                it.copy(input = it.input.copyOf()).also { owned -> identity = owned }
+            }
+        }, pinSourceIds, sourceBounds)
+        val job = projection.job(jobId, inputBytes, active)
+        val rows = terminalRows(jobId, page, active)
+        val producer = projection.source(rows.render.sourceId, jobId, active)
+        return Snapshot(job, identity, rows.copy(render = rows.render.copy(execution = rows.render.execution.copyOf()),
+            journal = rows.journal.copy(payload = rows.journal.payload.copyOf())), producer)
+    }
+
+    private fun terminalRows(jobId: JobId, page: ExportPageSnapshot, active: () -> Unit, expectedId: String? = null): TerminalRows {
         val id = jobId.value
-        val job = projection.job(jobId, inputBytes, active).detached()
         val terminalAttempt = attempt(id)?.takeIf { it > 0 } ?: invalid(jobId)
-        val renderId = try {
-            RenderId(renderIds(id).singleOrNull() ?: invalid(jobId))
-        } catch (_: IllegalArgumentException) {
-            invalid(jobId)
+        val renderId = renderIds(id).singleOrNull() ?: invalid(jobId)
+        // The final transaction compares against a previously parsed canonical ID, not an ID supplied by the current row.
+        if (expectedId != null) {
+            if (renderId != expectedId) invalid(jobId)
+        } else {
+            try { RenderId(renderId) } catch (_: IllegalArgumentException) { invalid(jobId) }
         }
         val size = page.output.size
         val maxBytes = OrdinaryRenderExecution.maxEnvelopeBytes
-        if (renderBounds(renderId.value, id, page.pageId.value, page.recipeRevision, size.width, size.height, maxBytes) != true) invalid(jobId)
+        if (renderBounds(renderId, id, page.pageId.value, page.recipeRevision, size.width, size.height, maxBytes) != true) invalid(jobId)
         active()
-        val row = renderRow(renderId.value) ?: invalid(jobId)
-        if (row.renderId != renderId.value || row.execution.size !in 1..maxBytes) invalid(jobId)
-        val render = row.copy(execution = row.execution.copyOf())
+        val row = renderRow(renderId) ?: invalid(jobId)
+        if (row.renderId != renderId || row.execution.size !in 1..maxBytes) invalid(jobId)
         if (journalBounds(id, terminalAttempt, RenderFileIntent.payloadBytes) != true) invalid(jobId)
         active()
         val journal = journalRow(id, terminalAttempt) ?: invalid(jobId)
         if (journal.payload.size != RenderFileIntent.payloadBytes) invalid(jobId)
-        val ownedJournal = journal.copy(payload = journal.payload.copyOf())
-        val producer = projection.source(render.sourceId, jobId, active)
-        return Snapshot(job, terminalAttempt, render, ownedJournal, producer)
+        return TerminalRows(terminalAttempt, row, journal)
     }
 
-    private fun authenticate(proof: RoomFrozenRenderReads.Verified.TerminalProof, snapshot: Snapshot): Metadata {
+    private fun authenticate(proof: RoomFrozenRenderReads.Verified.TerminalProof, snapshot: Snapshot, active: () -> Unit): Metadata {
         val page = proof.page
         val (source, blob) = snapshot.producer
-        val row = snapshot.render
-        val journal = snapshot.journal
+        val (attempt, row, journal) = snapshot.rows
         val size = PixelSize(row.width, row.height)
         require(row.jobId == proof.jobId.value && row.pageId == page.pageId.value && row.recipeRevision == page.recipeRevision)
         require(row.state == "READY" && row.renderStatus == "OK" && size == page.output.size && row.byteCount > 0)
         requireSha256(row.byteSha256)
-        require(journal.kind == "RENDER" && journal.ownerId == row.jobId && journal.attempt == snapshot.attempt)
+        require(journal.kind == "RENDER" && journal.ownerId == row.jobId && journal.attempt == attempt)
         require(journal.state == "COMMITTED" && journal.errorCode == null)
         require(journal.expectedByteCount == row.byteCount && journal.expectedByteSha256 == row.byteSha256)
         val sealHash = requireNotNull(journal.sealSha256).also(::requireSha256)
@@ -128,20 +140,54 @@ internal class RoomTerminalRenderReads(
 
         // Success cleared the Job lease. Only the exact historical owner field is taken from the payload; every other field is independently known.
         val intent = RenderFileIntent(TransactionId(journal.transactionId), RenderId(row.renderId), proof.jobId,
-            RenderFileIntent.historicalOwner(journal.payload), snapshot.attempt, snapshot.attempt, proof.canonicalInputSha256,
+            RenderFileIntent.historicalOwner(journal.payload), attempt, attempt, proof.canonicalInputSha256,
             page.pageId, producer.sourceId, producer.blobId, SourceId(proof.pinSourceId), producer.byteSha256,
             page.pixelHash, page.recipeRevision, page.recipeHash, page.output)
         require(journal.stagingPath == intent.stagingPath && journal.finalPath == intent.finalPath && row.relativePath == intent.finalPath)
         require(journal.payload.contentEquals(intent.journalPayload()))
-        return Metadata(intent, sealHash, row.byteSha256, row.byteCount, execution.rasterSha256)
+        return Metadata(intent, sealHash, row.byteSha256, row.byteCount, execution.rasterSha256) { owningContext ->
+            requireUnchanged(proof.jobId, page, snapshot, owningContext)
+        }.also { active() }
+    }
+
+    /** On the original issuer's final transaction: raw admission first, then exact bounded projections. No file or execution decoder is involved. */
+    private fun requireUnchanged(jobId: JobId, page: ExportPageSnapshot, expected: Snapshot, active: () -> Unit) {
+        active()
+        val identity = expected.identity
+        if (jobBounds(jobId.value, identity.input.size) != true) invalid(jobId)
+        val live = jobIdentity(jobId.value) ?: invalid(jobId)
+        if (!live.input.contentEquals(identity.input) || live.copy(input = identity.input) != identity ||
+            pinSourceIds(jobId.value).singleOrNull() != expected.job.pinId) invalid(jobId)
+        requireSource(jobId, expected.job.binding, pinned = true)
+        val (attempt, render, journal) = terminalRows(jobId, page, active, expected.rows.render.renderId)
+        val before = expected.rows
+        if (attempt != before.attempt || !render.execution.contentEquals(before.render.execution) ||
+            render.copy(execution = before.render.execution) != before.render ||
+            !journal.payload.contentEquals(before.journal.payload) || journal.copy(payload = before.journal.payload) != before.journal) invalid(jobId)
+        if (expected.producer != expected.job.binding) requireSource(jobId, expected.producer, pinned = false)
+    }
+
+    private fun requireSource(job: JobId, before: ExportSourceBinding, pinned: Boolean) {
+        val (source, blob) = before
+        if (sourceBounds(source.sourceId) != true) invalid(job)
+        val current = metadata.queries.source(source.sourceId) ?: invalid(job)
+        if (current.refCount < (if (pinned) 1 else 0) || current.copy(refCount = source.refCount) != source) invalid(job)
+        val currentBlob = metadata.queries.sourceBlob(blob.sourceBlobId) ?: invalid(job)
+        // Other retained owners can legitimately change these counters without altering the immutable source identity.
+        if (currentBlob.sourceCount <= 0 || currentBlob.copy(sourceCount = blob.sourceCount) != blob) invalid(job)
     }
 
     private class Snapshot(
         val job: RoomFrozenRenderReads.Projection.JobSnapshot,
+        val identity: FrozenRenderJobIdentityRow,
+        val rows: TerminalRows,
+        val producer: ExportSourceBinding,
+    )
+
+    private data class TerminalRows(
         val attempt: Long,
         val render: RenderedPageRow,
         val journal: FileTransactionRow,
-        val producer: ExportSourceBinding,
     )
 
     /** Expected values for a later stable sealed read, not path authority, a lease, verified bytes, or PRIVATE_READY. */
@@ -151,11 +197,13 @@ internal class RoomTerminalRenderReads(
         val byteSha256: String,
         val byteCount: Long,
         val rasterSha256: String,
+        private val recheck: (() -> Unit) -> Unit,
     ) {
         val transactionId: TransactionId get() = intent.transactionId
         val renderId: RenderId get() = intent.renderId
         val size: PixelSize get() = intent.output.size
         fun intentPayload(): ByteArray = intent.journalPayload()
+        internal fun requireUnchangedInTransaction(active: () -> Unit) = recheck(active)
     }
 
     private fun invalid(jobId: JobId): Nothing =

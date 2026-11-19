@@ -28,7 +28,8 @@ internal class RoomPngExportItemWrites private constructor(
         val key = PngExportItemIntent.ownerKey(assembly.jobId, item.ordinal)
         val stage = intent.stagingPath
         val final = intent.finalPath
-        fun payload(): ByteArray = intent.journalPayload()
+        private val canonicalPayload = intent.journalPayload()
+        fun payload(): ByteArray = canonicalPayload.copyOf()
     }
 
     internal fun insertFreshSet(assembly: PngExportItemIntent.Assembly, plans: List<Plan>, audit: Long, fence: () -> Unit) {
@@ -78,6 +79,8 @@ internal class RoomPngExportItemWrites private constructor(
 
     internal fun movedCheck(assembly: PngExportItemIntent.Assembly, moves: List<RoomPngExportItemReads.ExpectedMove>): () -> RoomPngExportItemReads.Verdict =
         reads.prepareMovedCheck(assembly, moves)
+
+    internal fun requireCommittedKeys(assembly: PngExportItemIntent.Assembly) = reads.requireKeys(assembly, assembly.pageCount)
 
     private fun invalid(plan: Plan): Nothing = throw RepositoryFailure(OperationError(
         OperationErrorCode.INTEGRITY_FAILED, false, "png_export_item_phase_invalid", plan.assembly.jobId.value,

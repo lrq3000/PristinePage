@@ -64,27 +64,31 @@ internal class RoomPngExportItemReads private constructor(
     }
 
     private fun inspect(assembly: PngExportItemIntent.Assembly, expected: List<PreparedMove>?): Verdict {
-        val keys = List(PngExportItemIntent.MAX_ITEMS) { PngExportItemIntent.ownerKey(assembly.jobId, it) }
         // The inventory is only a bounded occupancy check; the invalid-ID sentinel still counts as present.
         if (inventory(assembly.snapshotId.value, assembly.pageCount + 1).isNotEmpty()) refuse(assembly, "artifacts_present")
-        // Finish scalar admission across the entire relevant key space before loading even the first typed row. False is a match, including on extra keys.
-        for ((ordinal, key) in keys.withIndex()) {
-            val flag = bounds(key, assembly.attempt, PngExportItemIntent.payloadBytes)
-            when {
-                expected == null && flag == false -> refuse(assembly, "unbounded")
-                expected == null && flag == true -> refuse(assembly, "occupied")
-                expected != null && ordinal >= expected.size && flag != null -> refuse(assembly, "extra")
-                expected != null && ordinal < expected.size && flag == null -> refuse(assembly, "missing")
-                expected != null && ordinal < expected.size && flag == false -> refuse(assembly, "unbounded")
-            }
-        }
+        requireKeys(assembly, expected?.size)
         if (expected == null) return Verdict.FRESH
         for ((ordinal, move) in expected.withIndex()) {
-            val key = keys[ordinal]
+            val key = PngExportItemIntent.ownerKey(assembly.jobId, ordinal)
             val row = project(key, assembly.attempt)
             if (row == null || !move.matches(row, key, assembly.attempt)) refuse(assembly, "mismatch")
         }
         return Verdict.MOVED
+    }
+
+    internal fun requireKeys(assembly: PngExportItemIntent.Assembly, expectedCount: Int?) {
+        // Finish scalar admission across the entire relevant key space before loading even the first typed row. False is a match, including on extra keys.
+        for (ordinal in 0 until PngExportItemIntent.MAX_ITEMS) {
+            val key = PngExportItemIntent.ownerKey(assembly.jobId, ordinal)
+            val flag = bounds(key, assembly.attempt, PngExportItemIntent.payloadBytes)
+            when {
+                expectedCount == null && flag == false -> refuse(assembly, "unbounded")
+                expectedCount == null && flag == true -> refuse(assembly, "occupied")
+                expectedCount != null && ordinal >= expectedCount && flag != null -> refuse(assembly, "extra")
+                expectedCount != null && ordinal < expectedCount && flag == null -> refuse(assembly, "missing")
+                expectedCount != null && ordinal < expectedCount && flag == false -> refuse(assembly, "unbounded")
+            }
+        }
     }
 
     private fun inTransaction(assembly: PngExportItemIntent.Assembly, action: () -> Verdict): Verdict =
