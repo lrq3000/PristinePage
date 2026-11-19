@@ -12,9 +12,13 @@ import app.pristinepage.data.repository.RenderIntentQueries
 
 @Dao abstract class ExportSnapshotDao : ExportSnapshotQueries, RenderIntentQueries {
     // Return only a scalar before Room extracts any settings bytes. SQLite length(BLOB) reads its byte count, not a Kotlin ByteArray; type checks prevent coercion of corrupt storage classes.
+    // Both queries match the caller's canonical snapshotId by exact key. Other projected IDs and hashes need both extents because length(TEXT) stops at NUL.
+    // Bound state and fallback text to four UTF-8 bytes per allowed character without deciding which values the typed reader supports.
     @Query("""SELECT CASE WHEN (typeof(settings)='blob' AND length(settings) BETWEEN 1 AND 524288)
-        AND (typeof(snapshotId)='text' AND length(snapshotId)=36) AND (typeof(documentId)='text' AND length(documentId)=36)
-        AND (typeof(snapshotSha256)='text' AND length(snapshotSha256)=64) AND (typeof(state)='text' AND length(state) BETWEEN 1 AND 128)
+        AND (typeof(snapshotId)='text' AND length(snapshotId)=36)
+        AND (typeof(documentId)='text' AND length(documentId)=36 AND length(CAST(documentId AS BLOB))=36)
+        AND (typeof(snapshotSha256)='text' AND length(snapshotSha256)=64 AND length(CAST(snapshotSha256 AS BLOB))=64)
+        AND (typeof(state)='text' AND length(state) BETWEEN 1 AND 128 AND length(CAST(state AS BLOB)) BETWEEN 1 AND 512)
         AND (typeof(documentRevision)='integer' AND documentRevision>0) AND (typeof(createdAt)='integer' AND typeof(retainedUntil)='integer')
         THEN 1 ELSE 0 END FROM ExportSnapshot WHERE snapshotId=:snapshotId""")
     abstract override fun snapshotMetadataIsBounded(snapshotId: String): Boolean?
@@ -23,10 +27,14 @@ import app.pristinepage.data.repository.RenderIntentQueries
     @Query("""SELECT CASE WHEN COUNT(*) BETWEEN 1 AND 100
         AND COALESCE(SUM(length(recipe)+length(masks)+length(providers)+4096),0)+(SELECT length(settings)+4096 FROM ExportSnapshot WHERE snapshotId=:snapshotId)<=8388608
         AND MIN(CASE WHEN (typeof(ordinal)='integer' AND ordinal BETWEEN 0 AND 99)
-            AND (typeof(snapshotId)='text' AND length(snapshotId)=36) AND (typeof(originalPageId)='text' AND length(originalPageId)=36)
-            AND (typeof(sourceId)='text' AND length(sourceId)=36) AND (typeof(sourceBlobId)='text' AND length(sourceBlobId)=36)
-            AND (typeof(byteSha256)='text' AND length(byteSha256)=64) AND (typeof(pixelSha256)='text' AND length(pixelSha256)=64)
-            AND (typeof(recipeSha256)='text' AND length(recipeSha256)=64) AND (typeof(assetSetSha256)='text' AND length(assetSetSha256)=64)
+            AND (typeof(snapshotId)='text' AND length(snapshotId)=36)
+            AND (typeof(originalPageId)='text' AND length(originalPageId)=36 AND length(CAST(originalPageId AS BLOB))=36)
+            AND (typeof(sourceId)='text' AND length(sourceId)=36 AND length(CAST(sourceId AS BLOB))=36)
+            AND (typeof(sourceBlobId)='text' AND length(sourceBlobId)=36 AND length(CAST(sourceBlobId AS BLOB))=36)
+            AND (typeof(byteSha256)='text' AND length(byteSha256)=64 AND length(CAST(byteSha256 AS BLOB))=64)
+            AND (typeof(pixelSha256)='text' AND length(pixelSha256)=64 AND length(CAST(pixelSha256 AS BLOB))=64)
+            AND (typeof(recipeSha256)='text' AND length(recipeSha256)=64 AND length(CAST(recipeSha256 AS BLOB))=64)
+            AND (typeof(assetSetSha256)='text' AND length(assetSetSha256)=64 AND length(CAST(assetSetSha256 AS BLOB))=64)
             AND (typeof(width)='integer' AND width BETWEEN 1 AND 12000) AND (typeof(height)='integer' AND height BETWEEN 1 AND 12000 AND width*height<=48000000)
             AND (typeof(conversionFingerprint)='text' AND length(CAST(conversionFingerprint AS BLOB)) BETWEEN 1 AND 512)
             AND (typeof(rendererVersion)='text' AND length(CAST(rendererVersion AS BLOB)) BETWEEN 1 AND 512)
@@ -37,8 +45,10 @@ import app.pristinepage.data.repository.RenderIntentQueries
             AND (typeof(requestedOutputHeight)='integer' AND requestedOutputHeight BETWEEN 1 AND 2147483647)
             AND (typeof(outputWidth)='integer' AND outputWidth BETWEEN 1 AND 2147483647)
             AND (typeof(outputHeight)='integer' AND outputHeight BETWEEN 1 AND 2147483647)
-            AND (typeof(fallbackPolicy)='text' AND length(fallbackPolicy) BETWEEN 1 AND 128)
-            AND ((acceptedRenderId IS NULL AND acceptedExecutionSha256 IS NULL) OR (typeof(acceptedRenderId)='text' AND length(acceptedRenderId)=36 AND typeof(acceptedExecutionSha256)='text' AND length(acceptedExecutionSha256)=64))
+            AND (typeof(fallbackPolicy)='text' AND length(fallbackPolicy) BETWEEN 1 AND 128 AND length(CAST(fallbackPolicy AS BLOB)) BETWEEN 1 AND 512)
+            AND ((acceptedRenderId IS NULL AND acceptedExecutionSha256 IS NULL) OR (
+                (typeof(acceptedRenderId)='text' AND length(acceptedRenderId)=36 AND length(CAST(acceptedRenderId AS BLOB))=36)
+                AND (typeof(acceptedExecutionSha256)='text' AND length(acceptedExecutionSha256)=64 AND length(CAST(acceptedExecutionSha256 AS BLOB))=64)))
             THEN 1 ELSE 0 END)=1 THEN 1 ELSE 0 END FROM ExportPage WHERE snapshotId=:snapshotId""")
     abstract override fun exportPagesAreBounded(snapshotId: String): Boolean
 

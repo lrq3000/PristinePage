@@ -10,6 +10,7 @@ import test_room_schema
 
 
 DAO = Path(__file__).resolve().parents[2] / "data/src/main/kotlin/app/pristinepage/data/db/ExportSnapshotDao.kt"
+TEXT_SUFFIX = "\x00" + "x" * 513
 
 
 class SnapshotReadBoundsTest(unittest.TestCase):
@@ -31,6 +32,115 @@ class SnapshotReadBoundsTest(unittest.TestCase):
         match = re.search(r'@Query\("""((?:(?!""").)*)"""\)\s*abstract override fun ' + method + r'\(', DAO.read_text(encoding="utf-8"), re.S)
         self.assertIsNotNone(match, f"Pre-materialization snapshot SQL is absent: {method}")
         return self.db.execute(match.group(1), {"snapshotId": self.snapshot}).fetchone()[0]
+
+    def assert_text_suffix_rejected(self, table, field, prefix, gate):
+        # These identifiers come only from the fixed test cases; mutate exactly the seeded header or its single page.
+        where = "WHERE snapshotId=?" if table == "ExportSnapshot" else "WHERE snapshotId=? AND ordinal=0"
+        update = f"UPDATE {table} SET {field}=? {where}"
+        self.db.execute(update, (prefix + TEXT_SUFFIX, self.snapshot))
+        try:
+            # Prove the mismatch with scalars only: this is still TEXT, and only its byte extent counts the full suffix.
+            extents = self.db.execute(
+                f"SELECT typeof({field}), length({field}), length(CAST({field} AS BLOB)) FROM {table} {where}",
+                (self.snapshot,),
+            ).fetchone()
+            self.assertEqual(("text", len(prefix), len(prefix) + len(TEXT_SUFFIX)), extents)
+            self.assertEqual(0, self.gate(gate), f"{table}.{field} must be refused before typed projection")
+        finally:
+            # A failing subtest must not leave its mutation in place for the next field.
+            self.db.execute(update, (prefix, self.snapshot))
+
+    def test_snapshot_header_rejects_text_suffixes_but_admits_bounded_unknown_state(self):
+        gate = "snapshotMetadataIsBounded"
+        self.assertEqual(1, self.gate(gate))
+        # The raw guard checks shape, not membership; verifyLoadable owns UNSUPPORTED_VERSION for a bounded unknown state.
+        for state in ("FUTURE_" + "X" * 121, "FUTURE_\u754c", "\U0001f642" * 128):
+            with self.subTest(state_bytes=len(state.encode("utf-8"))):
+                self.db.execute("UPDATE ExportSnapshot SET state=? WHERE snapshotId=?", (state, self.snapshot))
+                self.assertEqual(1, self.gate(gate))
+        self.db.execute("UPDATE ExportSnapshot SET state='FROZEN' WHERE snapshotId=?", (self.snapshot,))
+        for field, prefix in (("snapshotSha256", "c" * 64), ("state", "FROZEN")):
+            with self.subTest(field=field):
+                self.assert_text_suffix_rejected("ExportSnapshot", field, prefix, gate)
+
+    def test_export_pages_reject_text_suffixes_without_narrowing_unicode_versions(self):
+        gate = "exportPagesAreBounded"
+        self.assertEqual(1, self.gate(gate))
+        # Both version strings fit the typed 128 UTF-16 code-unit policy, but exceed 128 UTF-8 bytes.
+        self.db.execute(
+            "UPDATE ExportPage SET conversionFingerprint=?, rendererVersion=? WHERE snapshotId=? AND ordinal=0",
+            ("\u754c" * 128, "\U0001f642" * 64, self.snapshot),
+        )
+        self.assertEqual(1, self.gate(gate))
+        self.db.execute(
+            "UPDATE ExportPage SET conversionFingerprint='srgb-v1', rendererVersion='renderer-v1' WHERE snapshotId=? AND ordinal=0",
+            (self.snapshot,),
+        )
+        fields = (
+            ("originalPageId", str(UUID(int=100))),
+            ("byteSha256", "a" * 64),
+            ("pixelSha256", "b" * 64),
+            ("recipeSha256", "c" * 64),
+            ("assetSetSha256", "d" * 64),
+            ("fallbackPolicy", "FAIL"),
+        )
+        for field, prefix in fields:
+            with self.subTest(field=field):
+                self.assert_text_suffix_rejected("ExportPage", field, prefix, gate)
+
+    def test_export_pages_reject_text_suffixes_in_each_accepted_render_field(self):
+        gate = "exportPagesAreBounded"
+        job_id, render_id = (str(UUID(int=i)) for i in (200, 201))
+        page_id, execution_sha256 = str(UUID(int=100)), "e" * 64
+        self.db.execute(
+            "INSERT INTO Job (jobId, kind, idempotenceKey, canonicalInputSha256, input, state, attempt, leaseGeneration, createdAt, updatedAt) "
+            "VALUES (?, 'PAGE_RENDER', 'fixture-render-job', ?, ?, 'SUCCEEDED', 1, 1, 0, 0)",
+            (job_id, "f" * 64, b"{}"),
+        )
+        # The test-only parent with the same malformed key keeps the real FK enforced while only one projected field changes.
+        self.db.executemany(
+            "INSERT INTO RenderedPage (renderId, jobId, sourceId, pageId, recipeRevision, cacheKey, execution, executionSha256, "
+            "relativePath, byteSha256, rasterPixelSha256, byteCount, width, height, renderStatus, state) "
+            "VALUES (?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?, 4, 3, 2, 'DEGRADED', 'READY')",
+            [
+                (key, job_id, self.source, page_id, f"fixture-cache-{i}", b"{}", execution_sha256, f"fixture/{i}/page.bin", "a" * 64, "b" * 64)
+                for i, key in enumerate((render_id, render_id + TEXT_SUFFIX))
+            ],
+        )
+        self.db.execute(
+            "UPDATE ExportPage SET fallbackPolicy='KEEP_STAGE_INPUT', acceptedRenderId=?, acceptedExecutionSha256=? WHERE snapshotId=? AND ordinal=0",
+            (render_id, execution_sha256, self.snapshot),
+        )
+        self.assertEqual(1, self.gate(gate))
+        for field, prefix in (("acceptedRenderId", render_id), ("acceptedExecutionSha256", execution_sha256)):
+            with self.subTest(field=field):
+                self.assert_text_suffix_rejected("ExportPage", field, prefix, gate)
+
+    def test_snapshot_and_page_reject_text_suffixes_in_foreign_ids(self):
+        # Copy only the required parents under synthetic keys so the real FK checks cannot mask any raw guard failure.
+        self.db.execute(
+            "INSERT INTO Document SELECT ?, title, documentRevision, lifecycle, createdAt, updatedAt, deletedAt FROM Document WHERE documentId=?",
+            (self.document + TEXT_SUFFIX, self.document),
+        )
+        self.db.execute(
+            "INSERT INTO SourceBlob SELECT ?, byteSha256, byteCount, mime, encodedWidth, encodedHeight, ?, state, sourceCount, "
+            "ingestTransactionId, createdAt FROM SourceBlob WHERE sourceBlobId=?",
+            (self.blob + TEXT_SUFFIX, "fixture/other-original.bin", self.blob),
+        )
+        self.db.execute(
+            "INSERT INTO Source SELECT ?, ?, pixelSha256, width, height, exifOrientation, conversionFingerprint, profileSha256, "
+            "refCount, state, createdAt FROM Source WHERE sourceId=?",
+            (self.source + TEXT_SUFFIX, self.blob + TEXT_SUFFIX, self.source),
+        )
+        self.assertEqual(1, self.gate("snapshotMetadataIsBounded"))
+        self.assertEqual(1, self.gate("exportPagesAreBounded"))
+        for table, field, prefix, gate in (
+            ("ExportSnapshot", "documentId", self.document, "snapshotMetadataIsBounded"),
+            ("ExportPage", "sourceId", self.source, "exportPagesAreBounded"),
+            ("ExportPage", "sourceBlobId", self.blob, "exportPagesAreBounded"),
+        ):
+            with self.subTest(field=field):
+                self.assert_text_suffix_rejected(table, field, prefix, gate)
 
     def test_snapshot_header_bounds_precede_settings_extraction(self):
         self.assertEqual(1, self.gate("snapshotMetadataIsBounded"))
