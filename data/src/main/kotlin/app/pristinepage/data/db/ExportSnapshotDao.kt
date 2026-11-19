@@ -161,6 +161,32 @@ import app.pristinepage.data.repository.RenderIntentQueries
         THEN 1 ELSE 0 END FROM FileTransaction WHERE kind='RENDER' AND ownerId=:jobId AND attempt=:attempt""")
     abstract override fun renderIntentReadIsBounded(jobId: String, attempt: Long, expectedPayloadBytes: Int): Boolean?
 
+    // Bind the exact canonical key and live attempt derived by the caller. No row means absent; a matched false must never authorize insert or typed projection. True admits raw shape only, not payload or path identity.
+    @Query("""SELECT CASE WHEN (typeof(attempt)='integer' AND attempt>0)
+        AND (typeof(transactionId)='text' AND length(CAST(transactionId AS BLOB))=36 AND length(transactionId)=36)
+        AND (typeof(stagingPath)='text' AND length(CAST(stagingPath AS BLOB))=57 AND length(stagingPath)=57)
+        AND (typeof(finalPath)='text' AND length(CAST(finalPath AS BLOB))=85 AND length(finalPath)=85)
+        AND (:expectedPayloadBytes>0 AND typeof(payload)='blob' AND length(payload)=:expectedPayloadBytes)
+        AND (errorCode IS NULL AND typeof(updatedAt)='integer')
+        AND ((state IN ('INTENT','COPYING') AND sealSha256 IS NULL AND expectedByteSha256 IS NULL AND expectedByteCount IS NULL)
+          OR (state IN ('SEALED','MOVED','COMMITTED')
+            AND (typeof(sealSha256)='text' AND length(CAST(sealSha256 AS BLOB))=64 AND length(sealSha256)=64)
+            AND (typeof(expectedByteSha256)='text' AND length(CAST(expectedByteSha256 AS BLOB))=64 AND length(expectedByteSha256)=64)
+            AND (typeof(expectedByteCount)='integer' AND expectedByteCount>0)))
+        THEN 1 ELSE 0 END FROM FileTransaction
+        WHERE kind='EXPORT' COLLATE BINARY AND ownerId=:ownerKey COLLATE BINARY AND attempt=:attempt""")
+    internal abstract fun exportItemIntentReadIsBounded(ownerKey: String, attempt: Long, expectedPayloadBytes: Int): Boolean?
+
+    // Preserve every row for n+1 detection, including malformed members. Validate byte and character extents before inspecting UUID shape; '' is a bounded invalid ID, not absence. Invalid limits become zero, never SQLite's negative unlimited limit.
+    @Query("""SELECT CASE WHEN (typeof(artifactId)='text' AND length(CAST(artifactId AS BLOB))=36 AND length(artifactId)=36)
+        THEN CASE WHEN (substr(artifactId,9,1)='-' AND substr(artifactId,14,1)='-'
+            AND substr(artifactId,19,1)='-' AND substr(artifactId,24,1)='-')
+            AND (length(replace(artifactId,'-',''))=32 AND replace(artifactId,'-','') NOT GLOB '*[^0-9a-f]*')
+        THEN artifactId ELSE '' END ELSE '' END AS artifactId
+        FROM ExportArtifact WHERE snapshotId=:snapshotId ORDER BY ordinal
+        LIMIT CASE WHEN :limit BETWEEN 1 AND 101 THEN :limit ELSE 0 END""")
+    internal abstract fun exportArtifactIdsForSnapshot(snapshotId: String, limit: Int): List<String>
+
     // Only on a create-path exact-key miss. Scan the existing (kind, ownerId) index range; never extract a malformed key or its payload.
     @Query("""SELECT EXISTS(SELECT 1 FROM FileTransaction WHERE kind='RENDER' AND ownerId=:jobId
         AND (typeof(attempt)!='integer' OR attempt<=0))""")
