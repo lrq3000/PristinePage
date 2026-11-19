@@ -32,6 +32,11 @@ fun interface ExportAdmission {
     suspend fun check(snapshot: ExportSnapshot): OperationError?
 }
 
+/** Borrows the authenticated snapshot and a detached, unmodifiable list of its proved original bindings, one per frozen ordinal even for repeats. Runs outside Room after closed-byte proof; these are the snapshot's originals, not any reused render job's pin. */
+internal fun interface ExportBindingAdmission {
+    suspend fun check(snapshot: ExportSnapshot, originalsInFrozenOrder: List<ExportSourceBinding>): OperationError?
+}
+
 interface ExportSnapshots {
     suspend fun freezeExport(documentId: DocumentId, expectedDocumentRevision: Long, settings: ExportSettings): ExportSnapshot
     suspend fun load(snapshotId: ExportSnapshotId): ExportSnapshot

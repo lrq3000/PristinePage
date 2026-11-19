@@ -102,8 +102,7 @@ class ExportSnapshotTest {
         }
         private fun type(name: String): Class<*> = try { Class.forName("app.pristinepage.data.repository.$name") }
         catch (_: ClassNotFoundException) { throw AssertionError("Atomic immutable export freeze is absent: $name") }
-        private fun service(): Any {
-            val implementation = type("RoomExportSnapshots")
+        private fun service(boundAdmission: ExportBindingAdmission? = null): ExportSnapshots {
             val queries = Proxy.newProxyInstance(type("ExportSnapshotQueries").classLoader, arrayOf(type("ExportSnapshotQueries"))) { _, method, args ->
                 check(f.metadata.inTransaction) { "Snapshot/job query must use the original metadata transaction" }
                 if (method.name.startsWith("insert")) writes += method.name
@@ -147,18 +146,28 @@ class ExportSnapshotTest {
                     "insertExportJob" -> { val row = args[0] as JobRow; check(jobs.values.none { it.idempotenceKey == row.idempotenceKey }); check(jobs.putIfAbsent(row.jobId, row) == null); Unit }
                     else -> error("Unexpected snapshot query ${method.name}")
                 }
-            }
+            } as ExportSnapshotQueries
             val proof = ExportSourceProof { binding ->
                 assertFalse("Source proof must run outside the transaction", f.metadata.inTransaction)
                 fileProof?.verify(binding)
                 onProof?.invoke()
             }
+            if (boundAdmission != null) {
+                return RoomExportSnapshots.withBindingAdmission(metadata, queries, proof, boundAdmission, "renderer-v1", "rgb8-v1", backend, "binary64", { 1000L }, Dispatchers.Unconfined)
+            }
             val admission = ExportAdmission {
                 assertFalse("Admission must run outside the transaction", f.metadata.inTransaction)
                 onAdmission?.invoke()
             }
-            return implementation.constructors.single { it.parameterCount == 10 }.newInstance(metadata, queries, proof, admission, "renderer-v1", "rgb8-v1", backend, "binary64", { 1000L }, Dispatchers.Unconfined)
+            return type("RoomExportSnapshots").constructors.single { it.parameterCount == 10 }
+                .newInstance(metadata, queries, proof, admission, "renderer-v1", "rgb8-v1", backend, "binary64", { 1000L }, Dispatchers.Unconfined) as ExportSnapshots
         }
+        fun bindingAwareService(admit: ExportBindingAdmission): ExportSnapshots =
+            service { snapshot, bindings ->
+                assertFalse("Binding-aware admission must run outside the transaction", f.metadata.inTransaction)
+                admit.check(snapshot, bindings)
+            }
+
         suspend fun freeze(expected: Long = 1): Any {
             val service = service(); val method = service.javaClass.methods.single { it.name.startsWith("freezeExport") }
             return suspendCoroutineUninterceptedOrReturn { continuation ->
@@ -207,6 +216,36 @@ class ExportSnapshotTest {
         }
         suspend fun freezeError(document: DocumentId = f.document): OperationError? =
             try { canonical(true, document); null } catch (failure: RepositoryFailure) { failure.error }
+
+        suspend fun bindingFreezeError(service: ExportSnapshots): OperationError? =
+            try { service.freezeExport(f.document, 1, settings); null } catch (failure: RepositoryFailure) { failure.error }
+
+        fun rebindFixturePage(pageId: PageId, target: SourceRow) = with(f.metadata) {
+            val page = pages.getValue(pageId.value)
+            val key = page.pageId to page.currentRecipeRevision
+            pages[page.pageId] = page.copy(sourceId = target.sourceId)
+            recipes[key] = recipes.getValue(key).copy(sourceId = target.sourceId)
+            for ((owner, id) in listOf("PAGE" to page.pageId, "RECIPE_HISTORY" to "recipe-v1/${page.pageId}/${key.second}")) {
+                val reference = checkNotNull(references.remove(Triple(owner, id, page.sourceId)))
+                references[Triple(owner, id, target.sourceId)] = reference.copy(sourceId = target.sourceId)
+            }
+            for (id in listOf(page.sourceId, target.sourceId)) setSourceRefCount(id, countSourceReferences(id))
+        }
+
+        fun installClosedOriginals(): Map<String, ExportSourceBinding> {
+            val fixtureRoot = File("build/freeze-prepare-fixtures").apply { mkdirs() }
+            val files = SourceFiles(Files.createTempDirectory(fixtureRoot.toPath(), "bound-admission-").toFile())
+            fileProof = FileExportSourceProof(files, Dispatchers.Unconfined)
+            return f.metadata.sources.values.mapIndexed { index, source ->
+                val old = f.metadata.blobs.getValue(source.sourceBlobId)
+                val bytes = ByteArray(4 + 3 * index) { (1 + index + it).toByte() }
+                val digest = MessageDigest.getInstance("SHA-256").digest(bytes).joinToString("") { "%02x".format(it.toInt() and 255) }
+                files.finalFile(old.sourceBlobId).apply { checkNotNull(parentFile).mkdirs(); writeBytes(bytes) }
+                val blob = old.copy(byteSha256 = digest, byteCount = bytes.size.toLong())
+                f.metadata.blobs[blob.sourceBlobId] = blob
+                source.sourceId to ExportSourceBinding(source, blob)
+            }.toMap()
+        }
 
         fun assertNoWrites(before: List<Any>) {
             assertEquals("No attempted write (not just no surviving write)", emptyList<String>(), writes)
@@ -447,6 +486,93 @@ class ExportSnapshotTest {
         assertEquals(listOf(keys.first()), h.falseRecipeKeys)
         assertEquals("Final preparation must not re-project the selected recipe", keys, h.recipeReads)
         h.assertNoWrites(clean)
+    }
+
+    @Test fun bindingAdmissionReceivesEveryFrozenOrdinalAfterAllOriginalProofsBeforeWrites() = runTest {
+        val h = Harness(3)
+        val alternate = h.retainEquivalentSource()
+        h.rebindFixturePage(h.f.pageIds.first(), alternate)
+        val bySource = h.installClosedOriginals()
+        val expected = listOf(bySource.getValue(alternate.sourceId), bySource.getValue(h.f.source.value), bySource.getValue(h.f.source.value))
+        val before = h.nonSnapshotState()
+        val onePreparation = listOf("document", "pages", "source", "blob", "source", "blob", "source", "blob")
+        val verified = mutableListOf<ExportSourceBinding>()
+        val proof = checkNotNull(h.fileProof)
+        h.fileProof = ExportSourceProof { binding -> proof.verify(binding); verified += binding }
+        var admitted: ExportSnapshot? = null
+        val service = h.bindingAwareService { snapshot, bindings ->
+            assertNull("Admission is called once", admitted)
+            h.assertNoWrites(before)
+            assertEquals("No second metadata lookup to build admission bindings", onePreparation, h.typedReads)
+            assertEquals("Only completed proofs count, once per distinct source", 2, verified.size)
+            assertEquals(expected.toSet(), verified.toSet())
+            assertEquals("Admission needs one exact tuple per reviewed ordinal, not per proof", expected, bindings)
+            assertEquals(h.f.pageIds, snapshot.pages.map { it.pageId })
+            assertEquals(ExportFormat.PNG, snapshot.settings.format)
+            assertEquals(h.settings.pages, snapshot.settings.pages)
+            for ((ordinal, page) in snapshot.pages.withIndex()) {
+                val (source, blob) = bindings[ordinal]
+                assertEquals(ordinal, page.ordinal)
+                assertEquals(source.sourceId, page.sourceId.value)
+                assertEquals(blob.sourceBlobId, page.sourceBlobId.value)
+                assertEquals(blob.byteSha256, page.byteHash)
+                assertEquals(source.pixelSha256, page.pixelHash)
+                assertEquals(PixelSize(source.width, source.height), page.sourceSize)
+                assertEquals(source.conversionFingerprint, page.conversionFingerprint)
+            }
+            admitted = snapshot
+            assertThrows(UnsupportedOperationException::class.java) { (bindings as MutableList<ExportSourceBinding>).removeAt(0) }
+            null
+        }
+
+        val frozen = service.freezeExport(h.f.document, 1, h.settings)
+
+        assertEquals("Admission must not introduce another file proof", 2, verified.size)
+        assertEquals("Only initial preparation and the final recheck read the originals", onePreparation + onePreparation, h.typedReads)
+        assertEquals(checkNotNull(admitted).snapshotHash, frozen.snapshotHash)
+        assertEquals(frozen.snapshotHash, h.snapshots.values.single().snapshotSha256)
+        assertEquals(expected.map { it.source.sourceId }, h.pages.values.sortedBy { it.ordinal }.map { it.sourceId })
+    }
+
+    @Test fun bindingAdmissionVetoPreservesItsExactSafeErrorAndAttemptsNoWrites() = runTest {
+        val h = Harness(1)
+        h.installClosedOriginals()
+        val before = h.nonSnapshotState()
+        val veto = OperationError(OperationErrorCode.RESOURCE_LIMIT, true, "fixture_bound_export_veto", h.f.pageIds.single().value)
+        var calls = 0
+        val service = h.bindingAwareService { _, _ ->
+            calls++
+            h.assertNoWrites(before)
+            veto
+        }
+
+        val error = h.bindingFreezeError(service)
+
+        assertEquals(1, calls)
+        assertEquals(veto, error)
+        h.assertNoWrites(before)
+    }
+
+    @Test fun bindingAdmissionCannotPublishAfterOriginalTupleChangesWithoutChangingFrozenPageIdentity() = runTest {
+        val h = Harness(1)
+        val original = h.installClosedOriginals().getValue(h.f.source.value)
+        val before = h.nonSnapshotState()
+        var afterChange: List<Any>? = null
+        val service = h.bindingAwareService { _, bindings ->
+            assertNull("Admission is called once", afterChange)
+            assertEquals(original, bindings.single())
+            h.assertNoWrites(before)
+            // A different positive byte count passes the metadata guard and is not hashed in an ExportPage. The original bytes are untouched.
+            h.f.metadata.blobs[original.blob.sourceBlobId] = original.blob.copy(byteCount = original.blob.byteCount + 1)
+            afterChange = h.nonSnapshotState()
+            null
+        }
+
+        val error = h.bindingFreezeError(service)
+
+        assertEquals(listOf(h.f.source.value to true, h.f.source.value to true), h.sourceGuardResults)
+        assertEquals(OperationError(OperationErrorCode.INTEGRITY_FAILED, false, "export_inputs_changed", h.f.document.value), error)
+        h.assertNoWrites(checkNotNull(afterChange))
     }
 
     @Test fun aggregateMetadataAdmitsOneBelowAndExactlyAtLimitButNeverProjectsAboveIt() = runTest {

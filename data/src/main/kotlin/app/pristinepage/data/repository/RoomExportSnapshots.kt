@@ -6,6 +6,7 @@ import app.pristinepage.core.recipe.GeometryRecipe
 import app.pristinepage.core.recipe.RecipeCodec
 import app.pristinepage.data.db.*
 import app.pristinepage.data.model.*
+import java.util.Collections
 import java.util.UUID
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineDispatcher
@@ -14,8 +15,44 @@ import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.withContext
 
 /** Ordinary mask-free snapshot publication. Proof/admission suspend outside Room; the final transaction rechecks exact frozen inputs before its first write. Neither PENDING jobs nor FROZEN rows claim rendering, codec execution or publication. Unsupported retention paths fail closed instead of shedding dependencies. */
-class RoomExportSnapshots @JvmOverloads constructor(private val metadata: MetadataAccess, private val queries: ExportSnapshotQueries, private val proof: ExportSourceProof, private val admission: ExportAdmission, private val rendererVersion: String, private val encodingVersion: String, private val backend: String, private val precision: String, private val clock: () -> Long = System::currentTimeMillis, private val dispatcher: CoroutineDispatcher = Dispatchers.IO) : ExportSnapshots {
+class RoomExportSnapshots private constructor(
+    private val metadata: MetadataAccess,
+    private val queries: ExportSnapshotQueries,
+    private val proof: ExportSourceProof,
+    private val admitPrepared: suspend (ExportSnapshot, List<ExportSourceBinding>) -> OperationError?,
+    private val rendererVersion: String,
+    private val encodingVersion: String,
+    private val backend: String,
+    private val precision: String,
+    private val clock: () -> Long,
+    private val dispatcher: CoroutineDispatcher,
+) : ExportSnapshots {
+    @JvmOverloads
+    constructor(metadata: MetadataAccess, queries: ExportSnapshotQueries, proof: ExportSourceProof, admission: ExportAdmission, rendererVersion: String, encodingVersion: String, backend: String, precision: String, clock: () -> Long = System::currentTimeMillis, dispatcher: CoroutineDispatcher = Dispatchers.IO) :
+        this(metadata, queries, proof, { snapshot, _ -> admission.check(snapshot) }, rendererVersion, encodingVersion, backend, precision, clock, dispatcher)
+
     constructor(database: PristineDatabase, proof: ExportSourceProof, admission: ExportAdmission, rendererVersion: String, encodingVersion: String, backend: String, precision: String) : this(RoomMetadataAccess(database), database.exportSnapshots(), proof, admission, rendererVersion, encodingVersion, backend, precision)
+
+    companion object {
+        // A named factory keeps the existing ten-argument JVM constructor unambiguous and selects only one policy.
+        internal fun withBindingAdmission(
+            metadata: MetadataAccess,
+            queries: ExportSnapshotQueries,
+            proof: ExportSourceProof,
+            admission: ExportBindingAdmission,
+            rendererVersion: String,
+            encodingVersion: String,
+            backend: String,
+            precision: String,
+            clock: () -> Long = System::currentTimeMillis,
+            dispatcher: CoroutineDispatcher = Dispatchers.IO,
+        ): RoomExportSnapshots =
+            RoomExportSnapshots(metadata, queries, proof, { snapshot, bindings ->
+                // Source and Blob rows are immutable scalar values; only the per-ordinal list needs detaching.
+                admission.check(snapshot, Collections.unmodifiableList(ArrayList(bindings)))
+            }, rendererVersion, encodingVersion, backend, precision, clock, dispatcher)
+    }
+
     private val q get() = metadata.queries
     private val profile = OrdinaryExportProfile(rendererVersion,encodingVersion,backend,precision)
     private data class Prepared(val rows: List<ExportPageRow>, val bindings: List<ExportSourceBinding>, val identity: FrozenExportIdentity)
@@ -73,7 +110,7 @@ class RoomExportSnapshots @JvmOverloads constructor(private val metadata: Metada
             }
             val now = clock()
             val snapshot = value(snapshotId, documentId, expectedDocumentRevision, settings, prepared, now)
-            admission.check(snapshot)?.let { throw RepositoryFailure(it) }
+            admitPrepared(snapshot, prepared.bindings)?.let { throw RepositoryFailure(it) }
             coroutineContext.ensureActive()
             metadata.transaction {
                 val live = prepare(snapshotId, documentId, expectedDocumentRevision, settings)
