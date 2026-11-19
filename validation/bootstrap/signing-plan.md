@@ -6,9 +6,9 @@ Current package amendment I-01, explicitly approved2026-11-15: recurring named d
 
 ## Exact approved scope
 
-After bootstrap tests and relevant build/manifest checks pass, generate one new development-only key at `X:\local-workspace\.worktrees\paperlight-v1\.local-signing\debug.keystore`, alias `androiddebugkey`, RSA2048, PKCS12, validity3650days, self-signed subject `CN=PristinePage Development,O=Local Development`. Refuse to overwrite or adopt an unexpected existing key. The standard public development password `android` is not a user secret or a production credential. Keep the private key ignored and never print, commit or upload it.
+The one-time bootstrap generated the development-only key at `X:\local-workspace\.worktrees\paperlight-v1\.local-signing\debug.keystore`, alias `androiddebugkey`, RSA2048, PKCS12, validity3650days, self-signed subject `CN=PristinePage Development,O=Local Development`. Recurring builds use the exact approved key; refuse to overwrite or adopt an unexpected key. The standard public development password `android` is not a user secret or a production credential. Keep the private key ignored and never print, commit or upload it.
 
-Proposed command from the primary worktree:
+Historical one-time command from the original primary worktree; do not rerun:
 
 ```text
 "C:\Program Files\Android\Android Studio\jbr\bin\keytool.exe" -genkeypair -noprompt -storetype PKCS12 -keyalg RSA -keysize 2048 -validity 3650 -alias androiddebugkey -storepass android -keypass android -dname "CN=PristinePage Development,O=Local Development" -keystore .local-signing/debug.keystore
@@ -20,6 +20,6 @@ APK tasks would be `:app:assembleDebug` and, when instrumented tests exist, `:ap
 
 ## Verification and exclusions
 
-Verify signatures using installed Build Tools35.0.0 `apksigner.bat verify --verbose --print-certs app/build/outputs/apk/debug/app-debug.apk`; retain public certificate fingerprint, APK SHA-256, byte length, package/version/minSDK/ABI and actual packaged manifest/resource inspection. Inspect test-APK signatures separately when built. Signing does not establish functionality, fidelity, offline/device acceptance or production readiness.
+Verify signatures with `apksigner.bat verify --verbose --print-certs <apk>` from the installed SDK Build Tools version explicitly pinned in `gradle/libs.versions.toml` (currently `36.0.0`; see the [Build Tools handoff](build-tools-36-handoff.md) for the recorded tool hashes). Run it separately on each current app and test APK and compare each signer to the approved development certificate in the [bootstrap receipt](apk-receipt.md). Retain the certificate fingerprint, APK SHA-256, byte length, package/version/minSDK/ABI and actual packaged manifest/resource inspection. Historical commands and artifact receipts keep their original versions. Signing does not establish functionality, fidelity, offline/device acceptance or production readiness.
 
 No phone/emulator installation, app launch, permissions/settings change, app-data clearing, external sharing, model acquisition, production/store signing or publication is included. Those require their own named-target approval. Build outputs are regenerable; any retained milestone delivery uses a unique version/hash filename under ignored `dist/`, never an unrelated user's file. The key/cache/outputs remain for manual cleanup.
