@@ -4,6 +4,7 @@ import app.pristinepage.core.pipeline.RenderCoordinator
 import app.pristinepage.core.pipeline.RenderRequest
 import app.pristinepage.core.pipeline.RenderResult
 import app.pristinepage.core.pipeline.RenderStatus
+import app.pristinepage.core.recipe.SourceBinding
 import app.pristinepage.data.model.OperationErrorCode
 import app.pristinepage.data.model.RepositoryFailure
 import app.pristinepage.image.preview.RenderedPreviewBitmap
@@ -19,7 +20,7 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 
 /** The preview is borrowed from the scheduler, not another owner. A view must copy/convert it within the owning lifecycle; neither the result nor its pixels belong in saved state. Previous explicitly distinguishes an older completed same-page image from the requested selection. */
-data class PreviewState(val request: RenderRequest? = null, val preview: RenderResult? = null, val processing: Boolean = false, val failure: RenderStatus? = null, val previous: Boolean = false, val display: RenderedPreviewBitmap? = null)
+data class PreviewState(val request: RenderRequest? = null, val preview: RenderResult? = null, val processing: Boolean = false, val failure: RenderStatus? = null, val previous: Boolean = false, val display: RenderedPreviewBitmap? = null, val view: EditorView = EditorView.RESULT)
 
 /** Main-confined selected-only interactive work, never WorkManager or a second render queue. The Application renderer still serializes/admit processes. The session calls close before its scope ends; native work that ignores cancellation may finish privately but cannot publish or escape ownership. Neighbor/card prioritization, debounce, bitmap lifetime and durable source pins are separate consumers. */
 class PreviewScheduler @JvmOverloads constructor(private val renderer: RenderCoordinator, private val scope: CoroutineScope, private val converter: RenderedPreviewBitmaps? = null) : AutoCloseable {
@@ -29,17 +30,12 @@ class PreviewScheduler @JvmOverloads constructor(private val renderer: RenderCoo
     private var generation = 0L
     private var closed = false
 
-    fun schedule(request: RenderRequest) {
+    @JvmOverloads fun schedule(request: RenderRequest, view: EditorView = EditorView.RESULT) {
         check(!closed) { "Preview session is closed" }
         // Never reuse a generation after Undo, retry or a page switch. Pixel identity alone does not distinguish an obsolete in-flight request from a newly selected identical recipe (ABA).
         require(request.generation > generation && request.recipeRevision > 0) { "A preview request needs a newer positive generation and retained revision" }
         generation = request.generation
-        work?.cancel()
-        val oldState = current.value
-        val old = oldState.preview
-        val previous = old?.takeIf { samePageSource(it.request, request) }
-        current.value = PreviewState(request, previous, processing = true, previous = previous != null, display = oldState.display.takeIf { previous != null })
-        if (old !== previous) release(oldState)
+        replace(PreviewState(request, processing = true, view = view), request.pageId, request.sourceId, request.recipe.geometry.source)
         work = scope.launch {
             var candidate: RenderResult? = null
             var display: RenderedPreviewBitmap? = null
@@ -59,7 +55,7 @@ class PreviewScheduler @JvmOverloads constructor(private val renderer: RenderCoo
                         if (!isCurrent(request)) return@launch
                         if (display != null && display.request != request) { fail(request, RenderStatus.PROCESSING_FAILED); return@launch }
                         val replaced = current.value
-                        current.value = PreviewState(request, candidate, display = display)
+                        current.value = PreviewState(request, candidate, display = display, view = view)
                         candidate = null // Transfer the WHOLE result, including accounting, only after publication succeeded.
                         display = null
                         release(replaced)
@@ -92,7 +88,22 @@ class PreviewScheduler @JvmOverloads constructor(private val renderer: RenderCoo
         if (isCurrent(request)) current.value = current.value.copy(processing = false, failure = status, previous = current.value.preview != null)
     }
 
-    private fun samePageSource(a: RenderRequest, b: RenderRequest) = a.pageId == b.pageId && a.sourceId == b.sourceId && a.sourcePixelHash == b.sourcePixelHash && a.recipe.geometry.source == b.recipe.geometry.source
+    /** Sizing can reject a quad before there is an OutputSpec. Cancel the obsolete job and keep only a previous image from this source; no request can prove readiness here. */
+    internal fun rejectSizing(pageId: String, sourceId: String, source: SourceBinding, status: RenderStatus) {
+        replace(PreviewState(failure = status), pageId, sourceId, source)
+    }
+
+    private fun replace(next: PreviewState, pageId: String, sourceId: String, source: SourceBinding) {
+        val old = current.value
+        val previous = old.preview?.takeIf {
+            it.request.pageId == pageId && it.request.sourceId == sourceId &&
+                it.request.sourcePixelHash == source.sourcePixelHash && it.request.recipe.geometry.source == source
+        }
+        // Invalidate publication before cancellation, including Main.immediate cancellation handlers.
+        current.value = next.copy(preview = previous, previous = previous != null, display = old.display.takeIf { previous != null })
+        work?.cancel()
+        if (old.preview !== previous) release(old)
+    }
 
     /** Detach draw state before releasing both owners. Pause is reversible but never resets generation, so late work cannot exploit request reuse after resume. */
     fun clear() {

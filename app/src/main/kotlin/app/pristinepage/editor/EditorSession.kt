@@ -2,6 +2,7 @@ package app.pristinepage.editor
 
 import app.pristinepage.core.geometry.GeometrySizing
 import app.pristinepage.core.pipeline.*
+import app.pristinepage.core.recipe.GeometryRecipe
 import app.pristinepage.core.recipe.RecipeCodec
 import app.pristinepage.data.model.*
 import app.pristinepage.image.preview.RenderedPreviewBitmaps
@@ -21,6 +22,7 @@ class EditorSession @JvmOverloads constructor(documentId: String, pageId: String
     private var history: RecipeHistory? = null
     private var loading: Job? = null
     private var saving: Job? = null
+    private var shapeDrag: ShapeDrag? = null
     private var generation = 0L
     private var active = true
     private var closed = false
@@ -52,6 +54,11 @@ class EditorSession @JvmOverloads constructor(documentId: String, pageId: String
 
     fun edit(recipe: Recipe) {
         val edits = editable() ?: return
+        endShapeDrag()
+        replaceDraft(edits, recipe)
+    }
+
+    private fun replaceDraft(edits: RecipeHistory, recipe: Recipe) {
         if (!edits.replace(recipe)) {
             // Choosing an already-selected recipe while looking at a reference still returns to its Result, without inventing another history entry or a dirty draft.
             if (current.value.view != EditorView.RESULT) { current.value = current.value.copy(view = EditorView.RESULT); renderDraft() }
@@ -64,15 +71,53 @@ class EditorSession @JvmOverloads constructor(documentId: String, pageId: String
         if (editable() == null) return
         val view = EditorViews.parse(id)
         if (current.value.view == view) return
+        endShapeDrag()
         current.value = current.value.copy(view = view)
         renderDraft()
     }
 
     fun rotateClockwise() { editable()?.current?.let { edit(it.copy(geometry = it.geometry.withOutputQuarterTurns((it.geometry.outputQuarterTurns + 1) % 4))) } }
     fun chooseLook(id: String) { editable()?.current?.let { edit(EditorLooks.select(it, id)) } }
-    fun undo() { val edits = editable() ?: return; if (!edits.canUndo) return; edits.undo(); updateDraft(); renderDraft() }
-    fun redo() { val edits = editable() ?: return; if (!edits.canRedo) return; edits.redo(); updateDraft(); renderDraft() }
-    fun discard() { val edits = editable() ?: return; edits.discard(); updateDraft(); renderDraft() }
+    internal fun resetShape() = editShape(EditorShapes::reset)
+    internal fun selectPerspective() = editShape(EditorShapes::perspective)
+    internal fun selectManualCurve() = editShape(EditorShapes::manualCurve)
+    internal class ShapeDrag(val label: ShapePoint, val horizontal: Boolean)
+
+    internal fun beginShapeDrag(label: ShapePoint, horizontal: Boolean): ShapeDrag? {
+        val edits = editable() ?: return null
+        if (!active || current.value.confirmExit || label !in EditorShapes.points(edits.current.geometry)) return null
+        endShapeDrag()
+        edits.beginGesture()
+        return ShapeDrag(label, horizontal).also { shapeDrag = it }
+    }
+
+    internal fun endShapeDrag(drag: ShapeDrag? = shapeDrag) {
+        if (drag == null || drag !== shapeDrag) return
+        shapeDrag = null
+        val edits = checkNotNull(history)
+        edits.endGesture()
+    }
+
+    internal fun setShapeCoordinate(label: ShapePoint, horizontal: Boolean, value: Double, drag: ShapeDrag? = null) {
+        val edits = editable() ?: return
+        if (!active || current.value.confirmExit) return
+        if (drag == null) endShapeDrag()
+        else if (drag !== shapeDrag || drag.label != label || drag.horizontal != horizontal) return
+        // Read the other axis from the current draft rather than a potentially not-yet-recomposed slider lambda.
+        val draft = edits.current
+        val point = EditorShapes.points(draft.geometry)[label] ?: return
+        val moved = if (horizontal) point.copy(x = value) else point.copy(y = value)
+        replaceDraft(edits, draft.copy(geometry = EditorShapes.setPoint(draft.geometry, label, moved)))
+    }
+
+    private fun editShape(change: (GeometryRecipe) -> GeometryRecipe) {
+        val draft = editable()?.current ?: return
+        edit(draft.copy(geometry = change(draft.geometry)))
+    }
+
+    fun undo() { val edits = editable() ?: return; endShapeDrag(); if (!edits.canUndo) return; edits.undo(); updateDraft(); renderDraft() }
+    fun redo() { val edits = editable() ?: return; endShapeDrag(); if (!edits.canRedo) return; edits.redo(); updateDraft(); renderDraft() }
+    fun discard() { val edits = editable() ?: return; endShapeDrag(); edits.discard(); updateDraft(); renderDraft() }
 
     private fun updateDraft() {
         val edits = checkNotNull(history)
@@ -83,17 +128,16 @@ class EditorSession @JvmOverloads constructor(documentId: String, pageId: String
         if (closed || !active) return
         val page = current.value.page ?: return
         val draft = current.value.draft ?: return
-        val recipe = EditorViews.recipe(draft, current.value.view)
+        val view = current.value.view
+        val recipe = EditorViews.recipe(draft, view)
         try {
             generation = Math.addExact(generation, 1)
             val output = GeometrySizing.output(recipe.geometry, RenderPurpose.PREVIEW, 1024)
-            scheduler.schedule(RenderRequest(page.sourceId.value, recipe.geometry.source.sourcePixelHash, page.pageId.value, page.recipeRevision, recipe, output, generation, null, FallbackPolicy.FAIL))
+            scheduler.schedule(RenderRequest(page.sourceId.value, recipe.geometry.source.sourcePixelHash, page.pageId.value, page.recipeRevision, recipe, output, generation, null, FallbackPolicy.FAIL), view)
         } catch (_: IllegalArgumentException) {
-            scheduler.clear()
-            current.value = current.value.copy(error = OperationError(OperationErrorCode.INVALID_INPUT, false, "editor_geometry_invalid", selected.value))
+            scheduler.rejectSizing(page.pageId.value, page.sourceId.value, recipe.geometry.source, RenderStatus.INVALID_INPUT)
         } catch (_: ArithmeticException) {
-            scheduler.clear()
-            current.value = current.value.copy(error = OperationError(OperationErrorCode.RESOURCE_LIMIT, false, "editor_generation_limit", selected.value))
+            scheduler.rejectSizing(page.pageId.value, page.sourceId.value, recipe.geometry.source, RenderStatus.RESOURCE_LIMIT)
         }
     }
 
@@ -101,7 +145,7 @@ class EditorSession @JvmOverloads constructor(documentId: String, pageId: String
     fun setActive(value: Boolean) {
         if (closed || active == value) return
         active = value
-        if (active) renderDraft() else scheduler.clear()
+        if (active) renderDraft() else { endShapeDrag(); scheduler.clear() }
     }
 
     fun apply() = save(andBack = false)
@@ -109,6 +153,9 @@ class EditorSession @JvmOverloads constructor(documentId: String, pageId: String
     private fun save(andBack: Boolean) {
         val edits = editable() ?: return
         if (!edits.dirty) { if (andBack) exit(); return }
+        // Both Apply paths pass this guard before enqueueing the repository CAS, not just when the buttons recompose.
+        if (current.value.shapeBlocksApply(preview.value)) return
+        endShapeDrag()
         val page = checkNotNull(current.value.page)
         val draft = edits.current
         current.value = current.value.copy(saving = true, error = null, confirmExit = false)
@@ -139,15 +186,17 @@ class EditorSession @JvmOverloads constructor(documentId: String, pageId: String
     private fun saveFailed(error: OperationError) { if (!closed) current.value = current.value.copy(saving = false, error = error) }
     fun requestBack() {
         if (closed || current.value.saving) return
+        endShapeDrag()
         if (current.value.dirty) current.value = current.value.copy(confirmExit = true) else exit()
     }
     fun keepEditing() { if (!closed) current.value = current.value.copy(confirmExit = false) }
     fun discardAndBack() { val edits = editable() ?: return; edits.discard(); updateDraft(); exit() }
-    private fun exit() { current.value = current.value.copy(exitReady = true, confirmExit = false); close() }
+    private fun exit() { endShapeDrag(); current.value = current.value.copy(exitReady = true, confirmExit = false); close() }
 
     override fun close() {
         if (closed) return
         closed = true
+        endShapeDrag()
         loading?.cancel(); saving?.cancel()
         scheduler.close()
     }

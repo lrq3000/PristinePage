@@ -12,6 +12,8 @@ import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.semantics.LiveRegionMode
+import androidx.compose.ui.semantics.liveRegion
 import androidx.compose.ui.semantics.selected
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
@@ -40,8 +42,9 @@ class PageEditorScreen : EditorContent {
         LaunchedEffect(session, state.exitReady) { if (state.exitReady) exit() }
         BackHandler(enabled = !state.exitReady) { session.requestBack() }
         val editable = state.page != null && !state.loading && !state.saving && !state.exitReady
+        val shapeBlocksApply = state.shapeBlocksApply(preview)
         val expected = state.draft?.let { EditorViews.recipe(it,state.view) }
-        val showingCurrent = !preview.previous && preview.display?.request == preview.request && preview.display?.request?.recipe == expected
+        val showingCurrent = !preview.previous && preview.view == state.view && preview.display?.request == preview.request && preview.display?.request?.recipe == expected
         val viewLabel = when (state.view) {
             EditorView.RESULT -> R.string.editor_view_result
             EditorView.GEOMETRY_INPUT -> R.string.editor_view_input
@@ -84,12 +87,15 @@ class PageEditorScreen : EditorContent {
                     RenderStatus.RESOURCE_LIMIT -> R.string.error_resource_limit
                     RenderStatus.STORAGE_FAILED -> R.string.error_storage_failed
                     RenderStatus.UNAVAILABLE -> R.string.error_provider_unavailable
-                    RenderStatus.INVALID_INPUT -> R.string.error_invalid_input
+                    RenderStatus.INVALID_INPUT -> if (preview.request == null) R.string.editor_shape_invalid_input else R.string.error_invalid_input
+                    RenderStatus.INVALID_MAP -> R.string.editor_shape_invalid_map
                     RenderStatus.CANCELED -> R.string.error_canceled
                     else -> R.string.error_processing
-                }), color = MaterialTheme.colorScheme.error)
+                }), modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite }, color = MaterialTheme.colorScheme.error)
                 Button(onClick = session::retryPreview, enabled = editable, modifier = control("editor-retry-preview")) { Text(stringResource(R.string.editor_retry_preview)) }
             }
+            state.draft?.let { EditorShapeControls(it.geometry, editable, session) }
+            if (shapeBlocksApply) ShapeSaveNotice(state, preview)
             listOf("result" to R.string.editor_view_result, "input" to R.string.editor_view_input, "original" to R.string.editor_view_original).forEach { (id, label) ->
                 OutlinedButton(onClick = { session.showView(id) }, enabled = editable, modifier = control("editor-view-$id").semantics { selected = state.view == EditorViews.parse(id) }) { Text(stringResource(label)) }
             }
@@ -99,14 +105,14 @@ class PageEditorScreen : EditorContent {
             Button(onClick = session::undo, enabled = editable && state.canUndo, modifier = control("editor-undo")) { Text(stringResource(R.string.editor_undo)) }
             Button(onClick = session::redo, enabled = editable && state.canRedo, modifier = control("editor-redo")) { Text(stringResource(R.string.editor_redo)) }
             OutlinedButton(onClick = session::discard, enabled = editable && state.dirty, modifier = control("editor-discard")) { Text(stringResource(R.string.editor_discard)) }
-            Button(onClick = session::apply, enabled = editable && state.dirty, modifier = control("editor-apply")) { Text(stringResource(R.string.editor_apply)) }
+            Button(onClick = session::apply, enabled = editable && state.dirty && !shapeBlocksApply, modifier = control("editor-apply")) { Text(stringResource(R.string.editor_apply)) }
         }
         if (state.confirmExit) AlertDialog(
             modifier = Modifier.testTag("editor-exit-choice"),
             onDismissRequest = session::keepEditing,
             title = { Text(stringResource(R.string.editor_exit_title)) },
-            text = { Text(stringResource(R.string.editor_exit_notice)) },
-            confirmButton = { TextButton(onClick = session::applyAndBack, modifier = Modifier.heightIn(min = 48.dp).testTag("editor-apply-exit")) { Text(stringResource(R.string.editor_apply)) } },
+            text = { if (shapeBlocksApply) ShapeSaveNotice(state, preview) else Text(stringResource(R.string.editor_exit_notice)) },
+            confirmButton = { TextButton(onClick = session::applyAndBack, enabled = editable && !shapeBlocksApply, modifier = Modifier.heightIn(min = 48.dp).testTag("editor-apply-exit")) { Text(stringResource(R.string.editor_apply)) } },
             dismissButton = { Column {
                 TextButton(onClick = session::keepEditing, modifier = Modifier.heightIn(min = 48.dp).testTag("editor-keep-editing")) { Text(stringResource(R.string.editor_keep_editing)) }
                 TextButton(onClick = session::discardAndBack, modifier = Modifier.heightIn(min = 48.dp).testTag("editor-discard-exit")) { Text(stringResource(R.string.editor_discard_exit)) }
@@ -115,4 +121,13 @@ class PageEditorScreen : EditorContent {
     }
 
     private fun control(tag: String) = Modifier.fillMaxWidth().heightIn(min = 48.dp).testTag(tag)
+}
+
+@Composable private fun ShapeSaveNotice(state: EditorState, preview: PreviewState) {
+    val message = when {
+        state.view != EditorView.RESULT -> R.string.editor_shape_need_result
+        preview.failure != null -> R.string.editor_shape_unverified
+        else -> R.string.editor_shape_wait
+    }
+    Text(stringResource(message), modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite })
 }
