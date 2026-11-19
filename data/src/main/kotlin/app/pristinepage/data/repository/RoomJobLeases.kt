@@ -7,6 +7,7 @@ import app.pristinepage.data.model.*
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.withContext
 
@@ -84,11 +85,47 @@ class RoomJobLeases @JvmOverloads constructor(private val metadata: MetadataAcce
             database.exportSnapshots()::renderJobLeaseReadIsBounded,
         )
 
-        private val projection = RoomFrozenRenderReads.Projection(metadata.queries, jobBounds, jobIdentity, pinSourceIds, sourceBounds)
+        private val catalog = metadata.queries
+        private val projection = RoomFrozenRenderReads.Projection(catalog, jobBounds, jobIdentity, pinSourceIds, sourceBounds)
         private val leases = RoomJobLeases(metadata, jobs, liveness, auditClock, leaseClock, dispatcher)
+
+        sealed interface ProducerResult {
+            data class Busy(val state: String) : ProducerResult
+            data class Rejected(val error: OperationError) : ProducerResult
+        }
+
+        /** The original admission and the exact delivered lease travel together; a separate read or a lookalike lease cannot reconstruct this grant. */
+        class Acquired private constructor(
+            val admitted: RoomFrozenRenderAdmission.Admitted,
+            override val lease: JobLease,
+        ) : ProducerResult, RenderAttemptAuthority {
+            override val proof get() = admitted.proof
+
+            fun belongsTo(catalog: CatalogQueries): Boolean = admitted.issuedBy(catalog)
+
+            companion object {
+                /** Perform the guarded acquisition; there is no upgrade of a separately returned legacy lease. */
+                suspend fun acquire(
+                    acquisition: FrozenRenderAcquisition, admitted: RoomFrozenRenderAdmission.Admitted, owner: String, durationMillis: Long,
+                ): ProducerResult = when (val result = acquisition.acquire(admitted, owner, durationMillis)) {
+                    is AcquireLeaseResult.Granted -> Acquired(admitted, result.lease)
+                    is AcquireLeaseResult.Busy -> ProducerResult.Busy(result.state)
+                    is AcquireLeaseResult.Rejected -> ProducerResult.Rejected(result.error)
+                }
+            }
+        }
+
+        suspend fun acquireForProducer(admitted: RoomFrozenRenderAdmission.Admitted, owner: String, durationMillis: Long): ProducerResult =
+            Acquired.acquire(this, admitted, owner, durationMillis)
 
         suspend fun acquire(admitted: RoomFrozenRenderAdmission.Admitted, owner: String, durationMillis: Long): AcquireLeaseResult {
             val proof = admitted.proof
+            if (!admitted.issuedBy(catalog)) {
+                currentCoroutineContext().ensureActive()
+                return AcquireLeaseResult.Rejected(OperationError(
+                    OperationErrorCode.INTEGRITY_FAILED, false, "frozen_render_admission_store_mismatch", proof.jobId.value,
+                ))
+            }
             return leases.acquire(proof.jobId, owner, durationMillis) { active ->
                 val jobId = proof.jobId
                 // Revalidate the exact narrow identity and live binding before admitting the remaining fields for SELECT *.

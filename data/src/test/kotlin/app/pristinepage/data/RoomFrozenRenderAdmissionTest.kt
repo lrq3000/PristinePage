@@ -7,6 +7,7 @@ import app.pristinepage.core.pipeline.RenderPurpose
 import app.pristinepage.data.db.*
 import app.pristinepage.data.model.*
 import app.pristinepage.data.repository.*
+import java.io.IOException
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
@@ -225,6 +226,32 @@ class RoomFrozenRenderAdmissionTest {
         f.assertStored(before)
     }
 
+    @Test fun countOneButTransactionCompletionFailureDoesNotDeliverAdmissionReceipt() = runTest {
+        val f = fixture()
+        val before = f.stored()
+        var completionReached = false
+        f.afterWriterBody = {
+            assertEquals(listOf(1), f.casResults)
+            assertEquals("ADMITTED", f.job.state)
+            completionReached = true
+            throw IOException("Synthetic failure completing the admission transaction")
+        }
+        var returned = false
+        try {
+            f.admit()
+            returned = true
+            fail("Admission returned after transaction completion failed")
+        } catch (failure: RepositoryFailure) {
+            assertEquals(OperationError(OperationErrorCode.STORAGE_FAILED, true, "frozen_render_admission_storage_failed", f.jobId.value),
+                failure.error)
+        }
+        assertTrue(completionReached)
+        assertFalse(returned)
+        assertEquals(1, f.preflightCalls)
+        assertEquals(listOf(proofReads, proofReads + "cas"), f.transactions)
+        f.assertStored(before)
+    }
+
     @Test fun impossibleCasCountFailsClosedAndDiscardsTheProvisionalMutation() = runTest {
         val f = fixture()
         val before = f.stored()
@@ -246,7 +273,7 @@ class RoomFrozenRenderAdmissionTest {
         }.join()
     }
 
-    private data class Stored(
+    internal data class Stored(
         val job: JobRow,
         val references: Map<Triple<String, String, String>, SourceReferenceRow>,
         val sources: Map<String, SourceRow>,
@@ -255,7 +282,7 @@ class RoomFrozenRenderAdmissionTest {
 
     private suspend fun fixture(retained: OrdinaryExportProfile = profile) = Fixture().apply { freeze(retained) }
 
-    private class Fixture {
+    internal class Fixture(private val traceSourceProjection: Boolean = true) {
         private val repository = RepositoryFixture(count = 1)
         val catalog = repository.metadata
         private val jobs = LinkedHashMap<String, JobRow>()
@@ -277,11 +304,12 @@ class RoomFrozenRenderAdmissionTest {
             private set
         var refusedGuard: String? = null
         var afterFirstTransaction: () -> Unit = {}
+        var afterWriterBody: () -> Unit = {}
         var onBlobProjection: () -> Unit = {}
         var overrideCount: Int? = null
         var now = admissionTime
 
-        suspend fun freeze(retained: OrdinaryExportProfile) {
+        suspend fun freeze(retained: OrdinaryExportProfile = profile) {
             val snapshots = object : ExportSnapshotQueries {
                 override fun insertSnapshot(row: ExportSnapshotRow) = Unit
                 override fun insertExportPage(row: ExportPageRow) = Unit
@@ -311,7 +339,8 @@ class RoomFrozenRenderAdmissionTest {
 
         // Keep Room's transactions and typed access as doubles, but not the canonical read or write authorization logic.
         private val metadata = object : MetadataAccess {
-            override val queries: CatalogQueries = object : CatalogQueries by catalog {
+            // The producer tests need the same catalog identity across the admission and writer adapters, as in real Room.
+            override val queries: CatalogQueries = if (!traceSourceProjection) catalog else object : CatalogQueries by catalog {
                 override fun source(id: String): SourceRow? {
                     typedAfter("source bounds", "source")
                     assertEquals(pinIds().singleOrNull(), id)
@@ -334,7 +363,12 @@ class RoomFrozenRenderAdmissionTest {
                 admittedGuards.clear()
                 val before = job
                 val result = try {
-                    catalog.transaction(action)
+                    catalog.transaction {
+                        val value = action()
+                        // The body, including the CAS result branch, has returned. Throw before the fake transaction returns to admission.
+                        if (transactions.size == 2) afterWriterBody()
+                        value
+                    }
                 } catch (failure: Throwable) {
                     job = before
                     throw failure
@@ -440,6 +474,24 @@ class RoomFrozenRenderAdmissionTest {
 
         fun stored() = Stored(job.copy(input = job.input.copyOf(), checkpoint = job.checkpoint?.copyOf()),
             catalog.references.toMap(), catalog.sources.toMap(), catalog.blobs.toMap())
+
+        /** Copy only the frozen writer's input rows to an independent store; neither store has admitted the job yet. */
+        fun forkPendingRender(): Fixture {
+            check(job.state == "PENDING")
+            val pending = stored()
+            return Fixture(traceSourceProjection).also { other ->
+                other.page = page
+                other.frozenJobId = jobId
+                other.job = pending.job
+                other.canonical = pending.job.copy(input = pending.job.input.copyOf())
+                other.catalog.sources.clear()
+                other.catalog.sources.putAll(pending.sources.mapValues { it.value.copy() })
+                other.catalog.blobs.clear()
+                other.catalog.blobs.putAll(pending.blobs.mapValues { it.value.copy() })
+                other.catalog.references.clear()
+                other.catalog.references.putAll(pending.references.mapValues { it.value.copy() })
+            }
+        }
 
         fun assertStored(expected: Stored) {
             assertEquals(expected.job.copy(input = job.input, checkpoint = job.checkpoint), job)

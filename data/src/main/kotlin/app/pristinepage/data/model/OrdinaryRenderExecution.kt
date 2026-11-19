@@ -9,7 +9,9 @@ import app.pristinepage.core.pipeline.RenderResult
 import app.pristinepage.core.pipeline.RenderStatus
 import app.pristinepage.core.pipeline.requireSha256
 import app.pristinepage.core.recipe.RecipeCodec
+import app.pristinepage.data.repository.RenderAttemptAuthority
 import app.pristinepage.data.repository.RoomFrozenRenderReads
+import app.pristinepage.data.repository.RoomJobLeases.FrozenRenderAcquisition.Acquired
 import java.io.ByteArrayOutputStream
 import java.io.DataOutputStream
 import java.security.MessageDigest
@@ -25,12 +27,19 @@ internal class OrdinaryRenderExecution private constructor(
     val cacheKey: String,
     val rasterSha256: String,
     val size: PixelSize,
+    private val capturedWith: Acquired?,
 ) {
     fun bytes(): ByteArray = envelope.copyOf()
     fun sameExecution(other: OrdinaryRenderExecution): Boolean = envelope.contentEquals(other.envelope)
 
-    fun matches(proof: RoomFrozenRenderReads.Verified, raster: String): Boolean =
-        sourceId == proof.page.sourceId && blobId == proof.page.sourceBlobId && sourceByteSha256 == proof.page.byteHash &&
+    /** In-memory capture authority, deliberately excluded from the v1 envelope. Equal serialized provenance cannot upgrade a legacy capture. */
+    fun capturedFor(authority: RenderAttemptAuthority): Boolean = when (authority) {
+        is Acquired -> capturedWith === authority
+        is RenderAttemptAuthority.Legacy -> capturedWith == null
+    }
+
+    fun matches(proof: RoomFrozenRenderReads.Verified, intent: RenderFileIntent, raster: String): Boolean =
+        sourceId == intent.sourceId && blobId == intent.sourceBlobId && sourceByteSha256 == intent.sourceByteSha256 &&
             preExecutionKey == proof.preExecutionKey && rasterSha256 == raster
 
     companion object {
@@ -63,11 +72,23 @@ internal class OrdinaryRenderExecution private constructor(
             "render-cache-v1:" + sha256(("pristinepage-ordinary-render-cache-v1\u0000" + preExecutionKey + executionHash).encodeToByteArray())
 
         /** Borrow only. Run outside Room; never retain the raster, rederive stage results from a recipe, or close the result owner here. */
-        fun capture(proof: RoomFrozenRenderReads.Verified, result: RenderResult, checkpoint: () -> Unit): OrdinaryRenderExecution {
+        fun capture(proof: RoomFrozenRenderReads.Verified, result: RenderResult, checkpoint: () -> Unit): OrdinaryRenderExecution =
+            capture(proof, null, result, checkpoint)
+
+        fun capture(authority: RenderAttemptAuthority, result: RenderResult, checkpoint: () -> Unit): OrdinaryRenderExecution =
+            capture(authority.proof, authority as? Acquired, result, checkpoint)
+
+        private fun capture(
+            proof: RoomFrozenRenderReads.Verified, acquired: Acquired?, result: RenderResult, checkpoint: () -> Unit,
+        ): OrdinaryRenderExecution {
+            val producer = acquired?.proof?.pinnedBinding
             val page = proof.page
+            val sourceId = producer?.source?.sourceId?.let(::SourceId) ?: page.sourceId
+            val blobId = producer?.blob?.sourceBlobId?.let(::SourceBlobId) ?: page.sourceBlobId
+            val sourceByteSha256 = producer?.blob?.byteSha256 ?: page.byteHash
             val preExecutionKey = proof.preExecutionKey
             requirePreExecutionKey(preExecutionKey)
-            val expected = RenderRequest(page.sourceId.value, page.pixelHash, page.pageId.value, page.recipeRevision,
+            val expected = RenderRequest(sourceId.value, page.pixelHash, page.pageId.value, page.recipeRevision,
                 RecipeCodec.decode(page.canonicalRecipe), page.output, 0, null, FallbackPolicy.FAIL)
             require(page.output == page.requestedOutput && page.output.purpose == RenderPurpose.EXPORT && page.fallbackPolicy == FallbackPolicy.FAIL)
             require(result.request == expected && result.status == RenderStatus.OK)
@@ -76,6 +97,11 @@ internal class OrdinaryRenderExecution private constructor(
             require(size == expected.output.size)
             val stages = result.stages
             require(stages.size in MIN_STAGES..LIST_LIMIT && stages.first().outputSize == page.sourceSize && stages.last().outputSize == size)
+            if (producer != null) {
+                val decode = stages.first()
+                require(decode.stageId == "source_decode_v1" && decode.version == 1 && decode.outcome == "OK" &&
+                    decode.inputSize == PixelSize(producer.blob.encodedWidth, producer.blob.encodedHeight))
+            }
             val bytes = ByteArrayOutputStream()
             val raster: String
             DataOutputStream(bytes).use { out ->
@@ -94,7 +120,7 @@ internal class OrdinaryRenderExecution private constructor(
 
                 out.write(ENVELOPE_TAG.encodeToByteArray())
                 text(preExecutionKey)
-                text(expected.pageId); text(expected.sourceId); text(page.sourceBlobId.value); text(page.byteHash); text(expected.sourcePixelHash)
+                text(expected.pageId); text(expected.sourceId); text(blobId.value); text(sourceByteSha256); text(expected.sourcePixelHash)
                 out.writeLong(expected.recipeRevision); text(page.recipeHash)
                 dimensions(expected.output.size); text(expected.output.purpose.name); text(expected.fallback.name)
                 text(result.status.name); dimensions(size)
@@ -115,7 +141,7 @@ internal class OrdinaryRenderExecution private constructor(
             val envelope = bytes.toByteArray()
             val hash = sha256(envelope)
             val key = cacheKey(preExecutionKey, hash)
-            return OrdinaryRenderExecution(page.sourceId, page.sourceBlobId, page.byteHash, preExecutionKey, envelope, hash, key, raster, size)
+            return OrdinaryRenderExecution(sourceId, blobId, sourceByteSha256, preExecutionKey, envelope, hash, key, raster, size, acquired)
         }
 
         /** Hash only active samples of the retained raster, using the same row digest as closed-file verification. */

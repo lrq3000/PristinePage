@@ -64,6 +64,10 @@ internal class RoomFrozenRenderReads(
         private fun matchesIdentity(id: String, kind: String, key: String, digest: String, bytes: ByteArray): Boolean =
             id == jobId.value && kind == "PAGE_RENDER" && key == preExecutionKey && digest == canonicalInputSha256 && bytes.contentEquals(input)
 
+        internal fun hasSameProducer(pinId: String, binding: ExportSourceBinding): Boolean =
+            pinId == pinSourceId && binding.source.refCount > 0 && binding.blob.sourceCount > 0 &&
+                binding.sameImmutableBindingAs(pinnedBinding)
+
         internal fun requireUnchangedForLease(row: FrozenRenderJobIdentityRow, pinId: String, binding: ExportSourceBinding) {
             if (!matchesIdentity(row.jobId, row.kind, row.idempotenceKey, row.canonicalInputSha256, row.input)) {
                 refuse(jobId, OperationErrorCode.INTEGRITY_FAILED, "frozen_render_job_invalid")
@@ -73,7 +77,7 @@ internal class RoomFrozenRenderReads(
             } catch (_: IllegalArgumentException) {
                 refuse(jobId, OperationErrorCode.INTEGRITY_FAILED, "frozen_render_job_invalid")
             }
-            if (pinId != pinSourceId || !binding.sameImmutableBindingAs(pinnedBinding)) {
+            if (!hasSameProducer(pinId, binding)) {
                 refuse(jobId, OperationErrorCode.INTEGRITY_FAILED, "frozen_render_lease_binding_changed")
             }
         }
@@ -208,24 +212,37 @@ internal class RoomFrozenRenderReads(
             }
         }
 
-        fun source(id: String, jobId: JobId, active: () -> Unit): ExportSourceBinding {
-            validateId(id, jobId)
-            // A missing Source behind a retained reference is corruption. This scalar also guards its exact Blob before either projection.
-            if (sourceBounds(id) != true) invalidMetadata(jobId)
-            active()
-            val source = catalog.source(id) ?: invalidMetadata(jobId)
-            if (source.sourceId != id) invalidMetadata(jobId)
-            validateId(source.sourceBlobId, jobId)
-            val blob = catalog.sourceBlob(source.sourceBlobId) ?: invalidMetadata(jobId)
-            if (blob.sourceBlobId != source.sourceBlobId) invalidMetadata(jobId)
-            return ExportSourceBinding(source, blob)
-        }
+        fun source(id: String, jobId: JobId, active: () -> Unit): ExportSourceBinding =
+            source(catalog, sourceBounds, id, jobId, active)
 
-        private fun validateId(id: String, jobId: JobId) {
-            try {
-                requireOpaqueId(id)
-            } catch (_: IllegalArgumentException) {
-                invalidMetadata(jobId)
+        companion object {
+            /** Producer-phase reads use the catalog's own guard, from the same transaction as both typed rows. */
+            internal fun producerSource(catalog: CatalogQueries, id: String, jobId: JobId, active: () -> Unit): ExportSourceBinding {
+                val guards = catalog as? CommittedSourceQueries ?: invalidMetadata(jobId)
+                return source(catalog, guards::sourceReadIsBounded, id, jobId, active)
+            }
+
+            private fun source(
+                catalog: CatalogQueries, sourceBounds: (String) -> Boolean?, id: String, jobId: JobId, active: () -> Unit,
+            ): ExportSourceBinding {
+                validateId(id, jobId)
+                // A missing Source behind a retained reference is corruption. This scalar also guards its exact Blob before either projection.
+                if (sourceBounds(id) != true) invalidMetadata(jobId)
+                active()
+                val source = catalog.source(id) ?: invalidMetadata(jobId)
+                if (source.sourceId != id) invalidMetadata(jobId)
+                validateId(source.sourceBlobId, jobId)
+                val blob = catalog.sourceBlob(source.sourceBlobId) ?: invalidMetadata(jobId)
+                if (blob.sourceBlobId != source.sourceBlobId) invalidMetadata(jobId)
+                return ExportSourceBinding(source, blob)
+            }
+
+            private fun validateId(id: String, jobId: JobId) {
+                try {
+                    requireOpaqueId(id)
+                } catch (_: IllegalArgumentException) {
+                    invalidMetadata(jobId)
+                }
             }
         }
     }

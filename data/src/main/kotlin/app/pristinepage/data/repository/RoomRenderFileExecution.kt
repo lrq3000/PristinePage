@@ -37,14 +37,14 @@ internal class RoomRenderFileExecution(
         readback: (File, () -> Unit) -> String?,
     ) {
         withContext(dispatcher) {
-            verifyMoved(proof, lease, intent, maxBytes, writer, readback, { coroutineContext.ensureActive() })
+            verifyMoved(RenderAttemptAuthority.Legacy(proof, lease), intent, maxBytes, writer, readback, { coroutineContext.ensureActive() })
         }
     }
 
     /** Only issued and consumed within the completion attempt after byte, semantic and exact MOVED verification. */
     class VerifiedMoved private constructor(
         private val authority: RoomRenderIntents,
-        val proof: RoomFrozenRenderReads.Verified, val lease: JobLease, val intent: RenderFileIntent,
+        val attemptAuthority: RenderAttemptAuthority, val intent: RenderFileIntent,
         val phase: RenderFilePhase, val rasterSha256: String, val execution: OrdinaryRenderExecution, val active: () -> Unit,
     ) {
         // This is a synchronous borrow, not a portable proof. Even an internal consumer cannot take it into a later transaction or use another database authority.
@@ -57,34 +57,41 @@ internal class RoomRenderFileExecution(
 
         /** One owner-retained memory scope. A fresh scope cannot adopt an existing file checkpoint, even when its result has equal pixels and provenance. */
         class Attempt internal constructor(private val executor: RoomRenderFileExecution, private val rows: RenderCompletionQueries) {
-            private class Producing(val lease: JobLease, val intent: RenderFileIntent, val execution: OrdinaryRenderExecution)
+            private class Producing(val authority: RenderAttemptAuthority, val intent: RenderFileIntent, val execution: OrdinaryRenderExecution) {
+                fun matches(candidate: RenderAttemptAuthority): Boolean =
+                    if (authority is RenderAttemptAuthority.Legacy && candidate is RenderAttemptAuthority.Legacy) {
+                        authority.lease == candidate.lease
+                    } else authority === candidate
+            }
 
             private val gate = Mutex()
             private var producing: Producing? = null
 
             suspend fun complete(
-                proof: RoomFrozenRenderReads.Verified, lease: JobLease, intent: RenderFileIntent,
+                authority: RenderAttemptAuthority, intent: RenderFileIntent,
                 candidate: OrdinaryRenderExecution, maxBytes: Long, writer: (OutputStream) -> Unit, readback: (File, () -> Unit) -> String?,
             ): RenderId = withContext(executor.dispatcher) {
                 val active = { coroutineContext.ensureActive() }
+                val lease = authority.lease
                 active()
                 if (!gate.tryLock()) executor.refuse(lease, OperationErrorCode.REVISION_CONFLICT, "render_completion_in_use")
                 try {
+                    if (!candidate.capturedFor(authority)) executor.invalid(lease)
                     val retained = producing
-                    if (retained != null && (retained.lease != lease || retained.intent != intent ||
+                    if (retained != null && (!retained.matches(authority) || retained.intent != intent ||
                             !retained.execution.sameExecution(candidate))) executor.invalid(lease)
                     val execution = retained?.execution ?: candidate
-                    val (phase, raster) = executor.verifyMoved(proof, lease, intent, maxBytes, writer,
+                    val (phase, raster) = executor.verifyMoved(authority, intent, maxBytes, writer,
                         readback = { file, checkpoint -> readback(file, checkpoint)?.takeIf { it == execution.rasterSha256 } },
                         active = active,
                         admitPhase = { state ->
                             // A fresh write grant is the only source of provenance. A bound scope may only continue that grant, never redo it.
                             if ((state == FileTransactionState.INTENT) != (retained == null)) executor.invalid(lease)
                         },
-                        copyingGranted = { producing = Producing(lease, intent, execution) },
+                        copyingGranted = { producing = Producing(authority, intent, execution) },
                     )
                     active()
-                    val receipt = VerifiedMoved(executor.intents, proof, lease, intent, phase, raster, checkNotNull(producing).execution, active)
+                    val receipt = VerifiedMoved(executor.intents, authority, intent, phase, raster, checkNotNull(producing).execution, active)
                     executor.intents.commitMoved(receipt, rows)
                     intent.renderId
                 } finally {
@@ -97,15 +104,16 @@ internal class RoomRenderFileExecution(
     internal fun completionAttempt(rows: RenderCompletionQueries): VerifiedMoved.Attempt = VerifiedMoved.Attempt(this, rows)
 
     private fun verifyMoved(
-        proof: RoomFrozenRenderReads.Verified, lease: JobLease, intent: RenderFileIntent,
+        authority: RenderAttemptAuthority, intent: RenderFileIntent,
         maxBytes: Long, writer: (OutputStream) -> Unit, readback: (File, () -> Unit) -> String?, active: () -> Unit,
         admitPhase: (FileTransactionState) -> Unit = {},
         copyingGranted: () -> Unit = {},
     ): Pair<RenderFilePhase, String> {
+        val lease = authority.lease
         active()
         if (maxBytes <= 0) refuse(lease, OperationErrorCode.INVALID_INPUT, "render_file_invalid_cap")
         fun fence(expected: RenderFilePhase? = null, next: FileTransactionState? = null, seal: RenderSealIdentity? = null) =
-            intents.executionPhase(proof, lease, intent, active, expected, next, seal)
+            intents.executionPhase(authority, intent, active, expected, next, seal)
 
         try {
             var admission = fence()

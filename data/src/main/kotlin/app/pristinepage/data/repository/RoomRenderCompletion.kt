@@ -6,6 +6,7 @@ import app.pristinepage.data.db.PristineDatabase
 import app.pristinepage.data.db.RenderedPageRow
 import app.pristinepage.data.files.DerivedFiles
 import app.pristinepage.data.model.*
+import app.pristinepage.data.repository.RoomJobLeases.FrozenRenderAcquisition.Acquired
 import java.io.File
 import java.io.OutputStream
 import kotlinx.coroutines.CancellationException
@@ -37,10 +38,21 @@ internal class RoomRenderCompletion(
     suspend fun complete(
         proof: RoomFrozenRenderReads.Verified, lease: JobLease, intent: RenderFileIntent, result: RenderResult,
         maxBytes: Long, writer: (OutputStream) -> Unit, readback: (File, () -> Unit) -> String?,
+    ): RenderId = complete(RenderAttemptAuthority.Legacy(proof, lease), intent, result, maxBytes, writer, readback)
+
+    suspend fun completeForProducer(
+        acquired: Acquired, intent: RenderFileIntent, result: RenderResult,
+        maxBytes: Long, writer: (OutputStream) -> Unit, readback: (File, () -> Unit) -> String?,
+    ): RenderId = complete(acquired, intent, result, maxBytes, writer, readback)
+
+    private suspend fun complete(
+        authority: RenderAttemptAuthority, intent: RenderFileIntent, result: RenderResult,
+        maxBytes: Long, writer: (OutputStream) -> Unit, readback: (File, () -> Unit) -> String?,
     ): RenderId = withContext(dispatcher) {
         coroutineContext.ensureActive()
+        val lease = authority.lease
         val execution = try {
-            OrdinaryRenderExecution.capture(proof, result) { coroutineContext.ensureActive() }
+            OrdinaryRenderExecution.capture(authority, result) { coroutineContext.ensureActive() }
         } catch (canceled: CancellationException) {
             throw canceled
         } catch (_: IllegalArgumentException) {
@@ -48,7 +60,7 @@ internal class RoomRenderCompletion(
         } catch (_: IllegalStateException) {
             invalid(lease)
         }
-        attempt.complete(proof, lease, intent, execution, maxBytes, writer, readback)
+        attempt.complete(authority, intent, execution, maxBytes, writer, readback)
     }
 
     private fun invalid(lease: JobLease): Nothing =

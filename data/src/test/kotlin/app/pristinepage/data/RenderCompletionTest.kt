@@ -6,18 +6,23 @@ import app.pristinepage.core.recipe.GeometryRecipe
 import app.pristinepage.core.recipe.RecipeCodec
 import app.pristinepage.core.recipe.SourceBinding
 import app.pristinepage.data.RenderFileExecutionTest.RenderFileFixture
+import app.pristinepage.data.RoomFrozenRenderAdmissionTest.Fixture as AdmissionFixture
 import app.pristinepage.data.db.ExportPageRow
 import app.pristinepage.data.db.FileTransactionRow
+import app.pristinepage.data.db.JobRow
 import app.pristinepage.data.db.RenderedPageRow
 import app.pristinepage.data.db.SourceBlobRow
 import app.pristinepage.data.db.SourceRow
+import app.pristinepage.data.files.DerivedFiles
+import app.pristinepage.data.files.DirectorySync
 import app.pristinepage.data.model.*
-import app.pristinepage.data.repository.FrozenRenderJobIdentityRow
-import app.pristinepage.data.repository.LeaseOwnerState
-import app.pristinepage.data.repository.RoomFrozenRenderReads
-import app.pristinepage.data.repository.RoomRenderCompletion
+import app.pristinepage.data.repository.*
+import app.pristinepage.data.repository.RoomJobLeases.FrozenRenderAcquisition
+import java.io.ByteArrayOutputStream
+import java.io.DataOutputStream
 import java.io.File
 import java.io.OutputStream
+import java.nio.file.Files
 import java.security.MessageDigest
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.cancel
@@ -99,6 +104,246 @@ class RenderCompletionTest {
             f.refuses(OperationErrorCode.REVISION_CONFLICT) { f.complete(result, writer = { error("Already succeeded") }) }
         }
         assertSame(ready, f.records.single())
+    }
+
+    @Test fun admittedJobOriginalBindsIntentExecutionReadyAndTerminalMetadata() = runTest {
+        val f = producerAttempt()
+        val page = f.frozen.page
+        val before = f.frozen.stored()
+        val recipeBytes = page.canonicalRecipe.copyOf()
+        val intent = f.prepare()
+        val journal = checkNotNull(f.journal)
+        val expectedPayload = f.expectedJournalPayload(intent)
+        assertEquals(f.lease.jobId, intent.jobId)
+        assertEquals(f.lease.generation, intent.generation)
+        assertEquals(f.lease.generation, intent.attempt)
+        assertEquals(f.lease.owner, intent.leaseOwner)
+        assertEquals(before.job.canonicalInputSha256, intent.canonicalInputSha256)
+        assertEquals(page.pageId, intent.pageId)
+        assertEquals(page.recipeRevision, intent.recipeRevision)
+        assertEquals(page.recipeHash, intent.recipeSha256)
+        assertEquals(page.output, intent.output)
+        assertEquals(page.pixelHash, intent.sourcePixelSha256)
+        assertEquals(SourceId(f.source.sourceId), intent.sourceId)
+        assertEquals(SourceBlobId(f.blob.sourceBlobId), intent.sourceBlobId)
+        assertEquals(hash(producerOriginal), intent.sourceByteSha256)
+        assertEquals(SourceId(f.source.sourceId), intent.jobPinSourceId)
+        assertEquals("INTENT", journal.state)
+        assertEquals(intent.transactionId.value, journal.transactionId)
+        assertEquals(intent.attempt, journal.attempt)
+        assertArrayEquals(expectedPayload, intent.journalPayload())
+        assertArrayEquals(expectedPayload, journal.payload)
+        f.assertNoFiles(intent)
+
+        var closes = 0
+        f.result(ownership = AutoCloseable { closes++ }).use { result ->
+            assertEquals(intent.renderId, f.complete(intent, result))
+            assertEquals(0, closes)
+            assertEquals(18, result.image!!.getUnsigned(2, 1, 2))
+        }
+        assertEquals(1, closes)
+        assertEquals(1, f.writes)
+        assertTrue(f.readbacks > 0)
+        assertEquals(listOf("COPYING", "SEALED", "MOVED", "COMMITTED"), f.phaseWrites)
+        assertEquals(0, page.ordinal)
+        assertArrayEquals(recipeBytes, page.canonicalRecipe)
+        val job = f.frozen.job
+        f.frozen.assertStored(before.copy(job = before.job.copy(state = "SUCCEEDED", leaseOwner = null,
+            leaseUntil = null, updatedAt = job.updatedAt)))
+        val ready = f.records.single()
+        assertEquals(intent.renderId.value, ready.renderId)
+        assertEquals(before.job.jobId, ready.jobId)
+        assertEquals(page.pageId.value, ready.pageId)
+        assertEquals(page.recipeRevision, ready.recipeRevision)
+        assertEquals(f.source.sourceId, ready.sourceId)
+        assertEquals("READY", ready.state)
+        assertEquals("OK", ready.renderStatus)
+        assertEquals(page.output.size, PixelSize(ready.width, ready.height))
+        assertEquals(intent.finalPath, ready.relativePath)
+        assertEquals(hash(encoded), ready.byteSha256)
+        assertEquals(encoded.size.toLong(), ready.byteCount)
+        assertEquals(rasterHash, ready.rasterPixelSha256)
+        assertEquals(hash(ready.execution), ready.executionSha256)
+        assertEquals("render-cache-v1:${hash(("pristinepage-ordinary-render-cache-v1\u0000" +
+            before.job.idempotenceKey + ready.executionSha256).encodeToByteArray())}", ready.cacheKey)
+        assertArrayEquals(encoded, f.file(intent.finalPath).readBytes())
+
+        // Read the persisted envelope, not an expected envelope generated by capture(). The reader authenticates the unchanged v1 key/page/recipe/policy fields.
+        val record = OrdinaryRenderExecutionRead.read(ready.execution, f.admitted.proof, ready.executionSha256,
+            ready.cacheKey, ready.rasterPixelSha256, page.output.size)
+        assertEquals(OrdinaryRenderExecutionRead.SourceRelation.NORMALIZED_COMPATIBLE_REUSE, record.sourceRelation)
+        assertEquals(OrdinaryRenderExecutionRead.UnprovenProducer(SourceId(f.source.sourceId), SourceBlobId(f.blob.sourceBlobId),
+            hash(producerOriginal)), record.unprovenProducer)
+        assertEquals(stages(page.sourceSize, page.output.size), record.stages) // The literal first input is 2×3, not the frozen 3×2.
+        assertEquals(listOf("W3", "W1"), record.warnings)
+
+        val committed = checkNotNull(f.journal)
+        assertEquals("COMMITTED", committed.state)
+        assertEquals(journal.transactionId, committed.transactionId)
+        assertArrayEquals(expectedPayload, committed.payload)
+        val terminal = f.loadTerminal()
+        assertEquals(intent.transactionId, terminal.transactionId)
+        assertEquals(intent.renderId, terminal.renderId)
+        assertEquals(page.output.size, terminal.size)
+        assertEquals(hash(f.seal(intent).readBytes()), terminal.sealSha256)
+        assertEquals(hash(encoded), terminal.byteSha256)
+        assertEquals(encoded.size.toLong(), terminal.byteCount)
+        assertEquals(rasterHash, terminal.rasterSha256)
+        assertArrayEquals(expectedPayload, terminal.intentPayload())
+    }
+
+    @Test fun producerWriterRefusesOkResultNamingFrozenConsumer() = runTest {
+        val f = producerAttempt()
+        val intent = f.prepare()
+        f.assertRefusesResult(intent, request = f.request().copy(sourceId = f.frozen.page.sourceId.value),
+            stages = f.correctStages(), witness = "Frozen consumer was accepted as the producing Source")
+    }
+
+    @Test fun producerWriterRefusesOkResultWithWrongEncodedDecodeSize() = runTest {
+        val f = producerAttempt()
+        val intent = f.prepare()
+        val stages = f.correctStages().toMutableList()
+        // Only the initial input changes. The resulting stage chain and final raster still have the right normalized shape.
+        stages[0] = stages[0].copy(inputSize = f.frozen.page.sourceSize)
+        f.assertRefusesResult(intent, request = f.request(), stages = stages,
+            witness = "Producer was accepted with the frozen consumer's encoded dimensions")
+    }
+
+    @Test fun producerLeaseRefusesForeignAdmissionEvenWhenBothStoresHaveIdenticalRows() = runTest {
+        val issuer = AdmissionFixture(traceSourceProjection = false).apply { freeze() }
+        val receiver = issuer.forkPendingRender()
+        assertNotSame(issuer.catalog, receiver.catalog)
+        receiver.assertStored(issuer.stored())
+        val foreign = checkNotNull(issuer.admit())
+        val local = checkNotNull(receiver.admit())
+        val before = receiver.stored()
+        receiver.assertStored(issuer.stored())
+        assertEquals(foreign.proof.pinnedBinding, local.proof.pinnedBinding)
+
+        val (source, blob) = receiver.bindingFor(receiver.pinIds().single())
+        val f = ProducerAttempt(receiver, local, source, blob)
+        val writes = mutableListOf<String>()
+        f.afterMetadataWrite = { writes += it }
+        val refused = f.acquireReceipt(foreign)
+        if (refused !is FrozenRenderAcquisition.ProducerResult.Rejected) {
+            throw AssertionError("A foreign admission was not refused by the matching local store: $refused")
+        }
+        assertEquals(OperationErrorCode.INTEGRITY_FAILED, refused.error.code)
+        assertFalse(refused.error.retryable)
+        assertEquals(receiver.jobId.value, refused.error.affectedId)
+        assertTrue(writes.isEmpty())
+        receiver.assertStored(before)
+
+        f.acquire()
+        assertEquals(listOf("RUNNING"), writes)
+        assertEquals(receiver.jobId, f.lease.jobId)
+        assertEquals("RUNNING", receiver.job.state)
+        issuer.assertStored(before)
+    }
+
+    @Test fun producerFileJoinRefusesLegacyExecutionWithWrongDecodeSizeEvenWhenSourceMatches() = runTest {
+        val frozen = AdmissionFixture(traceSourceProjection = false).apply { freeze() }
+        val (source, blob) = frozen.bindingFor(frozen.pinIds().single())
+        val f = ProducerAttempt(frozen, checkNotNull(frozen.admit()), source, blob).apply { acquire() }
+        val intent = f.prepare()
+        val row = checkNotNull(f.journal)
+        val payload = row.payload.copyOf()
+        val running = frozen.stored()
+        assertEquals(frozen.page.sourceId, intent.sourceId)
+        assertEquals(frozen.page.sourceBlobId, intent.sourceBlobId)
+        assertEquals(frozen.page.byteHash, intent.sourceByteSha256)
+        assertEquals(3 to 2, blob.encodedWidth to blob.encodedHeight)
+        assertEquals(PixelSize(2, 3), f.correctStages().first().inputSize)
+
+        val legacy = f.result().use { OrdinaryRenderExecution.capture(f.admitted.proof, it) {} }
+        try {
+            f.completeCaptured(intent, legacy)
+            throw AssertionError("The producer file join published a legacy capture with the wrong decode size")
+        } catch (failure: RepositoryFailure) {
+            assertEquals(OperationErrorCode.INTEGRITY_FAILED, failure.error.code)
+            assertFalse(failure.error.retryable)
+            assertEquals(f.lease.jobId.value, failure.error.affectedId)
+        }
+        f.assertUnstarted(intent, row, payload, running)
+
+        // Only the first input extent changes in the positive control. It uses the normal producer capture and the same writer/readback.
+        val corrected = f.correctStages().toMutableList()
+        corrected[0] = corrected[0].copy(inputSize = PixelSize(3, 2))
+        f.result(stages = corrected).use { assertEquals(intent.renderId, f.complete(intent, it)) }
+        assertEquals("READY", f.records.single().state)
+    }
+
+    @Test fun producerIntentDoesNotReinterpretAnExistingConsumerBoundAttempt() = runTest {
+        val f = producerAttempt()
+        val old = f.intents.prepare(f.admitted.proof, f.lease)
+        val row = checkNotNull(f.journal)
+        val payload = row.payload.copyOf()
+        val running = f.frozen.stored()
+        assertEquals(f.frozen.page.sourceId, old.sourceId)
+        assertEquals(SourceId(f.source.sourceId), old.jobPinSourceId)
+        f.refusesProducer("render_intent_binding_invalid", "Producer preparation adopted a historical consumer-bound intent") {
+            f.prepare()
+        }
+        f.assertUnstarted(old, row, payload, running)
+    }
+
+    @Test fun producerRejectsSameIdBlobDriftOnPhaseWriteReadback() = runTest {
+        for ((attempted, durable) in listOf("INTENT" to null, "COPYING" to "INTENT", "SEALED" to "COPYING",
+            "MOVED" to "SEALED", "COMMITTED" to "MOVED", "SUCCEEDED" to "MOVED")) {
+            val f = producerAttempt()
+            val running = f.frozen.stored()
+            val intent = if (attempted == "INTENT") null else f.prepare()
+            var drifted = false
+            f.afterMetadataWrite = { state ->
+                if (state == attempted) {
+                    // Change only an immutable field not carried by v1; the IDs, hashes, normalized dimensions and both counters stay valid.
+                    f.driftBlobLength()
+                    drifted = true
+                }
+            }
+            f.refusesProducer("render_intent_binding_invalid", "Same-ID Blob drift survived $attempted") {
+                if (intent == null) f.prepare()
+                else f.result().use { f.complete(intent, it) }
+            }
+            assertTrue("The $attempted write must precede refusal", drifted)
+            assertEquals(attempted, durable, f.journal?.state)
+            assertTrue("$attempted published READY", f.records.isEmpty())
+            assertEquals(if (attempted in setOf("INTENT", "COPYING")) 0 else 1, f.writes)
+            f.frozen.assertStored(running)
+            if (intent != null && attempted == "COPYING") f.assertNoFiles(intent)
+        }
+    }
+
+    @Test fun producerExpiryAfterSuccessCasRollsBackReadyAndPreservesMovedBytes() = runTest {
+        val f = producerAttempt()
+        val intent = f.prepare()
+        val running = f.frozen.stored()
+        var moved: FileTransactionRow? = null
+        f.afterMetadataWrite = { state ->
+            when (state) {
+                "MOVED" -> moved = f.journal
+                "SUCCEEDED" -> {
+                    assertEquals("COMMITTED", f.journal?.state)
+                    assertEquals("READY", f.records.single().state)
+                    f.leaseNow = checkNotNull(running.job.leaseUntil)
+                }
+            }
+        }
+        f.result().use { result ->
+            val failure = try {
+                f.complete(intent, result)
+                throw AssertionError("Producer published after expiry at final readback")
+            } catch (failure: RepositoryFailure) {
+                failure
+            }
+            assertEquals(OperationError(OperationErrorCode.REVISION_CONFLICT, false, "job_lease_lost", f.lease.jobId.value), failure.error)
+        }
+        assertEquals(running.job.leaseUntil, f.leaseNow)
+        assertSame(checkNotNull(moved), f.journal)
+        assertTrue(f.records.isEmpty())
+        f.frozen.assertStored(running)
+        assertArrayEquals(encoded, f.file(intent.finalPath).readBytes())
+        assertEquals(f.journal?.sealSha256, hash(f.seal(intent).readBytes()))
     }
 
     @Test fun executionBoundMovedStillRequiresSameRasterFromReadback() = runTest {
@@ -435,12 +680,6 @@ class RenderCompletionTest {
 
     private fun RenderFileFixture.stages() = stages(proof.page.sourceSize, proof.page.output.size)
 
-    private fun stages(source: PixelSize, output: PixelSize) = listOf(
-        StageRecord("source_decode_v1", 1, null, "OK", PixelSize(2, 3), source, listOf("SOURCE_PIXELS_VERIFIED")),
-        StageRecord("geometry_none_v1", 1, null, "EXACT_PERMUTATION", source, output, emptyList()),
-        StageRecord("none_v1", 1, null, "EXACT_IDENTITY", output, output, listOf("W2", "W1")),
-    )
-
     private fun RenderFileFixture.result(request: RenderRequest = request(), status: RenderStatus = RenderStatus.OK,
         image: RgbImage = raster(),
         stages: List<StageRecord> = stages(), warnings: List<String> = listOf("W3", "W1"), ownership: AutoCloseable? = null,
@@ -480,7 +719,284 @@ class RenderCompletionTest {
         readback: (File, () -> Unit) -> String? = ::readback, completion: RoomRenderCompletion = newCompletion()): RenderId =
         completion.complete(proof, lease, intent, result, encoded.size.toLong(), writer, readback)
 
+    private suspend fun producerAttempt(): ProducerAttempt {
+        val f = AdmissionFixture(traceSourceProjection = false).apply { freeze() }
+        val originalJobInput = f.job.input.copyOf()
+        val (consumer, consumerBlob) = f.bindingFor(f.pinIds().single())
+        f.retainEquivalentOriginal()
+        f.attachEquivalentPin(replace = true)
+        val (alternate, alternateBlob) = f.bindingFor(f.pinIds().single())
+        // Seed these independent source-byte metadata values before admission; the EXIF-6 original is encoded 2×3 and normalizes to A's 3×2.
+        val source = alternate.copy(exifOrientation = 6)
+        val blob = alternateBlob.copy(encodedWidth = 2, encodedHeight = 3, byteSha256 = hash(producerOriginal),
+            byteCount = producerOriginal.size.toLong())
+        f.catalog.sources[source.sourceId] = source
+        f.catalog.blobs[blob.sourceBlobId] = blob
+        assertEquals(f.page.sourceId.value, consumer.sourceId)
+        assertEquals(3 to 2, consumerBlob.encodedWidth to consumerBlob.encodedHeight)
+        assertNotEquals(consumer.sourceId, source.sourceId)
+        assertNotEquals(consumerBlob.sourceBlobId, blob.sourceBlobId)
+        assertNotEquals(consumerBlob.byteSha256, blob.byteSha256)
+        assertEquals(consumer.pixelSha256, source.pixelSha256)
+        assertEquals(consumer.conversionFingerprint, source.conversionFingerprint)
+        assertEquals(listOf(source.sourceId), f.pinIds())
+        val admitted = checkNotNull(f.admit())
+        assertSame(f.page, admitted.proof.page)
+        assertEquals(source, admitted.proof.pinnedBinding.source)
+        assertEquals(blob, admitted.proof.pinnedBinding.blob)
+        assertEquals(listOf(1), f.casResults)
+        assertArrayEquals(originalJobInput, f.job.input)
+        return ProducerAttempt(f, admitted, source, blob).apply { acquire() }
+    }
+
+    // Only the row ports are doubled. Reuse the admitted freeze/CAS fixture, live lease code, real private-file protocol, and the existing completion raster/readback control.
+    private class ProducerAttempt(
+        val frozen: AdmissionFixture,
+        val admitted: RoomFrozenRenderAdmission.Admitted,
+        val source: SourceRow,
+        val blob: SourceBlobRow,
+    ) : JobLeaseQueries, RenderIntentQueries, RenderCompletionQueries {
+        var journal: FileTransactionRow? = null
+            private set
+        val records = mutableListOf<RenderedPageRow>()
+        val phaseWrites = mutableListOf<String>()
+        var writes = 0
+            private set
+        var readbacks = 0
+            private set
+        var afterMetadataWrite: (String) -> Unit = {}
+        var leaseNow = 100L
+        private lateinit var acquired: FrozenRenderAcquisition.Acquired
+        val lease: JobLease get() = acquired.lease
+        private val root = Files.createTempDirectory(File("build").toPath(), "render-producer-test-").toFile().canonicalFile
+        private val live = LeaseOwnerLiveness { if (it == producerOwner) LeaseOwnerState.ALIVE else LeaseOwnerState.UNKNOWN }
+        private val catalog = frozen.catalog
+        private val metadata = object : MetadataAccess {
+            override val queries = catalog
+            override fun <T> transaction(action: () -> T): T {
+                val beforeJob = frozen.job
+                val beforeJournal = journal
+                val beforeRecords = records.toList()
+                return try {
+                    catalog.transaction(action)
+                } catch (failure: Throwable) {
+                    frozen.job = beforeJob
+                    journal = beforeJournal
+                    records.clear()
+                    records.addAll(beforeRecords)
+                    throw failure
+                }
+            }
+        }
+        private var auditTime = 3000L
+        private val audit = { auditTime++ }
+        private val ids = listOf("50000000-0000-0000-0000-000000000000", "60000000-0000-0000-0000-000000000000").iterator()
+        val intents = RoomRenderIntents(metadata, this, this, ::jobBounds, ::pins, live, audit, { leaseNow }, ids::next, Dispatchers.Unconfined)
+        private val files = DerivedFiles(root, DirectorySync { check(!catalog.inTransaction); true })
+        private val executor = RoomRenderFileExecution(intents, files, Dispatchers.Unconfined)
+        private val completion = RoomRenderCompletion(executor, this, Dispatchers.Unconfined)
+        private val acquisition = FrozenRenderAcquisition(metadata, this, live, ::jobBounds, ::identity,
+            ::pins, catalog::sourceReadIsBounded, ::renderJobLeaseReadIsBounded, audit, { leaseNow }, Dispatchers.Unconfined)
+
+        suspend fun acquireReceipt(receipt: RoomFrozenRenderAdmission.Admitted): FrozenRenderAcquisition.ProducerResult =
+            acquisition.acquireForProducer(receipt, producerOwner, 50L)
+
+        suspend fun acquire() {
+            val result = acquireReceipt(admitted)
+            check(result is FrozenRenderAcquisition.Acquired) { "Expected live lease for the actual receipt, got $result" }
+            assertSame(admitted, result.admitted)
+            acquired = result
+        }
+
+        suspend fun prepare(): RenderFileIntent = intents.prepareForProducer(acquired)
+
+        suspend fun complete(intent: RenderFileIntent, result: RenderResult): RenderId =
+            completion.completeForProducer(acquired, intent, result, encoded.size.toLong(), ::writePayload, ::readPayload)
+
+        suspend fun completeCaptured(intent: RenderFileIntent, execution: OrdinaryRenderExecution): RenderId =
+            executor.completionAttempt(this).complete(acquired, intent, execution, encoded.size.toLong(), ::writePayload, ::readPayload)
+
+        private fun writePayload(output: OutputStream) {
+            check(!catalog.inTransaction && journal?.state == "COPYING")
+            writes++
+            output.write(encoded)
+        }
+
+        private fun readPayload(file: File, checkpoint: () -> Unit): String? {
+            check(!catalog.inTransaction)
+            readbacks++
+            return readback(file, checkpoint)
+        }
+
+        fun request(): RenderRequest = frozen.page.let { page ->
+            RenderRequest(source.sourceId, page.pixelHash, page.pageId.value, page.recipeRevision,
+                RecipeCodec.decode(page.canonicalRecipe), page.output, 0, null, FallbackPolicy.FAIL)
+        }
+
+        fun driftBlobLength() {
+            check(catalog.inTransaction)
+            catalog.blobs[blob.sourceBlobId] = blob.copy(byteCount = blob.byteCount + 1)
+            check(catalog.sourceReadIsBounded(source.sourceId) == true)
+        }
+
+        fun correctStages() = stages(frozen.page.sourceSize, frozen.page.output.size)
+        fun result(
+            request: RenderRequest = request(), stages: List<StageRecord> = correctStages(), ownership: AutoCloseable? = null,
+        ) = RenderResult(request, RenderStatus.OK, raster(), stages, listOf("W3", "W1"), ownership)
+
+        suspend fun assertRefusesResult(intent: RenderFileIntent, request: RenderRequest, stages: List<StageRecord>, witness: String) {
+            val row = checkNotNull(journal)
+            val payload = row.payload.copyOf()
+            val running = frozen.stored()
+            var closes = 0
+            result(request, stages, AutoCloseable { closes++ }).use { result ->
+                refusesProducer("render_execution_invalid", witness) { complete(intent, result) }
+                assertEquals(0, closes)
+                assertEquals(18, result.image!!.getUnsigned(2, 1, 2))
+            }
+            assertEquals(1, closes)
+            assertUnstarted(intent, row, payload, running)
+        }
+
+        suspend fun refusesProducer(key: String, witness: String, action: suspend () -> Unit) {
+            val failure = try {
+                action()
+                throw AssertionError(witness)
+            } catch (failure: RepositoryFailure) {
+                failure
+            }
+            assertEquals(OperationError(OperationErrorCode.INTEGRITY_FAILED, false, key, lease.jobId.value), failure.error)
+        }
+
+        fun file(path: String) = File(root, path)
+        fun seal(intent: RenderFileIntent) = File(file(intent.stagingPath).parentFile, "derived-seal.json")
+        fun assertNoFiles(intent: RenderFileIntent) {
+            assertFalse(file(intent.stagingPath).exists())
+            assertFalse(seal(intent).exists())
+            assertFalse(file(intent.finalPath).exists())
+        }
+
+        fun assertUnstarted(intent: RenderFileIntent, row: FileTransactionRow, payload: ByteArray, running: RoomFrozenRenderAdmissionTest.Stored) {
+            assertEquals("INTENT", row.state)
+            val current = checkNotNull(journal)
+            assertEquals(row.copy(payload = current.payload), current)
+            assertArrayEquals(payload, current.payload)
+            frozen.assertStored(running)
+            assertTrue(phaseWrites.isEmpty())
+            assertTrue(records.isEmpty())
+            assertEquals(0, writes)
+            assertEquals(0, readbacks)
+            assertNoFiles(intent)
+        }
+
+        // Build the fixed v1 journal vector from the fixture's independently known IDs/rows and live lease, not from a copied or self-hashed intent.
+        fun expectedJournalPayload(intent: RenderFileIntent): ByteArray {
+            val page = frozen.page
+            val bytes = ByteArrayOutputStream()
+            DataOutputStream(bytes).use { wire ->
+                wire.writeBytes("pristinepage-ordinary-render-intent-v1\u0000")
+                wire.writeBytes(intent.transactionId.value + intent.renderId.value + frozen.job.jobId + lease.owner)
+                wire.writeLong(lease.generation)
+                wire.writeLong(lease.generation)
+                wire.writeBytes(frozen.job.canonicalInputSha256 + page.pageId.value + source.sourceId + blob.sourceBlobId +
+                    source.sourceId + hash(producerOriginal) + page.pixelHash)
+                wire.writeLong(page.recipeRevision)
+                wire.writeBytes(page.recipeHash)
+                wire.writeInt(page.output.size.width)
+                wire.writeInt(page.output.size.height)
+            }
+            return bytes.toByteArray()
+        }
+
+        suspend fun loadTerminal(): RoomTerminalRenderReads.Metadata {
+            return RoomTerminalRenderReads(metadata, profile, Dispatchers.Unconfined, ::jobBounds, ::identity, ::pins,
+                catalog::sourceReadIsBounded,
+                { id -> sql { job(id)?.takeIf { it.state == "SUCCEEDED" && it.leaseOwner == null && it.leaseUntil == null &&
+                    it.attempt == it.leaseGeneration && it.errorCode == null }?.attempt } },
+                { id -> sql { records.filter { it.jobId == id }.take(2).map { it.renderId } } },
+                { id, owner, page, revision, width, height, cap -> sql {
+                    records.singleOrNull { it.renderId == id }?.let { it.jobId == owner && it.pageId == page &&
+                        it.recipeRevision == revision && it.state == "READY" && it.renderStatus == "OK" &&
+                        it.width == width && it.height == height && it.execution.size in 1..cap }
+                } },
+                { id -> sql { records.singleOrNull { it.renderId == id } } },
+                ::renderIntentReadIsBounded, ::renderIntentRow,
+            ).load(frozen.jobId, frozen.page)
+        }
+
+        private fun <T> sql(action: () -> T): T {
+            check(catalog.inTransaction)
+            return action()
+        }
+
+        private fun jobBounds(jobId: String, extent: Int) = job(jobId)?.let { it.input.size == extent }
+        private fun identity(jobId: String) = job(jobId)?.let {
+            FrozenRenderJobIdentityRow(it.jobId, it.kind, it.idempotenceKey, it.canonicalInputSha256, it.input)
+        }
+        private fun pins(id: String) = sql { if (id == frozen.jobId.value) frozen.pinIds() else emptyList() }
+        override fun job(id: String) = sql { frozen.job.takeIf { it.jobId == id } }
+        override fun updateLease(row: JobRow, expectedGeneration: Long) = sql {
+            if (job(row.jobId)?.leaseGeneration != expectedGeneration) 0 else {
+                frozen.job = row
+                afterMetadataWrite(row.state)
+                1
+            }
+        }
+        override fun renderJobLeaseReadIsBounded(jobId: String) = job(jobId)?.let { true }
+        override fun renderIntentReadIsBounded(jobId: String, attempt: Long, expectedPayloadBytes: Int) =
+            renderIntentRow(jobId, attempt)?.let { it.payload.size == expectedPayloadBytes }
+        override fun renderIntentHasMalformedAttempts(jobId: String) = sql { false }
+        override fun renderIntentRow(jobId: String, attempt: Long) = sql {
+            journal?.takeIf { it.kind == "RENDER" && it.ownerId == jobId && it.attempt == attempt }
+        }
+        override fun insertRenderIntent(row: FileTransactionRow) = sql {
+            check(journal == null)
+            journal = row
+            afterMetadataWrite(row.state)
+        }
+        override fun markRenderIntentCopying(transactionId: String, jobId: String, attempt: Long, updatedAt: Long) = sql {
+            val old = renderIntentRow(jobId, attempt)
+            if (old == null || old.transactionId != transactionId || old.state != "INTENT") 0
+            else advanceRenderFilePhase(old, old.copy(state = "COPYING", updatedAt = updatedAt))
+        }
+        override fun advanceRenderFilePhase(previous: FileTransactionRow, next: FileTransactionRow) = sql {
+            val old = renderIntentRow(previous.ownerId, previous.attempt)
+            if (old == null || !old.payload.contentEquals(previous.payload) || old.copy(payload = previous.payload) != previous) 0
+            else {
+                phaseWrites += next.state
+                journal = next
+                afterMetadataWrite(next.state)
+                1
+            }
+        }
+        override fun renderCompletionOccupied(renderId: String, jobId: String, cacheKey: String, relativePath: String) = sql {
+            records.any { it.renderId == renderId || it.jobId == jobId || it.cacheKey == cacheKey || it.relativePath == relativePath }
+        }
+        override fun insertReadyRender(row: RenderedPageRow) = sql {
+            check(!renderCompletionOccupied(row.renderId, row.jobId, row.cacheKey, row.relativePath))
+            records.add(row.copy(execution = row.execution.copyOf()))
+            Unit
+        }
+        override fun readyRenderMatches(row: RenderedPageRow) = sql {
+            records.singleOrNull()?.let { it.execution.contentEquals(row.execution) && it.copy(execution = row.execution) == row } == true
+        }
+        override fun commitMovedRender(previous: FileTransactionRow, updatedAt: Long): Int {
+            check(previous.state == "MOVED")
+            return advanceRenderFilePhase(previous, previous.copy(state = "COMMITTED", updatedAt = updatedAt))
+        }
+    }
+
     private companion object {
+        private fun stages(source: PixelSize, output: PixelSize) = listOf(
+            StageRecord("source_decode_v1", 1, null, "OK", PixelSize(2, 3), source, listOf("SOURCE_PIXELS_VERIFIED")),
+            StageRecord("geometry_none_v1", 1, null, "EXACT_PERMUTATION", source, output, emptyList()),
+            StageRecord("none_v1", 1, null, "EXACT_IDENTITY", output, output, listOf("W2", "W1")),
+        )
+
+        val profile = OrdinaryExportProfile("renderer-v1", "rgb8-v1", "reference", "binary64")
+        const val producerOwner = "40000000-0000-0000-0000-000000000000"
+        val producerOriginal = byteArrayOf(23, 1, 4, 9, 8, 7) // Source-byte identity only; not decoded or represented as a real PNG.
+
         fun raster() = RgbImage(3, 2, 10, ByteArray(19) { if (it == 9) 99 else (it + if (it < 9) 1 else 0).toByte() })
         val encoded = byteArrayOf(80, 78, 71, 17, 4) // Synthetic encoded payload; the oracle below is intentionally not a codec.
         val rasterHash = "69383a3ea68c8e12c19b9f0b604a888357ef9a8c3f180f6e50c60faea74df7c4"

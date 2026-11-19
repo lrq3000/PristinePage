@@ -39,12 +39,16 @@ internal class RoomFrozenRenderAdmission(
         database.exportSnapshots()::admitPendingRender,
     )
 
-    private val projection = RoomFrozenRenderReads.Projection(metadata.queries, jobBounds, jobIdentity, pinSourceIds, sourceBounds)
+    private val catalog = metadata.queries
+    private val projection = RoomFrozenRenderReads.Projection(catalog, jobBounds, jobIdentity, pinSourceIds, sourceBounds)
 
     suspend fun admit(jobId: JobId, page: ExportPageSnapshot): Admitted? = Admitted.admit(this, jobId, page)
 
     /** Exact first-admission receipt, not a live pin, reservation, lease or file authority. */
-    class Admitted private constructor(val proof: RoomFrozenRenderReads.Verified) {
+    class Admitted private constructor(val proof: RoomFrozenRenderReads.Verified, private val issuer: CatalogQueries) {
+        // Separate Room adapters share the database's catalog instance. Equal rows in another store are not this admission.
+        internal fun issuedBy(catalog: CatalogQueries): Boolean = issuer === catalog
+
         companion object {
             // Keep the only minting site with the complete admission path; a standalone Verified cannot be promoted to a receipt.
             suspend fun admit(admission: RoomFrozenRenderAdmission, jobId: JobId, page: ExportPageSnapshot): Admitted? =
@@ -72,7 +76,7 @@ internal class RoomFrozenRenderAdmission(
                         // Cancellation is checked immediately before the CAS, not guaranteed against a race with a started commit.
                         when (prepared.admitUnchanged(initial, live, updatedAt, active, admission.admitPending)) {
                             0 -> null
-                            1 -> Admitted(proof)
+                            1 -> Admitted(proof, admission.catalog)
                             else -> throw RepositoryFailure(OperationError(
                                 OperationErrorCode.INTEGRITY_FAILED, false, "frozen_render_admission_count_invalid", jobId.value,
                             ))
