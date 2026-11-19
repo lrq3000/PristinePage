@@ -19,20 +19,32 @@ class RoomJobLeases @JvmOverloads constructor(private val metadata: MetadataAcce
     override suspend fun acquireAdmitted(jobId: JobId, owner: String, durationMillis: Long): AcquireLeaseResult =
         acquire(jobId, owner, durationMillis)
 
+    /** Same writer and lease CAS, with domain checks around the write. Throwing from either check aborts the transaction; a guarded caller still controls its own delivered authority. */
+    internal suspend fun acquireGuarded(
+        jobId: JobId,
+        owner: String,
+        durationMillis: Long,
+        read: (active: () -> Unit) -> JobRow,
+        beforeWrite: (JobRow) -> Unit,
+        afterWrite: (JobRow, active: () -> Unit) -> JobRow,
+    ): AcquireLeaseResult = acquire(jobId, owner, durationMillis, beforeWrite, afterWrite, read)
+
     private suspend fun acquire(
         jobId: JobId,
         owner: String,
         durationMillis: Long,
-        guardedRenderRead: ((active: () -> Unit) -> JobRow)? = null,
+        beforeWrite: ((JobRow) -> Unit)? = null,
+        afterWrite: ((JobRow, active: () -> Unit) -> JobRow)? = null,
+        guardedRead: ((active: () -> Unit) -> JobRow)? = null,
     ): AcquireLeaseResult = withContext(dispatcher) {
         try {
             try { requireOpaqueId(owner); require(durationMillis in 1..86_400_000L) }
             catch (_: IllegalArgumentException) { reject(OperationErrorCode.INVALID_INPUT, "invalid_job_lease", jobId.value) }
             coroutineContext.ensureActive()
             metadata.transaction {
-                val job = if (guardedRenderRead == null) {
+                val job = if (guardedRead == null) {
                     jobs.job(jobId.value) ?: reject(OperationErrorCode.INVALID_INPUT, "job_unavailable", jobId.value)
-                } else guardedRenderRead { coroutineContext.ensureActive() }
+                } else guardedRead { coroutineContext.ensureActive() }
                 if (job.leaseGeneration < 0 || job.attempt < 0) reject(OperationErrorCode.INTEGRITY_FAILED, "invalid_job_lease", jobId.value)
                 val now = leaseClock()
                 when (job.state) {
@@ -52,10 +64,22 @@ class RoomJobLeases @JvmOverloads constructor(private val metadata: MetadataAcce
                 catch (_: ArithmeticException) { reject(OperationErrorCode.RESOURCE_LIMIT, "job_lease_limit", jobId.value) }
                 coroutineContext.ensureActive()
                 val running = job.copy(state = "RUNNING", leaseOwner = owner, leaseUntil = until, leaseGeneration = generation, attempt = attempt, errorCode = null, updatedAt = auditClock())
+                beforeWrite?.invoke(running)
                 // Fence known cancellation through the last clock sample for the guarded route, without changing legacy acquisition timing.
-                if (guardedRenderRead != null) coroutineContext.ensureActive()
-                if (jobs.updateLease(running, job.leaseGeneration) != 1) return@transaction AcquireLeaseResult.Busy(job.state)
-                AcquireLeaseResult.Granted(JobLease(jobId, owner, generation))
+                if (guardedRead != null) coroutineContext.ensureActive()
+                val count = jobs.updateLease(running, job.leaseGeneration)
+                if (afterWrite != null && count !in 0..1) reject(OperationErrorCode.INTEGRITY_FAILED, "job_lease_update_count_invalid", jobId.value)
+                if (count != 1) return@transaction AcquireLeaseResult.Busy(job.state)
+                val lease = JobLease(jobId, owner, generation)
+                if (afterWrite != null) {
+                    val written = afterWrite(running) { coroutineContext.ensureActive() }
+                    if (liveness.state(owner) != LeaseOwnerState.ALIVE) reject(OperationErrorCode.INVALID_INPUT, "job_owner_not_alive", jobId.value)
+                    if (JobLeaseFence.current(written, lease, leaseClock()) == null) {
+                        reject(OperationErrorCode.REVISION_CONFLICT, "job_lease_lost", jobId.value)
+                    }
+                    coroutineContext.ensureActive()
+                }
+                AcquireLeaseResult.Granted(lease)
             }
         } catch (canceled: CancellationException) { throw canceled }
         catch (failure: RepositoryFailure) { AcquireLeaseResult.Rejected(failure.error) }

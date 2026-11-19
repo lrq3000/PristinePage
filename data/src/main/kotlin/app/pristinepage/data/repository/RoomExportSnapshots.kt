@@ -61,41 +61,81 @@ class RoomExportSnapshots private constructor(
     override suspend fun load(snapshotId: ExportSnapshotId): ExportSnapshot = withContext(dispatcher) {
         try {
             coroutineContext.ensureActive()
-            val (record, pages) = metadata.transaction {
-                val bounded = queries.snapshotMetadataIsBounded(snapshotId.value) ?: reject(OperationErrorCode.SOURCE_UNAVAILABLE, "export_snapshot_unavailable", snapshotId.value)
-                if (!bounded) reject(OperationErrorCode.INTEGRITY_FAILED, "export_snapshot_metadata_invalid", snapshotId.value)
-                val record = queries.snapshot(snapshotId.value) ?: reject(OperationErrorCode.SOURCE_UNAVAILABLE, "export_snapshot_unavailable", snapshotId.value)
-                if (record.snapshotId != snapshotId.value) reject(OperationErrorCode.INTEGRITY_FAILED, "export_snapshot_identity_mismatch", snapshotId.value)
-                verifyLoadable(record, snapshotId)
-                if (!queries.exportPagesAreBounded(snapshotId.value)) reject(OperationErrorCode.INTEGRITY_FAILED, "export_snapshot_metadata_invalid", snapshotId.value)
-                val pages = queries.exportPages(snapshotId.value)
-                record to pages
-            }
+            val captured = metadata.transaction { SnapshotRead.capture(queries, snapshotId, clock) }
             coroutineContext.ensureActive()
-            val settings = try { ExportSettingsCodec.decode(record.settings) } catch (_: IllegalArgumentException) { reject(OperationErrorCode.UNSUPPORTED_VERSION, "export_snapshot_settings_unsupported", snapshotId.value) }
-            if (!record.settings.contentEquals(ExportSettingsCodec.encode(settings))) reject(OperationErrorCode.INTEGRITY_FAILED, "export_snapshot_settings_noncanonical", snapshotId.value)
-            if (pages.any { it.recipeSchemaVersion != 1 }) reject(OperationErrorCode.UNSUPPORTED_VERSION, "export_snapshot_recipe_unsupported", snapshotId.value)
-            val identity = try {
-                require(pages.all { it.snapshotId == snapshotId.value })
-                ExportSnapshotIdentity.create(DocumentId(record.documentId), record.documentRevision, settings, pages)
-            } catch (_: IllegalArgumentException) { reject(OperationErrorCode.INTEGRITY_FAILED, "export_snapshot_content_invalid", snapshotId.value) }
-            if (identity.snapshotHash != record.snapshotSha256) reject(OperationErrorCode.INTEGRITY_FAILED, "export_snapshot_identity_mismatch", snapshotId.value)
-            coroutineContext.ensureActive()
-            ExportSnapshot(snapshotId, DocumentId(record.documentId), record.documentRevision, identity.snapshotHash, settings, pages.map(::ExportPageSnapshot), record.createdAt)
+            captured.authenticate().also { coroutineContext.ensureActive() }
         } catch (canceled: CancellationException) { throw canceled }
         catch (failure: RepositoryFailure) { throw failure }
         catch (_: Exception) { reject(OperationErrorCode.STORAGE_FAILED, "export_snapshot_read_failed", snapshotId.value, retryable = true) }
     }
 
-    private fun verifyLoadable(record: ExportSnapshotRow, snapshotId: ExportSnapshotId) {
-        when (record.state) {
-            "FROZEN", "RENDERING", "ASSEMBLING", "PRIVATE_READY" -> Unit
-            "CANCELED" -> reject(OperationErrorCode.CANCELED, "export_snapshot_canceled", snapshotId.value)
-            "FAILED" -> reject(OperationErrorCode.PROCESSING_FAILED, "export_snapshot_failed", snapshotId.value)
-            "EXPIRED" -> reject(OperationErrorCode.SESSION_EXPIRED, "export_snapshot_expired", snapshotId.value)
-            else -> reject(OperationErrorCode.UNSUPPORTED_VERSION, "export_snapshot_state_unsupported", snapshotId.value)
+    /** Already raw-admitted, detached frozen rows. Authenticate outside the writer; compare bounded exact fields inside it without parsing or hashing again. */
+    internal class SnapshotRead private constructor(
+        private val id: ExportSnapshotId,
+        private val record: ExportSnapshotRow,
+        private val pages: List<ExportPageRow>,
+    ) {
+        fun authenticate(): ExportSnapshot {
+            val settings = try { ExportSettingsCodec.decode(record.settings) } catch (_: IllegalArgumentException) { reject(id, OperationErrorCode.UNSUPPORTED_VERSION, "export_snapshot_settings_unsupported") }
+            if (!record.settings.contentEquals(ExportSettingsCodec.encode(settings))) reject(id, OperationErrorCode.INTEGRITY_FAILED, "export_snapshot_settings_noncanonical")
+            if (pages.any { it.recipeSchemaVersion != 1 }) reject(id, OperationErrorCode.UNSUPPORTED_VERSION, "export_snapshot_recipe_unsupported")
+            val identity = try {
+                require(pages.all { it.snapshotId == id.value })
+                ExportSnapshotIdentity.create(DocumentId(record.documentId), record.documentRevision, settings, pages)
+            } catch (_: IllegalArgumentException) { reject(id, OperationErrorCode.INTEGRITY_FAILED, "export_snapshot_content_invalid") }
+            if (identity.snapshotHash != record.snapshotSha256) reject(id, OperationErrorCode.INTEGRITY_FAILED, "export_snapshot_identity_mismatch")
+            return ExportSnapshot(id, DocumentId(record.documentId), record.documentRevision, identity.snapshotHash, settings, pages.map(::ExportPageSnapshot), record.createdAt)
         }
-        if (record.retainedUntil <= clock()) reject(OperationErrorCode.SESSION_EXPIRED, "export_snapshot_expired", snapshotId.value)
+
+        fun requireSameContent(live: SnapshotRead) {
+            // Retention is live policy, not hashed content. Both captures separately check the lifecycle and retention relevant to their call.
+            if (record != live.record.copy(settings = record.settings, state = record.state, retainedUntil = record.retainedUntil) ||
+                !record.settings.contentEquals(live.record.settings) || pages.size != live.pages.size ||
+                pages.indices.any { i ->
+                    val a = pages[i]; val b = live.pages[i]
+                    a != b.copy(recipe = a.recipe, masks = a.masks, providers = a.providers) ||
+                        !a.recipe.contentEquals(b.recipe) || !a.masks.contentEquals(b.masks) || !a.providers.contentEquals(b.providers)
+                }
+            ) reject(id, OperationErrorCode.INTEGRITY_FAILED, "export_snapshot_content_changed")
+        }
+
+        fun requireRetained(now: Long) {
+            if (record.retainedUntil <= now) expired(id)
+        }
+
+        companion object {
+            /** Call only inside the transaction of the supplied same-store queries. */
+            fun capture(queries: ExportSnapshotQueries, id: ExportSnapshotId, clock: () -> Long, freshOnly: Boolean = false, detach: Boolean = false): SnapshotRead {
+                val bounded = queries.snapshotMetadataIsBounded(id.value) ?: reject(id, OperationErrorCode.SOURCE_UNAVAILABLE, "export_snapshot_unavailable")
+                if (!bounded) invalidMetadata(id)
+                val row = queries.snapshot(id.value) ?: reject(id, OperationErrorCode.SOURCE_UNAVAILABLE, "export_snapshot_unavailable")
+                if (row.snapshotId != id.value) reject(id, OperationErrorCode.INTEGRITY_FAILED, "export_snapshot_identity_mismatch")
+                when (row.state) {
+                    "FROZEN", "RENDERING", "ASSEMBLING", "PRIVATE_READY" -> Unit
+                    "CANCELED" -> reject(id, OperationErrorCode.CANCELED, "export_snapshot_canceled")
+                    "FAILED" -> reject(id, OperationErrorCode.PROCESSING_FAILED, "export_snapshot_failed")
+                    "EXPIRED" -> expired(id)
+                    else -> reject(id, OperationErrorCode.UNSUPPORTED_VERSION, "export_snapshot_state_unsupported")
+                }
+                if (row.retainedUntil <= clock()) expired(id)
+                if (freshOnly && row.state != "FROZEN") reject(id, OperationErrorCode.REVISION_CONFLICT, "export_snapshot_not_fresh")
+                if (!queries.exportPagesAreBounded(id.value)) invalidMetadata(id)
+                val pages = queries.exportPages(id.value)
+                return if (!detach) SnapshotRead(id, row, pages) else SnapshotRead(
+                    id, row.copy(settings = row.settings.copyOf()),
+                    pages.map { it.copy(recipe = it.recipe.copyOf(), masks = it.masks.copyOf(), providers = it.providers.copyOf()) },
+                )
+            }
+
+            private fun invalidMetadata(id: ExportSnapshotId): Nothing =
+                reject(id, OperationErrorCode.INTEGRITY_FAILED, "export_snapshot_metadata_invalid")
+
+            private fun expired(id: ExportSnapshotId): Nothing =
+                reject(id, OperationErrorCode.SESSION_EXPIRED, "export_snapshot_expired")
+
+            private fun reject(id: ExportSnapshotId, code: OperationErrorCode, key: String): Nothing =
+                throw RepositoryFailure(OperationError(code, false, key, id.value))
+        }
     }
 
     override suspend fun freezeExport(documentId: DocumentId, expectedDocumentRevision: Long, settings: ExportSettings): ExportSnapshot = withContext(dispatcher) {

@@ -88,6 +88,35 @@ class SnapshotReadBoundsTest(unittest.TestCase):
             with self.subTest(field=field):
                 self.assert_text_suffix_rejected("ExportPage", field, prefix, gate)
 
+    def test_fallback_text_byte_boundary_with_the_same_character_count(self):
+        for suffix, flag in (("", 1), ("\0x", 0)):
+            with self.subTest(byte_extent=512 + len(suffix)):
+                self.db.execute("UPDATE ExportPage SET fallbackPolicy=?", ("\U0001f642" * 128 + suffix,))
+                self.assertEqual((128, 512 + len(suffix)), self.db.execute(
+                    "SELECT length(fallbackPolicy), length(CAST(fallbackPolicy AS BLOB)) FROM ExportPage"
+                ).fetchone())
+                self.assertEqual(flag, self.gate("exportPagesAreBounded"))
+        # Change only the raw byte extent from 512 to 513; length(TEXT) still sees 128 characters.
+        self.db.execute("UPDATE ExportPage SET fallbackPolicy=?", ("\U0001f642" * 128 + "\0",))
+        self.assertEqual((128, 513), self.db.execute(
+            "SELECT length(fallbackPolicy), length(CAST(fallbackPolicy AS BLOB)) FROM ExportPage"
+        ).fetchone())
+        self.assertEqual(0, self.gate("exportPagesAreBounded"))
+
+    def test_nul_suffixed_snapshot_foreign_key_cannot_match_canonical_lookup(self):
+        foreign = self.snapshot + "\0x"
+        self.db.execute(
+            "INSERT INTO ExportSnapshot SELECT ?, documentId, documentRevision, snapshotSha256, settings, state, createdAt, retainedUntil "
+            "FROM ExportSnapshot WHERE snapshotId=?", (foreign, self.snapshot),
+        )
+        self.db.execute("UPDATE ExportPage SET snapshotId=? WHERE snapshotId=?", (foreign, self.snapshot))
+        self.assertEqual([], self.db.execute("PRAGMA foreign_key_check").fetchall())
+        self.assertEqual(1, self.gate("snapshotMetadataIsBounded"))
+        self.assertEqual(0, self.gate("exportPagesAreBounded"))
+        self.assertEqual([(36, 38)], self.db.execute(
+            "SELECT length(snapshotId), length(CAST(snapshotId AS BLOB)) FROM ExportPage WHERE snapshotId=?", (foreign,)
+        ).fetchall())
+
     def test_export_pages_reject_text_suffixes_in_each_accepted_render_field(self):
         gate = "exportPagesAreBounded"
         job_id, render_id = (str(UUID(int=i)) for i in (200, 201))

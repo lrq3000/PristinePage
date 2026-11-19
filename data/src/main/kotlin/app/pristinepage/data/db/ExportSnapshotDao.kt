@@ -70,6 +70,30 @@ import app.pristinepage.data.repository.RenderIntentQueries
     @Query("SELECT jobId, kind, idempotenceKey, canonicalInputSha256, snapshotId, input FROM Job WHERE jobId=:jobId")
     internal abstract fun assemblyJobIdentity(jobId: String): AssemblyJobIdentityRow?
 
+    // Call only after the separate assemblyJobReadIsBounded statement admits this exact row in the same transaction. A scalar result does not bound the BLOB comparison.
+    @Query("""SELECT CASE WHEN (kind='EXPORT_ASSEMBLY' AND snapshotId=:snapshotId AND pageOrdinal IS NULL)
+        AND (idempotenceKey=:key AND canonicalInputSha256=:digest AND typeof(input)='blob' AND input=:input)
+        THEN 1 ELSE 0 END FROM Job WHERE jobId=:jobId""")
+    internal abstract fun freshAssemblyInputMatches(jobId: String, snapshotId: String, key: String, digest: String, input: ByteArray): Boolean?
+
+    // Run alongside the existing generic lease-storage bounds. The virgin phases bind zero/nulls; the post-CAS check binds the actual assigned attempt, owner and elapsed deadline.
+    @Query("""SELECT CASE WHEN (state=:state AND typeof(attempt)='integer' AND attempt=:attempt)
+        AND (typeof(leaseGeneration)='integer' AND leaseGeneration=:attempt)
+        AND (leaseOwner IS :owner AND leaseUntil IS :until AND checkpoint IS NULL AND errorCode IS NULL)
+        THEN 1 ELSE 0 END FROM Job WHERE jobId=:jobId""")
+    internal abstract fun freshAssemblyPhaseMatches(jobId: String, state: String, attempt: Long, owner: String?, until: Long?): Boolean?
+
+    // The caller has already rechecked the retained frozen input and bounded the full Job row in this same transaction.
+    @Query("""UPDATE Job SET state='ADMITTED', updatedAt=:updatedAt WHERE jobId=:jobId
+        AND (kind='EXPORT_ASSEMBLY' AND snapshotId=:snapshotId AND pageOrdinal IS NULL)
+        AND (idempotenceKey=:key AND canonicalInputSha256=:digest AND typeof(input)='blob' AND input=:input)
+        AND (state='PENDING' AND typeof(attempt)='integer' AND attempt=0 AND typeof(leaseGeneration)='integer' AND leaseGeneration=0)
+        AND (leaseOwner IS NULL AND leaseUntil IS NULL AND checkpoint IS NULL AND errorCode IS NULL)
+        AND (typeof(createdAt)='integer' AND typeof(updatedAt)='integer' AND updatedAt=:previousUpdatedAt)""")
+    internal abstract fun admitPendingAssembly(
+        jobId: String, snapshotId: String, key: String, digest: String, input: ByteArray, previousUpdatedAt: Long, updatedAt: Long,
+    ): Int
+
     // Only a missing exact key may authorize an insert. Project an invalid ID as a sentinel rather than filtering the match or returning SQL NULL.
     @Query("""SELECT CASE WHEN (typeof(jobId)='text' AND length(CAST(jobId AS BLOB))=36 AND length(jobId)=36) THEN jobId ELSE '' END
         FROM Job WHERE idempotenceKey=:key""")
