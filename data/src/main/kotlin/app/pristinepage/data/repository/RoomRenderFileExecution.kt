@@ -119,8 +119,7 @@ internal class RoomRenderFileExecution(
             var admission = fence()
             admitPhase(admission.phase.state)
             val target = DerivedFileTarget(DerivedKind.RENDER, intent.renderId.value)
-            // A domain tag and the exact unchanged v1 envelope bind a successful closed raster readback to this job, attempt and target. Byte hash and extent are already part of the canonical DerivedFiles seal.
-            val prefix = SEAL_TAG + intent.journalPayload()
+            val sealMetadata = OrdinaryRenderSealV1(intent.journalPayload())
             fun verify(file: File, checkpoint: () -> Unit): String {
                 checkpoint()
                 val hash = readback(file, checkpoint) ?: invalid(lease)
@@ -136,7 +135,7 @@ internal class RoomRenderFileExecution(
                 val checkpoint = admission.checkpoint
                 val staged = files.stage(intent.transactionId.value, target, maxBytes, writer, checkpoint)
                 val rasterHash = files.readStaged(staged, checkpoint) { verify(it, checkpoint) }
-                files.seal(staged, prefix + rasterHash.encodeToByteArray(), checkpoint)
+                files.seal(staged, sealMetadata.encode(rasterHash), checkpoint)
             } else {
                 val phase = admission.phase
                 val recorded = phase.seal
@@ -146,11 +145,10 @@ internal class RoomRenderFileExecution(
                     requireFinal = phase.state == FileTransactionState.MOVED, checkpoint = checkpoint,
                     authenticate = { byteHash, count, metadata ->
                         if (recorded != null && (recorded.byteSha256 != byteHash || recorded.byteCount != count)) invalid(lease)
-                        if (metadata.size != prefix.size + 64 || !metadata.copyOf(prefix.size).contentEquals(prefix)) invalid(lease)
-                        requireSha256(metadata.decodeToString(startIndex = prefix.size))
+                        sealMetadata.rasterSha256(metadata)
                     },
                     readback = { file, metadata ->
-                        if (verify(file, checkpoint) != metadata.decodeToString(startIndex = prefix.size)) invalid(lease)
+                        if (verify(file, checkpoint) != sealMetadata.rasterSha256(metadata)) invalid(lease)
                     },
                 ) ?: invalid(lease)
             }
@@ -169,7 +167,7 @@ internal class RoomRenderFileExecution(
                 fence(phase, FileTransactionState.MOVED, identity)
             }
             active()
-            return moved.phase to sealed.metadata.decodeToString(startIndex = prefix.size)
+            return moved.phase to sealMetadata.rasterSha256(sealed.metadata)
         } catch (canceled: CancellationException) {
             throw canceled
         } catch (failure: RepositoryFailure) {
@@ -187,8 +185,23 @@ internal class RoomRenderFileExecution(
 
     private fun refuse(lease: JobLease, code: OperationErrorCode, key: String, retryable: Boolean = false): Nothing =
         throw RepositoryFailure(OperationError(code, retryable, key, lease.jobId.value))
+}
+
+/** The v1 domain tag and exact intent bind closed raster readback to one attempt and target. The outer DerivedFiles seal carries the encoded hash and extent. */
+internal class OrdinaryRenderSealV1(intentPayload: ByteArray) {
+    private val prefix = TAG + intentPayload
+
+    fun encode(rasterSha256: String): ByteArray {
+        requireSha256(rasterSha256)
+        return prefix + rasterSha256.encodeToByteArray()
+    }
+
+    fun rasterSha256(metadata: ByteArray): String {
+        require(metadata.size == prefix.size + 64 && metadata.copyOf(prefix.size).contentEquals(prefix))
+        return metadata.decodeToString(startIndex = prefix.size).also(::requireSha256)
+    }
 
     private companion object {
-        val SEAL_TAG = "pristinepage-ordinary-render-readback-v1\u0000".encodeToByteArray()
+        val TAG = "pristinepage-ordinary-render-readback-v1\u0000".encodeToByteArray()
     }
 }

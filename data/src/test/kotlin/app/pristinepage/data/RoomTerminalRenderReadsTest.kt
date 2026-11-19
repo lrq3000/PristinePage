@@ -6,11 +6,23 @@ import app.pristinepage.core.recipe.GeometryRecipe
 import app.pristinepage.core.recipe.RecipeCodec
 import app.pristinepage.core.recipe.SourceBinding
 import app.pristinepage.data.db.*
+import app.pristinepage.data.files.DerivedFileTarget
+import app.pristinepage.data.files.DerivedFiles
+import app.pristinepage.data.files.DerivedKind
+import app.pristinepage.data.files.DirectorySync
 import app.pristinepage.data.model.*
 import app.pristinepage.data.repository.*
+import java.io.File
+import java.nio.ByteBuffer
+import java.nio.file.Files
 import java.security.MessageDigest
 import java.util.UUID
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.job
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.*
 import org.junit.Test
@@ -173,6 +185,171 @@ class RoomTerminalRenderReadsTest {
         fixture().refuses(JobId(id(90)), OperationErrorCode.SOURCE_UNAVAILABLE)
     }
 
+    @Test fun terminalPngJoinReadsOnlyTheExactSealedFinalForThreeDistinctOriginals() = runTest {
+        val f = fixture()
+        f.journals[1] = f.writerJournal(attempt = 1)
+        f.journals[3] = f.writerJournal(attempt = 3)
+        val producerId = f.producer.sourceId.value
+        f.metadata.sources[producerId] = f.metadata.sources.getValue(producerId).copy(refCount = 0)
+        assertEquals(setOf(id(10), id(12), id(14)), setOf(f.frozen.sourceId.value, f.render.sourceId, f.pinIds.single()))
+        val final = f.sealTerminalFinal()
+        assertNotEquals(sealHash, final.sealSha256)
+        var calls = 0
+        val receipt = f.terminalAttempt(final.reader, terminalByteCap) { file, dimensions, raster, cap, checkpoint ->
+            f.assertOutsideGuardedRead()
+            calls++
+            final.decode(file, dimensions, raster, cap, checkpoint)
+        }.invoke()
+        assertEquals(1, calls)
+        assertEquals(TerminalReceipt(RenderId(id(6)), TransactionId(id(7)), final.sealSha256,
+            ReadbackIdentity(encodedHash, 5L, rasterHash)), receipt)
+        final.assertUnchanged()
+    }
+
+    @Test fun terminalPngJoinRefusesWrongSealBindingOrCapBeforeReadback() = runTest {
+        for (fault in SealFault.entries) {
+            val f = fixture()
+            val final = f.sealTerminalFinal(
+                intentPayload = if (fault == SealFault.INTENT) f.writerJournal(owner = id(9)).payload else f.current.payload,
+                sealedRaster = if (fault == SealFault.RASTER) otherHash else rasterHash,
+                tag = if (fault == SealFault.TAG) "pristinepage-ordinary-render-readback-v2\u0000" else terminalSealTag,
+            )
+            if (fault == SealFault.DIGEST) f.current = f.current.copy(sealSha256 = sealHash)
+            if (fault == SealFault.BYTES) {
+                // Keep the render/journal tuple consistent so only the comparison to the actual seal rejects.
+                f.current = f.current.copy(expectedByteSha256 = otherHash)
+                f.render = f.render.copy(byteSha256 = otherHash)
+            }
+            if (fault == SealFault.EXTENT) {
+                f.current = f.current.copy(expectedByteCount = 4)
+                f.render = f.render.copy(byteCount = 4)
+            }
+            val finalBytes = if (fault == SealFault.FINAL) final.driftFinal() else syntheticBytes
+            val cap = if (fault == SealFault.CAP) 4L else terminalByteCap
+            val attempt = f.terminalAttempt(final.reader, cap) { _, _, _, _, _ ->
+                throw AssertionError("$fault reached semantic readback")
+            }
+            refusesTerminal(attempt, if (fault == SealFault.CAP) OperationErrorCode.RESOURCE_LIMIT else OperationErrorCode.INTEGRITY_FAILED)
+            f.assertOutsideGuardedRead()
+            final.assertUnchanged(finalBytes)
+        }
+    }
+
+    @Test fun terminalPngJoinRejectsAnyDifferentObservedIdentityWithoutAReceipt() = runTest {
+        // Refuse each field independently. Validating only the raster digest could hide different closed bytes, and the converse is also insufficient.
+        for (mutate in listOf<(ReadbackIdentity) -> ReadbackIdentity>(
+            { it.copy(byteSha256 = otherHash) }, { it.copy(byteCount = it.byteCount + 1) }, { it.copy(rasterSha256 = otherHash) },
+        )) {
+            val f = fixture()
+            val final = f.sealTerminalFinal()
+            var calls = 0
+            val attempt = f.terminalAttempt(final.reader, terminalByteCap) { file, dimensions, raster, cap, checkpoint ->
+                f.assertOutsideGuardedRead()
+                calls++
+                mutate(final.decode(file, dimensions, raster, cap, checkpoint))
+            }
+            refusesTerminal(attempt, OperationErrorCode.INTEGRITY_FAILED)
+            assertEquals(1, calls)
+            final.assertUnchanged()
+        }
+    }
+
+    @Test fun terminalPngJoinCannotReturnAReceiptWhenReadbackCancelsThenReturnsExactIdentity() = runTest {
+        val f = fixture()
+        val final = f.sealTerminalFinal()
+        var observed: ReadbackIdentity? = null
+        var receipt: TerminalReceipt? = null
+        var canceled = false
+        // Keep the reader on the same dispatcher so a dispatcher switch cannot mask a missing cancellation fence.
+        launch(Dispatchers.Unconfined, start = CoroutineStart.UNDISPATCHED) {
+            val job = coroutineContext.job
+            try {
+                receipt = f.terminalAttempt(final.reader, terminalByteCap) { file, dimensions, raster, cap, checkpoint ->
+                    f.assertOutsideGuardedRead()
+                    val identity = final.decode(file, dimensions, raster, cap, checkpoint)
+                    job.cancel()
+                    identity.also { observed = it }
+                }.invoke()
+            } catch (_: CancellationException) {
+                canceled = true
+            }
+        }.join()
+        assertEquals(ReadbackIdentity(encodedHash, 5L, rasterHash), observed)
+        assertTrue("Cancellation must propagate from the join", canceled)
+        assertNull(receipt)
+        final.assertUnchanged()
+    }
+
+    private suspend fun refusesTerminal(attempt: suspend () -> TerminalReceipt, code: OperationErrorCode) {
+        val rejection = try {
+            attempt()
+            throw AssertionError("Terminal PNG data join returned a receipt for a mismatched identity")
+        } catch (failure: RepositoryFailure) {
+            failure.error
+        }
+        assertEquals(code, rejection.code)
+    }
+
+    private enum class SealFault { DIGEST, TAG, INTENT, RASTER, BYTES, EXTENT, FINAL, CAP }
+
+    private data class ReadbackIdentity(val byteSha256: String, val byteCount: Long, val rasterSha256: String)
+
+    // Test projection only: no path or ownership, and no proposed reusable receipt class.
+    private data class TerminalReceipt(val renderId: RenderId, val transactionId: TransactionId, val sealSha256: String, val observed: ReadbackIdentity)
+
+    private class TerminalFinal(transactionId: String, target: DerivedFileTarget, sealMetadata: ByteArray) {
+        private val root = Files.createTempDirectory(
+            Files.createDirectories(File(System.getProperty("user.dir"), "build/test-terminal-png-data-join").toPath()), "case-",
+        ).toFile().canonicalFile
+        private val stage = File(root, "staging/$transactionId/derived.part")
+        private val seal = File(root, "staging/$transactionId/derived-seal.json")
+        private val final = File(root, "renders/${target.objectId}/page.bin")
+        private val sealBytes: ByteArray
+        val sealSha256: String
+        val reader = DerivedFiles(root, DirectorySync { throw AssertionError("Terminal inspection must not sync") }) {
+            throw AssertionError("Terminal inspection must not force the seal")
+        }
+
+        init {
+            val setup = DerivedFiles(root, DirectorySync { false })
+            val staged = setup.stage(transactionId, target, 5L, { it.write(syntheticBytes) })
+            val sealed = setup.seal(staged, sealMetadata)
+            assertEquals(final, setup.move(sealed))
+            sealBytes = seal.readBytes()
+            sealSha256 = sha256(sealBytes)
+            assertEquals(sealed.sealSha256, sealSha256)
+            assertUnchanged()
+        }
+
+        fun decode(file: File, dimensions: PixelSize, expectedRaster: String, cap: Long, checkpoint: () -> Unit): ReadbackIdentity {
+            assertEquals(final, file)
+            assertEquals(size, dimensions)
+            assertEquals(rasterHash, expectedRaster)
+            assertEquals(terminalByteCap, cap)
+            checkpoint()
+            val bytes = file.readBytes()
+            // This stub associates one literal token with RGB samples 1..18. It does not decode PNG or echo the caller's expected digest.
+            assertArrayEquals(syntheticBytes, bytes)
+            val rgb = ByteArray(18) { (it + 1).toByte() }
+            val rasterInput = "pristinepage-ordinary-render-rgb8-v1\u0000".encodeToByteArray() +
+                ByteBuffer.allocate(8).putInt(3).putInt(2).array() + rgb
+            return ReadbackIdentity(sha256(bytes), bytes.size.toLong(), sha256(rasterInput))
+        }
+
+        fun driftFinal(): ByteArray {
+            // Change one byte after the fixture's move without changing extent, so the pre-readback final scan must compare actual SHA-256.
+            val drift = syntheticBytes.copyOf().apply { this[lastIndex] = 5 }
+            final.writeBytes(drift)
+            return drift
+        }
+
+        fun assertUnchanged(expectedFinal: ByteArray = syntheticBytes) {
+            assertFalse("No staged copy should remain or be recreated", stage.exists())
+            assertArrayEquals(sealBytes, seal.readBytes())
+            assertArrayEquals(expectedFinal, final.readBytes())
+        }
+    }
+
     private suspend fun fixture(retained: OrdinaryExportProfile = profile, runtime: OrdinaryExportProfile = profile) =
         Fixture(retained, runtime).apply { initialize() }
 
@@ -272,7 +449,7 @@ class RoomTerminalRenderReadsTest {
             return action()
         }
 
-        suspend fun load(jobId: JobId = checkNotNull(orderedJob)) = RoomTerminalRenderReads(this, runtime, Dispatchers.Unconfined,
+        private fun terminalReader() = RoomTerminalRenderReads(this, runtime, Dispatchers.Unconfined,
             { id, extent -> sql { if (id == job.jobId) job.input.size == extent else null } },
             { id -> sql { identityRow().takeIf { it.jobId == id } } },
             { id -> sql { if (id == job.jobId) pinIds else emptyList() } },
@@ -296,7 +473,37 @@ class RoomTerminalRenderReadsTest {
                 if (forbidJournalProjection) throw AssertionError("Projected an unsafe journal row")
                 journals[attempt]?.takeIf { it.ownerId == id && it.kind == "RENDER" }
             } },
-        ).load(jobId, frozen)
+        )
+
+        suspend fun load(jobId: JobId = checkNotNull(orderedJob)) = terminalReader().load(jobId, frozen)
+
+        fun sealTerminalFinal(
+            intentPayload: ByteArray = current.payload, sealedRaster: String = rasterHash, tag: String = terminalSealTag,
+        ): TerminalFinal {
+            val sealMetadata = tag.encodeToByteArray() + intentPayload + sealedRaster.encodeToByteArray()
+            return TerminalFinal(current.transactionId, DerivedFileTarget(DerivedKind.RENDER, render.renderId), sealMetadata)
+                .also { current = current.copy(sealSha256 = it.sealSha256) }
+        }
+
+        fun assertOutsideGuardedRead() {
+            assertFalse(metadata.inTransaction)
+            assertEquals(listOf(Triple(id(5), 2L, RenderFileIntent.payloadBytes)), journalGuardReads)
+        }
+
+        fun terminalAttempt(
+            files: DerivedFiles, maxBytes: Long,
+            readback: (File, PixelSize, String, Long, () -> Unit) -> ReadbackIdentity,
+        ): suspend () -> TerminalReceipt {
+            val reader = RoomTerminalPngReads(terminalReader(), files, Dispatchers.Unconfined)
+            return {
+                val receipt = reader.load(checkNotNull(orderedJob), frozen, maxBytes) { file, dimensions, raster, cap, checkpoint ->
+                    val observed = readback(file, dimensions, raster, cap, checkpoint)
+                    RoomTerminalPngReads.ObservedIdentity(observed.byteSha256, observed.byteCount, observed.rasterSha256)
+                }
+                TerminalReceipt(receipt.renderId, receipt.transactionId, receipt.sealSha256,
+                    ReadbackIdentity(receipt.observed.byteSha256, receipt.observed.byteCount, receipt.observed.rasterSha256))
+            }
+        }
 
         suspend fun refuses(
             requested: JobId = checkNotNull(orderedJob),
@@ -325,8 +532,13 @@ class RoomTerminalRenderReadsTest {
         val profile = OrdinaryExportProfile("renderer-v1", "rgb8-v1", "reference", "binary64")
         val historicalProfile = OrdinaryExportProfile("renderer-v1-retained", "rgb8-v1-retained", "reference-retained", "binary64")
         val sealHash = "9".repeat(64) // A recorded digest, not a claim that a seal exists.
-        val encodedHash = MessageDigest.getInstance("SHA-256").digest(byteArrayOf(80, 78, 71, 17, 4)).joinToString("") { "%02x".format(it) }
+        val syntheticBytes = byteArrayOf(80, 78, 71, 17, 4) // An opaque fixture token, not a PNG.
+        val encodedHash = sha256(syntheticBytes)
+        val otherHash = "e".repeat(64)
+        const val terminalByteCap = 6L // Deliberately not the five-byte expected extent.
+        const val terminalSealTag = "pristinepage-ordinary-render-readback-v1\u0000"
         const val rasterHash = "69383a3ea68c8e12c19b9f0b604a888357ef9a8c3f180f6e50c60faea74df7c4"
+        fun sha256(bytes: ByteArray) = MessageDigest.getInstance("SHA-256").digest(bytes).joinToString("") { "%02x".format(it) }
         fun request(page: ExportPageSnapshot) =
             RenderRequest(page.sourceId.value, pixels, page.pageId.value, 4, recipe, output, 0, null, FallbackPolicy.FAIL)
         fun page(source: Int, blob: Int, hashDigit: String, retained: OrdinaryExportProfile) = ExportPageSnapshot(ExportPageRow(id(1), 0, id(4), id(source), id(blob),
