@@ -9,6 +9,7 @@ import app.pristinepage.data.repository.RoomFreshExportAssembly
 import app.pristinepage.data.repository.RoomTerminalPngReads
 import app.pristinepage.data.OrdinaryPngTargetRetentionTest.TerminalStore
 import java.io.File
+import java.lang.reflect.Modifier
 import java.nio.file.Files
 import java.util.UUID
 import kotlin.coroutines.Continuation
@@ -23,6 +24,22 @@ import org.junit.Test
 private typealias FixtureReadback = TerminalStore.(File, PixelSize, String, Long, () -> Unit) -> RoomTerminalPngReads.ObservedIdentity?
 
 class OrdinaryPngAcquiredTerminalTest {
+    @Test fun acquiredDoesNotExposeNakedRunningMetadataFences() {
+        // Only examine the baseline declarations; neither fence is safe to invoke on a bare claim.
+        val naked = RoomFreshExportAssembly.Acquired::class.java.declaredMethods.filter {
+            !it.isSynthetic && !Modifier.isPrivate(it.modifiers) &&
+                it.name.substringBefore('$') in setOf("checkTerminalSet", "checkTerminalAttempt")
+        }
+        assertTrue("Bare Acquired exposes RUNNING metadata fences: ${naked.map { it.name }.sorted()}", naked.isEmpty())
+    }
+
+    @Test fun retainedFenceDeliveryHasNoCallerConstructibleReceiver() {
+        val bridge = RoomTerminalPngReads.Retained.AcquiredSetReader::class.java
+        assertTrue(Modifier.isFinal(bridge.modifiers))
+        assertTrue(bridge.declaredConstructors.all { it.isSynthetic || Modifier.isPrivate(it.modifiers) })
+        // The sole ordinary acquired-set receiver above takes Acquired only and returns receipts; no caller gets a fence handle.
+    }
+
     @Test fun acquiredSetInvocationAcceptsOnlyTheAcquiredClaim() {
         val entry = RoomTerminalPngReads.Retained::class.java.declaredMethods
             .filter { it.name.substringBefore('$') == "readAcquiredSet" && !it.isSynthetic }
@@ -50,6 +67,9 @@ class OrdinaryPngAcquiredTerminalTest {
             assertEquals(50L, row.leaseUntil)
             val baselineJobs = f.fullJobReads
             val baselinePages = f.pageReads
+            val baselineAttempts = f.attemptChecks
+            f.beforeSnapshotRow = { f.assertIssuingStoreInUse() }
+            f.beforeAttemptCheck = { f.assertIssuingStoreInUse() }
             val receipts = f.retained.readAcquiredSet(acquired)
             assertEquals(listOf("cap", "cap", "read 0", "read 1"), calls)
             assertEquals(listOf(id(60), id(61)), receipts.map { it.renderId.value })
@@ -61,8 +81,11 @@ class OrdinaryPngAcquiredTerminalTest {
             assertEquals("FROZEN", f.header.state)
             assertEquals(baselineJobs, f.fullJobReads)
             assertEquals(2, f.pageReads - baselinePages)
+            assertEquals(8, f.attemptChecks - baselineAttempts)
         }
         f.assertUnchanged()
+        f.lifetime.close()
+        assertEquals(1, f.closeCalls)
     }
 
     @Test fun importOnlyConfigurationRefusesBeforeTerminalMetadataOrFileScope() = runTest {
@@ -105,21 +128,39 @@ class OrdinaryPngAcquiredTerminalTest {
     @Test fun foreignLifetimeForeignStoreAndMetadataOnlyClaimsCannotEnterReadback() = runTest {
         val f = fixture()
         val foreign = fixture()
+        suspend fun TerminalStore.refuseWithoutMetadata(acquired: RoomFreshExportAssembly.Acquired) {
+            val before = listOf(snapshotReads, attemptChecks, fullJobReads, reads)
+            val failure = refuses(OperationErrorCode.INTEGRITY_FAILED) { retained.readAcquiredSet(acquired) }
+            assertEquals("terminal_png_retention_binding_invalid", failure.error.safeMessageKey)
+            assertEquals(before, listOf(snapshotReads, attemptChecks, fullJobReads, reads))
+            assertFalse(File(root, "ownership/ordinary-derived-v1.lock").exists())
+        }
         f.owners.run { owner ->
             val acquired = f.acquire(owner, OrdinaryExportLifetime {})
-            val baseline = f.reads
-            refuses(OperationErrorCode.INTEGRITY_FAILED) { f.retained.readAcquiredSet(acquired) }
-            assertEquals(baseline, f.reads)
+            f.refuseWithoutMetadata(acquired)
         }
         foreign.owners.run { owner ->
             val acquired = foreign.acquire(owner, f.lifetime)
-            refuses(OperationErrorCode.INTEGRITY_FAILED) { f.retained.readAcquiredSet(acquired) }
+            val before = listOf(foreign.snapshotReads, foreign.attemptChecks, foreign.fullJobReads, foreign.reads)
+            f.refuseWithoutMetadata(acquired)
+            assertEquals(before, listOf(foreign.snapshotReads, foreign.attemptChecks, foreign.fullJobReads, foreign.reads))
         }
         val unscoped = fixture()
         unscoped.owners.run { owner ->
-            val acquired = unscoped.acquire(owner, null)
-            refuses(OperationErrorCode.INTEGRITY_FAILED) { unscoped.retained.readAcquiredSet(acquired) }
-            assertEquals(0, unscoped.reads)
+            unscoped.refuseWithoutMetadata(unscoped.acquire(owner, null))
+        }
+    }
+
+    @Test fun acquiredClaimCannotRestartReadAfterIssuingStoreCloses() = runTest {
+        val f = fixture()
+        f.owners.run { owner ->
+            val acquired = f.acquire(owner)
+            f.lifetime.close()
+            val before = listOf(f.snapshotReads, f.attemptChecks, f.fullJobReads, f.reads)
+            val failure = refuses(OperationErrorCode.STORAGE_FAILED) { f.retained.readAcquiredSet(acquired) }
+            assertEquals("ordinary_export_store_closed", failure.error.safeMessageKey)
+            assertEquals(before, listOf(f.snapshotReads, f.attemptChecks, f.fullJobReads, f.reads))
+            assertFalse(File(f.root, "ownership/ordinary-derived-v1.lock").exists())
         }
     }
 
@@ -199,6 +240,57 @@ class OrdinaryPngAcquiredTerminalTest {
         }
     }
 
+    @Test fun finalSnapshotFenceRefusesLateCanceledSnapshot() = runTest {
+        assertFinalSnapshotRefusal(OperationErrorCode.CANCELED, "export_snapshot_canceled", latePageReads = 0) {
+            header = header.copy(state = "CANCELED")
+        }
+    }
+
+    @Test fun finalSnapshotFenceRefusesLateFrozenContentDriftWithUnchangedHeaderAndJob() = runTest {
+        assertFinalSnapshotRefusal(OperationErrorCode.INTEGRITY_FAILED, "export_snapshot_content_changed", latePageReads = 1) {
+            changeFrozenRecipeRevision()
+        }
+    }
+
+    private suspend fun assertFinalSnapshotRefusal(
+        code: OperationErrorCode, key: String, latePageReads: Int, changeSnapshot: TerminalStore.() -> Unit,
+    ) {
+        var verified = 0
+        var attemptsAtLastReadback = 0
+        var finalSnapshotReads = 0
+        val f = fixture { file, size, raster, cap, checkpoint ->
+            readback(verified).verify(file, size, raster, cap, checkpoint).also {
+                verified++
+                if (verified == 2) attemptsAtLastReadback = attemptChecks
+            }
+        }
+        f.owners.run { owner ->
+            val acquired = f.acquire(owner)
+            val before = f.pageReads
+            val row = f.assemblyRow
+            f.beforeSnapshotRow = {
+                if (verified == 2) {
+                    // The last per-ordinal attempt fence follows the closed file inspection and its postchecks.
+                    assertEquals(attemptsAtLastReadback + 1, f.attemptChecks)
+                    assertEquals(before + 1, f.pageReads)
+                    finalSnapshotReads++
+                    f.changeSnapshot()
+                }
+            }
+            val failure = refuses(code) { f.retained.readAcquiredSet(acquired) }
+            assertEquals(key, failure.error.safeMessageKey)
+            assertEquals(acquired.admitted.prepared.snapshot.snapshotId.value, failure.error.affectedId)
+            assertEquals(2, verified)
+            assertEquals(1, finalSnapshotReads)
+            assertEquals(before + 1 + latePageReads, f.pageReads)
+            assertSame(row, f.assemblyRow)
+            assertEquals(10L, f.wall)
+            assertEquals(20L, f.elapsed)
+            assertEquals(LeaseOwnerState.ALIVE, f.owners.state(owner))
+        }
+        f.assertUnchanged()
+    }
+
     @Test fun invalidOrTooSmallDimensionCapNeverBecomesAnUnboundedRead() = runTest {
         for ((cap, code) in listOf(0L to OperationErrorCode.INVALID_INPUT, 3L to OperationErrorCode.RESOURCE_LIMIT)) {
             val f = fixture(cap = { cap })
@@ -228,8 +320,7 @@ class OrdinaryPngAcquiredTerminalTest {
                 ownJob.cancel()
                 // The cancel flag cannot unlock the lane or let the issuing store close.
                 runBlocking { writer.assertBusy() }
-                assertEquals("ordinary_export_store_in_use",
-                    assertThrows(RepositoryFailure::class.java) { f.lifetime.close() }.error.safeMessageKey)
+                f.assertIssuingStoreInUse()
             }
             try {
                 f.owners.run { owner ->
@@ -250,6 +341,39 @@ class OrdinaryPngAcquiredTerminalTest {
         assertEquals("MOVED", writer.row.state)
         f.assertUnchanged()
         f.lifetime.close()
+    }
+
+    @Test fun exceptionalFinalFenceUnwindsTheLaneAndStoreBorrow() = runTest {
+        var verified = 0
+        val f = fixture { file, size, raster, cap, checkpoint ->
+            readback(verified++ % 2).verify(file, size, raster, cap, checkpoint)
+        }
+        f.owners.run { owner ->
+            val acquired = f.acquire(owner)
+            f.beforeSnapshotRow = {
+                if (verified == 2) {
+                    f.assertIssuingStoreInUse()
+                    throw java.io.IOException("synthetic failure during the final snapshot read")
+                }
+            }
+            val failure = refuses(OperationErrorCode.STORAGE_FAILED) { f.retained.readAcquiredSet(acquired) }
+            assertEquals("export_assembly_metadata_failed", failure.error.safeMessageKey)
+            assertEquals(2, verified)
+            f.beforeSnapshotRow = {}
+            // A new legitimate read can acquire the one lane again; no receiver or file borrow survives the failure.
+            assertEquals(2, f.retained.readAcquiredSet(acquired).size)
+            assertEquals(4, verified)
+        }
+        f.assertUnchanged()
+        f.lifetime.close()
+        assertEquals(1, f.closeCalls)
+    }
+
+    private fun TerminalStore.assertIssuingStoreInUse() {
+        val issue = assertThrows(RepositoryFailure::class.java) { lifetime.close() }.error
+        assertEquals(OperationErrorCode.REVISION_CONFLICT, issue.code)
+        assertEquals("ordinary_export_store_in_use", issue.safeMessageKey)
+        assertEquals(0, closeCalls)
     }
 
     private suspend fun RenderFileExecutionTest.RenderFileFixture.assertBusy() {

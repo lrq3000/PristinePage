@@ -15,6 +15,7 @@ import app.pristinepage.data.model.RepositoryFailure
 import app.pristinepage.data.model.TransactionId
 import java.io.File
 import java.util.Collections
+import kotlin.coroutines.CoroutineContext
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers
@@ -93,47 +94,68 @@ internal class RoomTerminalPngReads(
 
         /** Evidence only: one cooperative lane and one issuing-store borrow; neither a file location nor a partial set escapes. */
         suspend fun readAcquiredSet(acquired: RoomFreshExportAssembly.Acquired): List<Receipt> =
-            withContext(reader.dispatcher) {
-                coroutineContext.ensureActive()
-                val prepared = acquired.admitted.prepared
-                val assembly = prepared.jobId
-                slot(prepared, 0) // Refuse a wrong store/lifetime before acquiring either retention guard.
-                val verification = setVerification
-                    ?: reader.refuse(assembly, OperationErrorCode.PROVIDER_UNAVAILABLE, "terminal_png_verifier_unavailable")
-                lifetime.retain(assembly.value) {
-                    owners.withOrdinaryDerivedLane(assembly) {
-                        val context = coroutineContext
-                        val active = acquired.checkTerminalSet(context)
-                        // Bind the trusted store's limit once to each frozen output size.
-                        val slots = prepared.snapshot.pages.indices.map { ordinal ->
-                            active()
-                            val (job, page) = slot(prepared, ordinal)
-                            val cap = verification.stagedByteCap(page.output.size)
-                            reader.requireCap(job, cap)
-                            TerminalSlot(job, page, cap)
-                        }
-                        val checkAttempt = {
-                            active()
-                            acquired.checkTerminalAttempt(context)
-                            active()
-                        }
-                        val guardedReadback = Readback { file, size, raster, cap, _ ->
-                            // The compressed-byte scan can be long. Verify the current attempt again just before handing the exact borrowed file to the verifier.
-                            checkAttempt()
-                            verification.readback.verify(file, size, raster, cap, active).also { active() }
-                        }
-                        val receipts = slots.map { (job, page, cap) ->
-                            active()
-                            val expected = reader.metadata.load(job, page)
-                            checkAttempt()
-                            useBoundFinal(job, expected, cap, active) { it.read(guardedReadback) }.also { checkAttempt() }
-                        }
-                        // Re-read the complete frozen identity and bounded attempt after all file postchecks, while the same lane is still held.
-                        acquired.checkTerminalSet(context)
-                        Collections.unmodifiableList(receipts)
+            AcquiredSetReader.start(this, acquired)
+
+        // Only this final, privately constructed bridge receives the owned operations. It has no factory or callback that can hand them (or itself) to another consumer.
+        internal class AcquiredSetReader private constructor(private val retained: Retained) {
+            @JvmSynthetic
+            internal suspend fun read(
+                prepared: RoomFreshExportAssembly.Prepared,
+                checkSet: (CoroutineContext) -> () -> Unit,
+                checkAttempt: (CoroutineContext) -> Unit,
+            ): List<Receipt> = retained.readWithRunningFences(prepared, checkSet, checkAttempt)
+
+            companion object {
+                @JvmSynthetic
+                internal suspend fun start(retained: Retained, acquired: RoomFreshExportAssembly.Acquired): List<Receipt> =
+                    acquired.readRetainedTerminalSet(AcquiredSetReader(retained))
+            }
+        }
+
+        private suspend fun readWithRunningFences(
+            prepared: RoomFreshExportAssembly.Prepared,
+            checkSet: (CoroutineContext) -> () -> Unit,
+            checkAttempt: (CoroutineContext) -> Unit,
+        ): List<Receipt> = withContext(reader.dispatcher) {
+            coroutineContext.ensureActive()
+            val assembly = prepared.jobId
+            slot(prepared, 0) // Refuse a wrong store/lifetime before acquiring either retention guard.
+            val verification = setVerification
+                ?: reader.refuse(assembly, OperationErrorCode.PROVIDER_UNAVAILABLE, "terminal_png_verifier_unavailable")
+            lifetime.retain(assembly.value) {
+                owners.withOrdinaryDerivedLane(assembly) {
+                    val context = coroutineContext
+                    val active = checkSet(context)
+                    // Bind the trusted store's limit once to each frozen output size.
+                    val slots = prepared.snapshot.pages.indices.map { ordinal ->
+                        active()
+                        val (job, page) = slot(prepared, ordinal)
+                        val cap = verification.stagedByteCap(page.output.size)
+                        reader.requireCap(job, cap)
+                        TerminalSlot(job, page, cap)
                     }
+                    val checkOrdinal = {
+                        active()
+                        checkAttempt(context)
+                        active()
+                    }
+                    val guardedReadback = Readback { file, size, raster, cap, _ ->
+                        // The compressed-byte scan can be long. Verify the current attempt again just before handing the exact borrowed file to the verifier.
+                        checkOrdinal()
+                        verification.readback.verify(file, size, raster, cap, active).also { active() }
+                    }
+                    val receipts = slots.map { (job, page, cap) ->
+                        active()
+                        val expected = reader.metadata.load(job, page)
+                        checkOrdinal()
+                        useBoundFinal(job, expected, cap, active) { it.read(guardedReadback) }.also { checkOrdinal() }
+                    }
+                    // Re-read the complete frozen identity and bounded attempt after all file postchecks, while the same lane is still held.
+                    checkSet(context)
+                    Collections.unmodifiableList(receipts)
                 }
             }
+        }
 
         private data class TerminalSlot(val job: JobId, val page: ExportPageSnapshot, val cap: Long)
 

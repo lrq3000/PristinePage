@@ -185,8 +185,12 @@ internal class RoomFreshExportAssembly private constructor(
         private val issuingService: RoomFreshExportAssembly,
         private val running: JobRow,
     ) {
-        /** Only the retained terminal-set reader calls this, after matching its issuer and entering its store lifetime and lane. */
-        internal fun checkTerminalSet(context: CoroutineContext): () -> Unit {
+        /** The final reader is constructed privately by the existing retained entry; this is not an arbitrary callback or an attempt handle. */
+        @JvmSynthetic
+        internal suspend fun readRetainedTerminalSet(reader: RoomTerminalPngReads.Retained.AcquiredSetReader): List<RoomTerminalPngReads.Receipt> =
+            reader.read(admitted.prepared, ::checkTerminalSet, ::checkTerminalAttempt)
+
+        private fun checkTerminalSet(context: CoroutineContext): () -> Unit {
             val service = issuingService
             val prepared = admitted.prepared
             val id = lease.jobId.value
@@ -205,7 +209,7 @@ internal class RoomFreshExportAssembly private constructor(
         }
 
         /** Ordinal boundaries use indexed scalar input/phase checks, not a second full snapshot or Job projection. */
-        internal fun checkTerminalAttempt(context: CoroutineContext) {
+        private fun checkTerminalAttempt(context: CoroutineContext) {
             context.ensureActive()
             val id = lease.jobId.value
             issuingService.storage(id) {

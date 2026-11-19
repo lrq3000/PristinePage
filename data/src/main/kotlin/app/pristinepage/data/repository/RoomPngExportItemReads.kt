@@ -9,7 +9,7 @@ import app.pristinepage.data.model.RepositoryFailure
 import kotlinx.coroutines.CancellationException
 
 /** Synchronous metadata leaf. The owning caller supplies authenticated frozen order, the exact attempt and expected moves, retains any live authority, and chooses the IO context. */
-internal class RoomPngExportItemReads(
+internal class RoomPngExportItemReads private constructor(
     private val metadata: MetadataAccess,
     private val inventory: (String, Int) -> List<String>,
     private val bounds: (String, Long, Int) -> Boolean?,
@@ -113,6 +113,22 @@ internal class RoomPngExportItemReads(
                 row.expectedByteSha256 == expected.intent.byteSha256 && row.expectedByteCount == expected.intent.byteCount &&
                 row.payload.contentEquals(payload)
     }
+
+    companion object {
+        /** Host fixtures only; ordinary callers derive the transaction and all reads from one database. */
+        @JvmSynthetic
+        @SyntheticJournalPorts
+        internal fun forSyntheticTests(
+            metadata: MetadataAccess,
+            inventory: (String, Int) -> List<String>,
+            bounds: (String, Long, Int) -> Boolean?,
+            project: (String, Long) -> ExportItemIntentRow?,
+        ): RoomPngExportItemReads = RoomPngExportItemReads(metadata, inventory, bounds, project)
+    }
+
+    @RequiresOptIn(message = "Independent journal read ports are for synthetic tests only.")
+    @Retention(AnnotationRetention.BINARY)
+    internal annotation class SyntheticJournalPorts
 }
 
 /** Type admission comes from the exact same-key scalar query in the same transaction, not from this projection. */

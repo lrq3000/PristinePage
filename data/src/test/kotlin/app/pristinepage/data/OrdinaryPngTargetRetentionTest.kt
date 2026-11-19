@@ -411,6 +411,12 @@ class OrdinaryPngTargetRetentionTest {
             private set
         var pageReads = 0
             private set
+        var snapshotReads = 0
+            private set
+        var attemptChecks = 0
+            private set
+        var beforeSnapshotRow = {}
+        var beforeAttemptCheck = {}
         var duringPages = {}
         var duringTerminalJournal = {}
         var missingOrdinal: Int? = null
@@ -428,7 +434,11 @@ class OrdinaryPngTargetRetentionTest {
             }
 
             override fun snapshotMetadataIsBounded(snapshotId: String) = query { true.takeIf { snapshotId == header.snapshotId } }
-            override fun snapshot(id: String) = query { header.takeIf { id == it.snapshotId } }
+            override fun snapshot(id: String) = query {
+                snapshotReads++
+                beforeSnapshotRow()
+                header.takeIf { id == it.snapshotId }
+            }
             override fun exportPagesAreBounded(snapshotId: String) = query { snapshotId == header.snapshotId }
             override fun exportPages(snapshotId: String) = query {
                 pageReads++
@@ -456,6 +466,8 @@ class OrdinaryPngTargetRetentionTest {
             }
             override fun leaseBounds(id: String) = query { id == assemblyRow.jobId }
             override fun phaseMatches(id: String, state: String, attempt: Long, owner: String?, until: Long?) = query {
+                attemptChecks++
+                beforeAttemptCheck()
                 with(assemblyRow) { jobId == id && this.state == state && this.attempt == attempt && leaseGeneration == attempt &&
                     leaseOwner == owner && leaseUntil == until && checkpoint == null && errorCode == null }
             }
@@ -600,6 +612,10 @@ class OrdinaryPngTargetRetentionTest {
             "8a372153929345d869029c667c187035a85324c0eaf23179290dab1b057c5f07" else rasterHash
 
         fun final(slot: Int): File = slots[slot].final
+        fun changeFrozenRecipeRevision() {
+            frozenPages = listOf(frozenPages.first(), frozenPages.last().copy(recipeRevision = 2))
+        }
+
         suspend fun load(slot: Int) = reader.load(prepared.orderedJobIds[slot], prepared.snapshot.pages[slot], cap, readback(slot))
 
         suspend fun retain(

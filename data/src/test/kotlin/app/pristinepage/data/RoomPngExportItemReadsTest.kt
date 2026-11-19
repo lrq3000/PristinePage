@@ -1,6 +1,7 @@
 package app.pristinepage.data
 
 import app.pristinepage.core.pipeline.PixelSize
+import app.pristinepage.data.db.PristineDatabase
 import app.pristinepage.data.model.ArtifactId
 import app.pristinepage.data.model.ExportSnapshotId
 import app.pristinepage.data.model.JobId
@@ -19,15 +20,27 @@ import app.pristinepage.data.repository.RoomPngExportItemReads.ExpectedMove
 import app.pristinepage.data.repository.RoomPngExportItemReads.Verdict
 import java.io.ByteArrayOutputStream
 import java.io.DataOutputStream
+import java.lang.reflect.Modifier
 import java.security.MessageDigest
 import java.util.UUID
+import kotlinx.coroutines.CancellationException
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertSame
 import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class RoomPngExportItemReadsTest {
+    @Test fun ordinaryConstructionCanOnlyDeriveJournalPortsFromOneDatabase() {
+        // A JVM constructor inventory, not an invocation of the independently injectable baseline route.
+        val constructors = RoomPngExportItemReads::class.java.declaredConstructors
+            .filter { !it.isSynthetic && !Modifier.isPrivate(it.modifiers) }
+            .map { it.parameterTypes.toList() }
+        assertEquals("A normal constructor can supply independent journal ports",
+            listOf(listOf(PristineDatabase::class.java)), constructors)
+    }
+
     @Test fun fixedV1EnvelopeAndOwnerKeyMatchIndependentLiterals() {
         val f = Fixture()
         val item = f.plan[0].intent
@@ -77,6 +90,32 @@ class RoomPngExportItemReadsTest {
         assertEquals((0..99).map { f.owner(it) to 3L }, f.seeks)
         assertEquals(listOf(f.owner(0), f.owner(1)), f.projected)
         assertEquals(1, f.transactions)
+    }
+
+    @Test fun movedPlanDoesNotReadTheCallersListAfterEnteringItsTransaction() {
+        val f = movedFixture()
+        val plan = f.plan.toMutableList()
+        f.atTransactionEntry = {
+            // Leave all synthetic persisted rows untouched; only the caller's list changes.
+            plan.clear()
+        }
+        assertEquals(Verdict.MOVED, moved(f, plan = plan))
+        assertTrue(plan.isEmpty())
+        assertEquals(1, f.transactions)
+        assertEquals(listOf(3), f.limits)
+        assertEquals((0..99).map { f.owner(it) to 3L }, f.seeks)
+        assertEquals(listOf(f.owner(0), f.owner(1)), f.projected)
+    }
+
+    @Test fun scalarReadCancellationPropagatesTheSameExceptionWithoutProjectionOrFurtherSeeks() {
+        val f = movedFixture()
+        val canceled = CancellationException("synthetic scalar read canceled")
+        f.onSeek = { key -> if (key == f.owner(1)) throw canceled }
+        assertSame(canceled, assertThrows(CancellationException::class.java) { moved(f) })
+        assertEquals(1, f.transactions)
+        assertEquals(listOf(3), f.limits)
+        assertEquals(listOf(f.owner(0) to 3L, f.owner(1) to 3L), f.seeks)
+        assertTrue(f.projected.isEmpty())
     }
 
     @Test fun missingWrongAttemptMalformedAndExtraMatchRefuseBeforeAnyProjection() {
@@ -213,6 +252,7 @@ class RoomPngExportItemReadsTest {
         addMoved(0)
     }
 
+    @OptIn(RoomPngExportItemReads.SyntheticJournalPorts::class)
     private class Fixture : MetadataAccess {
         val assembly = Assembly(
             ExportSnapshotId(id(11)), "a".repeat(64), JobId(id(10)),
@@ -236,8 +276,10 @@ class RoomPngExportItemReadsTest {
         var inventory = emptyList<String>()
         var transactions = 0
         var diskFailure = false
+        var atTransactionEntry: () -> Unit = {}
+        var onSeek: (String) -> Unit = {}
         private var inTransaction = false
-        val reader = RoomPngExportItemReads(this, ::inventory, ::bounds, ::row)
+        val reader = RoomPngExportItemReads.forSyntheticTests(this, ::inventory, ::bounds, ::row)
 
         override val queries: CatalogQueries get() = error("No catalog or wider query is part of this boundary")
 
@@ -246,6 +288,7 @@ class RoomPngExportItemReadsTest {
             transactions++
             inTransaction = true
             try {
+                atTransactionEntry()
                 return action()
             } finally {
                 inTransaction = false
@@ -264,6 +307,7 @@ class RoomPngExportItemReadsTest {
             assertTrue(inTransaction)
             assertEquals(685, extent)
             seeks += key to attempt
+            onSeek(key)
             return if (key to attempt in unbounded) false else rows[key to attempt]?.let { true }
         }
 
