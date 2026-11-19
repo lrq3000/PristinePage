@@ -23,6 +23,7 @@ class PrivateImportStore private constructor(
     private val database: PristineDatabase,
     private val root: File,
     private val owners: FileOperationOwners,
+    private val terminalPngVerification: RoomTerminalPngReads.AcquiredSetVerification?,
     val documents: DocumentRepository,
     val imports: ImportSessionCommands,
     val selections: ImportSelections,
@@ -62,6 +63,7 @@ class PrivateImportStore private constructor(
         internal val owners = store.owners
         internal val files = DerivedFiles(store.root)
         internal val lifetime = store.exportLifetime
+        internal val terminalPngVerification = store.terminalPngVerification
 
         companion object {
             internal fun bind(store: PrivateImportStore): OrdinaryExport = OrdinaryExport.from(ExportComposition(store))
@@ -70,7 +72,20 @@ class PrivateImportStore private constructor(
 
     companion object {
         /** No destructive migration fallback, provider resumption or optimistic renderer admission. Opening verifies Room on IO; cancellation during result dispatch closes the database even if the caller never receives the constructed owner. */
-        @JvmStatic @JvmOverloads suspend fun open(context: Context, provider: SourceInput, inspector: SourceInspector, admission: RecipeAdmission = RecipeAdmission { _, _ -> OperationError(OperationErrorCode.PROVIDER_UNAVAILABLE, false, "renderer_unavailable", null) }): PrivateImportStore {
+        @JvmStatic @JvmOverloads suspend fun open(context: Context, provider: SourceInput, inspector: SourceInspector, admission: RecipeAdmission = RecipeAdmission { _, _ -> OperationError(OperationErrorCode.PROVIDER_UNAVAILABLE, false, "renderer_unavailable", null) }): PrivateImportStore =
+            openStore(context, provider, inspector, admission, null)
+
+        /** Trusted construction only; neither the opened store nor its export facade can replace this pair. No verifier is wired by the import-only entry. */
+        @JvmSynthetic
+        internal suspend fun openWithTerminalPngVerification(
+            context: Context, provider: SourceInput, inspector: SourceInspector, admission: RecipeAdmission,
+            verification: RoomTerminalPngReads.AcquiredSetVerification,
+        ): PrivateImportStore = openStore(context, provider, inspector, admission, verification)
+
+        private suspend fun openStore(
+            context: Context, provider: SourceInput, inspector: SourceInspector, admission: RecipeAdmission,
+            verification: RoomTerminalPngReads.AcquiredSetVerification?,
+        ): PrivateImportStore {
             var opened: PristineDatabase? = null
             try {
                 return withContext(Dispatchers.IO) {
@@ -90,7 +105,7 @@ class PrivateImportStore private constructor(
                     // Direct/test callers remain fail-closed by default. Application supplies the image-owned structural policy explicitly; data never imports rendering or infers capability from a stored recipe name.
                     val documents = RoomDocumentRepository(metadata, admission, recovery = recovery)
                     coroutineContext.ensureActive()
-                    PrivateImportStore(database, root, owners, documents, sessions, sessions, sessions, sources, RoomCommittedSources(metadata, database.catalog(), files), RoomDocumentCatalog(metadata, database.catalog()), RoomEditablePages(metadata, database.catalog()))
+                    PrivateImportStore(database, root, owners, verification, documents, sessions, sessions, sessions, sources, RoomCommittedSources(metadata, database.catalog(), files), RoomDocumentCatalog(metadata, database.catalog()), RoomEditablePages(metadata, database.catalog()))
                 }
             } catch (failure: Throwable) {
                 // Preserve the initiating structured failure/cancellation even if close encounters another storage fault. No reset, schema rewrite or file cleanup is attempted.

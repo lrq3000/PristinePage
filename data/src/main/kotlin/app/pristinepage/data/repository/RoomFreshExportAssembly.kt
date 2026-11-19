@@ -7,6 +7,7 @@ import app.pristinepage.data.db.JobRow
 import app.pristinepage.data.db.PristineDatabase
 import app.pristinepage.data.model.*
 import app.pristinepage.data.repository.RoomExportSnapshots.SnapshotRead
+import kotlin.coroutines.CoroutineContext
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers
@@ -17,10 +18,10 @@ import kotlinx.coroutines.withContext
 /** The deliberate first assembly claim only. Neither the frozen references nor the acquired metadata retain render targets or authorize any file access. */
 internal class RoomFreshExportAssembly private constructor(
     private val store: Store,
-    liveness: LeaseOwnerLiveness,
+    private val liveness: LeaseOwnerLiveness,
     private val preflight: suspend (ExportSnapshot, List<JobId>) -> OperationError?,
     private val auditClock: () -> Long = System::currentTimeMillis,
-    leaseClock: () -> Long = SystemClock::elapsedRealtime,
+    private val leaseClock: () -> Long = SystemClock::elapsedRealtime,
     private val dispatcher: CoroutineDispatcher = Dispatchers.IO,
     private val lifetime: OrdinaryExportLifetime? = null,
 ) {
@@ -178,7 +179,58 @@ internal class RoomFreshExportAssembly private constructor(
     }
 
     /** Carries the original admission and exact result of its guarded lease write. No upgrade from a separately obtained bare lease. */
-    class Acquired private constructor(val admitted: Admitted, val lease: JobLease) {
+    class Acquired private constructor(
+        val admitted: Admitted,
+        val lease: JobLease,
+        private val issuingService: RoomFreshExportAssembly,
+        private val running: JobRow,
+    ) {
+        /** Only the retained terminal-set reader calls this, after matching its issuer and entering its store lifetime and lane. */
+        internal fun checkTerminalSet(context: CoroutineContext): () -> Unit {
+            val service = issuingService
+            val prepared = admitted.prepared
+            val id = lease.jobId.value
+            context.ensureActive()
+            val live = service.storage(id) {
+                service.store.transaction {
+                    val snapshot = service.liveSnapshot(prepared)
+                    service.requireJobInput(prepared) { context.ensureActive() }
+                    service.requireJobPhase(id, "RUNNING", running.attempt, running.leaseOwner, running.leaseUntil)
+                    // Retention must hold after the last bounded projection/comparison, not only at snapshot admission.
+                    checkTerminalClocks(snapshot, context)
+                    snapshot
+                }
+            }
+            return { checkTerminalClocks(live, context) }
+        }
+
+        /** Ordinal boundaries use indexed scalar input/phase checks, not a second full snapshot or Job projection. */
+        internal fun checkTerminalAttempt(context: CoroutineContext) {
+            context.ensureActive()
+            val id = lease.jobId.value
+            issuingService.storage(id) {
+                issuingService.store.transaction {
+                    issuingService.requireJobInput(admitted.prepared) { context.ensureActive() }
+                    issuingService.requireJobPhase(id, "RUNNING", running.attempt, running.leaseOwner, running.leaseUntil)
+                }
+            }
+            context.ensureActive()
+        }
+
+        private fun checkTerminalClocks(snapshot: SnapshotRead, context: CoroutineContext) {
+            context.ensureActive()
+            val id = lease.jobId.value
+            if (issuingService.liveness.state(lease.owner) != LeaseOwnerState.ALIVE) {
+                reject(id, OperationErrorCode.INVALID_INPUT, "job_owner_not_alive")
+            }
+            // Only the detached, post-CAS observation is used here; each metadata fence must separately match its actual RUNNING phase.
+            if (JobLeaseFence.current(running, lease, issuingService.leaseClock()) == null) {
+                reject(id, OperationErrorCode.REVISION_CONFLICT, "job_lease_lost")
+            }
+            snapshot.requireRetained(issuingService.auditClock())
+            context.ensureActive()
+        }
+
         companion object {
             suspend fun acquire(service: RoomFreshExportAssembly, admitted: Admitted, owner: String, durationMillis: Long): Acquired =
                 service.retainIfScoped(admitted.prepared.jobId.value) { acquireBody(service, admitted, owner, durationMillis) }
@@ -188,6 +240,7 @@ internal class RoomFreshExportAssembly private constructor(
                 val prepared = admitted.prepared
                 prepared.requireIssuer(service)
                 lateinit var live: SnapshotRead
+                lateinit var observedRunning: JobRow
                 val result = service.leases.acquireGuarded(prepared.jobId, owner, durationMillis,
                     read = { active ->
                         active()
@@ -201,12 +254,13 @@ internal class RoomFreshExportAssembly private constructor(
                         val written = service.readJob(prepared, "RUNNING", running.attempt, running.leaseOwner, running.leaseUntil, active, afterWrite = true)
                         if (!sameRow(running, written)) invalid(prepared.jobId.value)
                         service.requireRetainedAfterFullRead(prepared)
+                        observedRunning = written
                         written
                     },
                 )
                 currentCoroutineContext().ensureActive()
                 return when (result) {
-                    is AcquireLeaseResult.Granted -> Acquired(admitted, result.lease)
+                    is AcquireLeaseResult.Granted -> Acquired(admitted, result.lease, service, observedRunning)
                     is AcquireLeaseResult.Busy -> conflict(prepared.jobId.value)
                     is AcquireLeaseResult.Rejected -> throw RepositoryFailure(result.error)
                 }
@@ -232,20 +286,29 @@ internal class RoomFreshExportAssembly private constructor(
         active: () -> Unit, afterWrite: Boolean = false,
     ): JobRow {
         val id = prepared.jobId.value
-        // Separate statements: a scalar equality result does not bound the BLOB comparison, and SQL AND does not promise evaluation order.
-        if (store.renderJobIdByKey(prepared.key) != id || store.assemblyBounds(id) != true) invalid(id)
-        active()
-        if (store.exactInputMatches(id, prepared.snapshot.snapshotId.value, prepared.key, prepared.digest, prepared.inputBytes()) != true ||
-            store.leaseBounds(id) != true) invalid(id)
-        if (store.phaseMatches(id, state, attempt, owner, until) != true) {
-            if (afterWrite) invalid(id) else conflict(id)
-        }
+        requireJobInput(prepared, active)
+        requireJobPhase(id, state, attempt, owner, until, afterWrite)
         active()
         val row = store.job(id) ?: invalid(id)
         if (!prepared.matches(row) || row.state != state || row.attempt != attempt || row.leaseGeneration != attempt ||
             row.leaseOwner != owner || row.leaseUntil != until || row.checkpoint != null || row.errorCode != null
         ) invalid(id)
         return row.copy(input = row.input.copyOf())
+    }
+
+    private fun requireJobInput(prepared: Prepared, active: () -> Unit) {
+        val id = prepared.jobId.value
+        // Separate statements: a scalar equality result does not bound the BLOB comparison, and SQL AND does not promise evaluation order.
+        if (store.renderJobIdByKey(prepared.key) != id || store.assemblyBounds(id) != true) invalid(id)
+        active()
+        if (store.exactInputMatches(id, prepared.snapshot.snapshotId.value, prepared.key, prepared.digest, prepared.inputBytes()) != true) invalid(id)
+    }
+
+    private fun requireJobPhase(id: String, state: String, attempt: Long, owner: String?, until: Long?, afterWrite: Boolean = false) {
+        if (store.leaseBounds(id) != true) invalid(id)
+        if (store.phaseMatches(id, state, attempt, owner, until) != true) {
+            if (afterWrite) invalid(id) else conflict(id)
+        }
     }
 
     private fun <T> storage(id: String, action: () -> T): T = try { action() }

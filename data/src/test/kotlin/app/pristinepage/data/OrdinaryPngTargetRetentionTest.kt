@@ -34,6 +34,26 @@ private typealias BorrowFinal = RoomTerminalPngReads.RetainedFinal
 private typealias ConsumeFinal = (BorrowFinal) -> Unit
 
 class OrdinaryPngTargetRetentionTest {
+    @Test fun openedStoreCannotReplaceAcquiredSetReadbackConfiguration() {
+        val factory = PrivateImportStore.OrdinaryExport::class.java.declaredMethods
+            .filter { it.returnType == RoomTerminalPngReads.Retained::class.java && !it.isSynthetic }
+        val reader = RoomTerminalPngReads.Retained::class.java.constructors.filterNot { it.isSynthetic }
+        assertEquals("An opened export facade still accepts caller-selected readback configuration",
+            listOf(listOf(OrdinaryExportProfile::class.java)), factory.map { it.parameterTypes.toList() })
+        assertEquals("The production reader must derive configuration from its issuing composition",
+            listOf(listOf(PrivateImportStore.ExportComposition::class.java, OrdinaryExportProfile::class.java)),
+            reader.map { it.parameterTypes.toList() })
+    }
+
+    @Test fun importOnlyPublicOpenKeepsItsTwoExistingSignatures() {
+        val overloads = PrivateImportStore::class.java.declaredMethods
+            .filter { it.name == "open" && Modifier.isPublic(it.modifiers) && Modifier.isStatic(it.modifiers) }
+        val base = listOf(android.content.Context::class.java, SourceInput::class.java,
+            app.pristinepage.data.files.SourceInspector::class.java)
+        assertEquals(setOf(base + Continuation::class.java, base + RecipeAdmission::class.java + Continuation::class.java),
+            overloads.map { it.parameterTypes.toList() }.toSet())
+    }
+
     @Test fun productionParticipantsCannotBeConstructedFromIndependentDatabaseAndFileComponents() {
         for (type in listOf(RoomRenderFileExecution::class.java, RoomRenderCompletion::class.java,
             RoomTerminalPngReads.Retained::class.java)) {
@@ -362,8 +382,12 @@ class OrdinaryPngTargetRetentionTest {
         }
     }
 
-    private class TerminalStore(private val root: File) {
-        private val owners = FileOperationOwners(root, dispatcher = Dispatchers.Unconfined)
+    internal class TerminalStore(
+        val root: File, private val distinct: Boolean = false, private val reverseReferences: Boolean = false,
+        private val nonordinary: Boolean = false,
+        private val verification: (TerminalStore.() -> RoomTerminalPngReads.AcquiredSetVerification)? = null,
+    ) {
+        val owners = FileOperationOwners(root, dispatcher = Dispatchers.Unconfined)
         var closeCalls = 0
             private set
         var onClose: () -> Unit = {}
@@ -375,24 +399,49 @@ class OrdinaryPngTargetRetentionTest {
         private val recipe = Recipe(geometry = GeometryRecipe.None(SourceBinding(source.pixelSha256, size, source.conversionFingerprint)))
         private val setup = DerivedFiles(root, DirectorySync { false })
         private lateinit var slots: List<Slot>
+        private lateinit var byJob: Map<String, Slot>
+        private lateinit var frozenPages: List<ExportPageRow>
         private val snapshotId = ExportSnapshotId(id(30))
         private val assembly = JobId(id(31))
-        private lateinit var header: ExportSnapshotRow
-        private lateinit var assemblyInput: ByteArray
+        lateinit var header: ExportSnapshotRow
+        lateinit var assemblyRow: JobRow
+        var wall = 10L
+        var elapsed = 20L
+        var fullJobReads = 0
+            private set
+        var pageReads = 0
+            private set
+        var duringPages = {}
+        var duringTerminalJournal = {}
+        var missingOrdinal: Int? = null
         lateinit var prepared: RoomFreshExportAssembly.Prepared
             private set
         private val store = object : RoomFreshExportAssembly.SyntheticStore(), MetadataAccess by catalog {
             private val key = ExportAssemblyInput.key(snapshotId)
 
+            override fun <T> transaction(action: () -> T): T = catalog.transaction {
+                val before = if (this@TerminalStore::assemblyRow.isInitialized) assemblyRow else null
+                try { action() } catch (failure: Throwable) {
+                    if (before != null) assemblyRow = before
+                    throw failure
+                }
+            }
+
             override fun snapshotMetadataIsBounded(snapshotId: String) = query { true.takeIf { snapshotId == header.snapshotId } }
             override fun snapshot(id: String) = query { header.takeIf { id == it.snapshotId } }
             override fun exportPagesAreBounded(snapshotId: String) = query { snapshotId == header.snapshotId }
-            override fun exportPages(snapshotId: String) = query { slots.map { it.frozen }.filter { it.snapshotId == snapshotId } }
+            override fun exportPages(snapshotId: String) = query {
+                pageReads++
+                duringPages()
+                frozenPages.filter { it.snapshotId == snapshotId }
+            }
             override fun renderJobIdByKey(key: String) = query { assembly.value.takeIf { key == this.key } }
-            override fun assemblyBounds(id: String) = query { true.takeIf { id == assembly.value } }
+            override fun assemblyBounds(id: String) = query { (assemblyRow.input.size in 184..4144).takeIf { id == assembly.value } }
             override fun assemblyIdentity(id: String) = query {
-                AssemblyJobIdentityRow(assembly.value, "EXPORT_ASSEMBLY", key, ExportAssemblyInput.digest(assemblyInput),
-                    snapshotId.value, assemblyInput).takeIf { id == assembly.value }
+                with(assemblyRow) {
+                    AssemblyJobIdentityRow(jobId, kind, idempotenceKey, canonicalInputSha256, snapshotId, input)
+                        .takeIf { id == jobId }
+                }
             }
 
             override fun renderJobReadIsBounded(jobId: String, expectedInputBytes: Int) = error("No freeze or job admission")
@@ -401,32 +450,60 @@ class OrdinaryPngTargetRetentionTest {
             override fun insertSnapshot(row: ExportSnapshotRow) = error("Read-only fixture")
             override fun insertExportPage(row: ExportPageRow) = error("Read-only fixture")
             override fun insertExportJob(row: JobRow) = error("Read-only fixture")
-            override fun exactInputMatches(id: String, snapshot: String, key: String, digest: String, input: ByteArray) = error("No assembly lease")
-            override fun leaseBounds(id: String) = error("No assembly lease")
-            override fun phaseMatches(id: String, state: String, attempt: Long, owner: String?, until: Long?) = error("No assembly lease")
-            override fun admitPending(id: String, snapshot: String, key: String, digest: String, input: ByteArray, previousUpdatedAt: Long, updatedAt: Long) =
-                error("No assembly lease")
-            override fun job(id: String) = error("No assembly lease")
-            override fun updateLease(row: JobRow, expectedGeneration: Long) = error("No assembly lease")
+            override fun exactInputMatches(id: String, snapshot: String, key: String, digest: String, input: ByteArray) = query {
+                with(assemblyRow) { jobId == id && snapshotId == snapshot && idempotenceKey == key && canonicalInputSha256 == digest &&
+                    kind == "EXPORT_ASSEMBLY" && pageOrdinal == null && this.input.contentEquals(input) }
+            }
+            override fun leaseBounds(id: String) = query { id == assemblyRow.jobId }
+            override fun phaseMatches(id: String, state: String, attempt: Long, owner: String?, until: Long?) = query {
+                with(assemblyRow) { jobId == id && this.state == state && this.attempt == attempt && leaseGeneration == attempt &&
+                    leaseOwner == owner && leaseUntil == until && checkpoint == null && errorCode == null }
+            }
+            override fun admitPending(id: String, snapshot: String, key: String, digest: String, input: ByteArray, previousUpdatedAt: Long, updatedAt: Long) = query {
+                if (!exactInputMatches(id, snapshot, key, digest, input) || !phaseMatches(id, "PENDING", 0, null, null) ||
+                    assemblyRow.updatedAt != previousUpdatedAt) return@query 0
+                assemblyRow = assemblyRow.copy(state = "ADMITTED", updatedAt = updatedAt)
+                1
+            }
+            override fun job(id: String) = query { fullJobReads++; assemblyRow.takeIf { it.jobId == id } }
+            override fun updateLease(row: JobRow, expectedGeneration: Long) = query {
+                if (row.jobId != assemblyRow.jobId || assemblyRow.leaseGeneration != expectedGeneration) return@query 0
+                assemblyRow = row
+                1
+            }
         }
 
-        suspend fun initialize(firstTarget: RenderId) {
+        suspend fun initialize(firstTarget: RenderId = RenderId(id(60))) {
             catalog.sources[source.sourceId] = source
             catalog.blobs[blob.sourceBlobId] = blob
             slots = listOf(seed(0, firstTarget), seed(1, RenderId(id(61))))
+            byJob = slots.asReversed().associateBy { it.identity.jobId } // Deliberately opposite the frozen order.
+            frozenPages = slots.map { it.frozen }
+            if (nonordinary) frozenPages = listOf(frozenPages.first().let { it.copy(providers = it.providers + byteArrayOf(32)) }, frozenPages.last())
             val document = DocumentId(id(32))
             val settings = ExportSettings(ExportFormat.PNG, slots.map { PageOutputSettings(PageId(it.frozen.originalPageId), output) },
                 null, null, emptyList())
-            val snapshotHash = ExportSnapshotIdentity.create(document, 1, settings, slots.map { it.frozen }).snapshotHash
+            val snapshotHash = ExportSnapshotIdentity.create(document, 1, settings, frozenPages).snapshotHash
             header = ExportSnapshotRow(snapshotId.value, document.value, 1, snapshotHash, ExportSettingsCodec.encode(settings), "FROZEN", 1, 100)
-            assemblyInput = ExportAssemblyInput.encode(snapshotId, snapshotHash, slots.map { it.intent.jobId })
+            val refs = slots.map { it.intent.jobId }
+            val assemblyInput = ExportAssemblyInput.encode(snapshotId, snapshotHash, if (reverseReferences) refs.reversed() else refs)
+            assemblyRow = JobRow(assembly.value, "EXPORT_ASSEMBLY", ExportAssemblyInput.key(snapshotId),
+                ExportAssemblyInput.digest(assemblyInput), snapshotId.value, null, assemblyInput, "PENDING", 0,
+                null, null, 0, null, null, 1, 1)
             // Use the real bounded snapshot/assembly reader. Only metadata rows are supplied by the test; there is no forged preparation or lease.
             prepared = issue(lifetime)
         }
 
-        suspend fun issue(issuingLifetime: OrdinaryExportLifetime?) =
-            RoomFreshExportAssembly.forSyntheticTests(store, owners, { _, _ -> error("No assembly admission") },
-                { 10 }, { 20 }, Dispatchers.Unconfined, issuingLifetime).prepare(snapshotId)
+        suspend fun issue(issuingLifetime: OrdinaryExportLifetime?) = consumer(issuingLifetime).prepare(snapshotId)
+
+        private fun consumer(issuingLifetime: OrdinaryExportLifetime?) =
+            RoomFreshExportAssembly.forSyntheticTests(store, owners, { _, _ -> check(!catalog.inTransaction); null },
+                { wall }, { elapsed }, Dispatchers.Unconfined, issuingLifetime)
+
+        suspend fun acquire(owner: String, issuingLifetime: OrdinaryExportLifetime? = lifetime): RoomFreshExportAssembly.Acquired {
+            val service = consumer(issuingLifetime)
+            return service.acquire(service.admit(service.prepare(snapshotId)), owner, 30L)
+        }
 
         var reads = 0
             private set
@@ -435,7 +512,7 @@ class OrdinaryPngTargetRetentionTest {
             return action()
         }
 
-        private fun job(key: String) = slots.singleOrNull { it.identity.jobId == key }
+        private fun job(key: String) = byJob[key]?.takeUnless { it.frozen.ordinal == missingOrdinal }
         private val metadata = RoomTerminalRenderReads(store, profile, Dispatchers.Unconfined,
             { key, extent -> query { reads++; job(key)?.let { it.identity.input.size == extent } } },
             { key -> query { job(key)?.identity } },
@@ -449,12 +526,12 @@ class OrdinaryPngTargetRetentionTest {
             } },
             { render -> query { slots.singleOrNull { it.row.renderId == render }?.row } },
             { key, attempt, extent -> query { job(key)?.journal?.takeIf { it.attempt == attempt }?.let { it.payload.size == extent } } },
-            { key, attempt -> query { job(key)?.journal?.takeIf { it.attempt == attempt } } },
+            { key, attempt -> query { duringTerminalJournal(); job(key)?.journal?.takeIf { it.attempt == attempt } } },
         )
         // Own reader instance independent of the writer instance. No force/sync on a terminal read.
         private val reader = RoomTerminalPngReads(metadata, DerivedFiles(root, DirectorySync { error("Read path attempted directory sync") }),
             Dispatchers.Unconfined)
-        private val retained = RoomTerminalPngReads.Retained.forSyntheticTests(reader, owners, store, lifetime)
+        val retained by lazy { RoomTerminalPngReads.Retained.forSyntheticTests(reader, owners, store, lifetime, verification?.invoke(this)) }
 
         private data class Slot(
             val frozen: ExportPageRow, val identity: FrozenRenderJobIdentityRow, val intent: RenderFileIntent,
@@ -488,10 +565,10 @@ class OrdinaryPngTargetRetentionTest {
                 { query { listOf(page.sourceId.value) } }, catalog::sourceReadIsBounded, profile, Dispatchers.Unconfined)
             // The real writer grammar creates the synthetic terminal fixture. The readback oracle below uses independent literals.
             val verified = proof.verified(jobId, page)
-            val execution = RenderResult(request, RenderStatus.OK, RgbImage(3, 2, 9, ByteArray(18) { (it + 1).toByte() }),
+            val execution = RenderResult(request, RenderStatus.OK, RgbImage(3, 2, 9, ByteArray(18) { (it + firstSample(ordinal)).toByte() }),
                 stages, emptyList()).use { OrdinaryRenderExecution.capture(verified, it) {} }
-            assertEquals(rasterHash, execution.rasterSha256)
-            val staged = setup.stage(intent.transactionId.value, target, cap, { it.write(payload) })
+            assertEquals(expectedRaster(ordinal), execution.rasterSha256)
+            val staged = setup.stage(intent.transactionId.value, target, cap, { it.write(encoded(ordinal)) })
             val sealed = setup.seal(staged, OrdinaryRenderSealV1(intent.journalPayload()).encode(execution.rasterSha256))
             val final = setup.move(sealed)
             val ready = RenderedPageRow(renderId.value, jobId.value, page.sourceId.value, pageId.value, 1, execution.cacheKey, execution.bytes(),
@@ -501,18 +578,26 @@ class OrdinaryPngTargetRetentionTest {
             return Slot(frozen, identity, intent, ready, committed, final, stage, seal, seal.readBytes())
         }
 
-        private fun readback(slot: Int, beforeReturn: () -> Unit = {}) = RoomTerminalPngReads.Readback { file, dimensions, expectedRaster, byteCap, checkpoint ->
+        fun readback(slot: Int, beforeReturn: () -> Unit = {}) = RoomTerminalPngReads.Readback { file, dimensions, expectedRaster, byteCap, checkpoint ->
             assertFalse(catalog.inTransaction)
             assertEquals(slots[slot].final, file)
             assertEquals(size, dimensions)
-            assertEquals(rasterHash, expectedRaster)
+            assertEquals(expectedRaster(slot), expectedRaster)
             assertEquals(cap, byteCap)
             checkpoint()
             val bytes = file.readBytes()
-            assertArrayEquals(payload, bytes)
+            assertArrayEquals(encoded(slot), bytes)
             beforeReturn()
-            RoomTerminalPngReads.ObservedIdentity(sha256(bytes), bytes.size.toLong(), rasterHash)
+            // Independent synthetic readback: the first byte selects a literal RGB ramp and the digest includes dimensions.
+            val raster = byteArrayOf(*"pristinepage-ordinary-render-rgb8-v1\u0000".encodeToByteArray(), 0, 0, 0, 3, 0, 0, 0, 2,
+                *ByteArray(18) { (bytes.first() + it).toByte() })
+            RoomTerminalPngReads.ObservedIdentity(sha256(bytes), bytes.size.toLong(), sha256(raster))
         }
+
+        private fun firstSample(ordinal: Int) = if (distinct && ordinal == 1) 19 else 1
+        private fun encoded(ordinal: Int) = ByteArray(4) { (firstSample(ordinal) + it).toByte() }
+        private fun expectedRaster(ordinal: Int) = if (distinct && ordinal == 1)
+            "8a372153929345d869029c667c187035a85324c0eaf23179290dab1b057c5f07" else rasterHash
 
         fun final(slot: Int): File = slots[slot].final
         suspend fun load(slot: Int) = reader.load(prepared.orderedJobIds[slot], prepared.snapshot.pages[slot], cap, readback(slot))
@@ -529,14 +614,14 @@ class OrdinaryPngTargetRetentionTest {
             assertEquals(expected.intent.transactionId, receipt.transactionId)
             assertEquals(expected.journal.sealSha256, receipt.sealSha256)
             assertEquals(size, receipt.size)
-            assertEquals(RoomTerminalPngReads.ObservedIdentity(sha256(payload), payload.size.toLong(), rasterHash), receipt.observed)
+            assertEquals(RoomTerminalPngReads.ObservedIdentity(sha256(encoded(slot)), 4, expectedRaster(slot)), receipt.observed)
         }
 
         fun assertUnchanged() {
-            for (slot in slots) {
+            for ((ordinal, slot) in slots.withIndex()) {
                 assertFalse(slot.stage.exists())
                 assertArrayEquals(slot.originalSealBytes, slot.seal.readBytes())
-                assertArrayEquals(payload, slot.final.readBytes())
+                assertArrayEquals(encoded(ordinal), slot.final.readBytes())
             }
         }
     }

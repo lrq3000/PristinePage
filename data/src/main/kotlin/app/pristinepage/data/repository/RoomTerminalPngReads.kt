@@ -14,6 +14,7 @@ import app.pristinepage.data.model.RenderId
 import app.pristinepage.data.model.RepositoryFailure
 import app.pristinepage.data.model.TransactionId
 import java.io.File
+import java.util.Collections
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers
@@ -32,6 +33,9 @@ internal class RoomTerminalPngReads(
     fun interface Readback {
         fun verify(file: File, size: PixelSize, expectedRasterSha256: String, maxBytes: Long, checkpoint: () -> Unit): ObservedIdentity?
     }
+
+    /** Installed together at trusted store construction. The bound codec still follows the synchronous read-only File contract; it is not sandboxed. */
+    internal class AcquiredSetVerification(val stagedByteCap: (PixelSize) -> Long, val readback: Readback)
 
     /** Evidence for one retained render, not a pathname, pin, lease, artifact or readiness grant. */
     sealed interface Receipt {
@@ -61,10 +65,11 @@ internal class RoomTerminalPngReads(
         private val owners: FileOperationOwners,
         private val lifetime: OrdinaryExportLifetime,
         private val slot: (RoomFreshExportAssembly.Prepared, Int) -> Pair<JobId, ExportPageSnapshot>,
+        private val setVerification: AcquiredSetVerification?,
     ) {
         constructor(store: PrivateImportStore.ExportComposition, profile: OrdinaryExportProfile) :
             this(RoomTerminalPngReads(RoomTerminalRenderReads(store.database, profile), store.files), store.owners, store.lifetime,
-                { prepared, ordinal -> prepared.terminalSlot(store, ordinal) })
+                { prepared, ordinal -> prepared.terminalSlot(store, ordinal) }, store.terminalPngVerification)
 
         init {
             require(owners.ownsCanonicalRoot(reader.files.canonicalRoot))
@@ -81,15 +86,66 @@ internal class RoomTerminalPngReads(
                 owners.withOrdinaryDerivedLane(job) {
                     val expected = reader.metadata.load(job, page)
                     val active = { coroutineContext.ensureActive() }
-                    val borrow = BoundFinal(reader, job, expected, maxBytes, active)
-                    try {
-                        active()
-                        consume(borrow)
-                        active()
-                    } finally {
-                        borrow.end()
+                    useBoundFinal(job, expected, maxBytes, active, consume)
+                }
+            }
+        }
+
+        /** Evidence only: one cooperative lane and one issuing-store borrow; neither a file location nor a partial set escapes. */
+        suspend fun readAcquiredSet(acquired: RoomFreshExportAssembly.Acquired): List<Receipt> =
+            withContext(reader.dispatcher) {
+                coroutineContext.ensureActive()
+                val prepared = acquired.admitted.prepared
+                val assembly = prepared.jobId
+                slot(prepared, 0) // Refuse a wrong store/lifetime before acquiring either retention guard.
+                val verification = setVerification
+                    ?: reader.refuse(assembly, OperationErrorCode.PROVIDER_UNAVAILABLE, "terminal_png_verifier_unavailable")
+                lifetime.retain(assembly.value) {
+                    owners.withOrdinaryDerivedLane(assembly) {
+                        val context = coroutineContext
+                        val active = acquired.checkTerminalSet(context)
+                        // Bind the trusted store's limit once to each frozen output size.
+                        val slots = prepared.snapshot.pages.indices.map { ordinal ->
+                            active()
+                            val (job, page) = slot(prepared, ordinal)
+                            val cap = verification.stagedByteCap(page.output.size)
+                            reader.requireCap(job, cap)
+                            TerminalSlot(job, page, cap)
+                        }
+                        val checkAttempt = {
+                            active()
+                            acquired.checkTerminalAttempt(context)
+                            active()
+                        }
+                        val guardedReadback = Readback { file, size, raster, cap, _ ->
+                            // The compressed-byte scan can be long. Verify the current attempt again just before handing the exact borrowed file to the verifier.
+                            checkAttempt()
+                            verification.readback.verify(file, size, raster, cap, active).also { active() }
+                        }
+                        val receipts = slots.map { (job, page, cap) ->
+                            active()
+                            val expected = reader.metadata.load(job, page)
+                            checkAttempt()
+                            useBoundFinal(job, expected, cap, active) { it.read(guardedReadback) }.also { checkAttempt() }
+                        }
+                        // Re-read the complete frozen identity and bounded attempt after all file postchecks, while the same lane is still held.
+                        acquired.checkTerminalSet(context)
+                        Collections.unmodifiableList(receipts)
                     }
                 }
+            }
+
+        private data class TerminalSlot(val job: JobId, val page: ExportPageSnapshot, val cap: Long)
+
+        private fun <T> useBoundFinal(
+            job: JobId, expected: RoomTerminalRenderReads.Metadata, maxBytes: Long, active: () -> Unit, consume: (RetainedFinal) -> T,
+        ): T {
+            val borrow = BoundFinal(reader, job, expected, maxBytes, active)
+            try {
+                active()
+                return consume(borrow).also { active() }
+            } finally {
+                borrow.end()
             }
         }
 
@@ -97,7 +153,8 @@ internal class RoomTerminalPngReads(
             @JvmSynthetic
             internal fun forSyntheticTests(
                 reader: RoomTerminalPngReads, owners: FileOperationOwners, store: RoomFreshExportAssembly.SyntheticStore, lifetime: OrdinaryExportLifetime,
-            ): Retained = Retained(reader, owners, lifetime) { prepared, ordinal -> prepared.terminalSlot(store, lifetime, ordinal) }
+                setVerification: AcquiredSetVerification? = null,
+            ): Retained = Retained(reader, owners, lifetime, { prepared, ordinal -> prepared.terminalSlot(store, lifetime, ordinal) }, setVerification)
         }
     }
 
