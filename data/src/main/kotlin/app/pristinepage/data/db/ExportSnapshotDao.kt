@@ -284,6 +284,111 @@ import app.pristinepage.data.repository.RenderIntentQueries
         seal: String?, byteSha256: String?, byteCount: Long?,
     ): Int
 
+    // This is not a file-phase edge. The later same-transaction owner must admit the raw row first, use its own exact expected tuple and require one affected row. Audit time may repeat or regress.
+    @Query("""UPDATE FileTransaction SET state='COMMITTED', updatedAt=:updatedAt
+        WHERE (transactionId=:transactionId COLLATE BINARY AND kind='EXPORT' COLLATE BINARY
+            AND ownerId=:ownerKey COLLATE BINARY AND attempt=:attempt)
+        AND (state='MOVED' COLLATE BINARY AND errorCode IS NULL)
+        AND (typeof(:transactionId)='text' AND length(CAST(:transactionId AS BLOB))=36 AND length(:transactionId)=36)
+        AND (typeof(:ownerKey)='text' AND length(CAST(:ownerKey AS BLOB)) BETWEEN 53 AND 54
+            AND length(:ownerKey)=length(CAST(:ownerKey AS BLOB)))
+        AND (typeof(attempt)='integer' AND typeof(:attempt)='integer' AND :attempt>0)
+        AND (typeof(updatedAt)='integer' AND typeof(:previousUpdatedAt)='integer' AND updatedAt=:previousUpdatedAt
+            AND :previousUpdatedAt>=0 AND typeof(:updatedAt)='integer' AND :updatedAt>=0)
+        AND (typeof(stagingPath)='text' AND typeof(:stagingPath)='text' AND stagingPath=:stagingPath COLLATE BINARY
+            AND length(CAST(:stagingPath AS BLOB))=57 AND length(:stagingPath)=57)
+        AND (typeof(finalPath)='text' AND typeof(:finalPath)='text' AND finalPath=:finalPath COLLATE BINARY
+            AND length(CAST(:finalPath AS BLOB))=85 AND length(:finalPath)=85)
+        AND CASE WHEN typeof(payload)='blob' AND length(payload)=685 AND typeof(:payload)='blob' AND length(:payload)=685
+            THEN payload=:payload ELSE 0 END
+        AND CASE WHEN (typeof(:seal)='text' AND length(CAST(:seal AS BLOB))=64 AND length(:seal)=64)
+            AND (typeof(:byteSha256)='text' AND length(CAST(:byteSha256 AS BLOB))=64 AND length(:byteSha256)=64)
+            AND (typeof(:byteCount)='integer' AND :byteCount>0)
+            THEN (typeof(sealSha256)='text' AND sealSha256=:seal COLLATE BINARY AND :seal NOT GLOB '*[^0-9a-f]*')
+                AND (typeof(expectedByteSha256)='text' AND expectedByteSha256=:byteSha256 COLLATE BINARY AND :byteSha256 NOT GLOB '*[^0-9a-f]*')
+                AND (typeof(expectedByteCount)='integer' AND expectedByteCount=:byteCount)
+            ELSE 0 END""")
+    internal abstract fun commitMovedExportItem(
+        transactionId: String, ownerKey: String, attempt: Long, previousUpdatedAt: Long, updatedAt: Long,
+        stagingPath: String, finalPath: String, payload: ByteArray, seal: String, byteSha256: String, byteCount: Long,
+    ): Int
+
+    // Fixed private PNG metadata, not provider readback. Invalid input inserts nothing and every existing unique key aborts; the owning transaction must postcheck the exact row.
+    @Query("""INSERT OR ABORT INTO ExportArtifact (artifactId,snapshotId,ordinal,mime,relativePath,byteSha256,byteCount,pageCount,verification,state,createdAt)
+        SELECT :artifactId,:snapshotId,:ordinal,'image/png','exports/' || :snapshotId || '/' || :artifactId || '.bin',
+            :byteSha256,:byteCount,1,'ORDINARY_PNG_ENCODED_AND_RGB_V1','READY',:createdAt
+        WHERE (typeof(:artifactId)='text' AND length(CAST(:artifactId AS BLOB))=36
+            AND :artifactId GLOB '????????-????-????-????-????????????'
+            AND length(replace(:artifactId,'-',''))=32 AND :artifactId NOT GLOB '*[^0-9a-f-]*')
+        AND (typeof(:snapshotId)='text' AND length(CAST(:snapshotId AS BLOB))=36
+            AND :snapshotId GLOB '????????-????-????-????-????????????'
+            AND length(replace(:snapshotId,'-',''))=32 AND :snapshotId NOT GLOB '*[^0-9a-f-]*')
+        AND (typeof(:byteSha256)='text' AND length(CAST(:byteSha256 AS BLOB))=64 AND length(:byteSha256)=64
+            AND :byteSha256 NOT GLOB '*[^0-9a-f]*')
+        AND (typeof(:ordinal)='integer' AND :ordinal BETWEEN 0 AND 99)
+        AND (typeof(:byteCount)='integer' AND :byteCount>0)
+        AND (typeof(:createdAt)='integer' AND :createdAt>=0)""")
+    internal abstract fun insertReadyPngExportArtifact(
+        artifactId: String, snapshotId: String, ordinal: Int, byteSha256: String, byteCount: Long, createdAt: Long,
+    )
+
+    // Bound the writer's expected values before the primary-key seek. The inner CASE bounds persisted values before comparing immutable fields; no artifact row is returned. Ordered n+1 inventory is a separate obligation.
+    @Query("""SELECT CASE WHEN (typeof(:artifactId)='text' AND length(CAST(:artifactId AS BLOB))=36
+            AND :artifactId GLOB '????????-????-????-????-????????????'
+            AND length(replace(:artifactId,'-',''))=32 AND :artifactId NOT GLOB '*[^0-9a-f-]*')
+        AND (typeof(:snapshotId)='text' AND length(CAST(:snapshotId AS BLOB))=36
+            AND :snapshotId GLOB '????????-????-????-????-????????????'
+            AND length(replace(:snapshotId,'-',''))=32 AND :snapshotId NOT GLOB '*[^0-9a-f-]*')
+        AND (typeof(:byteSha256)='text' AND length(CAST(:byteSha256 AS BLOB))=64 AND length(:byteSha256)=64
+            AND :byteSha256 NOT GLOB '*[^0-9a-f]*')
+        AND (typeof(:ordinal)='integer' AND :ordinal BETWEEN 0 AND 99)
+        AND (typeof(:byteCount)='integer' AND :byteCount>0)
+        AND (typeof(:createdAt)='integer' AND :createdAt>=0)
+        THEN EXISTS(SELECT 1 FROM ExportArtifact WHERE artifactId=:artifactId COLLATE BINARY
+            AND CASE WHEN (typeof(snapshotId)='text' AND length(CAST(snapshotId AS BLOB))=36)
+                AND (typeof(relativePath)='text' AND length(CAST(relativePath AS BLOB))=85)
+                AND (typeof(byteSha256)='text' AND length(CAST(byteSha256 AS BLOB))=64)
+                AND (typeof(mime)='text' AND length(CAST(mime AS BLOB))=9)
+                AND (typeof(verification)='text' AND length(CAST(verification AS BLOB))=31)
+                AND (typeof(state)='text' AND length(CAST(state AS BLOB))=5)
+                AND (typeof(ordinal)='integer' AND typeof(byteCount)='integer'
+                    AND typeof(pageCount)='integer' AND typeof(createdAt)='integer')
+                THEN (snapshotId=:snapshotId COLLATE BINARY AND ordinal=:ordinal
+                    AND relativePath=('exports/' || :snapshotId || '/' || :artifactId || '.bin') COLLATE BINARY)
+                AND (byteSha256=:byteSha256 COLLATE BINARY AND byteCount=:byteCount AND createdAt=:createdAt)
+                AND (mime='image/png' COLLATE BINARY AND pageCount=1 AND verification='ORDINARY_PNG_ENCODED_AND_RGB_V1' COLLATE BINARY
+                    AND state='READY' COLLATE BINARY)
+                ELSE 0 END)
+        ELSE 0 END""")
+    internal abstract fun readyPngExportArtifactMatches(
+        artifactId: String, snapshotId: String, ordinal: Int, byteSha256: String, byteCount: Long, createdAt: Long,
+    ): Boolean
+
+    // Header CAS only. The future same-database writer must recheck the full frozen set and retained live lease in its one transaction, and not reuse a RUNNING/FROZEN fence after its own success writes.
+    @Query("""UPDATE ExportSnapshot SET state='PRIVATE_READY'
+        WHERE (snapshotId=:snapshotId COLLATE BINARY AND state='FROZEN' COLLATE BINARY)
+        AND (typeof(:snapshotId)='text' AND length(CAST(:snapshotId AS BLOB))=36
+            AND :snapshotId GLOB '????????-????-????-????-????????????'
+            AND length(replace(:snapshotId,'-',''))=32 AND :snapshotId NOT GLOB '*[^0-9a-f-]*')
+        AND (typeof(:documentId)='text' AND length(CAST(:documentId AS BLOB))=36
+            AND :documentId GLOB '????????-????-????-????-????????????'
+            AND length(replace(:documentId,'-',''))=32 AND :documentId NOT GLOB '*[^0-9a-f-]*'
+            AND typeof(documentId)='text' AND documentId=:documentId COLLATE BINARY)
+        AND (typeof(:snapshotSha256)='text' AND length(CAST(:snapshotSha256 AS BLOB))=64 AND length(:snapshotSha256)=64
+            AND :snapshotSha256 NOT GLOB '*[^0-9a-f]*'
+            AND typeof(snapshotSha256)='text' AND snapshotSha256=:snapshotSha256 COLLATE BINARY)
+        AND (typeof(documentRevision)='integer' AND typeof(:documentRevision)='integer' AND :documentRevision>0 AND documentRevision=:documentRevision)
+        AND (typeof(createdAt)='integer' AND typeof(:createdAt)='integer' AND :createdAt>=0 AND createdAt=:createdAt)
+        AND (typeof(retainedUntil)='integer' AND typeof(:retainedUntil)='integer' AND :retainedUntil>0 AND retainedUntil=:retainedUntil)
+        AND (typeof(:now)='integer' AND :now>=0 AND :now<:retainedUntil)
+        AND CASE WHEN typeof(settings)='blob' AND length(settings) BETWEEN 1 AND 524288
+            AND typeof(:settings)='blob' AND length(:settings) BETWEEN 1 AND 524288
+            THEN settings=:settings ELSE 0 END""")
+    internal abstract fun markOrdinaryPngSnapshotPrivateReady(
+        snapshotId: String, documentId: String, documentRevision: Long, snapshotSha256: String,
+        settings: ByteArray, createdAt: Long, retainedUntil: Long, now: Long,
+    ): Int
+
     // Preserve every row for n+1 detection, including malformed members. Validate byte and character extents before inspecting UUID shape; '' is a bounded invalid ID, not absence. Invalid limits become zero, never SQLite's negative unlimited limit.
     @Query("""SELECT CASE WHEN (typeof(artifactId)='text' AND length(CAST(artifactId AS BLOB))=36 AND length(artifactId)=36)
         THEN CASE WHEN (substr(artifactId,9,1)='-' AND substr(artifactId,14,1)='-'

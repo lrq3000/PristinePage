@@ -1,5 +1,6 @@
 """Dormant T-11 EXPORT item mutations: execute the actual DAO statements on Room's v1 DDL."""
 
+import re
 import sqlite3
 import struct
 import unittest
@@ -7,6 +8,37 @@ import unittest
 import test_export_item_bounds
 import test_room_schema
 from test_export_item_bounds import expected_key, uid
+
+
+def witness_lazy_blob_comparison(test, db, sql, column, parameter, extent, args, malformed, rejected, accepted):
+    # Scope the probe to the actual THEN branch; the valid control must reach it. No opcode positions or optimizer-specific AND order.
+    predicate = (rf"\bCASE\s+WHEN\s+((?:(?!\b(?:CASE|THEN|END)\b).)*)\bTHEN\s+"
+                 rf"({column}\s*=\s*:{parameter})\s+ELSE\s+0\s+END")
+    matches = tuple(re.finditer(predicate, sql, re.S))
+    test.assertEqual(1, len(matches), f"No unique lazy comparison of {column}")
+    match, = matches
+    # Require all guards in this CASE's own WHEN, not elsewhere in the statement.
+    guard = match[1]
+    for operand in (column, ":" + parameter):
+        test.assertRegex(guard, rf"typeof\({operand}\)\s*=\s*'blob'")
+        test.assertRegex(guard, rf"length\({operand}\)\s*{extent}")
+    calls = []
+    db.create_function("fixture_blob_eq", 2, lambda a, b: calls.append((a, b)) or int(a == b))
+    probe = sql[:match.start(2)] + f"fixture_blob_eq({column}, :{parameter})" + sql[match.end(2):]
+    for value in malformed:
+        with test.subTest(operand="bound", sample=repr(value)[:32]):
+            test.assertEqual(rejected, db.execute(probe, args | {parameter: value}).rowcount)
+            test.assertEqual([], calls)
+    # Test fixtures in this module and the final-metadata module each seed only the target row for this probe.
+    table = {"payload": "FileTransaction", "settings": "ExportSnapshot"}[column]
+    for value in malformed:
+        with test.subTest(operand="persisted", sample=repr(value)[:32]):
+            db.execute(f"UPDATE {table} SET {column}=?", (value,))
+            test.assertEqual(rejected, db.execute(probe, args | {parameter: value}).rowcount)
+            test.assertEqual([], calls)
+    db.execute(f"UPDATE {table} SET {column}=?", (args[parameter],))
+    test.assertEqual(accepted, db.execute(probe, args).rowcount)
+    test.assertEqual([(args[parameter], args[parameter])], calls)
 
 
 class ExportItemPhasesSqlTest(unittest.TestCase):
@@ -201,6 +233,21 @@ class ExportItemPhasesSqlTest(unittest.TestCase):
                 self.db.execute(f"UPDATE FileTransaction SET {column}=? WHERE transactionId=?",
                                 (intent[column], plan["transactionId"]))
         self.assertEqual(1, self.advance(args))
+
+    def test_phase_refuses_exact_tuple_with_only_kind_wrong(self):
+        intent = self.expected(self.plan())
+        self.seed(intent | {"kind": "RENDER"})
+        args = self.edge(intent, "COPYING")
+        self.assert_refused(args)
+        self.db.execute("UPDATE FileTransaction SET kind='EXPORT'")
+        self.assertEqual(1, self.advance(args))
+
+    def test_phase_payload_comparison_is_bounded_by_its_lazy_case(self):
+        intent = self.expected(self.plan())
+        self.seed(intent)
+        witness_lazy_blob_comparison(self, self.db, self.dao("advanceExportItemPhase"), "payload", "payload",
+                                     r"=\s*685", self.edge(intent, "COPYING"),
+                                     (b"x" * 684, b"x" * 686, "x" * 685), 0, 1)
 
     def test_phase_refuses_skip_wrong_old_state_and_committed_edge(self):
         intent = self.expected(self.plan())
