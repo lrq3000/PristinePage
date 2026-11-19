@@ -98,6 +98,18 @@ class ExportItemSqlTest(unittest.TestCase):
         self.item(6, 2)
         self.assertEqual([(1,)], self.guard(2))
 
+    def test_case_only_assembly_uuid_alias_is_not_an_exact_item_match(self):
+        alias = self.assembly.upper()
+        self.assertNotEqual(self.assembly, alias, "The fixture must exercise ASCII UUID case")
+        self.item(1, 0, key=expected_key(alias, 0))
+        self.item(2, 1)
+        self.assertEqual([], self.guard(0))
+        self.assertEqual([(1,)], self.guard(1))
+
+        # Both spellings can coexist in v1; the canonical lookup still returns just its own row.
+        self.item(3, 0)
+        self.assertEqual([(1,)], self.guard(0))
+
     def test_matching_bad_row_returns_false_not_absence_before_projection(self):
         self.item(1, 0, payload=self.payload.decode("ascii"))
         self.item(2, 1, payload=self.payload + b"\x00")
@@ -108,6 +120,26 @@ class ExportItemSqlTest(unittest.TestCase):
                 self.assertEqual([(0,)], self.guard(ordinal))
         self.assertEqual([], self.guard(4))
 
+    def test_matching_moved_item_rejects_each_malformed_text_field_in_isolation(self):
+        self.item(1, 0)
+        cases = (("stagingPath", 57), ("transactionId", 36),
+                 ("sealSha256", 64), ("expectedByteSha256", 64))
+        for ordinal, (field, extent) in enumerate(cases, start=1):
+            with self.subTest(field=field):
+                n = ordinal + 1
+                self.item(n, ordinal)
+                self.assertEqual([(1,)], self.guard(ordinal))
+                # Change only this column on the admitted fixture. The short suffix preserves length(TEXT), but not the byte count.
+                self.db.execute(f"UPDATE FileTransaction SET {field}={field} || ? WHERE transactionId=?",
+                                ("\x00x", uid(n)))
+                raw_shape = self.db.execute(
+                    f"SELECT typeof({field}), length({field}), length(CAST({field} AS BLOB)) "
+                    "FROM FileTransaction WHERE ownerId=?", (self.args(ordinal)["ownerKey"],)
+                ).fetchone()
+                self.assertEqual(("text", extent, extent + 2), raw_shape)
+                self.assertEqual([(0,)], self.guard(ordinal))
+                self.assertEqual([(1,)], self.guard(0), "The unchanged sibling remains admitted")
+
     def test_key_scan_detects_extra_even_when_extra_payload_is_malformed(self):
         self.item(1, 0)
         self.item(2, 1)
@@ -116,6 +148,42 @@ class ExportItemSqlTest(unittest.TestCase):
         # The candidate can use either these exact per-key seeks or a verified equivalent bounded query.
         flags = {ordinal: self.guard(ordinal) for ordinal in range(100)}
         self.assertEqual({0: [(1,)], 1: [(1,)], 99: [(0,)]}, {i: f for i, f in flags.items() if f})
+
+    def test_typed_item_projection_is_one_exact_index_seek_and_omits_audit_column(self):
+        self.item(1, 0, payload=b"a" * 685)
+        self.item(2, 1, payload=b"b" * 685)
+        self.item(3, 0, attempt=ATTEMPT - 1, payload=b"wrong")
+        self.item(4, 0, kind="RENDER", payload=b"wrong")
+        self.item(5, 0, key=expected_key(self.assembly.upper(), 0), payload=b"wrong")
+        sql = self.dao("exportItemIntentRow")
+        for ordinal, expected_byte in ((0, b"a"), (1, b"b")):
+            args = self.args(ordinal) | {"expectedPayloadBytes": 685}
+            self.assertEqual([(1,)], self.db.execute(self.dao("exportItemIntentReadIsBounded"), args).fetchall())
+            cursor = self.db.execute(sql, args)
+            self.assertEqual(("transactionId", "kind", "ownerId", "attempt", "state", "stagingPath",
+                              "finalPath", "sealSha256", "expectedByteSha256", "expectedByteCount",
+                              "payload", "errorCode"), tuple(c[0] for c in cursor.description))
+            row, = cursor.fetchall()
+            self.assertEqual((uid(ordinal + 1), "EXPORT", args["ownerKey"], ATTEMPT, "MOVED"), row[:5])
+            self.assertEqual(expected_byte * 685, row[10])
+        self.assertEqual([], self.db.execute(sql, self.args(2)).fetchall())
+        plan = [r[3] for r in self.db.execute("EXPLAIN QUERY PLAN " + sql, self.args(0))]
+        self.assertEqual(1, len(plan), plan)
+        self.assertRegex(plan[0], r"^SEARCH .*index_FileTransaction_kind_ownerId_attempt "
+                                  r"\(kind=\? AND ownerId=\? AND attempt=\?\)$")
+
+    def test_fixed_payload_extent_and_exact_key_scope_before_projection(self):
+        for n, ordinal, payload in ((1, 0, b"a" * 685), (2, 1, b"a" * 684), (3, 99, b"b" * 686)):
+            self.item(n, ordinal, payload=payload)
+        self.item(4, 100, payload=b"wrong")
+        self.item(5, -1, payload=b"wrong")
+        self.item(6, 2, key=expected_key(self.assembly.upper(), 2), payload=b"wrong")
+        self.item(7, 3, attempt=ATTEMPT + 1, payload=b"wrong")
+        sql = self.dao("exportItemIntentReadIsBounded")
+        flags = [self.db.execute(sql, self.args(i) | {"expectedPayloadBytes": 685}).fetchall()
+                 for i in range(100)]
+        self.assertEqual({0: [(1,)], 1: [(0,)], 99: [(0,)]},
+                         {i: f for i, f in enumerate(flags) if f})
 
     def test_known_stage_requires_the_matching_raw_seal_shape(self):
         unsealed = dict(sealSha256=None, expectedByteSha256=None, expectedByteCount=None)
@@ -151,6 +219,25 @@ class ExportItemSqlTest(unittest.TestCase):
         plan = self.db.execute("EXPLAIN QUERY PLAN " + sql, args).fetchall()
         self.assertTrue(any(row[3].startswith("SEARCH ") and "index_ExportArtifact_snapshotId_ordinal" in row[3]
                             and "snapshotId=?" in row[3] for row in plan), plan)
+
+    def test_negative_and_real_ordinals_keep_their_positions_in_bounded_inventory(self):
+        self.seed_artifacts()
+        sql = self.dao("exportArtifactIdsForSnapshot")
+        args = dict(snapshotId=self.snapshot, limit=3)
+        first, second, extra, moved = ((uid(n),) for n in (101, 102, 103, 104))
+        self.assertEqual([first, second, extra], self.db.execute(sql, args).fetchall())
+
+        cases = ((-1, "integer", [moved, first, second]),
+                 (0.5, "real", [first, moved, second]))
+        for ordinal, storage_class, expected in cases:
+            with self.subTest(ordinal=ordinal, storage_class=storage_class):
+                self.db.execute("UPDATE ExportArtifact SET ordinal=? WHERE artifactId=?",
+                                (ordinal, moved[0]))
+                # INTEGER affinity alone does not establish the stored value's class or its position relative to 0 and 1.
+                self.assertEqual((storage_class, ordinal), self.db.execute(
+                    "SELECT typeof(ordinal), ordinal FROM ExportArtifact WHERE artifactId=?", moved
+                ).fetchone())
+                self.assertEqual(expected, self.db.execute(sql, args).fetchall())
 
     def test_malformed_raw_artifact_id_occupies_the_extra_slot_as_a_sentinel(self):
         self.seed_artifacts()

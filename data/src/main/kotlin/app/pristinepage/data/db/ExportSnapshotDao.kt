@@ -5,6 +5,7 @@ import androidx.room.Insert
 import androidx.room.OnConflictStrategy
 import androidx.room.Query
 import app.pristinepage.data.repository.AssemblyJobIdentityRow
+import app.pristinepage.data.repository.ExportItemIntentRow
 import app.pristinepage.data.repository.ExportSnapshotQueries
 import app.pristinepage.data.repository.FrozenRenderJobIdentityRow
 import app.pristinepage.data.repository.RenderCompletionQueries
@@ -210,6 +211,12 @@ import app.pristinepage.data.repository.RenderIntentQueries
         THEN 1 ELSE 0 END FROM FileTransaction
         WHERE kind='EXPORT' COLLATE BINARY AND ownerId=:ownerKey COLLATE BINARY AND attempt=:attempt""")
     internal abstract fun exportItemIntentReadIsBounded(ownerKey: String, attempt: Long, expectedPayloadBytes: Int): Boolean?
+
+    // Only after scalar admission of this expected ordinal in the same transaction. No audit time or unexpected ordinal's payload is projected.
+    @Query("""SELECT transactionId, kind, ownerId, attempt, state, stagingPath, finalPath, sealSha256,
+        expectedByteSha256, expectedByteCount, payload, errorCode FROM FileTransaction
+        WHERE kind='EXPORT' COLLATE BINARY AND ownerId=:ownerKey COLLATE BINARY AND attempt=:attempt""")
+    internal abstract fun exportItemIntentRow(ownerKey: String, attempt: Long): ExportItemIntentRow?
 
     // Preserve every row for n+1 detection, including malformed members. Validate byte and character extents before inspecting UUID shape; '' is a bounded invalid ID, not absence. Invalid limits become zero, never SQLite's negative unlimited limit.
     @Query("""SELECT CASE WHEN (typeof(artifactId)='text' AND length(CAST(artifactId AS BLOB))=36 AND length(artifactId)=36)
