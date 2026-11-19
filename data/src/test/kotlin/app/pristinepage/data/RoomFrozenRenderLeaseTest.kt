@@ -17,12 +17,14 @@ import org.junit.Test
 
 class RoomFrozenRenderLeaseTest {
     @Test fun admittedJobGetsOneLiveGrantWithIndependentClocks() = runTest {
-        val f = admitted()
+        val f = pending()
+        f.scrambleCasArgument = true
+        f.admit()
         val before = f.rows()
         assertEquals(AcquireLeaseResult.Granted(JobLease(f.id, owner, 1)), f.acquire())
         assertEquals(before.afterFirstGrant(), f.rows())
         assertEquals(AcquireLeaseResult.Busy("RUNNING"), f.acquire())
-        assertEquals(listOf(proofReads + "admit", leaseReads + "update", leaseReads), f.transactions.drop(2))
+        assertEquals(listOf(proofReads, proofReads + "admit", leaseReads + "update", leaseReads), f.transactions)
         assertEquals(2, f.fullReads)
         assertEquals(1, f.leaseUpdates)
     }
@@ -32,7 +34,7 @@ class RoomFrozenRenderLeaseTest {
         f.replacePin()
         f.admit()
         val before = f.rows()
-        assertEquals(alternateSource, f.proof.pinSourceId)
+        assertEquals(alternateSource, f.receipt.proof.pinSourceId)
         assertEquals(AcquireLeaseResult.Granted(JobLease(f.id, owner, 1)), f.acquire())
         assertEquals(before.afterFirstGrant(), f.rows())
         assertEquals(1, f.leaseUpdates)
@@ -68,11 +70,40 @@ class RoomFrozenRenderLeaseTest {
         f.reject("frozen_render_job_invalid", proofReads)
     }
 
-    @Test fun replacedNormalizedEquivalentPinStopsBeforeFullProjection() = runTest {
+    @Test fun freshlyVerifiableReplacementCannotUseTheFirstAdmissionsAuthority() = runTest {
         val f = admitted()
+        val original = f.binding()
         f.replacePin()
-        assertNotEquals(f.proof.pinSourceId, f.pins().single())
+        val fresh = f.readVerified()
+        assertEquals(alternateSource, fresh.pinSourceId)
+        val replacement = f.binding()
+        assertNotEquals(original.source.sourceId, replacement.source.sourceId)
+        assertNotEquals(original.blob.sourceBlobId, replacement.blob.sourceBlobId)
+        assertNotEquals(original.blob.byteSha256, replacement.blob.byteSha256)
+        assertEquals(original.source.pixelSha256, replacement.source.pixelSha256)
+        assertEquals(original.source.conversionFingerprint, replacement.source.conversionFingerprint)
+        assertEquals(f.receipt.proof.canonicalInputSha256, fresh.canonicalInputSha256)
+        assertEquals(original, f.receipt.proof.pinnedBinding)
+        // The fresh read authenticates B but conveys no admission authority. The separate writer must compare against A.
+        assertEquals(listOf(proofReads, proofReads + "admit", proofReads), f.transactions)
         f.reject("frozen_render_lease_binding_changed", proofReads)
+        assertEquals(4, f.transactions.size)
+        assertEquals(0, f.ownerReads)
+    }
+
+    @Test fun nonpositiveLiveSourceOrBlobCounterStopsBeforeFullProjection() = runTest {
+        for (count in listOf(0L, -1L)) {
+            for (changeSource in listOf(true, false)) {
+                val f = admitted()
+                val (source, blob) = f.binding()
+                // Keep the fake scalar guard permissive here, so a passing test requires the typed binding check.
+                f.supplyCounterDriftToTypedProof = true
+                if (changeSource) f.catalog.sources[source.sourceId] = source.copy(refCount = count)
+                else f.catalog.blobs[blob.sourceBlobId] = blob.copy(sourceCount = count)
+                f.reject("frozen_render_job_invalid", proofReads)
+                assertEquals(0, f.ownerReads)
+            }
+        }
     }
 
     @Test fun pinnedImmutableSourceOrBlobDriftStopsBeforeFullProjection() = runTest {
@@ -103,9 +134,9 @@ class RoomFrozenRenderLeaseTest {
         f.reject("frozen_render_job_unavailable", listOf("job bounds"), OperationErrorCode.SOURCE_UNAVAILABLE)
     }
 
-    @Test fun verifiedPendingAndTerminalRowsCannotSkipAdmissionOrRestart() = runTest {
+    @Test fun earlierReceiptDoesNotOverrideLivePendingOrTerminalState() = runTest {
         for (state in listOf("PENDING", "SUCCEEDED", "CANCELED")) {
-            val f = pending()
+            val f = admitted()
             f.row = f.row!!.copy(state = state)
             f.reject("job_not_admitted", leaseReads, OperationErrorCode.INVALID_INPUT)
             assertEquals(0, f.ownerReads)
@@ -206,7 +237,7 @@ class RoomFrozenRenderLeaseTest {
         f.assertNoUpdate(before, proofReads + "lease bounds")
     }
 
-    private suspend fun pending() = Fixture().apply { freezeAndVerify() }
+    private suspend fun pending() = Fixture().apply { freeze() }
     private suspend fun admitted() = pending().apply { admit() }
 
     private class Fixture : ExportSnapshotQueries, JobLeaseQueries {
@@ -215,7 +246,7 @@ class RoomFrozenRenderLeaseTest {
         private val frozenJobs = mutableListOf<JobRow>()
         lateinit var page: ExportPageSnapshot
         val id: JobId get() = JobId(canonical.jobId)
-        lateinit var proof: RoomFrozenRenderReads.Verified
+        lateinit var receipt: RoomFrozenRenderAdmission.Admitted
         var row: JobRow? = null
         private lateinit var canonical: JobRow
         val transactions = mutableListOf<MutableList<String>>()
@@ -229,6 +260,8 @@ class RoomFrozenRenderLeaseTest {
         var onLeaseBounds: () -> Unit = {}
         var fullProjection: (JobRow) -> JobRow = { it }
         var missCas = false
+        var scrambleCasArgument = false
+        var supplyCounterDriftToTypedProof = false
 
         private val metadata = object : MetadataAccess {
             override val queries = object : CatalogQueries by catalog {
@@ -250,7 +283,7 @@ class RoomFrozenRenderLeaseTest {
             }
         }
 
-        suspend fun freezeAndVerify() {
+        suspend fun freeze() {
             val freezer = RoomExportSnapshots(catalog, this, {}, { null }, profile.rendererVersion, profile.encodingVersion,
                 profile.backend, profile.precision, { 1_000 }, Dispatchers.Unconfined)
             val settings = ExportSettings(ExportFormat.PNG, listOf(PageOutputSettings(repository.pageIds.single(), output)), null, null, emptyList())
@@ -260,22 +293,22 @@ class RoomFrozenRenderLeaseTest {
             val referenced = ExportAssemblyInput.verify(JobId(assembly.jobId), snapshot, assembly)[page.ordinal]
             canonical = frozenJobs.single { it.jobId == referenced.value }
             row = canonical.copy(input = canonical.input.copyOf())
-            verify()
         }
 
-        private suspend fun verify() {
-            proof = RoomFrozenRenderReads(metadata, ::renderJobReadIsBounded, ::renderJobIdentity,
+        suspend fun readVerified(): RoomFrozenRenderReads.Verified =
+            RoomFrozenRenderReads(metadata, ::renderJobReadIsBounded, ::renderJobIdentity,
                 ::boundedRenderJobPinSourceIds, ::sourceBounds, profile, Dispatchers.Unconfined).verified(id, page)
-        }
 
         suspend fun admit() {
             assertEquals("PENDING", row!!.state)
             val before = rows()
-            assertTrue(RoomFrozenRenderAdmission(
+            var preflighted: ExportSourceBinding? = null
+            receipt = checkNotNull(RoomFrozenRenderAdmission(
                 metadata, profile, { actual, pin ->
                     assertFalse(catalog.inTransaction)
                     assertSame(page, actual)
                     assertEquals(binding(), pin)
+                    preflighted = pin
                     null
                 }, ::renderJobReadIsBounded, ::renderJobIdentity, ::boundedRenderJobPinSourceIds,
                 ::sourceBounds, ::admitPending, { 2_000 }, Dispatchers.Unconfined,
@@ -284,8 +317,11 @@ class RoomFrozenRenderLeaseTest {
             assertEquals(listOf(proofReads, proofReads + "admit"), transactions.takeLast(2))
             assertEquals(0, fullReads)
             assertEquals(0, leaseUpdates)
-            // A stable original may be byte-distinct. Re-verify that fixture before its admission, not after drift.
-            assertEquals(pins().single(), proof.pinSourceId)
+            assertSame(page, receipt.proof.page)
+            assertEquals(id, receipt.proof.jobId)
+            assertEquals(canonical.canonicalInputSha256, receipt.proof.canonicalInputSha256)
+            assertEquals(pins().single(), receipt.proof.pinSourceId)
+            assertSame(preflighted, receipt.proof.pinnedBinding)
         }
 
         private fun admitPending(id: String, key: String, digest: String, input: ByteArray, audit: Long): Int {
@@ -297,10 +333,11 @@ class RoomFrozenRenderLeaseTest {
             assertEquals(pending.canonicalInputSha256, digest)
             assertArrayEquals(pending.input, input)
             row = pending.copy(state = "ADMITTED", updatedAt = audit)
+            if (scrambleCasArgument) input.fill(0)
             return 1
         }
 
-        suspend fun replacePin() {
+        fun replacePin() {
             assertFalse(catalog.inTransaction)
             val (source, blob) = binding()
             checkNotNull(catalog.references.remove(Triple("JOB", id.value, source.sourceId)))
@@ -312,7 +349,6 @@ class RoomFrozenRenderLeaseTest {
             catalog.references[Triple("JOB", id.value, alternateSource)] = SourceReferenceRow("JOB", id.value, alternateSource, 0)
             assertNotEquals(page.byteHash, binding().blob.byteSha256)
             FrozenRenderJobProof.verifyPin(page, alternateSource, binding())
-            if (row!!.state == "PENDING") verify()
         }
 
         fun pins() = catalog.references.values.asSequence()
@@ -326,7 +362,7 @@ class RoomFrozenRenderLeaseTest {
         private fun sourceBounds(id: String): Boolean? {
             record("source bounds")
             assertEquals(pins().single(), id)
-            return catalog.sourceReadIsBounded(id)
+            return if (supplyCounterDriftToTypedProof) true else catalog.sourceReadIsBounded(id)
         }
 
         override fun renderJobReadIsBounded(jobId: String, expectedInputBytes: Int): Boolean? {
@@ -407,7 +443,7 @@ class RoomFrozenRenderLeaseTest {
             return RoomJobLeases.FrozenRenderAcquisition(
                 metadata, this, registry, ::renderJobReadIsBounded, ::renderJobIdentity, ::boundedRenderJobPinSourceIds,
                 ::sourceBounds, ::leaseBounds, { onAudit(); 7_000L }, { elapsed }, Dispatchers.Unconfined,
-            ).acquire(proof, requested, 40L)
+            ).acquire(receipt, requested, 40L)
         }
 
         override fun insertSnapshot(row: ExportSnapshotRow) = Unit

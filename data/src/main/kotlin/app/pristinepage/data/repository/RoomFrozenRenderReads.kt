@@ -51,7 +51,7 @@ internal class RoomFrozenRenderReads(
         val page: ExportPageSnapshot,
         val pinSourceId: String,
         identity: FrozenRenderJobIdentityRow,
-        private val pinnedBinding: ExportSourceBinding,
+        internal val pinnedBinding: ExportSourceBinding,
     ) {
         private val input = identity.input
         internal val preExecutionKey = identity.idempotenceKey

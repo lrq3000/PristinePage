@@ -41,35 +41,44 @@ internal class RoomFrozenRenderAdmission(
 
     private val projection = RoomFrozenRenderReads.Projection(metadata.queries, jobBounds, jobIdentity, pinSourceIds, sourceBounds)
 
-    suspend fun admit(jobId: JobId, page: ExportPageSnapshot): Boolean = withContext(dispatcher) {
-        val active: () -> Unit = { coroutineContext.ensureActive() }
-        active()
-        val prepared = RoomFrozenRenderReads.Verified.Prepared(jobId, page, runtime)
-        val initial = transaction(jobId) {
-            active()
-            projection.job(jobId, prepared.inputBytes, active).detached()
-        }
-        active()
-        prepared.authenticate(initial, active)
+    suspend fun admit(jobId: JobId, page: ExportPageSnapshot): Admitted? = Admitted.admit(this, jobId, page)
 
-        // No transaction or mutable job bytes cross into the external capability/resource check; success is not a reservation.
-        val refusal = preflight(page, initial.binding)
-        active()
-        refusal?.let { throw RepositoryFailure(it) }
-        val updatedAt = clock()
-        active()
+    /** Exact first-admission receipt, not a live pin, reservation, lease or file authority. */
+    class Admitted private constructor(val proof: RoomFrozenRenderReads.Verified) {
+        companion object {
+            // Keep the only minting site with the complete admission path; a standalone Verified cannot be promoted to a receipt.
+            suspend fun admit(admission: RoomFrozenRenderAdmission, jobId: JobId, page: ExportPageSnapshot): Admitted? =
+                withContext(admission.dispatcher) {
+                    val active: () -> Unit = { coroutineContext.ensureActive() }
+                    active()
+                    val prepared = RoomFrozenRenderReads.Verified.Prepared(jobId, page, admission.runtime)
+                    val initial = admission.transaction(jobId) {
+                        active()
+                        admission.projection.job(jobId, prepared.inputBytes, active).detached()
+                    }
+                    active()
+                    val proof = prepared.authenticate(initial, active)
 
-        transaction(jobId) {
-            active()
-            val live = projection.job(jobId, prepared.inputBytes, active)
-            // Cancellation is checked immediately before the CAS, not guaranteed against a race with a started commit.
-            when (prepared.admitUnchanged(initial, live, updatedAt, active, admitPending)) {
-                0 -> false
-                1 -> true
-                else -> throw RepositoryFailure(OperationError(
-                    OperationErrorCode.INTEGRITY_FAILED, false, "frozen_render_admission_count_invalid", jobId.value,
-                ))
-            }
+                    // No transaction or mutable job bytes cross into preflight. Retain its exact binding, not the later writer's observation.
+                    val refusal = admission.preflight(proof.page, proof.pinnedBinding)
+                    active()
+                    refusal?.let { throw RepositoryFailure(it) }
+                    val updatedAt = admission.clock()
+                    active()
+
+                    admission.transaction(jobId) {
+                        active()
+                        val live = admission.projection.job(jobId, prepared.inputBytes, active)
+                        // Cancellation is checked immediately before the CAS, not guaranteed against a race with a started commit.
+                        when (prepared.admitUnchanged(initial, live, updatedAt, active, admission.admitPending)) {
+                            0 -> null
+                            1 -> Admitted(proof)
+                            else -> throw RepositoryFailure(OperationError(
+                                OperationErrorCode.INTEGRITY_FAILED, false, "frozen_render_admission_count_invalid", jobId.value,
+                            ))
+                        }
+                    }
+                }
         }
     }
 

@@ -61,7 +61,7 @@ class RoomJobLeases @JvmOverloads constructor(private val metadata: MetadataAcce
         catch (_: Exception) { AcquireLeaseResult.Rejected(OperationError(OperationErrorCode.STORAGE_FAILED, true, "job_lease_write_failed", jobId.value)) }
     }
 
-    /** The ordinary render entry uses one database for the guarded projections and existing lease writer. Call only after separate resource admission; Verified is not a live JOB pin. */
+    /** The ordinary render entry rechecks the first admission's exact JOB binding inside the existing same-database lease writer. The receipt is not a live JOB pin. */
     internal class FrozenRenderAcquisition(
         metadata: MetadataAccess,
         private val jobs: JobLeaseQueries,
@@ -87,8 +87,9 @@ class RoomJobLeases @JvmOverloads constructor(private val metadata: MetadataAcce
         private val projection = RoomFrozenRenderReads.Projection(metadata.queries, jobBounds, jobIdentity, pinSourceIds, sourceBounds)
         private val leases = RoomJobLeases(metadata, jobs, liveness, auditClock, leaseClock, dispatcher)
 
-        suspend fun acquire(proof: RoomFrozenRenderReads.Verified, owner: String, durationMillis: Long): AcquireLeaseResult =
-            leases.acquire(proof.jobId, owner, durationMillis) { active ->
+        suspend fun acquire(admitted: RoomFrozenRenderAdmission.Admitted, owner: String, durationMillis: Long): AcquireLeaseResult {
+            val proof = admitted.proof
+            return leases.acquire(proof.jobId, owner, durationMillis) { active ->
                 val jobId = proof.jobId
                 // Revalidate the exact narrow identity and live binding before admitting the remaining fields for SELECT *.
                 projection.job(jobId, proof.inputBytes, active).requireUnchangedForLease(proof)
@@ -102,6 +103,7 @@ class RoomJobLeases @JvmOverloads constructor(private val metadata: MetadataAcce
                 }
                 row
             }
+        }
     }
 
     override suspend fun checkpoint(lease: JobLease, checkpoint: ByteArray): Boolean = withContext(dispatcher) {

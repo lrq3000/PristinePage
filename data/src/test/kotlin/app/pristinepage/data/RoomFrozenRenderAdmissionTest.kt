@@ -40,7 +40,7 @@ class RoomFrozenRenderAdmissionTest {
         assertEquals(0, f.casCalls)
         f.assertStored(before)
         release.complete(Unit)
-        assertTrue(admission.await())
+        assertNotNull(admission.await())
         assertEquals(1, f.preflightCalls)
         assertEquals(1, f.casCalls)
         assertEquals(listOf(proofReads, proofReads + "cas"), f.transactions)
@@ -136,7 +136,7 @@ class RoomFrozenRenderAdmissionTest {
         f.retainEquivalentOriginal()
         f.attachEquivalentPin(replace = true)
         val before = f.stored()
-        assertTrue(f.admit())
+        assertNotNull(f.admit())
         assertEquals(1, f.preflightCalls)
         assertEquals(1, f.casCalls)
         assertEquals(listOf(proofReads, proofReads + "cas"), f.transactions)
@@ -175,7 +175,7 @@ class RoomFrozenRenderAdmissionTest {
     @Test fun liveRefcountChangesDoNotReplaceOrInvalidateTheImmutableBinding() = runTest {
         val f = fixture()
         lateinit var afterExternalChange: Stored
-        assertTrue(f.admit {
+        assertNotNull(f.admit {
             val (source, blob) = f.bindingFor(f.pinIds().single())
             // Model only the counter effect of unrelated retained owners; the exact live JOB reference is untouched.
             f.catalog.sources[source.sourceId] = source.copy(refCount = source.refCount + 1)
@@ -202,16 +202,27 @@ class RoomFrozenRenderAdmissionTest {
         }
     }
 
-    @Test fun replayReturnsFalseFromZeroRowCasWithoutTouchingPriorAdmission() = runTest {
+    @Test fun replayReturnsNoReceiptFromZeroRowCasWithoutTouchingPriorAdmission() = runTest {
         val f = fixture()
-        assertTrue(f.admit())
+        assertNotNull(f.admit())
         val admitted = f.stored()
         f.now++
-        assertFalse(f.admit())
+        val replay = f.admit()
         assertEquals(2, f.preflightCalls)
         assertEquals(listOf(1, 0), f.casResults)
         assertEquals(listOf(proofReads, proofReads + "cas", proofReads, proofReads + "cas"), f.transactions)
         f.assertStored(admitted)
+        assertNull("A zero admission CAS must return no receipt", replay)
+    }
+
+    @Test fun missedFirstCasLeavesPendingJobWithNoReceipt() = runTest {
+        val f = fixture()
+        val before = f.stored()
+        f.overrideCount = 0
+        assertNull(f.admit())
+        assertEquals(listOf(0), f.casResults)
+        assertEquals(listOf(proofReads, proofReads + "cas"), f.transactions)
+        f.assertStored(before)
     }
 
     @Test fun impossibleCasCountFailsClosedAndDiscardsTheProvisionalMutation() = runTest {
@@ -469,18 +480,24 @@ class RoomFrozenRenderAdmissionTest {
             assertNoCas(changed)
         }
 
-        suspend fun admit(preflight: suspend () -> OperationError? = { null }): Boolean {
+        suspend fun admit(preflight: suspend () -> OperationError? = { null }): RoomFrozenRenderAdmission.Admitted? {
             val initialBinding = pinIds().singleOrNull()?.let(::bindingFor)
+            var preflightedBinding: ExportSourceBinding? = null
             val gate: suspend (ExportPageSnapshot, ExportSourceBinding) -> OperationError? = { frozenPage, binding ->
                 assertFalse("Preflight must not run inside Room", catalog.inTransaction)
                 preflightCalls++
                 assertSame(page, frozenPage)
                 assertEquals(initialBinding, binding)
+                preflightedBinding = binding
                 preflight()
             }
             return RoomFrozenRenderAdmission(
                 metadata, profile, gate, ::jobBounds, ::jobIdentity, ::boundedPins, ::sourceBounds, ::cas, { now }, Dispatchers.Unconfined,
-            ).admit(jobId, page)
+            ).admit(jobId, page)?.also { receipt ->
+                assertSame(page, receipt.proof.page)
+                assertEquals(jobId, receipt.proof.jobId)
+                assertSame("Retain the preflight object, not a newly projected writer binding", preflightedBinding, receipt.proof.pinnedBinding)
+            }
         }
     }
 
