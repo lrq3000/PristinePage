@@ -218,6 +218,72 @@ import app.pristinepage.data.repository.RenderIntentQueries
         WHERE kind='EXPORT' COLLATE BINARY AND ownerId=:ownerKey COLLATE BINARY AND attempt=:attempt""")
     internal abstract fun exportItemIntentRow(ownerKey: String, attempt: Long): ExportItemIntentRow?
 
+    // Only after checkFresh and the continuing owned attempt have been authenticated in the same writer transaction. This statement fixes the v1 owner/path grammar; it does not authenticate the plan or interpret its payload. Invalid shape inserts nothing; either existing UNIQUE key aborts, even for a corrupt row.
+    @Query("""INSERT OR ABORT INTO FileTransaction (transactionId,kind,ownerId,attempt,state,stagingPath,finalPath,
+        sealSha256,expectedByteSha256,expectedByteCount,payload,errorCode,updatedAt)
+        SELECT :transactionId,'EXPORT','export-item-v1:' || :assemblyJobId || ':' || :ordinal,:attempt,'INTENT',
+            'staging/' || :transactionId || '/derived.part','exports/' || :snapshotId || '/' || :artifactId || '.bin',
+            NULL,NULL,NULL,:payload,NULL,:updatedAt
+        WHERE typeof(:ordinal)='integer' AND :ordinal BETWEEN 0 AND 99
+            AND typeof(:attempt)='integer' AND :attempt>0
+            AND typeof(:updatedAt)='integer' AND :updatedAt>=0
+            AND typeof(:payload)='blob' AND length(:payload)=685
+            AND (typeof(:assemblyJobId)='text' AND length(CAST(:assemblyJobId AS BLOB))=36
+                AND :assemblyJobId GLOB '????????-????-????-????-????????????'
+                AND length(replace(:assemblyJobId,'-',''))=32 AND :assemblyJobId NOT GLOB '*[^0-9a-f-]*')
+            AND (typeof(:snapshotId)='text' AND length(CAST(:snapshotId AS BLOB))=36
+                AND :snapshotId GLOB '????????-????-????-????-????????????'
+                AND length(replace(:snapshotId,'-',''))=32 AND :snapshotId NOT GLOB '*[^0-9a-f-]*')
+            AND (typeof(:artifactId)='text' AND length(CAST(:artifactId AS BLOB))=36
+                AND :artifactId GLOB '????????-????-????-????-????????????'
+                AND length(replace(:artifactId,'-',''))=32 AND :artifactId NOT GLOB '*[^0-9a-f-]*')
+            AND (typeof(:transactionId)='text' AND length(CAST(:transactionId AS BLOB))=36
+                AND :transactionId GLOB '????????-????-????-????-????????????'
+                AND length(replace(:transactionId,'-',''))=32 AND :transactionId NOT GLOB '*[^0-9a-f-]*')""")
+    internal abstract fun insertExportItemIntent(
+        transactionId: String, assemblyJobId: String, snapshotId: String, artifactId: String, ordinal: Int, attempt: Long,
+        payload: ByteArray, updatedAt: Long,
+    ): Long
+
+    // Expected key, paths, payload, phase and audit timestamp come from the owning caller, not from a row projection. The triplet is null for COPYING, newly proved for SEALED, and the exact expected old triplet for MOVED. Wall audit time is not a lease clock.
+    // CASE keeps byte equality behind the raw type/extent checks in this same point update; WHERE/AND order is not a guard. No edge commits an artifact or grants file authority.
+    @Query("""UPDATE FileTransaction SET state=:nextState, updatedAt=:updatedAt,
+        sealSha256=CASE WHEN :nextState='SEALED' THEN :seal ELSE sealSha256 END,
+        expectedByteSha256=CASE WHEN :nextState='SEALED' THEN :byteSha256 ELSE expectedByteSha256 END,
+        expectedByteCount=CASE WHEN :nextState='SEALED' THEN :byteCount ELSE expectedByteCount END
+        WHERE kind='EXPORT' COLLATE BINARY AND ownerId=:ownerKey COLLATE BINARY AND attempt=:attempt
+            AND transactionId=:transactionId COLLATE BINARY AND state=:previousState COLLATE BINARY
+            AND typeof(attempt)='integer' AND typeof(:attempt)='integer' AND :attempt>0
+            AND typeof(updatedAt)='integer' AND typeof(:previousUpdatedAt)='integer' AND updatedAt=:previousUpdatedAt
+            AND :previousUpdatedAt>=0 AND typeof(:updatedAt)='integer' AND :updatedAt>=0 AND errorCode IS NULL
+            AND typeof(stagingPath)='text' AND stagingPath=:stagingPath COLLATE BINARY
+            AND length(CAST(:stagingPath AS BLOB))=57 AND length(:stagingPath)=57
+            AND typeof(finalPath)='text' AND finalPath=:finalPath COLLATE BINARY
+            AND length(CAST(:finalPath AS BLOB))=85 AND length(:finalPath)=85
+            AND CASE WHEN typeof(payload)='blob' AND length(payload)=685 AND typeof(:payload)='blob' AND length(:payload)=685
+                THEN payload=:payload ELSE 0 END
+            AND CASE
+                WHEN state='INTENT' AND :nextState='COPYING'
+                    THEN sealSha256 IS NULL AND expectedByteSha256 IS NULL AND expectedByteCount IS NULL
+                        AND :seal IS NULL AND :byteSha256 IS NULL AND :byteCount IS NULL
+                WHEN (state='COPYING' AND :nextState='SEALED') OR (state='SEALED' AND :nextState='MOVED')
+                    THEN CASE WHEN typeof(:seal)='text' AND length(CAST(:seal AS BLOB))=64 AND length(:seal)=64
+                        AND typeof(:byteSha256)='text' AND length(CAST(:byteSha256 AS BLOB))=64 AND length(:byteSha256)=64
+                        AND typeof(:byteCount)='integer' AND :byteCount>0
+                        AND :seal NOT GLOB '*[^0-9a-f]*' AND :byteSha256 NOT GLOB '*[^0-9a-f]*'
+                        THEN CASE WHEN state='COPYING'
+                            THEN sealSha256 IS NULL AND expectedByteSha256 IS NULL AND expectedByteCount IS NULL
+                            ELSE typeof(sealSha256)='text' AND sealSha256=:seal COLLATE BINARY
+                                AND typeof(expectedByteSha256)='text' AND expectedByteSha256=:byteSha256 COLLATE BINARY
+                                AND typeof(expectedByteCount)='integer' AND expectedByteCount=:byteCount END
+                        ELSE 0 END
+                ELSE 0 END""")
+    internal abstract fun advanceExportItemPhase(
+        transactionId: String, ownerKey: String, attempt: Long, previousState: String, nextState: String,
+        previousUpdatedAt: Long, updatedAt: Long, stagingPath: String, finalPath: String, payload: ByteArray,
+        seal: String?, byteSha256: String?, byteCount: Long?,
+    ): Int
+
     // Preserve every row for n+1 detection, including malformed members. Validate byte and character extents before inspecting UUID shape; '' is a bounded invalid ID, not absence. Invalid limits become zero, never SQLite's negative unlimited limit.
     @Query("""SELECT CASE WHEN (typeof(artifactId)='text' AND length(CAST(artifactId AS BLOB))=36 AND length(artifactId)=36)
         THEN CASE WHEN (substr(artifactId,9,1)='-' AND substr(artifactId,14,1)='-'
