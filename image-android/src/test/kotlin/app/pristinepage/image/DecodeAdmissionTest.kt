@@ -3,6 +3,7 @@ package app.pristinepage.image
 import app.pristinepage.core.pipeline.PixelSize
 import app.pristinepage.data.model.OperationErrorCode
 import app.pristinepage.data.model.RepositoryFailure
+import app.pristinepage.image.decode.ImageAllocationBudget
 import java.lang.reflect.InvocationTargetException
 import org.junit.Assert.*
 import org.junit.Test
@@ -75,6 +76,22 @@ class DecodeAdmissionTest {
         reject(OperationErrorCode.INVALID_INPUT) { call(b, "reserve", 0L) }
         reject(OperationErrorCode.INVALID_INPUT) { call(b, "reserve", -1L) }
         assertEquals(Long.MAX_VALUE - 5, call(b, "getUsedBytes")); a.close(); assertEquals(0L, call(b, "getUsedBytes"))
+    }
+
+    @Test fun reservationTokenAllocationFailureLeavesExistingChargeAndHeadroomIntact() {
+        val injected = OutOfMemoryError("synthetic reservation token allocation")
+        var failToken = false
+        val beforeTokenAllocation: () -> Unit = { if (failToken) throw injected }
+        val ledger = ImageAllocationBudget(17L, beforeTokenAllocation)
+        ledger.reserve(5).use {
+            failToken = true
+            assertSame(injected, assertThrows(OutOfMemoryError::class.java) { ledger.reserve(12).close() })
+            assertEquals(5L, ledger.usedBytes)
+            failToken = false
+            ledger.reserve(12).use { assertEquals(17L, ledger.usedBytes) }
+            assertEquals(5L, ledger.usedBytes)
+        }
+        assertEquals(0L, ledger.usedBytes)
     }
 
     @Test fun processingCapacityUsesTheSpecifiedMemoryClassRangeWithoutAnAppVersionLiteral() {

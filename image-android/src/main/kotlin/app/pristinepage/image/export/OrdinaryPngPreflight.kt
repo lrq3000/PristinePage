@@ -13,6 +13,7 @@ import app.pristinepage.data.model.SourceInspection
 import app.pristinepage.data.repository.ExportSourceBinding
 import app.pristinepage.image.decode.DecodeAdmission
 import app.pristinepage.image.decode.ImageAllocationBudget
+import app.pristinepage.image.decode.SourceDecodePolicy
 import app.pristinepage.image.decode.sourceParserBytes
 import app.pristinepage.image.render.AppearanceEngine
 import app.pristinepage.image.render.GeometryEngine
@@ -24,6 +25,7 @@ internal class OrdinaryPngPreflight(
     profile: OrdinaryExportProfile,
     private val budget: ImageAllocationBudget,
     private val sdkLevel: () -> Int = { Build.VERSION.SDK_INT },
+    private val buildFingerprint: () -> String = { Build.FINGERPRINT },
 ) {
     private val requests = OrdinaryFrozenPageRequest(profile)
 
@@ -33,12 +35,15 @@ internal class OrdinaryPngPreflight(
         val pageId = page.pageId.value
         val error = try {
             if (format != ExportFormat.PNG) pngRefuse(OperationErrorCode.UNSUPPORTED_FORMAT, "export_png_format")
-            requireOrdinaryPngApi(sdkLevel())
+            val sdk = sdkLevel()
+            requireOrdinaryPngApi(sdk)
             if (maxBytes <= 0) pngRefuse(OperationErrorCode.INVALID_INPUT, "export_png_invalid_cap")
             val request = requests.build(page)
             val (source, blob) = jobSource
             val decode = DecodeAdmission.estimate(blob.byteCount, blob.encodedWidth.toLong(), blob.encodedHeight.toLong(), source.exifOrientation)
-            requireMatchingSource(page, jobSource, decode.size)
+            val inspection = requireMatchingSource(page, jobSource, decode.size)
+            context.ensureActive()
+            SourceDecodePolicy.requireReproducible(inspection, sdk, buildFingerprint())
 
             val size = request.output.size
             val geometry = GeometryEngine.ordinaryCharge(request.recipe.geometry, size)
@@ -63,7 +68,7 @@ internal class OrdinaryPngPreflight(
         return error
     }
 
-    private fun requireMatchingSource(page: ExportPageSnapshot, jobSource: ExportSourceBinding, decodedSize: PixelSize) {
+    private fun requireMatchingSource(page: ExportPageSnapshot, jobSource: ExportSourceBinding, decodedSize: PixelSize): SourceInspection {
         val (source, blob) = jobSource
         try {
             requireSha256(blob.byteSha256)
@@ -76,6 +81,7 @@ internal class OrdinaryPngPreflight(
             require(blob.sourceBlobId != page.sourceBlobId.value || blob.byteSha256 == page.byteHash)
             require(decodedSize == inspection.normalizedSize && decodedSize == page.sourceSize &&
                 inspection.sourcePixelHash == page.pixelHash && inspection.conversionFingerprint == page.conversionFingerprint)
+            return inspection
         } catch (_: IllegalArgumentException) {
             pngRefuse(OperationErrorCode.INTEGRITY_FAILED, "export_png_source_binding_mismatch")
         }

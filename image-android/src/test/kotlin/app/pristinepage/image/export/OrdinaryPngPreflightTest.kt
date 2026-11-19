@@ -19,7 +19,9 @@ class OrdinaryPngPreflightTest {
     private val frozenSource = "10000000-0000-4000-8000-000000000001"
     private val frozenBlob = "10000000-0000-4000-8000-000000000002"
     private val pageId = "10000000-0000-4000-8000-000000000003"
-    private val normalized = SourceBinding("b".repeat(64), PixelSize(3, 2), "fixture-srgb-v1")
+    private val fixtureBuild = "pristinepage-jvm-test-build"
+    private val api28Conversion = "android-imagedecoder-v2/api28/245572580cf335c0/srgb-straight-white-exif-v1"
+    private val normalized = SourceBinding("b".repeat(64), PixelSize(3, 2), api28Conversion)
     private val recipe = Recipe(geometry = GeometryRecipe.None(normalized, outputQuarterTurns = 1))
     private val row = ExportPageRow(
         "10000000-0000-4000-8000-000000000004", 2, pageId, frozenSource, frozenBlob, "a".repeat(64),
@@ -70,6 +72,11 @@ class OrdinaryPngPreflightTest {
     @Test fun parserCanDominateAndDoesNotOverlapTheRenderPhase() = runTest {
         // 262,144 + 3 * 700,000 = 2,362,144, independently of the smaller 1,879,812-byte render phase.
         assertThreshold(2_362_144, binding = alternate.copy(blob = alternate.blob.copy(byteCount = 700_000)))
+    }
+
+    @Test fun parserClampsByteCountOfActualJobPinAboveOneMiB() = runTest {
+        // The JOB pin is 1 MiB + 1, but its parser charge is 262,144 + 3 * 1,048,576 = 3,407,872, above the 2,228,393-byte render peak.
+        assertThreshold(3_407_872, binding = alternate.copy(blob = alternate.blob.copy(byteCount = 1_048_577)))
     }
 
     @Test fun byteDistinctJobPinUsesItsOwnCountEvenWhenAxesMatch() = runTest {
@@ -134,6 +141,17 @@ class OrdinaryPngPreflightTest {
         assertEquals(0L, budget.usedBytes)
     }
 
+    @Test fun combinedReadbackPeakFitsAtLongMaxButOverflowsOneByteLater() = runTest {
+        // Output is 2x3: native readback adds 1,048,632 bytes, then retained appearance adds 65,572 more.
+        val cap = Long.MAX_VALUE - 1_114_204
+        val budget = ImageAllocationBudget(Long.MAX_VALUE)
+        assertEquals(Long.MAX_VALUE - 65_571, pngNativeBytes(2, 3, cap + 1))
+        assertNull(check(budget, cap = cap))
+        assertEquals(0L, budget.usedBytes)
+        assertError(OperationErrorCode.RESOURCE_LIMIT, "image_allocation_limit", check(budget, cap = cap + 1))
+        assertEquals(0L, budget.usedBytes)
+    }
+
     @Test fun frozenProfileRecipeSizingAndUnavailableAppearanceUseExistingGates() = runTest {
         val budget = ImageAllocationBudget(Long.MAX_VALUE)
         for (page in listOf(row.copy(rendererVersion = "past"), row.copy(providers = "{}".toByteArray()),
@@ -158,6 +176,40 @@ class OrdinaryPngPreflightTest {
             pinned.copy(blob = blob.copy(byteSha256 = "e".repeat(64))),
             alternate.copy(source = alternate.source.copy(sourceId = frozenSource)))) {
             assertError(OperationErrorCode.INTEGRITY_FAILED, "export_png_source_binding_mismatch", check(budget, binding = binding))
+        }
+        assertEquals(0L, budget.usedBytes)
+    }
+
+    @Test fun coherentRecordedConversionIsUnavailableOnDifferentDecoderSdk() = runTest {
+        val budget = ImageAllocationBudget(2_000_000)
+        budget.reserve(17).use {
+            // API 29 cannot reproduce an API 28 fingerprint, regardless of the running build string.
+            val actual = check(budget, sdk = { 29 })
+            assertEquals(17L, budget.usedBytes)
+            assertError(OperationErrorCode.UNSUPPORTED_VERSION, "source_conversion_unavailable", actual)
+        }
+        assertEquals(0L, budget.usedBytes)
+    }
+
+    @Test fun exactProducerWithEmbeddedProfileRefusesBeforeAllocationFit() = runTest {
+        val producer = pinned
+        val profiled = producer.copy(source = producer.source.copy(profileSha256 = "d".repeat(64)))
+        val budget = ImageAllocationBudget(2_000_000)
+        val preflight = OrdinaryPngPreflight(profile, budget, { 28 }, { fixtureBuild })
+        val frozen = snapshot(row)
+        budget.reserve(17).use {
+            // Same source/blob/byte identity and matching conversion; the retained profile digest is the only changed input.
+            assertNull(preflight.check(ExportFormat.PNG, frozen, producer, 4096))
+            assertError(OperationErrorCode.UNSUPPORTED_FORMAT, "source_profile_unsupported",
+                preflight.check(ExportFormat.PNG, frozen, profiled, 4096))
+            assertEquals(17L, budget.usedBytes)
+            budget.reserve(budget.capacityBytes - 17).use {
+                assertError(OperationErrorCode.RESOURCE_LIMIT, "image_allocation_limit",
+                    preflight.check(ExportFormat.PNG, frozen, producer, 4096))
+                assertError(OperationErrorCode.UNSUPPORTED_FORMAT, "source_profile_unsupported",
+                    preflight.check(ExportFormat.PNG, frozen, profiled, 4096))
+                assertEquals(budget.capacityBytes, budget.usedBytes)
+            }
         }
         assertEquals(0L, budget.usedBytes)
     }
@@ -195,8 +247,9 @@ class OrdinaryPngPreflightTest {
     private suspend fun check(
         budget: ImageAllocationBudget, cap: Long = 4096, binding: ExportSourceBinding = pinned,
         page: ExportPageRow = row, format: ExportFormat = ExportFormat.PNG, sdk: () -> Int = { 28 },
-    ): OperationError? {
-        val snapshot = ExportPageSnapshot::class.java.getConstructor(ExportPageRow::class.java).newInstance(page)
-        return OrdinaryPngPreflight(profile, budget, sdk).check(format, snapshot, binding, cap)
-    }
+    ): OperationError? = OrdinaryPngPreflight(profile, budget, sdk, { fixtureBuild }).check(format, snapshot(page), binding, cap)
+
+    private fun snapshot(page: ExportPageRow): ExportPageSnapshot =
+        ExportPageSnapshot::class.java.getConstructor(ExportPageRow::class.java).newInstance(page)
+
 }

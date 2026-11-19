@@ -62,7 +62,7 @@ class AndroidSourceInspector @JvmOverloads constructor(private val budget: Image
                         // ImageDecoder applies EXIF itself; native asymmetric1..8 fixtures must verify this. Do NOT pass the stored EXIF to CanonicalSourcePixels a second time.
                         val image = CanonicalSourcePixels.normalize(bitmap.width, bitmap.height, 1, { y, row -> bitmap.getPixels(row, 0, bitmap.width, 0, y, bitmap.width, 1) }) { context.ensureActive() }
                         try {
-                            val fingerprint = conversionFingerprint()
+                            val fingerprint = SourceDecodePolicy.fingerprint(Build.VERSION.SDK_INT, Build.FINGERPRINT)
                             val hash = CanonicalSourcePixels.hash(image, fingerprint) { context.ensureActive() }
                             val inspection = SourceInspection(header.mime, header.size, permit.size, orientation, null, fingerprint, hash)
                             context.ensureActive()
@@ -119,9 +119,26 @@ class AndroidSourceInspector @JvmOverloads constructor(private val budget: Image
         checkpoint()
     }
 
-    private fun conversionFingerprint(): String = "android-imagedecoder-v2/api${Build.VERSION.SDK_INT}/${hex(MessageDigest.getInstance("SHA-256").digest(Build.FINGERPRINT.toByteArray(Charsets.UTF_8))).take(16)}/srgb-straight-white-exif-v1"
     private fun hex(bytes: ByteArray): String = bytes.joinToString("") { "%02x".format(it.toInt() and 255) }
     private fun refuse(code: OperationErrorCode, key: String, retryable: Boolean = false): Nothing = throw RepositoryFailure(OperationError(code, retryable, key, null))
+}
+
+/** The strict normalizer issues only this conversion version and currently records no embedded profile. */
+internal object SourceDecodePolicy {
+    fun fingerprint(sdk: Int, build: String): String {
+        val digest = MessageDigest.getInstance("SHA-256").digest(build.toByteArray(Charsets.UTF_8))
+        val prefix = digest.take(8).joinToString("") { "%02x".format(it.toInt() and 255) }
+        return "android-imagedecoder-v2/api$sdk/$prefix/srgb-straight-white-exif-v1"
+    }
+
+    fun requireReproducible(inspection: SourceInspection, sdk: Int, build: String) {
+        if (inspection.conversionFingerprint != fingerprint(sdk, build)) {
+            throw RepositoryFailure(OperationError(OperationErrorCode.UNSUPPORTED_VERSION, false, "source_conversion_unavailable", null))
+        }
+        if (inspection.profileSha256 != null) {
+            throw RepositoryFailure(OperationError(OperationErrorCode.UNSUPPORTED_FORMAT, false, "source_profile_unsupported", null))
+        }
+    }
 }
 
 internal fun sourceParserBytes(encodedBytes: Long): Long = 262144L + 3 * encodedBytes.coerceIn(0L, 1048576L)

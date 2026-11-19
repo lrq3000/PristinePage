@@ -6,7 +6,8 @@ import app.pristinepage.data.model.RepositoryFailure
 import java.util.concurrent.atomic.AtomicBoolean
 
 /** Application-scoped accounting shared by decode, retained previews and later render work, not one independent allowance per operation. Estimates do not measure total PSS/native decoder peaks; callers must include all concurrently owned buffers. */
-class ImageAllocationBudget(val capacityBytes: Long) {
+class ImageAllocationBudget internal constructor(val capacityBytes: Long, private val beforeTokenAllocation: (() -> Unit)?) {
+    constructor(capacityBytes: Long) : this(capacityBytes, null)
     private var used = 0L
     init { require(capacityBytes > 0) }
     val usedBytes: Long @Synchronized get() = used
@@ -15,8 +16,11 @@ class ImageAllocationBudget(val capacityBytes: Long) {
         if (bytes <= 0) refuse(OperationErrorCode.INVALID_INPUT, "invalid_image_allocation")
         // Subtraction is safe because 0<=used<=capacity; addition-first could wrap even when both values are positive.
         if (bytes > capacityBytes - used) refuse(OperationErrorCode.RESOURCE_LIMIT, "image_allocation_limit")
+        beforeTokenAllocation?.invoke()
+        // Allocate the complete release token before charging the ledger. A failed allocation otherwise has no owner to return the charge.
+        val reservation = Reservation(this, bytes)
         used += bytes
-        return Reservation(this, bytes)
+        return reservation
     }
 
     @Synchronized private fun release(bytes: Long) { check(bytes in 1..used); used -= bytes }
