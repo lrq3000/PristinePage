@@ -5,6 +5,7 @@ import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.lifecycle.ViewModelProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
+import app.pristinepage.core.recipe.AppearanceRecipe
 import app.pristinepage.data.model.*
 import app.pristinepage.editor.EditorViewModel
 import app.pristinepage.library.*
@@ -48,7 +49,19 @@ class LibraryEditorJourneyTest {
         compose.onNodeWithTag("editor-rotate").performScrollTo().performClick()
         compose.onNodeWithTag("editor-apply").performScrollTo().performClick()
         compose.waitUntil(10_000) { session.state.value.page?.recipeRevision == 2L && !session.state.value.saving && !session.state.value.dirty }
-        compose.onNodeWithTag("editor-look-paper").performScrollTo().performClick()
+        val accepted = checkNotNull(session.state.value.draft)
+        val paper = accepted.copy(appearance = AppearanceRecipe.PaperGainV1())
+        compose.onNodeWithTag("editor-looks-row").performScrollTo().assertIsDisplayed()
+        compose.onNodeWithTag("editor-look-binary").performScrollTo().assertIsDisplayed()
+        compose.onNodeWithTag("editor-look-paper").performScrollTo().performClick().assertIsSelected()
+        compose.waitUntil(10_000) {
+            val preview = session.preview.value
+            !preview.processing && !preview.previous && preview.display?.request == preview.request && preview.request?.recipe == paper
+        }
+        val preview = checkNotNull(session.preview.value.preview)
+        assertEquals(second.sourceId.value, preview.request.sourceId)
+        assertEquals(listOf("source_decode_v1", "geometry_none_v1", "paper_gain_v1"), preview.stages.map { it.stageId })
+        assertEquals(accepted, graph.store.editablePages.load(doc, second.pageId).recipe)
         compose.activityRule.scenario.recreate(); compose.waitForIdle()
         val retained = compose.runOnUiThread { ViewModelProvider(compose.activity)[EditorViewModel::class.java] }
         assertSame(host,retained); assertSame(session,retained.session.value); assertTrue(session.state.value.dirty)

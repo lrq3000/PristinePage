@@ -58,10 +58,17 @@ class PageEditorScreen : EditorContent {
             }
             if (state.dirty) Text(stringResource(R.string.editor_unsaved), modifier = Modifier.testTag("editor-unsaved"))
             if (state.saving) Text(stringResource(R.string.editor_saving))
-            Text(stringResource(R.string.editor_requested_view,stringResource(viewLabel)))
-            listOf("result" to R.string.editor_view_result, "input" to R.string.editor_view_input, "original" to R.string.editor_view_original).forEach { (id, label) ->
-                OutlinedButton(onClick = { session.showView(id) }, enabled = editable, modifier = control("editor-view-$id").semantics { selected = state.view == EditorViews.parse(id) }) { Text(stringResource(label)) }
+            val selectedLook = state.draft?.matchingLook()
+            Text(stringResource(R.string.editor_looks), style = MaterialTheme.typography.titleLarge)
+            Text(stringResource(R.string.editor_looks_sample_notice), style = MaterialTheme.typography.bodySmall)
+            EditorLookCarousel(selectedLook, editable, session::chooseLook)
+
+            val requestedLabel = if (state.view == EditorView.RESULT && selectedLook != null) {
+                stringResource(R.string.editor_requested_look, stringResource(selectedLook.label))
+            } else {
+                stringResource(R.string.editor_requested_view, stringResource(viewLabel))
             }
+            Text(requestedLabel)
             if (preview.display != null && !showingCurrent) Text(stringResource(R.string.editor_previous), modifier = Modifier.testTag("editor-previous"))
             preview.display?.let { display ->
                 val description = if (!showingCurrent) R.string.editor_previous_description else when (state.view) {
@@ -83,11 +90,8 @@ class PageEditorScreen : EditorContent {
                 }), color = MaterialTheme.colorScheme.error)
                 Button(onClick = session::retryPreview, enabled = editable, modifier = control("editor-retry-preview")) { Text(stringResource(R.string.editor_retry_preview)) }
             }
-            Text(stringResource(R.string.editor_looks), style = MaterialTheme.typography.titleLarge)
-            val looks = listOf("none" to R.string.editor_look_none, "paper" to R.string.editor_look_paper, "natural" to R.string.editor_look_natural, "gray" to R.string.editor_look_gray, "binary" to R.string.editor_look_binary)
-            looks.forEach { (id, label) ->
-                val selected = state.draft?.let { EditorLooks.select(it, id) == it } == true
-                OutlinedButton(onClick = { session.chooseLook(id) }, enabled = editable, modifier = control("editor-look-$id").semantics { this.selected = selected }) { Text(stringResource(label)) }
+            listOf("result" to R.string.editor_view_result, "input" to R.string.editor_view_input, "original" to R.string.editor_view_original).forEach { (id, label) ->
+                OutlinedButton(onClick = { session.showView(id) }, enabled = editable, modifier = control("editor-view-$id").semantics { selected = state.view == EditorViews.parse(id) }) { Text(stringResource(label)) }
             }
             Text(stringResource(R.string.editor_preset_notice))
             Button(onClick = session::rotateClockwise, enabled = editable, modifier = control("editor-rotate")) { Text(stringResource(R.string.editor_rotate)) }

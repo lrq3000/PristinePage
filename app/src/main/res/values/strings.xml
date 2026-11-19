@@ -54,6 +54,7 @@
     <string name="editor_view_input">Input after shape</string>
     <string name="editor_view_original">Original photograph</string>
     <string name="editor_requested_view">Requested view: %1$s</string>
+    <string name="editor_requested_look">Requested page preview: %1$s</string>
     <string name="editor_input_description">Geometry input preview, before all appearance and finishing</string>
     <string name="editor_original_description">Original photograph preview, uncropped and without user rotation</string>
     <string name="editor_previous_description">Previous completed preview, not the requested comparison</string>
@@ -64,12 +65,13 @@
     <string name="editor_preview_description">Rendered page preview, resized for display</string>
     <string name="editor_retry_preview">Retry requested preview</string>
     <string name="editor_looks">Looks</string>
+    <string name="editor_looks_sample_notice">Precomputed sample page. Swipe for more Looks; tap to preview one on your page.</string>
     <string name="editor_look_none">No enhancement</string>
-    <string name="editor_look_paper">White paper</string>
+    <string name="editor_look_paper">Paper white</string>
     <string name="editor_look_natural">Natural lightness</string>
     <string name="editor_look_gray">Grayscale</string>
-    <string name="editor_look_binary">Black and white</string>
-    <string name="editor_preset_notice">No enhancement clears all finishing. White paper, Natural and Grayscale keep compatible finishing. Black and white clears detail. Original bytes are never changed.</string>
+    <string name="editor_look_binary">Black &amp; white</string>
+    <string name="editor_preset_notice">No enhancement clears all finishing. Paper white, Natural lightness and Grayscale keep compatible finishing. Black &amp; white clears detail. Original bytes are never changed.</string>
     <string name="editor_rotate">Rotate 90° clockwise</string>
     <string name="editor_turns">Output rotation: %1$d° clockwise</string>
     <string name="editor_undo">Undo draft change</string>
