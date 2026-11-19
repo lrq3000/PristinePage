@@ -107,7 +107,8 @@ class RoomJobLeases @JvmOverloads constructor(private val metadata: MetadataAcce
                 /** Perform the guarded acquisition; there is no upgrade of a separately returned legacy lease. */
                 suspend fun acquire(
                     acquisition: FrozenRenderAcquisition, admitted: RoomFrozenRenderAdmission.Admitted, owner: String, durationMillis: Long,
-                ): ProducerResult = when (val result = acquisition.acquire(admitted, owner, durationMillis)) {
+                    firstAttemptOnly: Boolean = false,
+                ): ProducerResult = when (val result = acquisition.acquire(admitted, owner, durationMillis, firstAttemptOnly)) {
                     is AcquireLeaseResult.Granted -> Acquired(admitted, result.lease)
                     is AcquireLeaseResult.Busy -> ProducerResult.Busy(result.state)
                     is AcquireLeaseResult.Rejected -> ProducerResult.Rejected(result.error)
@@ -118,7 +119,16 @@ class RoomJobLeases @JvmOverloads constructor(private val metadata: MetadataAcce
         suspend fun acquireForProducer(admitted: RoomFrozenRenderAdmission.Admitted, owner: String, durationMillis: Long): ProducerResult =
             Acquired.acquire(this, admitted, owner, durationMillis)
 
-        suspend fun acquire(admitted: RoomFrozenRenderAdmission.Admitted, owner: String, durationMillis: Long): AcquireLeaseResult {
+        /** A first admission receipt does not authorize taking over or readmitting a competing attempt. */
+        suspend fun acquireForFreshProducer(admitted: RoomFrozenRenderAdmission.Admitted, owner: String, durationMillis: Long): ProducerResult =
+            Acquired.acquire(this, admitted, owner, durationMillis, firstAttemptOnly = true)
+
+        suspend fun acquire(admitted: RoomFrozenRenderAdmission.Admitted, owner: String, durationMillis: Long): AcquireLeaseResult =
+            acquire(admitted, owner, durationMillis, firstAttemptOnly = false)
+
+        private suspend fun acquire(
+            admitted: RoomFrozenRenderAdmission.Admitted, owner: String, durationMillis: Long, firstAttemptOnly: Boolean,
+        ): AcquireLeaseResult {
             val proof = admitted.proof
             if (!admitted.issuedBy(catalog)) {
                 currentCoroutineContext().ensureActive()
@@ -137,6 +147,11 @@ class RoomJobLeases @JvmOverloads constructor(private val metadata: MetadataAcce
                 val row = jobs.job(jobId.value)
                 if (row == null || !proof.matches(row)) {
                     leases.reject(OperationErrorCode.INTEGRITY_FAILED, "frozen_render_job_invalid", jobId.value)
+                }
+                // Check the very row the lease writer will CAS, before it can advance the counters or replace a prior owner.
+                if (firstAttemptOnly && (row.state != "ADMITTED" || row.leaseGeneration != 0L || row.attempt != 0L ||
+                        row.leaseOwner != null || row.leaseUntil != null || row.checkpoint != null || row.errorCode != null)) {
+                    leases.reject(OperationErrorCode.REVISION_CONFLICT, "frozen_render_first_attempt_unavailable", jobId.value)
                 }
                 row
             }

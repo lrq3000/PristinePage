@@ -71,6 +71,13 @@ internal class OrdinaryRenderExecution private constructor(
         fun cacheKey(preExecutionKey: String, executionHash: String): String =
             "render-cache-v1:" + sha256(("pristinepage-ordinary-render-cache-v1\u0000" + preExecutionKey + executionHash).encodeToByteArray())
 
+        /** The frozen page supplies recipe/output; the admitted execution path supplies the actual original's source ID. */
+        fun requestFor(page: ExportPageSnapshot, sourceId: SourceId): RenderRequest {
+            require(page.output == page.requestedOutput && page.output.purpose == RenderPurpose.EXPORT && page.fallbackPolicy == FallbackPolicy.FAIL)
+            return RenderRequest(sourceId.value, page.pixelHash, page.pageId.value, page.recipeRevision,
+                RecipeCodec.decode(page.canonicalRecipe), page.output, 0, null, FallbackPolicy.FAIL)
+        }
+
         /** Borrow only. Run outside Room; never retain the raster, rederive stage results from a recipe, or close the result owner here. */
         fun capture(proof: RoomFrozenRenderReads.Verified, result: RenderResult, checkpoint: () -> Unit): OrdinaryRenderExecution =
             capture(proof, null, result, checkpoint)
@@ -88,9 +95,7 @@ internal class OrdinaryRenderExecution private constructor(
             val sourceByteSha256 = producer?.blob?.byteSha256 ?: page.byteHash
             val preExecutionKey = proof.preExecutionKey
             requirePreExecutionKey(preExecutionKey)
-            val expected = RenderRequest(sourceId.value, page.pixelHash, page.pageId.value, page.recipeRevision,
-                RecipeCodec.decode(page.canonicalRecipe), page.output, 0, null, FallbackPolicy.FAIL)
-            require(page.output == page.requestedOutput && page.output.purpose == RenderPurpose.EXPORT && page.fallbackPolicy == FallbackPolicy.FAIL)
+            val expected = requestFor(page, sourceId)
             require(result.request == expected && result.status == RenderStatus.OK)
             val image = requireNotNull(result.image)
             val size = PixelSize(image.width, image.height)

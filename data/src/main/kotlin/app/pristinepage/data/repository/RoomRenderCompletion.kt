@@ -38,16 +38,22 @@ internal class RoomRenderCompletion(
     suspend fun complete(
         proof: RoomFrozenRenderReads.Verified, lease: JobLease, intent: RenderFileIntent, result: RenderResult,
         maxBytes: Long, writer: (OutputStream) -> Unit, readback: (File, () -> Unit) -> String?,
-    ): RenderId = complete(RenderAttemptAuthority.Legacy(proof, lease), intent, result, maxBytes, writer, readback)
+    ): RenderId = complete(RenderAttemptAuthority.Legacy(proof, lease), intent, result, maxBytes, { sink, _ -> writer(sink) }, readback)
 
     suspend fun completeForProducer(
         acquired: Acquired, intent: RenderFileIntent, result: RenderResult,
         maxBytes: Long, writer: (OutputStream) -> Unit, readback: (File, () -> Unit) -> String?,
+    ): RenderId = completeForProducerWithCheckpoint(acquired, intent, result, maxBytes, { sink, _ -> writer(sink) }, readback)
+
+    /** Synchronous writer borrow of the same live COPYING fence used by the staged sink, including during pixel preparation. */
+    internal suspend fun completeForProducerWithCheckpoint(
+        acquired: Acquired, intent: RenderFileIntent, result: RenderResult,
+        maxBytes: Long, writer: (OutputStream, () -> Unit) -> Unit, readback: (File, () -> Unit) -> String?,
     ): RenderId = complete(acquired, intent, result, maxBytes, writer, readback)
 
     private suspend fun complete(
         authority: RenderAttemptAuthority, intent: RenderFileIntent, result: RenderResult,
-        maxBytes: Long, writer: (OutputStream) -> Unit, readback: (File, () -> Unit) -> String?,
+        maxBytes: Long, writer: (OutputStream, () -> Unit) -> Unit, readback: (File, () -> Unit) -> String?,
     ): RenderId = withContext(dispatcher) {
         coroutineContext.ensureActive()
         val lease = authority.lease
@@ -60,7 +66,7 @@ internal class RoomRenderCompletion(
         } catch (_: IllegalStateException) {
             invalid(lease)
         }
-        attempt.complete(authority, intent, execution, maxBytes, writer, readback)
+        attempt.completeWithCheckpoint(authority, intent, execution, maxBytes, writer, readback)
     }
 
     private fun invalid(lease: JobLease): Nothing =

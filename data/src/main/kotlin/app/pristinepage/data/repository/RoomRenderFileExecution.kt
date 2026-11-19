@@ -37,7 +37,8 @@ internal class RoomRenderFileExecution(
         readback: (File, () -> Unit) -> String?,
     ) {
         withContext(dispatcher) {
-            verifyMoved(RenderAttemptAuthority.Legacy(proof, lease), intent, maxBytes, writer, readback, { coroutineContext.ensureActive() })
+            verifyMoved(RenderAttemptAuthority.Legacy(proof, lease), intent, maxBytes, { sink, _ -> writer(sink) }, readback,
+                { coroutineContext.ensureActive() })
         }
     }
 
@@ -70,6 +71,12 @@ internal class RoomRenderFileExecution(
             suspend fun complete(
                 authority: RenderAttemptAuthority, intent: RenderFileIntent,
                 candidate: OrdinaryRenderExecution, maxBytes: Long, writer: (OutputStream) -> Unit, readback: (File, () -> Unit) -> String?,
+            ): RenderId = completeWithCheckpoint(authority, intent, candidate, maxBytes, { sink, _ -> writer(sink) }, readback)
+
+            internal suspend fun completeWithCheckpoint(
+                authority: RenderAttemptAuthority, intent: RenderFileIntent,
+                candidate: OrdinaryRenderExecution, maxBytes: Long,
+                writer: (OutputStream, () -> Unit) -> Unit, readback: (File, () -> Unit) -> String?,
             ): RenderId = withContext(executor.dispatcher) {
                 val active = { coroutineContext.ensureActive() }
                 val lease = authority.lease
@@ -105,7 +112,7 @@ internal class RoomRenderFileExecution(
 
     private fun verifyMoved(
         authority: RenderAttemptAuthority, intent: RenderFileIntent,
-        maxBytes: Long, writer: (OutputStream) -> Unit, readback: (File, () -> Unit) -> String?, active: () -> Unit,
+        maxBytes: Long, writer: (OutputStream, () -> Unit) -> Unit, readback: (File, () -> Unit) -> String?, active: () -> Unit,
         admitPhase: (FileTransactionState) -> Unit = {},
         copyingGranted: () -> Unit = {},
     ): Pair<RenderFilePhase, String> {
@@ -133,7 +140,7 @@ internal class RoomRenderFileExecution(
                 // The transaction returned successfully, and no stage file or encoder has been opened yet.
                 copyingGranted()
                 val checkpoint = admission.checkpoint
-                val staged = files.stage(intent.transactionId.value, target, maxBytes, writer, checkpoint)
+                val staged = files.stage(intent.transactionId.value, target, maxBytes, { sink -> writer(sink, checkpoint) }, checkpoint)
                 val rasterHash = files.readStaged(staged, checkpoint) { verify(it, checkpoint) }
                 files.seal(staged, sealMetadata.encode(rasterHash), checkpoint)
             } else {
