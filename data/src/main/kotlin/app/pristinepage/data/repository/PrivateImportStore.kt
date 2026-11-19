@@ -3,10 +3,14 @@ package app.pristinepage.data.repository
 import android.content.Context
 import androidx.room.Room
 import app.pristinepage.data.db.PristineDatabase
+import app.pristinepage.data.files.DerivedFiles
 import app.pristinepage.data.files.SourceFiles
 import app.pristinepage.data.files.SourceInspector
+import app.pristinepage.data.model.ExportSnapshot
+import app.pristinepage.data.model.JobId
 import app.pristinepage.data.model.OperationError
 import app.pristinepage.data.model.OperationErrorCode
+import app.pristinepage.data.model.OrdinaryExportProfile
 import app.pristinepage.data.model.RepositoryFailure
 import java.io.File
 import kotlinx.coroutines.CancellationException
@@ -17,6 +21,8 @@ import kotlinx.coroutines.withContext
 /** Owns one private database and its import participants. The application retains this scope; Activities receive ports, never construct Room or close a store still used by another consumer. Closing this database does not release process-lifetime ownership locks or delete retained files. */
 class PrivateImportStore private constructor(
     private val database: PristineDatabase,
+    private val root: File,
+    private val owners: FileOperationOwners,
     val documents: DocumentRepository,
     val imports: ImportSessionCommands,
     val selections: ImportSelections,
@@ -26,7 +32,41 @@ class PrivateImportStore private constructor(
     val catalog: DocumentCatalog,
     val editablePages: EditablePages,
 ) : AutoCloseable {
-    override fun close() = database.close()
+    private val exportLifetime = OrdinaryExportLifetime(database::close)
+
+    override fun close() = exportLifetime.close()
+
+    // Internal only and lazy: the import-only path does not construct derived-file or export participants.
+    internal val ordinaryExport: OrdinaryExport by lazy { ExportComposition.bind(this) }
+
+    /** Only guarded services cross this boundary. In particular, no caller can retrieve or supply this store's write ports. */
+    internal class OrdinaryExport private constructor(private val composition: ExportComposition) {
+        internal fun assembly(preflight: suspend (ExportSnapshot, List<JobId>) -> OperationError?): RoomFreshExportAssembly =
+            RoomFreshExportAssembly.forOrdinaryExport(composition, preflight)
+
+        internal fun terminalReads(profile: OrdinaryExportProfile): RoomTerminalPngReads.Retained =
+            RoomTerminalPngReads.Retained(composition, profile)
+
+        internal fun renderFiles(): RoomRenderFileExecution = RoomRenderFileExecution(composition)
+
+        internal fun renderCompletion(): RoomRenderCompletion = RoomRenderCompletion(renderFiles())
+
+        companion object {
+            internal fun from(composition: ExportComposition): OrdinaryExport = OrdinaryExport(composition)
+        }
+    }
+
+    /** Construction input for the guarded implementations, not a returned capability. Private creation takes only an already opened store, never a database/root/owner tuple. */
+    internal class ExportComposition private constructor(store: PrivateImportStore) {
+        internal val database = store.database
+        internal val owners = store.owners
+        internal val files = DerivedFiles(store.root)
+        internal val lifetime = store.exportLifetime
+
+        companion object {
+            internal fun bind(store: PrivateImportStore): OrdinaryExport = OrdinaryExport.from(ExportComposition(store))
+        }
+    }
 
     companion object {
         /** No destructive migration fallback, provider resumption or optimistic renderer admission. Opening verifies Room on IO; cancellation during result dispatch closes the database even if the caller never receives the constructed owner. */
@@ -38,7 +78,7 @@ class PrivateImportStore private constructor(
                     val database = Room.databaseBuilder(context.applicationContext, PristineDatabase::class.java, "pristinepage.db").build()
                     opened = database
                     database.openHelper.writableDatabase
-                    val root = File(context.applicationContext.filesDir, "store")
+                    val root = File(context.applicationContext.filesDir, "store").canonicalFile
                     val files = SourceFiles(root)
                     val owners = FileOperationOwners(root)
                     val metadata = RoomMetadataAccess(database)
@@ -50,7 +90,7 @@ class PrivateImportStore private constructor(
                     // Direct/test callers remain fail-closed by default. Application supplies the image-owned structural policy explicitly; data never imports rendering or infers capability from a stored recipe name.
                     val documents = RoomDocumentRepository(metadata, admission, recovery = recovery)
                     coroutineContext.ensureActive()
-                    PrivateImportStore(database, documents, sessions, sessions, sessions, sources, RoomCommittedSources(metadata, database.catalog(), files), RoomDocumentCatalog(metadata, database.catalog()), RoomEditablePages(metadata, database.catalog()))
+                    PrivateImportStore(database, root, owners, documents, sessions, sessions, sessions, sources, RoomCommittedSources(metadata, database.catalog(), files), RoomDocumentCatalog(metadata, database.catalog()), RoomEditablePages(metadata, database.catalog()))
                 }
             } catch (failure: Throwable) {
                 // Preserve the initiating structured failure/cancellation even if close encounters another storage fault. No reset, schema rewrite or file cleanup is attempted.

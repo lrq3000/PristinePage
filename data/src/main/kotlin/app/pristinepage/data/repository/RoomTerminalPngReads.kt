@@ -9,6 +9,7 @@ import app.pristinepage.data.model.ExportPageSnapshot
 import app.pristinepage.data.model.JobId
 import app.pristinepage.data.model.OperationError
 import app.pristinepage.data.model.OperationErrorCode
+import app.pristinepage.data.model.OrdinaryExportProfile
 import app.pristinepage.data.model.RenderId
 import app.pristinepage.data.model.RepositoryFailure
 import app.pristinepage.data.model.TransactionId
@@ -49,11 +50,93 @@ internal class RoomTerminalPngReads(
         override val observed: ObservedIdentity,
     ) : Receipt
 
+    /** The callback can read only its issued slot, synchronously on its issuing thread. No caller-selected file, target, page, job or cap is accepted at use time. */
+    sealed interface RetainedFinal {
+        fun read(readback: Readback): Receipt
+    }
+
+    /** Prepared is an immutable reference, not Acquired or current snapshot liveness. This scope does not authorize artifact writes. */
+    class Retained private constructor(
+        private val reader: RoomTerminalPngReads,
+        private val owners: FileOperationOwners,
+        private val lifetime: OrdinaryExportLifetime,
+        private val slot: (RoomFreshExportAssembly.Prepared, Int) -> Pair<JobId, ExportPageSnapshot>,
+    ) {
+        constructor(store: PrivateImportStore.ExportComposition, profile: OrdinaryExportProfile) :
+            this(RoomTerminalPngReads(RoomTerminalRenderReads(store.database, profile), store.files), store.owners, store.lifetime,
+                { prepared, ordinal -> prepared.terminalSlot(store, ordinal) })
+
+        init {
+            require(owners.ownsCanonicalRoot(reader.files.canonicalRoot))
+        }
+
+        suspend fun withRetainedFinal(
+            prepared: RoomFreshExportAssembly.Prepared, ordinal: Int, maxBytes: Long,
+            consume: (RetainedFinal) -> Unit,
+        ) = withContext(reader.dispatcher) {
+            coroutineContext.ensureActive()
+            val (job, page) = slot(prepared, ordinal)
+            reader.requireCap(job, maxBytes)
+            lifetime.retain(job.value) {
+                owners.withOrdinaryDerivedLane(job) {
+                    val expected = reader.metadata.load(job, page)
+                    val active = { coroutineContext.ensureActive() }
+                    val borrow = BoundFinal(reader, job, expected, maxBytes, active)
+                    try {
+                        active()
+                        consume(borrow)
+                        active()
+                    } finally {
+                        borrow.end()
+                    }
+                }
+            }
+        }
+
+        companion object {
+            @JvmSynthetic
+            internal fun forSyntheticTests(
+                reader: RoomTerminalPngReads, owners: FileOperationOwners, store: RoomFreshExportAssembly.SyntheticStore, lifetime: OrdinaryExportLifetime,
+            ): Retained = Retained(reader, owners, lifetime) { prepared, ordinal -> prepared.terminalSlot(store, lifetime, ordinal) }
+        }
+    }
+
+    private class BoundFinal(
+        private val reader: RoomTerminalPngReads,
+        private val job: JobId,
+        private val expected: RoomTerminalRenderReads.Metadata,
+        private val maxBytes: Long,
+        private val active: () -> Unit,
+    ) : RetainedFinal {
+        private val borrower = Thread.currentThread()
+        private var ended = false
+
+        fun end() { ended = true }
+
+        override fun read(readback: Readback): Receipt {
+            // Only the issuing thread can reach inspection or read ended; it cannot leave the callback while a synchronous read is in flight.
+            if (Thread.currentThread() !== borrower || ended) {
+                reader.refuse(job, OperationErrorCode.INTEGRITY_FAILED, "terminal_png_retention_ended")
+            }
+            return reader.inspect(job, expected, maxBytes, readback, active)
+        }
+    }
+
+    /** Plain trusted-caller entry: the caller, not this method, retains lifetime and authenticates frozen assembly order. */
     suspend fun load(jobId: JobId, page: ExportPageSnapshot, maxBytes: Long, readback: Readback): Receipt = withContext(dispatcher) {
         val active = { coroutineContext.ensureActive() }
         active()
+        requireCap(jobId, maxBytes)
+        inspect(jobId, metadata.load(jobId, page), maxBytes, readback, active)
+    }
+
+    private fun requireCap(jobId: JobId, maxBytes: Long) {
         if (maxBytes <= 0) refuse(jobId, OperationErrorCode.INVALID_INPUT, "terminal_png_invalid_cap")
-        val expected = metadata.load(jobId, page)
+    }
+
+    private fun inspect(
+        jobId: JobId, expected: RoomTerminalRenderReads.Metadata, maxBytes: Long, readback: Readback, active: () -> Unit,
+    ): Receipt {
         active()
         val expectedSealMetadata = OrdinaryRenderSealV1(expected.intentPayload()).encode(expected.rasterSha256)
         val target = DerivedFileTarget(DerivedKind.RENDER, expected.renderId.value)
@@ -88,7 +171,7 @@ internal class RoomTerminalPngReads(
         // The callback result alone proves nothing: require the file layer's post-readback copy checks and closed inspection to finish first.
         active()
         if (seal == null) invalidSeal(jobId)
-        VerifiedReceipt(expected.renderId, expected.transactionId, expected.size, seal.sealSha256, verified ?: invalidSeal(jobId))
+        return VerifiedReceipt(expected.renderId, expected.transactionId, expected.size, seal.sealSha256, verified ?: invalidSeal(jobId))
     }
 
     private fun invalidSeal(jobId: JobId): Nothing =

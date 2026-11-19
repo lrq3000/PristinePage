@@ -1,7 +1,6 @@
 package app.pristinepage.data.repository
 
 import app.pristinepage.core.pipeline.requireSha256
-import app.pristinepage.data.db.PristineDatabase
 import app.pristinepage.data.files.DerivedByteLimitExceeded
 import app.pristinepage.data.files.DerivedFileTarget
 import app.pristinepage.data.files.DerivedFiles
@@ -16,14 +15,22 @@ import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.withContext
 
-/** Joins one exact committed intent to private bytes, through MOVED only. The caller retains the verified frozen owners, the current acquired same-boot lease and exclusive stable store/transaction/target ownership across every boundary, including recovery. */
-internal class RoomRenderFileExecution(
+/** Joins one exact committed intent to private bytes under the stable store's ordinary derived-file lane. The caller still retains the verified frozen owners and current acquired same-boot lease; neither the lane nor MOVED is recovery/takeover authority. */
+internal class RoomRenderFileExecution private constructor(
     private val intents: RoomRenderIntents,
     private val files: DerivedFiles,
+    private val owners: FileOperationOwners,
     private val dispatcher: CoroutineDispatcher = Dispatchers.IO,
+    private val lifetime: OrdinaryExportLifetime? = null,
+    private val completionRows: RenderCompletionQueries?,
 ) {
-    constructor(database: PristineDatabase, liveness: LeaseOwnerLiveness, files: DerivedFiles) :
-        this(RoomRenderIntents(database, liveness), files)
+    constructor(store: PrivateImportStore.ExportComposition) :
+        this(RoomRenderIntents(store.database, store.owners), store.files, store.owners, lifetime = store.lifetime,
+            completionRows = store.database.exportSnapshots().renderCompletionQueries())
+
+    init {
+        require(owners.ownsCanonicalRoot(files.canonicalRoot))
+    }
 
     /**
      * Call outside Room. The writer borrows only the synchronous output stream. Trusted readback borrows the closed File read-only, without retaining it, verifies complete lossless content against the exact frozen request and returns its canonical raster SHA-256 (null rejects). It may use the supplied local checkpoint between decode steps; it must supply its own decode/allocation admission. Recovery never calls the writer, and uses the same readback contract to match the recorded semantic identity.
@@ -37,9 +44,16 @@ internal class RoomRenderFileExecution(
         readback: (File, () -> Unit) -> String?,
     ) {
         withContext(dispatcher) {
-            verifyMoved(RenderAttemptAuthority.Legacy(proof, lease), intent, maxBytes, { sink, _ -> writer(sink) }, readback,
-                { coroutineContext.ensureActive() })
+            withFileLane(lease.jobId) { active ->
+                verifyMoved(RenderAttemptAuthority.Legacy(proof, lease), intent, maxBytes, { sink, _ -> writer(sink) }, readback, active)
+            }
         }
+    }
+
+    private suspend fun <T> withFileLane(job: JobId, block: (() -> Unit) -> T): T {
+        val run = suspend { owners.withOrdinaryDerivedLane(job) { block { coroutineContext.ensureActive() } } }
+        val storeLifetime = lifetime
+        return if (storeLifetime == null) run() else storeLifetime.retain(job.value, run)
     }
 
     /** Only issued and consumed within the completion attempt after byte, semantic and exact MOVED verification. */
@@ -57,7 +71,7 @@ internal class RoomRenderFileExecution(
         }
 
         /** One owner-retained memory scope. A fresh scope cannot adopt an existing file checkpoint, even when its result has equal pixels and provenance. */
-        class Attempt internal constructor(private val executor: RoomRenderFileExecution, private val rows: RenderCompletionQueries) {
+        class Attempt private constructor(private val executor: RoomRenderFileExecution, private val rows: RenderCompletionQueries) {
             private class Producing(val authority: RenderAttemptAuthority, val intent: RenderFileIntent, val execution: OrdinaryRenderExecution) {
                 fun matches(candidate: RenderAttemptAuthority): Boolean =
                     if (authority is RenderAttemptAuthority.Legacy && candidate is RenderAttemptAuthority.Legacy) {
@@ -78,9 +92,8 @@ internal class RoomRenderFileExecution(
                 candidate: OrdinaryRenderExecution, maxBytes: Long,
                 writer: (OutputStream, () -> Unit) -> Unit, readback: (File, () -> Unit) -> String?,
             ): RenderId = withContext(executor.dispatcher) {
-                val active = { coroutineContext.ensureActive() }
                 val lease = authority.lease
-                active()
+                coroutineContext.ensureActive()
                 if (!gate.tryLock()) executor.refuse(lease, OperationErrorCode.REVISION_CONFLICT, "render_completion_in_use")
                 try {
                     if (!candidate.capturedFor(authority)) executor.invalid(lease)
@@ -88,27 +101,33 @@ internal class RoomRenderFileExecution(
                     if (retained != null && (!retained.matches(authority) || retained.intent != intent ||
                             !retained.execution.sameExecution(candidate))) executor.invalid(lease)
                     val execution = retained?.execution ?: candidate
-                    val (phase, raster) = executor.verifyMoved(authority, intent, maxBytes, writer,
-                        readback = { file, checkpoint -> readback(file, checkpoint)?.takeIf { it == execution.rasterSha256 } },
-                        active = active,
-                        admitPhase = { state ->
-                            // A fresh write grant is the only source of provenance. A bound scope may only continue that grant, never redo it.
-                            if ((state == FileTransactionState.INTENT) != (retained == null)) executor.invalid(lease)
-                        },
-                        copyingGranted = { producing = Producing(authority, intent, execution) },
-                    )
-                    active()
-                    val receipt = VerifiedMoved(executor.intents, authority, intent, phase, raster, checkNotNull(producing).execution, active)
-                    executor.intents.commitMoved(receipt, rows)
-                    intent.renderId
+                    executor.withFileLane(lease.jobId) { active ->
+                        val (phase, raster) = executor.verifyMoved(authority, intent, maxBytes, writer,
+                            readback = { file, checkpoint -> readback(file, checkpoint)?.takeIf { it == execution.rasterSha256 } },
+                            active = active,
+                            admitPhase = { state ->
+                                // A fresh write grant is the only source of provenance. A bound scope may only continue that grant, never redo it.
+                                if ((state == FileTransactionState.INTENT) != (retained == null)) executor.invalid(lease)
+                            },
+                            copyingGranted = { producing = Producing(authority, intent, execution) },
+                        )
+                        active()
+                        val receipt = VerifiedMoved(executor.intents, authority, intent, phase, raster, checkNotNull(producing).execution, active)
+                        executor.intents.commitMoved(receipt, rows)
+                        intent.renderId
+                    }
                 } finally {
                     gate.unlock()
                 }
             }
+
+            companion object {
+                fun from(executor: RoomRenderFileExecution) = Attempt(executor, checkNotNull(executor.completionRows))
+            }
         }
     }
 
-    internal fun completionAttempt(rows: RenderCompletionQueries): VerifiedMoved.Attempt = VerifiedMoved.Attempt(this, rows)
+    internal fun completionAttempt(): VerifiedMoved.Attempt = VerifiedMoved.Attempt.from(this)
 
     private fun verifyMoved(
         authority: RenderAttemptAuthority, intent: RenderFileIntent,
@@ -192,6 +211,14 @@ internal class RoomRenderFileExecution(
 
     private fun refuse(lease: JobLease, code: OperationErrorCode, key: String, retryable: Boolean = false): Nothing =
         throw RepositoryFailure(OperationError(code, retryable, key, lease.jobId.value))
+
+    companion object {
+        @JvmSynthetic
+        internal fun forSyntheticTests(
+            intents: RoomRenderIntents, files: DerivedFiles, owners: FileOperationOwners, dispatcher: CoroutineDispatcher,
+            completionRows: RenderCompletionQueries? = null,
+        ): RoomRenderFileExecution = RoomRenderFileExecution(intents, files, owners, dispatcher, completionRows = completionRows)
+    }
 }
 
 /** The v1 domain tag and exact intent bind closed raster readback to one attempt and target. The outer DerivedFiles seal carries the encoded hash and extent. */

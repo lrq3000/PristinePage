@@ -404,7 +404,7 @@ class RenderCompletionTest {
 
     @Test fun movedRetryCannotAttributeBytesToDifferentWarningsAfterLateCasRefusal() = runTest {
         val f = fixture()
-        val completion = RoomRenderCompletion(f.executor, f.completionRows, Dispatchers.Unconfined)
+        val completion = RoomRenderCompletion(f.executor, Dispatchers.Unconfined)
         val pins = f.retainedPins()
         val job = f.job
         var writes = 0
@@ -995,7 +995,7 @@ class RenderCompletionTest {
     }
 
     private fun RenderFileFixture.newCompletion() =
-        RoomRenderCompletion(executor, completionRows, Dispatchers.Unconfined)
+        RoomRenderCompletion(executor, Dispatchers.Unconfined)
 
     private suspend fun RenderFileFixture.complete(result: RenderResult, writer: (OutputStream) -> Unit = { it.write(encoded) },
         readback: (File, () -> Unit) -> String? = ::readback, completion: RoomRenderCompletion = newCompletion()): RenderId =
@@ -1233,12 +1233,12 @@ class RenderCompletionTest {
         val intents = RoomRenderIntents(metadata, this, this, ::jobBounds, ::pins, live, audit, { leaseNow },
             { allocatedIntentIds++; ids.next() }, Dispatchers.Unconfined)
         private val files = DerivedFiles(root, DirectorySync { check(!catalog.inTransaction); true })
-        private val executor = RoomRenderFileExecution(intents, files, Dispatchers.Unconfined)
+        private val executor = RoomRenderFileExecution.forSyntheticTests(intents, files, owners, Dispatchers.Unconfined, this)
         private val completion = newCompletion()
         val acquisition = FrozenRenderAcquisition(metadata, this, live, ::jobBounds, ::identity,
             ::pins, catalog::sourceReadIsBounded, ::renderJobLeaseReadIsBounded, audit, { leaseNow }, Dispatchers.Unconfined)
 
-        fun newCompletion() = RoomRenderCompletion(executor, this, Dispatchers.Unconfined)
+        fun newCompletion() = RoomRenderCompletion(executor, Dispatchers.Unconfined)
 
         fun newAdmission(preflight: suspend (ExportPageSnapshot, ExportSourceBinding) -> OperationError?) =
             RoomFrozenRenderAdmission(metadata, profile, preflight, ::jobBounds, ::identity, ::pins, catalog::sourceReadIsBounded,
@@ -1287,7 +1287,7 @@ class RenderCompletionTest {
             completion.completeForProducer(acquired, intent, result, encoded.size.toLong(), ::writePayload, ::readPayload)
 
         suspend fun completeCaptured(intent: RenderFileIntent, execution: OrdinaryRenderExecution): RenderId =
-            executor.completionAttempt(this).complete(acquired, intent, execution, encoded.size.toLong(), ::writePayload, ::readPayload)
+            executor.completionAttempt().complete(acquired, intent, execution, encoded.size.toLong(), ::writePayload, ::readPayload)
 
         private fun writePayload(output: OutputStream) {
             check(!catalog.inTransaction && journal?.state == "COPYING")

@@ -22,6 +22,7 @@ internal class RoomFreshExportAssembly private constructor(
     private val auditClock: () -> Long = System::currentTimeMillis,
     leaseClock: () -> Long = SystemClock::elapsedRealtime,
     private val dispatcher: CoroutineDispatcher = Dispatchers.IO,
+    private val lifetime: OrdinaryExportLifetime? = null,
 ) {
     constructor(database: PristineDatabase, liveness: LeaseOwnerLiveness, preflight: suspend (ExportSnapshot, List<JobId>) -> OperationError?) : this(
         RoomStore(database), liveness, preflight,
@@ -66,6 +67,11 @@ internal class RoomFreshExportAssembly private constructor(
     suspend fun acquire(admitted: Admitted, owner: String, durationMillis: Long): Acquired =
         Acquired.acquire(this, admitted, owner, durationMillis)
 
+    private suspend fun <T> retainIfScoped(id: String, block: suspend () -> T): T {
+        val storeLifetime = lifetime
+        return if (storeLifetime == null) block() else storeLifetime.retain(id, block)
+    }
+
     /** Only this route can join an authenticated store snapshot with its exact persisted frozen ordinal list. */
     class Prepared private constructor(
         val snapshot: ExportSnapshot,
@@ -73,6 +79,7 @@ internal class RoomFreshExportAssembly private constructor(
         val jobId: JobId,
         private val frozen: SnapshotRead,
         private val issuer: Store,
+        private val lifetime: OrdinaryExportLifetime?,
     ) {
         private val input = ExportAssemblyInput.encode(snapshot.snapshotId, snapshot.snapshotHash, orderedJobIds)
         val key = ExportAssemblyInput.key(snapshot.snapshotId)
@@ -80,19 +87,38 @@ internal class RoomFreshExportAssembly private constructor(
         fun inputBytes(): ByteArray = input.copyOf()
 
         fun requireIssuer(service: RoomFreshExportAssembly) {
-            if (!issuer.sameIssuer(service.store)) {
+            if (!issuer.sameIssuer(service.store) || lifetime !== service.lifetime) {
                 reject(jobId.value, OperationErrorCode.INTEGRITY_FAILED, "export_assembly_store_mismatch")
             }
         }
 
         fun requireSameSnapshot(live: SnapshotRead) = frozen.requireSameContent(live)
 
+        internal fun terminalSlot(store: PrivateImportStore.ExportComposition, ordinal: Int): Pair<JobId, ExportPageSnapshot> =
+            terminalSlot(issuer is RoomStore && issuer.database === store.database && lifetime === store.lifetime, ordinal)
+
+        @JvmSynthetic
+        internal fun terminalSlot(store: SyntheticStore, lifetime: OrdinaryExportLifetime, ordinal: Int): Pair<JobId, ExportPageSnapshot> =
+            terminalSlot(issuer === store && this.lifetime === lifetime, ordinal)
+
+        private fun terminalSlot(sameIssuer: Boolean, ordinal: Int): Pair<JobId, ExportPageSnapshot> {
+            val page = snapshot.pages.getOrNull(ordinal)
+            val job = orderedJobIds.getOrNull(ordinal)
+            if (!sameIssuer || page?.ordinal != ordinal || job == null) {
+                reject(jobId.value, OperationErrorCode.INTEGRITY_FAILED, "terminal_png_retention_binding_invalid")
+            }
+            return job to page
+        }
+
         fun matches(row: JobRow): Boolean = row.jobId == jobId.value && row.kind == "EXPORT_ASSEMBLY" &&
             row.snapshotId == snapshot.snapshotId.value && row.pageOrdinal == null && row.idempotenceKey == key &&
             row.canonicalInputSha256 == digest && row.input.contentEquals(input)
 
         companion object {
-            suspend fun prepare(service: RoomFreshExportAssembly, id: ExportSnapshotId): Prepared = withContext(service.dispatcher) {
+            suspend fun prepare(service: RoomFreshExportAssembly, id: ExportSnapshotId): Prepared =
+                service.retainIfScoped(id.value) { prepareBody(service, id) }
+
+            private suspend fun prepareBody(service: RoomFreshExportAssembly, id: ExportSnapshotId): Prepared = withContext(service.dispatcher) {
                 coroutineContext.ensureActive()
                 val captured = service.storage(id.value) {
                     service.store.transaction { service.capture(id, detach = true) }
@@ -105,7 +131,7 @@ internal class RoomFreshExportAssembly private constructor(
                         it.assetSetHash != OrdinaryExportProfile.emptyAssetSetHash }
                 ) reject(id.value, OperationErrorCode.PROVIDER_UNAVAILABLE, "export_assembly_ordinary_png_required")
                 val (jobId, references) = service.assembly.loadForSnapshot(snapshot)
-                Prepared(snapshot, references, jobId, captured, service.store).also { coroutineContext.ensureActive() }
+                Prepared(snapshot, references, jobId, captured, service.store, service.lifetime).also { coroutineContext.ensureActive() }
             }
         }
     }
@@ -115,7 +141,10 @@ internal class RoomFreshExportAssembly private constructor(
         fun matches(current: JobRow): Boolean = sameRow(row, current)
 
         companion object {
-            suspend fun admit(service: RoomFreshExportAssembly, prepared: Prepared): Admitted = withContext(service.dispatcher) {
+            suspend fun admit(service: RoomFreshExportAssembly, prepared: Prepared): Admitted =
+                service.retainIfScoped(prepared.jobId.value) { admitBody(service, prepared) }
+
+            private suspend fun admitBody(service: RoomFreshExportAssembly, prepared: Prepared): Admitted = withContext(service.dispatcher) {
                 val active = { coroutineContext.ensureActive() }
                 active()
                 prepared.requireIssuer(service)
@@ -151,7 +180,10 @@ internal class RoomFreshExportAssembly private constructor(
     /** Carries the original admission and exact result of its guarded lease write. No upgrade from a separately obtained bare lease. */
     class Acquired private constructor(val admitted: Admitted, val lease: JobLease) {
         companion object {
-            suspend fun acquire(service: RoomFreshExportAssembly, admitted: Admitted, owner: String, durationMillis: Long): Acquired {
+            suspend fun acquire(service: RoomFreshExportAssembly, admitted: Admitted, owner: String, durationMillis: Long): Acquired =
+                service.retainIfScoped(admitted.prepared.jobId.value) { acquireBody(service, admitted, owner, durationMillis) }
+
+            private suspend fun acquireBody(service: RoomFreshExportAssembly, admitted: Admitted, owner: String, durationMillis: Long): Acquired {
                 currentCoroutineContext().ensureActive()
                 val prepared = admitted.prepared
                 prepared.requireIssuer(service)
@@ -222,11 +254,15 @@ internal class RoomFreshExportAssembly private constructor(
     catch (_: Exception) { throw RepositoryFailure(OperationError(OperationErrorCode.STORAGE_FAILED, true, "export_assembly_metadata_failed", id)) }
 
     companion object {
+        internal fun forOrdinaryExport(
+            store: PrivateImportStore.ExportComposition, preflight: suspend (ExportSnapshot, List<JobId>) -> OperationError?,
+        ): RoomFreshExportAssembly = RoomFreshExportAssembly(RoomStore(store.database), store.owners, preflight, lifetime = store.lifetime)
+
         @JvmSynthetic
         internal fun forSyntheticTests(
             store: SyntheticStore, liveness: LeaseOwnerLiveness, preflight: suspend (ExportSnapshot, List<JobId>) -> OperationError?,
-            auditClock: () -> Long, leaseClock: () -> Long, dispatcher: CoroutineDispatcher,
-        ): RoomFreshExportAssembly = RoomFreshExportAssembly(store, liveness, preflight, auditClock, leaseClock, dispatcher)
+            auditClock: () -> Long, leaseClock: () -> Long, dispatcher: CoroutineDispatcher, lifetime: OrdinaryExportLifetime? = null,
+        ): RoomFreshExportAssembly = RoomFreshExportAssembly(store, liveness, preflight, auditClock, leaseClock, dispatcher, lifetime)
 
         private fun sameRow(expected: JobRow, actual: JobRow): Boolean =
             expected == actual.copy(input = expected.input) && expected.input.contentEquals(actual.input)

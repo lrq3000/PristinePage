@@ -92,6 +92,7 @@ class DerivedFiles internal constructor(
     constructor(root: File, directorySync: DirectorySync = PlatformDirectorySync) : this(root, directorySync, { it.force(true) })
 
     private val paths = PrivateStorePaths(root)
+    internal val canonicalRoot: File get() = paths.root
 
     var directorySyncSupported: Boolean = true
         private set

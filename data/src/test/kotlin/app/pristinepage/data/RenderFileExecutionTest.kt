@@ -369,9 +369,11 @@ class RenderFileExecutionTest {
 
     private suspend fun fixture() = RenderFileFixture().apply { initialize() }
 
-    internal class RenderFileFixture {
-        // Keep real .part/seal/final files for each fault witness without performing any external-store cleanup.
-        private val root = Files.createTempDirectory(File("build").toPath(), "render-file-test-").toFile().canonicalFile
+    // Keep real .part/seal/final files for each fault witness without performing any external-store cleanup.
+    internal class RenderFileFixture(
+        val root: File = Files.createTempDirectory(File("build").toPath(), "render-file-test-").toFile().canonicalFile,
+        transactionId: TransactionId = TransactionId(id(20)),
+    ) {
         private val repo = RepositoryFixture()
         val inTransaction get() = repo.metadata.inTransaction
         lateinit var proof: RoomFrozenRenderReads.Verified
@@ -462,7 +464,7 @@ class RenderFileExecutionTest {
         private val alive = LeaseOwnerLiveness { if (it == owner) ownerState else LeaseOwnerState.UNKNOWN }
         private var nextAudit = 1000L
         private val audit = { nextAudit++ }
-        private val ids = listOf(id(20), id(21)).iterator()
+        private val ids = listOf(transactionId.value, id(21)).iterator()
         private val intents = RoomRenderIntents(metadata, leases, port,
             { id, size -> check(inTransaction); job.takeIf { it.jobId == id }?.let { it.input.size == size } },
             ::pins, alive, audit, { elapsed }, ids::next, Dispatchers.Unconfined)
@@ -472,8 +474,9 @@ class RenderFileExecutionTest {
             if (::intent.isInitialized && final.isFile) onFinalSync()
             true
         }, { channel -> check(!inTransaction); onForce(); channel.force(true) })
-        val executor = RoomRenderFileExecution(intents, files, Dispatchers.Unconfined)
-        val completionRows: RenderCompletionQueries = object : RenderCompletionQueries {
+        val executor by lazy { RoomRenderFileExecution.forSyntheticTests(intents, files,
+            FileOperationOwners(root, dispatcher = Dispatchers.Unconfined), Dispatchers.Unconfined, completionRows) }
+        private val completionRows: RenderCompletionQueries = object : RenderCompletionQueries {
             override fun renderCompletionOccupied(renderId: String, jobId: String, cacheKey: String, relativePath: String): Boolean {
                 check(inTransaction)
                 return records.any { it.renderId == renderId || it.jobId == jobId || it.cacheKey == cacheKey || it.relativePath == relativePath }

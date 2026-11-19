@@ -2,9 +2,7 @@ package app.pristinepage.data.repository
 
 import app.pristinepage.core.pipeline.RenderResult
 import app.pristinepage.data.db.FileTransactionRow
-import app.pristinepage.data.db.PristineDatabase
 import app.pristinepage.data.db.RenderedPageRow
-import app.pristinepage.data.files.DerivedFiles
 import app.pristinepage.data.model.*
 import app.pristinepage.data.repository.RoomJobLeases.FrozenRenderAcquisition.Acquired
 import java.io.File
@@ -26,13 +24,9 @@ internal interface RenderCompletionQueries {
 /** One ordinary FAIL/EXPORT attempt per instance. Retain this instance and the exclusive stable store/transaction/target and live lease across retries; abandon the instance if that ownership ends. The caller retains the whole result during each call. There is no terminal replay or app-facing service here. */
 internal class RoomRenderCompletion(
     executor: RoomRenderFileExecution,
-    rows: RenderCompletionQueries,
     private val dispatcher: CoroutineDispatcher = Dispatchers.IO,
 ) {
-    constructor(database: PristineDatabase, liveness: LeaseOwnerLiveness, files: DerivedFiles) :
-        this(RoomRenderFileExecution(database, liveness, files), database.exportSnapshots().renderCompletionQueries())
-
-    private val attempt = executor.completionAttempt(rows)
+    private val attempt = executor.completionAttempt()
 
     /** Readback must verify the complete lossless container from the executor's exact read-only File borrow and hash its decoded RGB, not echo the expected digest. The caller owns codec/runtime work and its memory admission. MOVED retry re-verifies bytes and never writes them again. */
     suspend fun complete(

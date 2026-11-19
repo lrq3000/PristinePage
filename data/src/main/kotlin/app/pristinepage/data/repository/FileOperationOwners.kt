@@ -6,15 +6,23 @@ import java.nio.ByteBuffer
 import java.nio.channels.FileChannel
 import java.nio.channels.FileLock
 import java.nio.file.Files
+import java.nio.file.LinkOption.NOFOLLOW_LINKS
+import java.nio.file.NoSuchFileException
+import java.nio.file.StandardOpenOption.CREATE
 import java.nio.file.StandardOpenOption.CREATE_NEW
 import java.nio.file.StandardOpenOption.READ
 import java.nio.file.StandardOpenOption.WRITE
+import java.nio.file.attribute.BasicFileAttributes
 import java.util.Locale
 import java.util.UUID
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.withContext
 
 /** App-private local-filesystem ownership protocol, not PID/deadline inference. Construct outside Room: canonical root resolution may perform IO. One shared-application-classloader channel/lock is intentionally retained per ownership root until actual VM termination; never close it at an operation boundary. All application writers must honor this advisory protocol. Legacy/missing/unsupported evidence stays UNKNOWN. */
@@ -24,7 +32,7 @@ class FileOperationOwners @JvmOverloads constructor(root: File, retainedEnded: I
     init {
         require(retainedEnded in 1..65536)
         val canonical = root.canonicalFile
-        val key = if (System.getProperty("os.name", "").orEmpty().startsWith("Windows", ignoreCase = true)) canonical.path.lowercase(Locale.ROOT) else canonical.path
+        val key = rootKey(canonical)
         pool = synchronized(pools) {
             pools.getOrPut(key) { Pool(canonical, retainedEnded) }.also { require(it.retainedEnded == retainedEnded) { "Ownership root retention configuration differs" } }
         }
@@ -33,6 +41,34 @@ class FileOperationOwners @JvmOverloads constructor(root: File, retainedEnded: I
     override fun state(owner: String): LeaseOwnerState {
         val local = pool.local.state(owner)
         return if (local != LeaseOwnerState.UNKNOWN) local else if (pool.ended(owner)) LeaseOwnerState.ENDED else LeaseOwnerState.UNKNOWN
+    }
+
+    internal fun ownsCanonicalRoot(root: File): Boolean = rootKey(pool.root) == rootKey(root)
+
+    /** Ordinary render-final participants only. Call outside Room on a file dispatcher. This lane excludes cooperating peers; it neither registers a requester nor proves a lease live. */
+    internal suspend fun <T> withOrdinaryDerivedLane(jobId: JobId, block: suspend CoroutineScope.() -> T): T {
+        currentCoroutineContext().ensureActive()
+        if (!pool.ordinaryDerived.tryLock()) derivedBusy(jobId)
+        try {
+            val channel = try { pool.openOrdinaryDerivedMarker() }
+            catch (canceled: CancellationException) { throw canceled }
+            catch (_: Exception) { derivedLockFailed(jobId) }
+            // Only the local holder opens the marker: closing a second channel on a live lock's file can release process-wide locks on some systems.
+            val closeMarker = AutoCloseable {
+                try { channel.close() } // The channel owns the native lock and releases it on close.
+                catch (_: Exception) { derivedLockFailed(jobId) }
+            }
+            return closeMarker.use {
+                val lock = try { channel.tryLock(0, 1, false) }
+                catch (canceled: CancellationException) { throw canceled }
+                catch (_: Exception) { derivedLockFailed(jobId) }
+                if (lock == null) derivedBusy(jobId)
+                // Do not close on a cancel flag: wait until the callback and all structured children/finally blocks have unwound.
+                coroutineScope { ensureActive(); block() }
+            }
+        } finally {
+            pool.ordinaryDerived.unlock()
+        }
     }
 
     override suspend fun <T> run(block: suspend CoroutineScope.(owner: String) -> T): T = pool.local.run { owner ->
@@ -65,6 +101,7 @@ class FileOperationOwners @JvmOverloads constructor(root: File, retainedEnded: I
 
     private class Pool(val root: File, val retainedEnded: Int) {
         val local = LocalOperationOwners(retainedEnded)
+        val ordinaryDerived = Mutex()
         private val terminal = LinkedHashMap<String, Unit>()
         private var lifetime: Lifetime? = null
 
@@ -73,6 +110,17 @@ class FileOperationOwners @JvmOverloads constructor(root: File, retainedEnded: I
         fun rememberEnded(owner: String): Unit = synchronized(terminal) {
             terminal[owner] = Unit
             if (terminal.size > retainedEnded) terminal.remove(terminal.keys.first())
+        }
+
+        fun openOrdinaryDerivedMarker(): FileChannel {
+            val path = beneath(ORDINARY_DERIVED_MARKER).toPath()
+            Files.createDirectories(path.parent)
+            check(beneath(ORDINARY_DERIVED_MARKER).toPath() == path)
+            val existing = try { Files.readAttributes(path, BasicFileAttributes::class.java, NOFOLLOW_LINKS) }
+            catch (_: NoSuchFileException) { null }
+            check(existing == null || existing.isRegularFile)
+            // CREATE (not CREATE_NEW) permits a racing healthy process to open the same file, without ever replacing/truncating it.
+            return FileChannel.open(path, CREATE, WRITE, NOFOLLOW_LINKS)
         }
 
         @Synchronized fun register(owner: String) {
@@ -141,7 +189,14 @@ class FileOperationOwners @JvmOverloads constructor(root: File, retainedEnded: I
     private companion object {
         const val OPERATION_HEADER = "pristinepage-operation-owner-v1"
         const val PROCESS_HEADER = "pristinepage-process-owner-v1"
+        const val ORDINARY_DERIVED_MARKER = "ownership/ordinary-derived-v1.lock"
         val pools = HashMap<String, Pool>()
+        fun rootKey(root: File): String =
+            if (System.getProperty("os.name", "").orEmpty().startsWith("Windows", ignoreCase = true)) root.path.lowercase(Locale.ROOT) else root.path
+        fun derivedBusy(jobId: JobId): Nothing =
+            throw RepositoryFailure(OperationError(OperationErrorCode.REVISION_CONFLICT, true, "ordinary_derived_store_busy", jobId.value))
+        fun derivedLockFailed(jobId: JobId): Nothing =
+            throw RepositoryFailure(OperationError(OperationErrorCode.STORAGE_FAILED, true, "ordinary_derived_store_lock_failed", jobId.value))
         fun processBytes(id: String) = "$PROCESS_HEADER\n$id\n".toByteArray(Charsets.UTF_8)
         fun operationBytes(owner: String, process: String) = "$OPERATION_HEADER\n$owner\n$process\n".toByteArray(Charsets.UTF_8)
         fun write(channel: FileChannel, bytes: ByteArray) { val buffer = ByteBuffer.wrap(bytes); while (buffer.hasRemaining()) check(channel.write(buffer) > 0) }
