@@ -88,6 +88,63 @@ class ExportAssemblyReadTest {
         assertEquals(listOf("begin", "guard", "projection", "end"), access.events)
     }
 
+    @Test fun snapshotKeyReadReturnsAssemblyIdAndImmutableReferencesInFrozenOrder() = runTest {
+        val access = ReadAccess()
+        val frozen = snapshot()
+        val bytes = wireBytes(frozen)
+        val (assemblyId, ordered) = loadForSnapshot(access, frozen, matchedId = job.value, guard = { true }) {
+            projection(frozen, bytes)
+        }
+
+        assertEquals(listOf("begin", "key", "guard", "projection", "end"), access.events)
+        assertEquals(job, assemblyId)
+        bytes.fill(0)
+        assertEquals(references, ordered)
+        assertThrows(UnsupportedOperationException::class.java) { (ordered as MutableList<JobId>).clear() }
+    }
+
+    @Test fun snapshotKeyMissAndMalformedMatchedIdStopBeforeAnyByIdRead() = runTest {
+        val frozen = snapshot()
+        val missing = ReadAccess()
+        assertFailure(OperationErrorCode.SOURCE_UNAVAILABLE, "export_assembly_job_unavailable", affectedId = frozen.snapshotId.value) {
+            loadForSnapshot(missing, frozen, matchedId = null)
+        }
+        assertEquals(listOf("begin", "key", "end"), missing.events)
+
+        // The scalar returns "" for an unbounded ID; a 36-byte non-UUID can also pass its extent check.
+        for (malformedId in listOf("", "g".repeat(36))) {
+            val malformed = ReadAccess()
+            assertFailure(OperationErrorCode.INTEGRITY_FAILED, "export_assembly_job_metadata_invalid", affectedId = frozen.snapshotId.value) {
+                loadForSnapshot(malformed, frozen, matchedId = malformedId)
+            }
+            assertEquals(listOf("begin", "key", "end"), malformed.events)
+        }
+    }
+
+    @Test fun snapshotKeyMatchCannotAdoptForeignSnapshotKeyOrNonNullOrdinal() = runTest {
+        val frozen = snapshot()
+        val bytes = wireBytes(frozen)
+        val foreign = "01234567-89ab-cdef-0123-456789abcdee"
+        // Keep the digest, wire payload, selected JobId and bounded extents valid; change only one projected binding at a time.
+        for (row in listOf(
+            projection(frozen, bytes, rowSnapshotId = foreign),
+            projection(frozen, bytes, key = "export-assembly-v1/$foreign"),
+        )) {
+            val access = ReadAccess()
+            assertFailure(OperationErrorCode.INTEGRITY_FAILED, "export_assembly_input_invalid") {
+                loadForSnapshot(access, frozen, matchedId = job.value, guard = { true }) { row }
+            }
+            assertEquals(listOf("begin", "key", "guard", "projection", "end"), access.events)
+        }
+
+        // The existing raw guard sees the non-NULL pageOrdinal, which the narrow projection intentionally does not expose.
+        val ordinalRefused = ReadAccess()
+        assertFailure(OperationErrorCode.INTEGRITY_FAILED, "export_assembly_job_metadata_invalid") {
+            loadForSnapshot(ordinalRefused, frozen, matchedId = job.value, guard = { false })
+        }
+        assertEquals(listOf("begin", "key", "guard", "end"), ordinalRefused.events)
+    }
+
     private class ReadAccess : MetadataAccess {
         val events = mutableListOf<String>()
         private var active = false
@@ -99,19 +156,25 @@ class ExportAssemblyReadTest {
             return try { action() } finally { active = false; events += "end" }
         }
 
-        fun record(event: String, actualId: String, expectedId: JobId) {
+        fun record(event: String, actual: String, expected: String) {
             check(active) { "$event ran outside the transaction" }
-            assertEquals(expectedId.value, actualId)
+            assertEquals(event, expected, actual)
             events += event
         }
     }
 
-    private suspend fun assertFailure(code: OperationErrorCode, key: String, retryable: Boolean = false, action: suspend () -> Unit) {
+    private suspend fun assertFailure(
+        code: OperationErrorCode,
+        key: String,
+        retryable: Boolean = false,
+        affectedId: String = job.value,
+        action: suspend () -> Unit,
+    ) {
         try {
             action()
             fail("Expected $code")
         } catch (failure: RepositoryFailure) {
-            assertEquals(OperationError(code, retryable, key, job.value), failure.error)
+            assertEquals(OperationError(code, retryable, key, affectedId), failure.error)
         }
     }
 
@@ -122,14 +185,33 @@ class ExportAssemblyReadTest {
         project: () -> AssemblyJobIdentityRow? = { throw AssertionError("Unexpected projection") },
     ): List<JobId> = RoomExportAssemblyReads(
         access,
-        { access.record("guard", it, job); guard() },
-        { access.record("projection", it, job); project() },
+        { access.record("guard", it, job.value); guard() },
+        { access.record("projection", it, job.value); project() },
         Dispatchers.Unconfined,
     ).load(job, frozen)
 
-    private fun projection(frozen: ExportSnapshot, bytes: ByteArray, jobId: String = job.value) =
-        AssemblyJobIdentityRow(jobId, "EXPORT_ASSEMBLY", "export-assembly-v1/${frozen.snapshotId.value}",
-            MessageDigest.getInstance("SHA-256").digest(bytes).toHexString(), frozen.snapshotId.value, bytes)
+    private suspend fun loadForSnapshot(
+        access: ReadAccess,
+        frozen: ExportSnapshot,
+        matchedId: String?,
+        guard: () -> Boolean? = { throw AssertionError("Unexpected by-ID guard") },
+        project: () -> AssemblyJobIdentityRow? = { throw AssertionError("Unexpected projection") },
+    ): Pair<JobId, List<JobId>> = RoomExportAssemblyReads(
+        access,
+        { access.record("guard", it, job.value); guard() },
+        { access.record("projection", it, job.value); project() },
+        Dispatchers.Unconfined,
+        jobIdByKey = { access.record("key", it, exactKey); matchedId },
+    ).loadForSnapshot(frozen)
+
+    private fun projection(
+        frozen: ExportSnapshot,
+        bytes: ByteArray,
+        jobId: String = job.value,
+        key: String = "export-assembly-v1/${frozen.snapshotId.value}",
+        rowSnapshotId: String = frozen.snapshotId.value,
+    ) = AssemblyJobIdentityRow(jobId, "EXPORT_ASSEMBLY", key,
+        MessageDigest.getInstance("SHA-256").digest(bytes).toHexString(), rowSnapshotId, bytes)
 
     private fun snapshot(): ExportSnapshot {
         val f = RepositoryFixture()
@@ -160,6 +242,7 @@ class ExportAssemblyReadTest {
         }.array()
 
     private val snapshotId = ExportSnapshotId("01234567-89ab-cdef-0123-456789abcdef")
+    private val exactKey = "export-assembly-v1/01234567-89ab-cdef-0123-456789abcdef"
     private val job = JobId("abcdef01-2345-6789-abcd-ef0123456789")
     private val references = listOf(JobId("fedcba98-7654-3210-fedc-ba9876543210"), JobId("00112233-4455-6677-8899-aabbccddeeff"))
 }

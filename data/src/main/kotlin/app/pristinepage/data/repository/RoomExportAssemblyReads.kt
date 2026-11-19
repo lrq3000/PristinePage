@@ -27,42 +27,69 @@ internal class RoomExportAssemblyReads(
     private val bounds: (String) -> Boolean?,
     private val identity: (String) -> AssemblyJobIdentityRow?,
     private val dispatcher: CoroutineDispatcher = Dispatchers.IO,
+    private val jobIdByKey: (String) -> String? = { error("Assembly job key lookup is not configured") },
 ) {
     constructor(database: PristineDatabase) : this(
         RoomMetadataAccess(database),
         database.exportSnapshots()::assemblyJobReadIsBounded,
         database.exportSnapshots()::assemblyJobIdentity,
+        jobIdByKey = database.exportSnapshots()::renderJobIdByKey,
     )
 
-    suspend fun load(jobId: JobId, snapshot: ExportSnapshot): List<JobId> = withContext(dispatcher) {
+    suspend fun load(jobId: JobId, snapshot: ExportSnapshot): List<JobId> =
+        read(snapshot, jobId).second
+
+    suspend fun loadForSnapshot(snapshot: ExportSnapshot): Pair<JobId, List<JobId>> =
+        read(snapshot, requestedJobId = null)
+
+    private suspend fun read(snapshot: ExportSnapshot, requestedJobId: JobId?): Pair<JobId, List<JobId>> = withContext(dispatcher) {
         coroutineContext.ensureActive()
-        val projection = try {
+        var affectedId = requestedJobId?.value ?: snapshot.snapshotId.value
+        val (jobId, projection) = try {
             metadata.transaction {
+                val jobId = requestedJobId ?: run {
+                    val matchedId = jobIdByKey(ExportAssemblyInput.key(snapshot.snapshotId))
+                    coroutineContext.ensureActive()
+                    if (matchedId == null) unavailable(affectedId)
+                    try {
+                        JobId(matchedId)
+                    } catch (_: IllegalArgumentException) {
+                        invalidMetadata(affectedId)
+                    }
+                }
+                affectedId = jobId.value
                 when (bounds(jobId.value)) {
-                    null -> refuse(jobId, OperationErrorCode.SOURCE_UNAVAILABLE, "export_assembly_job_unavailable")
-                    false -> invalidMetadata(jobId)
+                    null -> {
+                        // Only the initial lookup can establish absence; a key hit followed by a guard miss is inconsistent.
+                        if (requestedJobId != null) unavailable(affectedId)
+                        invalidMetadata(affectedId)
+                    }
+                    false -> invalidMetadata(affectedId)
                     true -> Unit
                 }
                 coroutineContext.ensureActive()
-                identity(jobId.value) ?: invalidMetadata(jobId)
+                jobId to (identity(jobId.value) ?: invalidMetadata(affectedId))
             }
         } catch (canceled: CancellationException) {
             throw canceled
         } catch (failure: RepositoryFailure) {
             throw failure
         } catch (_: Exception) {
-            refuse(jobId, OperationErrorCode.STORAGE_FAILED, "export_assembly_job_read_failed", retryable = true)
+            refuse(affectedId, OperationErrorCode.STORAGE_FAILED, "export_assembly_job_read_failed", retryable = true)
         }
         // Hash/parse only after releasing Room's transaction on the bounded, materialized projection.
         coroutineContext.ensureActive()
         val references = ExportAssemblyInput.verifyProjection(jobId, snapshot, projection)
         coroutineContext.ensureActive()
-        references
+        jobId to references
     }
 
-    private fun invalidMetadata(jobId: JobId): Nothing =
-        refuse(jobId, OperationErrorCode.INTEGRITY_FAILED, "export_assembly_job_metadata_invalid")
+    private fun unavailable(affectedId: String): Nothing =
+        refuse(affectedId, OperationErrorCode.SOURCE_UNAVAILABLE, "export_assembly_job_unavailable")
 
-    private fun refuse(jobId: JobId, code: OperationErrorCode, key: String, retryable: Boolean = false): Nothing =
-        throw RepositoryFailure(OperationError(code, retryable, key, jobId.value))
+    private fun invalidMetadata(affectedId: String): Nothing =
+        refuse(affectedId, OperationErrorCode.INTEGRITY_FAILED, "export_assembly_job_metadata_invalid")
+
+    private fun refuse(affectedId: String, code: OperationErrorCode, key: String, retryable: Boolean = false): Nothing =
+        throw RepositoryFailure(OperationError(code, retryable, key, affectedId))
 }
