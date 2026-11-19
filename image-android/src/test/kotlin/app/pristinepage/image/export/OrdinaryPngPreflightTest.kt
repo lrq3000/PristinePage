@@ -1,5 +1,6 @@
 package app.pristinepage.image.export
 
+import app.pristinepage.core.geometry.ExportSizing
 import app.pristinepage.core.pipeline.*
 import app.pristinepage.core.recipe.*
 import app.pristinepage.data.db.ExportPageRow
@@ -191,6 +192,90 @@ class OrdinaryPngPreflightTest {
         assertEquals(0L, budget.usedBytes)
     }
 
+    @Test fun sameSdkDifferentBuildCannotReproduceTheRecordedConversion() = runTest {
+        val budget = ImageAllocationBudget(2_000_000)
+        val frozen = snapshot(row)
+        val matching = OrdinaryPngPreflight(profile, budget, { 28 }, { fixtureBuild })
+        val otherBuild = OrdinaryPngPreflight(profile, budget, { 28 }, { "pristinepage-jvm-other-build" })
+        assertNull(matching.check(ExportFormat.PNG, frozen, pinned, 4096))
+        assertError(OperationErrorCode.UNSUPPORTED_VERSION, "source_conversion_unavailable",
+            otherBuild.check(ExportFormat.PNG, frozen, pinned, 4096))
+    }
+
+    @Test fun freezeRejectsOtherFormatsWithoutSubstitutingPng() = runTest {
+        assertNull(checkFreeze())
+        for (format in listOf(ExportFormat.JPEG, ExportFormat.PDF)) {
+            assertError(OperationErrorCode.UNSUPPORTED_FORMAT, "export_png_format", checkFreeze(format = format))
+        }
+    }
+
+    @Test fun freezeRequiresExactNormalOrExplicitResolvedSourceDimensions() = runTest {
+        val largeGraph = recipe.copy(geometry = GeometryRecipe.None(normalized.copy(sourceSize = PixelSize(6000, 3000)), outputQuarterTurns = 1))
+        val large = withRecipe(largeGraph).copy(width = 6000, height = 3000)
+        val original = pinned.copy(source = source.copy(width = 6000, height = 3000),
+            blob = blob.copy(encodedWidth = 3000, encodedHeight = 6000))
+        fun reviewed(width: Int, height: Int) = large.copy(
+            requestedOutputWidth = width, requestedOutputHeight = height, outputWidth = width, outputHeight = height,
+        )
+
+        // EXIF 6 normalizes the original to 6000x3000; the independent output turn resolves it to 3000x6000.
+        assertNull(checkFreeze(reviewed(2000, 4000), original))
+        assertNull(checkFreeze(reviewed(3000, 6000), original))
+        val smaller = reviewed(1500, 3000)
+        // Render accepts this exact common-scale size; this freeze policy must refuse it rather than substitute either supported size.
+        assertNull(check(ImageAllocationBudget(Long.MAX_VALUE), binding = original, page = smaller))
+        assertEquals(OperationErrorCode.INVALID_INPUT, checkFreeze(smaller, original)?.code)
+    }
+
+    @Test fun freezeAcceptsExactExplicitTargetWhenNormalWouldFloorAnAxisToZero() = runTest {
+        val geometry = GeometryRecipe.None(normalized.copy(sourceSize = PixelSize(12000, 2)), outputQuarterTurns = 1)
+        val explicit = withRecipe(recipe.copy(geometry = geometry)).copy(
+            width = 12000, height = 2, requestedOutputWidth = 2, requestedOutputHeight = 12000, outputWidth = 2, outputHeight = 12000,
+        )
+        val original = pinned.copy(source = source.copy(width = 12000, height = 2),
+            blob = blob.copy(encodedWidth = 2, encodedHeight = 12000))
+        // Normal would floor 2 × (4000 / 12000) to zero; it must not veto the distinct, exact 2×12000 target.
+        assertThrows(IllegalArgumentException::class.java) { ExportSizing.normal(geometry) }
+        assertNull(checkFreeze(explicit, original))
+    }
+
+    @Test fun freezeAdmitsTheNormalSizeOfferedAtTheLongEdgeBoundary() = runTest {
+        val geometry = GeometryRecipe.None(normalized.copy(sourceSize = PixelSize(5090, 1018)))
+        val offered = ExportSizing.normal(geometry).size
+        val reviewed = withRecipe(recipe.copy(geometry = geometry)).copy(
+            width = 5090, height = 1018, requestedOutputWidth = offered.width, requestedOutputHeight = offered.height,
+            outputWidth = offered.width, outputHeight = offered.height,
+        )
+        val original = pinned.copy(source = source.copy(width = 5090, height = 1018),
+            blob = blob.copy(encodedWidth = 1018, encodedHeight = 5090))
+        assertNull("Normal sizing offered $offered", checkFreeze(reviewed, original))
+    }
+
+    @Test fun freezeRequiresExactOriginalEvenWhenRenderCanUseAnEquivalentJobPin() = runTest {
+        assertNull(checkFreeze())
+        assertNull(check(ImageAllocationBudget(2_000_000), binding = alternate))
+        for (binding in listOf(
+            alternate,
+            pinned.copy(source = source.copy(sourceId = alternate.source.sourceId)),
+            pinned.copy(source = source.copy(sourceBlobId = alternateBlob),
+                blob = blob.copy(sourceBlobId = alternateBlob, relativePath = alternate.blob.relativePath)),
+            pinned.copy(blob = blob.copy(byteSha256 = alternate.blob.byteSha256)),
+        )) {
+            assertError(OperationErrorCode.INTEGRITY_FAILED, "export_png_source_binding_mismatch", checkFreeze(binding = binding))
+        }
+        // Exact IDs and hashes do not excuse ignoring a profile on the actual original.
+        val profiled = pinned.copy(source = source.copy(profileSha256 = "d".repeat(64)))
+        assertError(OperationErrorCode.UNSUPPORTED_FORMAT, "source_profile_unsupported", checkFreeze(binding = profiled))
+    }
+
+    @Test fun stagedPngByteCapUsesCheckedFinalDimensionsNotAllocationCost() {
+        assertEquals(1_048_581L, stagedByteCap(1, 1))
+        assertEquals(1_048_602L, stagedByteCap(3, 2))
+        assertEquals(49_051_576L, stagedByteCap(4000, 3000))
+        val overflow = assertThrows(RepositoryFailure::class.java) { stagedByteCap(Int.MAX_VALUE, Int.MAX_VALUE) }
+        assertEquals(OperationErrorCode.RESOURCE_LIMIT, overflow.error.code)
+    }
+
     @Test fun exactProducerWithEmbeddedProfileRefusesBeforeAllocationFit() = runTest {
         val producer = pinned
         val profiled = producer.copy(source = producer.source.copy(profileSha256 = "d".repeat(64)))
@@ -248,6 +333,11 @@ class OrdinaryPngPreflightTest {
         budget: ImageAllocationBudget, cap: Long = 4096, binding: ExportSourceBinding = pinned,
         page: ExportPageRow = row, format: ExportFormat = ExportFormat.PNG, sdk: () -> Int = { 28 },
     ): OperationError? = OrdinaryPngPreflight(profile, budget, sdk, { fixtureBuild }).check(format, snapshot(page), binding, cap)
+
+    private suspend fun checkFreeze(
+        page: ExportPageRow = row, binding: ExportSourceBinding = pinned, format: ExportFormat = ExportFormat.PNG,
+    ): OperationError? = OrdinaryPngPreflight(profile, ImageAllocationBudget(Long.MAX_VALUE), { 28 }, { fixtureBuild })
+        .checkFreeze(format, snapshot(page), binding)
 
     private fun snapshot(page: ExportPageRow): ExportPageSnapshot =
         ExportPageSnapshot::class.java.getConstructor(ExportPageRow::class.java).newInstance(page)

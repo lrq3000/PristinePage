@@ -27,6 +27,24 @@ class ExportSizingTest {
         assertEquals(PixelSize(3162,3794),normal(GeometryRecipe.Perspective(binding(6000,5000),full,outputQuarterTurns = 1)).size)
     }
 
+    @Test fun longEdgeBoundaryFloorsBothAxesFromTheSameExactScale() {
+        val target = binding(5090, 1018)
+        assertEquals(PixelSize(4000, 800), normal(GeometryRecipe.None(target)).size)
+        assertEquals(PixelSize(800, 4000), normal(GeometryRecipe.None(target, outputQuarterTurns = 1)).size)
+    }
+
+    @Test fun areaCapChangesTheCommonScaleOnlyAboveTwelveMegapixels() {
+        assertEquals(PixelSize(4000, 2999), normal(GeometryRecipe.None(binding(4000, 2999))).size)
+        assertEquals(PixelSize(4000, 3000), normal(GeometryRecipe.None(binding(4000, 3000))).size)
+        assertEquals(PixelSize(3999, 3000), normal(GeometryRecipe.None(binding(4000, 3001))).size)
+        assertEquals(PixelSize(3464, 3464), normal(GeometryRecipe.None(binding(Int.MAX_VALUE, Int.MAX_VALUE))).size)
+    }
+
+    @Test fun areaLimitedTargetCanLandExactlyOnBothAxes() {
+        // A 25/29 scale gives 3750 × 3200, exactly 12 MP without reaching the long-edge cap.
+        assertEquals(PixelSize(3750, 3200), normal(GeometryRecipe.None(binding(4350, 3712))).size)
+    }
+
     @Test fun fixedPageRatioComesFromGeometryNotTheOriginalPhotograph() {
         val recipe = GeometryRecipe.Perspective(binding(6000,4000),full,TargetRule.FixedRatio(1.0))
         assertEquals(PixelSize(3464,3464),normal(recipe).size)
