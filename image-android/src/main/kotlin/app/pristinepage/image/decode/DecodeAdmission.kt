@@ -12,16 +12,25 @@ class DecodePermit internal constructor(val size: PixelSize, val reservedBytes: 
 
 class DecodeAdmission(private val budget: ImageAllocationBudget) {
     fun admit(encodedBytes: Long, width: Long, height: Long, orientation: Int): DecodePermit {
-        if (encodedBytes <= 0 || width <= 0 || height <= 0 || orientation !in 1..8) refuse(OperationErrorCode.INVALID_INPUT, "invalid_decode_metadata")
-        if (encodedBytes > 104857600 || width > 12000 || height > 12000) refuse(OperationErrorCode.RESOURCE_LIMIT, "source_metadata_limit")
-        // Axis bounds precede multiplication. No untrusted Long product or narrowing occurs before those checks.
-        val pixels = width * height
-        if (pixels > 48_000_000) refuse(OperationErrorCode.RESOURCE_LIMIT, "source_metadata_limit")
-        // RGBA bitmap4N + provisional native workspace4N + packed RGB3N + owned immutable RGB copy3N, one ARGB row, fixed parser/hash workspace, and encoded-byte exposure. Not a measured native upper bound.
-        val estimate = encodedBytes + 14 * pixels + 4 * width + 1048576
-        val size = if (orientation in 5..8) PixelSize(height.toInt(), width.toInt()) else PixelSize(width.toInt(), height.toInt())
-        return DecodePermit(size, estimate, budget.reserve(estimate))
+        val estimate = estimate(encodedBytes, width, height, orientation)
+        return DecodePermit(estimate.size, estimate.bytes, budget.reserve(estimate.bytes))
     }
 
-    private fun refuse(code: OperationErrorCode, key: String): Nothing = throw RepositoryFailure(OperationError(code, false, key, null))
+    internal class Estimate(val size: PixelSize, val bytes: Long)
+
+    internal companion object {
+        fun estimate(encodedBytes: Long, width: Long, height: Long, orientation: Int): Estimate {
+            if (encodedBytes <= 0 || width <= 0 || height <= 0 || orientation !in 1..8) refuse(OperationErrorCode.INVALID_INPUT, "invalid_decode_metadata")
+            if (encodedBytes > 104857600 || width > 12000 || height > 12000) refuse(OperationErrorCode.RESOURCE_LIMIT, "source_metadata_limit")
+            // These bounds precede multiplication and narrowing; all charge terms together remain below 1 GiB.
+            val pixels = width * height
+            if (pixels > 48_000_000) refuse(OperationErrorCode.RESOURCE_LIMIT, "source_metadata_limit")
+            // RGBA bitmap4N + provisional native workspace4N + packed RGB3N + owned immutable RGB copy3N, one ARGB row, fixed parser/hash workspace, and encoded-byte exposure. Not a measured native upper bound.
+            val estimate = encodedBytes + 14 * pixels + 4 * width + 1048576
+            val size = if (orientation in 5..8) PixelSize(height.toInt(), width.toInt()) else PixelSize(width.toInt(), height.toInt())
+            return Estimate(size, estimate)
+        }
+
+        private fun refuse(code: OperationErrorCode, key: String): Nothing = throw RepositoryFailure(OperationError(code, false, key, null))
+    }
 }

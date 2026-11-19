@@ -52,22 +52,9 @@ class GeometryEngine(private val budget: ImageAllocationBudget) {
         catch (_: IllegalStateException) { refuse(OperationErrorCode.INVALID_INPUT, "closed_geometry_input") }
         validateOutput(target, output.size, recipe !is GeometryRecipe.None)
         val q = recipe.outputQuarterTurns
-        val base = Coordinates.rotatedSize(output.size, q)
-        val identitySize = base == sourceSize
-        if (recipe !is GeometryRecipe.None && recipe !is GeometryRecipe.Perspective && recipe !is GeometryRecipe.ManualCurve) {
-            refuse(OperationErrorCode.PROVIDER_UNAVAILABLE, "geometry_map_not_implemented")
-        }
-        // Compare SERIALIZED normalized chord midpoints exactly, as preparation does. A near-straight manual curve must not disappear under a source-resolution-dependent tolerance.
-        val manualStraight = recipe is GeometryRecipe.ManualCurve && recipe.depth == 0.0 && recipe.topMidpoint == midpoint(recipe.quad.tl, recipe.quad.tr) && recipe.bottomMidpoint == midpoint(recipe.quad.bl, recipe.quad.br)
-        val manualDirect = recipe is GeometryRecipe.ManualCurve && !manualStraight
-        val controls = when (recipe) { is GeometryRecipe.Perspective -> recipe.quad; is GeometryRecipe.ManualCurve -> recipe.quad; else -> null }
-        val exactPermutation = identitySize && (recipe is GeometryRecipe.None || ((recipe is GeometryRecipe.Perspective || manualStraight) && fullFrame(checkNotNull(controls))))
-        val needsPerspectiveProof = (recipe is GeometryRecipe.Perspective || manualStraight) && !exactPermutation
+        val (base, identitySize, manualStraight, manualDirect, controls, exactPermutation, needsPerspectiveProof, charge) =
+            plan(recipe, output.size, protection != null, coverage != null)
         val n = output.size.pixelCount
-        if (n > Int.MAX_VALUE / 3L || output.size.width > Int.MAX_VALUE / 3) refuse(OperationErrorCode.RESOURCE_LIMIT, "geometry_output_extent")
-        // Scratch plus immutable constructor copies: RGB6N, each float mask8N, and fixed metadata/object headroom. The caller continues charging the full source and source masks independently.
-        val proofScratch = if (manualDirect) ManualCurve.workspaceBytes() + ManualMapValidator.workspaceBytes() + ManualSamplingAxes.workspaceBytes(base) else if (needsPerspectiveProof) InverseMapValidator.perspectiveWorkspaceBytes() else 0L
-        val charge = 65536L + 6L * n + (if (protection != null) 8L * n else 0L) + (if (coverage != null) 8L * n else 0L) + proofScratch
         val reservation = budget.reserve(charge)
         var image: RgbImage? = null
         var transformedProtection: ProtectionMask? = null
@@ -78,7 +65,7 @@ class GeometryEngine(private val budget: ImageAllocationBudget) {
             var manualValidation: ManualMapValidation? = null
             val manualAxes = if (manualDirect) {
                 try {
-                    val candidate = ManualCurve.prepare(recipe, output.size, checkpoint)
+                    val candidate = ManualCurve.prepare(recipe as GeometryRecipe.ManualCurve, output.size, checkpoint)
                     candidate.requireSource(binding)
                     val admitted = ManualMapValidator.analyze(candidate, GeometryProofBudget(), checkpoint)
                     admitted.requireCandidate(candidate)
@@ -143,10 +130,38 @@ class GeometryEngine(private val budget: ImageAllocationBudget) {
         }
     }
 
-    private fun fullFrame(quad: QuadPx): Boolean = quad == QuadPx(PointPx(0.0, 0.0), PointPx(1.0, 0.0), PointPx(1.0, 1.0), PointPx(0.0, 1.0))
-    private fun midpoint(a: PointPx, b: PointPx) = PointPx((a.x + b.x) / 2.0, (a.y + b.y) / 2.0)
+    private data class Plan(
+        val base: PixelSize, val identitySize: Boolean, val manualStraight: Boolean, val manualDirect: Boolean,
+        val controls: QuadPx?, val exactPermutation: Boolean, val needsPerspectiveProof: Boolean, val charge: Long,
+    )
 
     companion object {
+        /** The ordinary coordinator supplies neither protection nor coverage. The shared plan chooses the execution branch but does not prepare, solve or validate a map. */
+        internal fun ordinaryCharge(recipe: GeometryRecipe, size: PixelSize): Long = plan(recipe, size, false, false).charge
+
+        private fun plan(recipe: GeometryRecipe, size: PixelSize, protection: Boolean, coverage: Boolean): Plan {
+            val base = Coordinates.rotatedSize(size, recipe.outputQuarterTurns)
+            val identitySize = base == recipe.source.sourceSize
+            if (recipe !is GeometryRecipe.None && recipe !is GeometryRecipe.Perspective && recipe !is GeometryRecipe.ManualCurve) {
+                refuse(OperationErrorCode.PROVIDER_UNAVAILABLE, "geometry_map_not_implemented")
+            }
+            // Compare SERIALIZED normalized chord midpoints exactly, as preparation does. A near-straight manual curve must not disappear under a source-resolution-dependent tolerance.
+            val manualStraight = recipe is GeometryRecipe.ManualCurve && recipe.depth == 0.0 && recipe.topMidpoint == midpoint(recipe.quad.tl, recipe.quad.tr) && recipe.bottomMidpoint == midpoint(recipe.quad.bl, recipe.quad.br)
+            val manualDirect = recipe is GeometryRecipe.ManualCurve && !manualStraight
+            val controls = when (recipe) { is GeometryRecipe.Perspective -> recipe.quad; is GeometryRecipe.ManualCurve -> recipe.quad; else -> null }
+            val exactPermutation = identitySize && (recipe is GeometryRecipe.None || ((recipe is GeometryRecipe.Perspective || manualStraight) && fullFrame(checkNotNull(controls))))
+            val needsPerspectiveProof = (recipe is GeometryRecipe.Perspective || manualStraight) && !exactPermutation
+            val n = size.pixelCount
+            if (n > Int.MAX_VALUE / 3L || size.width > Int.MAX_VALUE / 3) refuse(OperationErrorCode.RESOURCE_LIMIT, "geometry_output_extent")
+            // Scratch plus immutable constructor copies: RGB6N, each float mask8N, and fixed metadata/object headroom. The caller continues charging the full source and source masks independently.
+            val proofScratch = if (manualDirect) ManualCurve.workspaceBytes() + ManualMapValidator.workspaceBytes() + ManualSamplingAxes.workspaceBytes(base) else if (needsPerspectiveProof) InverseMapValidator.perspectiveWorkspaceBytes() else 0L
+            val charge = 65536L + 6L * n + (if (protection) 8L * n else 0L) + (if (coverage) 8L * n else 0L) + proofScratch
+            return Plan(base, identitySize, manualStraight, manualDirect, controls, exactPermutation, needsPerspectiveProof, charge)
+        }
+
+        private fun fullFrame(quad: QuadPx): Boolean = quad == QuadPx(PointPx(0.0, 0.0), PointPx(1.0, 0.0), PointPx(1.0, 1.0), PointPx(0.0, 1.0))
+        private fun midpoint(a: PointPx, b: PointPx) = PointPx((a.x + b.x) / 2.0, (a.y + b.y) / 2.0)
+
         /** Shared before coordinator decode and again at primitive entry: one predicate avoids disagreement about common-floor aspect/no-upscale/singleton policy. It does not admit source pixels or bypass map proof. */
         internal fun validateOutput(target: PixelSize, output: PixelSize, geometric: Boolean) {
             if (!admissibleSize(target, output, geometric)) refuse(OperationErrorCode.INVALID_INPUT, "invalid_geometry_output")

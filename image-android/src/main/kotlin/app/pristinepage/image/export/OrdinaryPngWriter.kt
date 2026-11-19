@@ -72,17 +72,20 @@ internal class OrdinaryPngWriter(private val budget: ImageAllocationBudget) {
     }
 }
 
-internal fun requireOrdinaryPngApi() {
-    if (Build.VERSION.SDK_INT < 28) pngRefuse(OperationErrorCode.PROVIDER_UNAVAILABLE, "export_png_api_unavailable")
+internal fun requireOrdinaryPngApi(sdk: Int = Build.VERSION.SDK_INT) {
+    if (sdk < 28) pngRefuse(OperationErrorCode.PROVIDER_UNAVAILABLE, "export_png_api_unavailable")
 }
 
 /** Admission, not a measured native limit: one 4N bitmap, one 4N potential copy, a 4W ARGB row, 1 MiB fixed codec workspace and encoded exposure if decoding. The caller's live RGB remains charged by its own owner. */
-internal fun pngNativeBytes(image: RgbImage, encodedReadback: Long = 0): Long {
+internal fun pngNativeBytes(image: RgbImage, encodedReadback: Long = 0): Long =
+    pngNativeBytes(image.width, image.height, encodedReadback)
+
+internal fun pngNativeBytes(width: Int, height: Int, encodedReadback: Long = 0): Long {
     try {
-        val pixels = Math.multiplyExact(image.width.toLong(), image.height.toLong())
+        val pixels = Math.multiplyExact(width.toLong(), height.toLong())
         val bitmap = Math.multiplyExact(4L, pixels)
         if (bitmap > Int.MAX_VALUE) pngRefuse(OperationErrorCode.RESOURCE_LIMIT, "export_png_bitmap_limit")
-        val row = Math.multiplyExact(4L, image.width.toLong())
+        val row = Math.multiplyExact(4L, width.toLong())
         val buffers = Math.addExact(Math.multiplyExact(2L, bitmap), row)
         return Math.addExact(Math.addExact(buffers, 1048576L), encodedReadback)
     } catch (_: ArithmeticException) {

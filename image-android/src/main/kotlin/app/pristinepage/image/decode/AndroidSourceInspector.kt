@@ -45,7 +45,7 @@ class AndroidSourceInspector @JvmOverloads constructor(private val budget: Image
                 if (Build.VERSION.SDK_INT < 28) refuse(OperationErrorCode.PROVIDER_UNAVAILABLE, "strict_decode_api_unavailable")
                 if (!file.isFile) refuse(OperationErrorCode.SOURCE_UNAVAILABLE, "source_file_unavailable")
                 // Bound and account the parser workspace BEFORE inspecting metadata. This reservation ends once only scalar header values remain; the larger decode permit then accounts all live raster buffers/workspace.
-                val parserBytes = 262144L + 3 * minOf(maxOf(0L, file.length()), 1048576L)
+                val parserBytes = sourceParserBytes(file.length())
                 val header = budget.reserve(parserBytes).use {
                     val parsed = SourceContainer.read(file) { context.ensureActive() }
                     verifyBytes(file, expectedByteSha256) { context.ensureActive() }
@@ -123,3 +123,5 @@ class AndroidSourceInspector @JvmOverloads constructor(private val budget: Image
     private fun hex(bytes: ByteArray): String = bytes.joinToString("") { "%02x".format(it.toInt() and 255) }
     private fun refuse(code: OperationErrorCode, key: String, retryable: Boolean = false): Nothing = throw RepositoryFailure(OperationError(code, retryable, key, null))
 }
+
+internal fun sourceParserBytes(encodedBytes: Long): Long = 262144L + 3 * encodedBytes.coerceIn(0L, 1048576L)

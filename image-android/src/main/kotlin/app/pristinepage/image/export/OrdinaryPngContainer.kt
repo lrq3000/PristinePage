@@ -22,7 +22,7 @@ internal class OrdinaryPngContainer(private val budget: ImageAllocationBudget) {
         if (length < SIGNATURE.size) structure()
         // One reusable 64 KiB block plus 64 KiB provisional digest/framing/stream overhead; no allocation sized by encoded payload.
         try {
-            return budget.reserve(2L * BLOCK).use { scan(Cursor(input, length, checkpoint), length, expected) }
+            return budget.reserve(scanBytes).use { scan(Cursor(input, length, checkpoint), length, expected) }
         } catch (_: IOException) {
             pngRefuse(OperationErrorCode.STORAGE_FAILED, "export_png_read_failed", retryable = true)
         } catch (_: OutOfMemoryError) {
@@ -134,21 +134,22 @@ internal class OrdinaryPngContainer(private val budget: ImageAllocationBudget) {
         }
     }
 
-    private companion object {
-        const val BLOCK = 65536
-        val SIGNATURE = "89504e470d0a1a0a".hexToByteArray()
-        val COLOR_FIELDS = setOf("sRGB", "gAMA", "cHRM")
-        val SRGB_CHROMA = longArrayOf(31270, 32900, 64000, 33000, 30000, 60000, 15000, 6000)
+    internal companion object {
+        private const val BLOCK = 65536
+        const val scanBytes = 2L * BLOCK
+        private val SIGNATURE = "89504e470d0a1a0a".hexToByteArray()
+        private val COLOR_FIELDS = setOf("sRGB", "gAMA", "cHRM")
+        private val SRGB_CHROMA = longArrayOf(31270, 32900, 64000, 33000, 30000, 60000, 15000, 6000)
         // Exact TIFF in either endian: one inline SHORT Orientation=1, zero padding/next IFD, no extra bytes. Do not invoke the general source TIFF reader for this privacy allowlist.
-        val EXIF_LE = "49492a0008000000010012010300010000000100000000000000".hexToByteArray()
-        val EXIF_BE = "4d4d002a00000008000101120003000000010001000000000000".hexToByteArray()
+        private val EXIF_LE = "49492a0008000000010012010300010000000100000000000000".hexToByteArray()
+        private val EXIF_BE = "4d4d002a00000008000101120003000000010001000000000000".hexToByteArray()
 
-        fun ByteArray.u8(at: Int) = this[at].toInt() and 255
-        fun ByteArray.u32(at: Int) =
+        private fun ByteArray.u8(at: Int) = this[at].toInt() and 255
+        private fun ByteArray.u32(at: Int) =
             (u8(at).toLong() shl 24) or (u8(at + 1).toLong() shl 16) or (u8(at + 2).toLong() shl 8) or u8(at + 3).toLong()
 
-        fun structure(): Nothing = pngRefuse(OperationErrorCode.INTEGRITY_FAILED, "export_png_structure")
-        fun metadata(): Nothing = pngRefuse(OperationErrorCode.UNSUPPORTED_FORMAT, "export_png_metadata")
+        private fun structure(): Nothing = pngRefuse(OperationErrorCode.INTEGRITY_FAILED, "export_png_structure")
+        private fun metadata(): Nothing = pngRefuse(OperationErrorCode.UNSUPPORTED_FORMAT, "export_png_metadata")
     }
 }
 

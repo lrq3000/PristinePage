@@ -13,15 +13,14 @@ import kotlinx.coroutines.*
 
 /** One ordinary frozen page to a complete owned raster through the Application renderer. Caller retains its snapshot/job source pins until close; this is not a lease acquisition, journal checkpoint, encoder, completed export or accepted-degraded replay path. */
 class FrozenPageRenderer @JvmOverloads constructor(private val sources: CommittedSources, private val renderer: RenderCoordinator, private val rendererVersion: String, encodingVersion: String, backend: String, precision: String, private val dispatcher: CoroutineDispatcher = PreviewProcessing.dispatcher) {
-    private val profile = OrdinaryExportProfile(rendererVersion,encodingVersion,backend,precision)
-    private val descriptor = profile.providerDescriptor()
+    private val requests = OrdinaryFrozenPageRequest(OrdinaryExportProfile(rendererVersion,encodingVersion,backend,precision))
 
     suspend fun render(page: ExportPageSnapshot): RenderResult {
         var completed: RenderResult? = null
         try {
             val delivered = withContext(dispatcher) {
                 currentCoroutineContext().ensureActive()
-                val request = request(page)
+                val request = requests.build(page)
                 val source = try { sources.load(page.sourceId) }
                 catch (canceled: CancellationException) { throw canceled }
                 catch (failure: RepositoryFailure) { throw failure }
@@ -50,8 +49,23 @@ class FrozenPageRenderer @JvmOverloads constructor(private val sources: Committe
         }
     }
 
-    private fun request(page: ExportPageSnapshot): RenderRequest {
-        if (page.fallbackPolicy != FallbackPolicy.FAIL || page.acceptedRenderId != null || page.acceptedExecutionHash != null || !page.masks.contentEquals("[]".toByteArray()) || page.rendererVersion != rendererVersion || !page.providers.contentEquals(descriptor) || page.assetSetHash != OrdinaryExportProfile.emptyAssetSetHash) refuse(OperationErrorCode.PROVIDER_UNAVAILABLE,"export_frozen_capability_unavailable",page)
+    private fun status(value: RenderStatus): OperationErrorCode = when (value) {
+        RenderStatus.RESOURCE_LIMIT -> OperationErrorCode.RESOURCE_LIMIT
+        RenderStatus.STORAGE_FAILED -> OperationErrorCode.STORAGE_FAILED
+        RenderStatus.CANCELED -> OperationErrorCode.CANCELED
+        RenderStatus.INVALID_MAP -> OperationErrorCode.INVALID_MAP
+        RenderStatus.INVALID_INPUT -> OperationErrorCode.INVALID_INPUT
+        RenderStatus.UNAVAILABLE -> OperationErrorCode.PROVIDER_UNAVAILABLE
+        else -> OperationErrorCode.PROCESSING_FAILED
+    }
+}
+
+/** Shared ordinary request and capability checks, without opening the original or constructing a raster. */
+internal class OrdinaryFrozenPageRequest(private val profile: OrdinaryExportProfile) {
+    private val descriptor = profile.providerDescriptor()
+
+    fun build(page: ExportPageSnapshot): RenderRequest {
+        if (page.fallbackPolicy != FallbackPolicy.FAIL || page.acceptedRenderId != null || page.acceptedExecutionHash != null || !page.masks.contentEquals("[]".toByteArray()) || page.rendererVersion != profile.rendererVersion || !page.providers.contentEquals(descriptor) || page.assetSetHash != OrdinaryExportProfile.emptyAssetSetHash) refuse(OperationErrorCode.PROVIDER_UNAVAILABLE,"export_frozen_capability_unavailable",page)
         if (page.recipeSchemaVersion != 1) refuse(OperationErrorCode.UNSUPPORTED_VERSION,"export_recipe_unsupported",page)
         val bytes = page.canonicalRecipe
         val recipe = try { RecipeCodec.decode(bytes) } catch (_: IllegalArgumentException) { refuse(OperationErrorCode.UNSUPPORTED_VERSION,"export_recipe_unsupported",page) }
@@ -62,14 +76,6 @@ class FrozenPageRenderer @JvmOverloads constructor(private val sources: Committe
         return RenderRequest(page.sourceId.value,page.pixelHash,page.pageId.value,page.recipeRevision,recipe,page.output,0,null,FallbackPolicy.FAIL)
     }
 
-    private fun status(value: RenderStatus): OperationErrorCode = when (value) {
-        RenderStatus.RESOURCE_LIMIT -> OperationErrorCode.RESOURCE_LIMIT
-        RenderStatus.STORAGE_FAILED -> OperationErrorCode.STORAGE_FAILED
-        RenderStatus.CANCELED -> OperationErrorCode.CANCELED
-        RenderStatus.INVALID_MAP -> OperationErrorCode.INVALID_MAP
-        RenderStatus.INVALID_INPUT -> OperationErrorCode.INVALID_INPUT
-        RenderStatus.UNAVAILABLE -> OperationErrorCode.PROVIDER_UNAVAILABLE
-        else -> OperationErrorCode.PROCESSING_FAILED
-    }
-    private fun refuse(code: OperationErrorCode, key: String, page: ExportPageSnapshot): Nothing = throw RepositoryFailure(OperationError(code,false,key,page.pageId.value))
 }
+
+private fun refuse(code: OperationErrorCode, key: String, page: ExportPageSnapshot): Nothing = throw RepositoryFailure(OperationError(code,false,key,page.pageId.value))
