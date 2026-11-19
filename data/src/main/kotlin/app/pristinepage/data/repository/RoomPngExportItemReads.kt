@@ -29,10 +29,17 @@ internal class RoomPngExportItemReads private constructor(
 
     fun checkFresh(assembly: PngExportItemIntent.Assembly): Verdict {
         validatePlan(assembly) { assembly.validate() }
-        return inspect(assembly, null)
+        return inTransaction(assembly) { checkFreshInTransaction(assembly) }
     }
 
-    fun checkMoved(assembly: PngExportItemIntent.Assembly, expected: List<ExpectedMove>): Verdict {
+    /** The writer must call this inside the transaction of the same participating database, before its first insert. */
+    internal fun checkFreshInTransaction(assembly: PngExportItemIntent.Assembly): Verdict = inspect(assembly, null)
+
+    fun checkMoved(assembly: PngExportItemIntent.Assembly, expected: List<ExpectedMove>): Verdict =
+        inTransaction(assembly, prepareMovedCheck(assembly, expected))
+
+    /** Validate/hash the plan before entering the writer transaction; the returned check is metadata only, not write authority. */
+    internal fun prepareMovedCheck(assembly: PngExportItemIntent.Assembly, expected: List<ExpectedMove>): () -> Verdict {
         val prepared = validatePlan(assembly) {
             assembly.validate()
             require(expected.size == assembly.pageCount)
@@ -53,35 +60,36 @@ internal class RoomPngExportItemReads private constructor(
                 PreparedMove(move, intent.stagingPath, intent.finalPath, intent.journalPayload())
             }
         }
-        return inspect(assembly, prepared)
+        return { inspect(assembly, prepared) }
     }
 
     private fun inspect(assembly: PngExportItemIntent.Assembly, expected: List<PreparedMove>?): Verdict {
         val keys = List(PngExportItemIntent.MAX_ITEMS) { PngExportItemIntent.ownerKey(assembly.jobId, it) }
-        return try {
-            metadata.transaction {
-                // The inventory is only a bounded occupancy check; the invalid-ID sentinel still counts as present.
-                if (inventory(assembly.snapshotId.value, assembly.pageCount + 1).isNotEmpty()) refuse(assembly, "artifacts_present")
-                // Finish scalar admission across the entire relevant key space before loading even the first typed row. False is a match, including on extra keys.
-                for ((ordinal, key) in keys.withIndex()) {
-                    val flag = bounds(key, assembly.attempt, PngExportItemIntent.payloadBytes)
-                    when {
-                        expected == null && flag == false -> refuse(assembly, "unbounded")
-                        expected == null && flag == true -> refuse(assembly, "occupied")
-                        expected != null && ordinal >= expected.size && flag != null -> refuse(assembly, "extra")
-                        expected != null && ordinal < expected.size && flag == null -> refuse(assembly, "missing")
-                        expected != null && ordinal < expected.size && flag == false -> refuse(assembly, "unbounded")
-                    }
-                }
-                if (expected == null) Verdict.FRESH else {
-                    for ((ordinal, move) in expected.withIndex()) {
-                        val key = keys[ordinal]
-                        val row = project(key, assembly.attempt)
-                        if (row == null || !move.matches(row, key, assembly.attempt)) refuse(assembly, "mismatch")
-                    }
-                    Verdict.MOVED
-                }
+        // The inventory is only a bounded occupancy check; the invalid-ID sentinel still counts as present.
+        if (inventory(assembly.snapshotId.value, assembly.pageCount + 1).isNotEmpty()) refuse(assembly, "artifacts_present")
+        // Finish scalar admission across the entire relevant key space before loading even the first typed row. False is a match, including on extra keys.
+        for ((ordinal, key) in keys.withIndex()) {
+            val flag = bounds(key, assembly.attempt, PngExportItemIntent.payloadBytes)
+            when {
+                expected == null && flag == false -> refuse(assembly, "unbounded")
+                expected == null && flag == true -> refuse(assembly, "occupied")
+                expected != null && ordinal >= expected.size && flag != null -> refuse(assembly, "extra")
+                expected != null && ordinal < expected.size && flag == null -> refuse(assembly, "missing")
+                expected != null && ordinal < expected.size && flag == false -> refuse(assembly, "unbounded")
             }
+        }
+        if (expected == null) return Verdict.FRESH
+        for ((ordinal, move) in expected.withIndex()) {
+            val key = keys[ordinal]
+            val row = project(key, assembly.attempt)
+            if (row == null || !move.matches(row, key, assembly.attempt)) refuse(assembly, "mismatch")
+        }
+        return Verdict.MOVED
+    }
+
+    private fun inTransaction(assembly: PngExportItemIntent.Assembly, action: () -> Verdict): Verdict =
+        try {
+            metadata.transaction(action)
         } catch (canceled: CancellationException) {
             throw canceled
         } catch (failure: RepositoryFailure) {
@@ -89,7 +97,6 @@ internal class RoomPngExportItemReads private constructor(
         } catch (_: Exception) {
             refuse(assembly, "read_failed", OperationErrorCode.STORAGE_FAILED)
         }
-    }
 
     private fun <T> validatePlan(assembly: PngExportItemIntent.Assembly, action: () -> T): T = try {
         action()

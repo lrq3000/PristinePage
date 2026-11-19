@@ -136,7 +136,12 @@ class DerivedFiles internal constructor(
     /** Seal only a closed, reverified payload. The caller supplies bounded canonical metadata; its domain meaning is checked by the later consumer. */
     @JvmOverloads
     @Synchronized
-    fun seal(staged: StagedDerived, metadata: ByteArray, checkpoint: () -> Unit = {}): SealedDerived {
+    fun seal(staged: StagedDerived, metadata: ByteArray, checkpoint: () -> Unit = {}): SealedDerived =
+        sealWithFence(staged, metadata, checkpoint) {}
+
+    /** Run the metadata-only fence after revalidating the closed stage; it must return before creating the seal. */
+    @Synchronized
+    internal fun sealWithFence(staged: StagedDerived, metadata: ByteArray, checkpoint: () -> Unit, authorize: () -> Unit): SealedDerived {
         staged.requireStore(paths.root)
         require(metadata.size in 1..METADATA_LIMIT) { "Invalid derived metadata size" }
         val ownedMetadata = metadata.copyOf()
@@ -150,6 +155,8 @@ class DerivedFiles internal constructor(
         )
         val bytes = encode(record)
         val file = sealFile(staged.transactionId)
+        checkpoint()
+        authorize()
         checkpoint()
         FileChannel.open(file.toPath(), CREATE_NEW, WRITE).use { channel ->
             writeAll(channel, ByteBuffer.wrap(bytes))
@@ -181,6 +188,46 @@ class DerivedFiles internal constructor(
             }, requireFinal = true,
             readback = { file, metadata -> readback(file, metadata.copyOf()) },
         )?.seal
+    }
+
+    /** Copy a bound final without exposing its path or read descriptor. Neither staging nor a successful stream alone authorizes sealing: the source borrow must also finish its postchecks. */
+    @Synchronized
+    internal fun stageBoundExportCopy(
+        sourceTransaction: String, sourceSeal: String, sourceTarget: DerivedFileTarget, sourceMetadata: ByteArray,
+        byteSha256: String, byteCount: Long, maxBytes: Long, exportTransaction: String, exportTarget: DerivedFileTarget,
+        checkpoint: () -> Unit, authorizeStage: () -> Unit,
+    ): StagedDerived {
+        require(sourceTarget.kind == DerivedKind.RENDER && exportTarget.kind == DerivedKind.EXPORT && sourceTransaction != exportTransaction)
+        var copied: StagedDerived? = null
+        requireNotNull(inspectBoundFinal(sourceTransaction, sourceSeal, sourceTarget, maxBytes, checkpoint,
+            authenticate = { digest, count, metadata ->
+                require(digest == byteSha256 && count == byteCount && metadata.contentEquals(sourceMetadata))
+            },
+            readback = { file, _ ->
+                require(attributes(finalFile(exportTarget)) == null) { "Fresh export target already exists" }
+                // The encoded pre-scan is complete. Observe live metadata once before any stage effect, not inside the streaming loop.
+                authorizeStage()
+                copied = stage(exportTransaction, exportTarget, maxBytes, writer = { sink ->
+                    FileChannel.open(file.toPath(), READ, NOFOLLOW_LINKS).use { source ->
+                        val buffer = ByteBuffer.allocate(BUFFER_SIZE)
+                        var remaining = byteCount
+                        while (remaining > 0) {
+                            checkpoint()
+                            buffer.clear().limit(minOf(remaining, BUFFER_SIZE.toLong()).toInt())
+                            val size = source.read(buffer)
+                            require(size > 0) { "Truncated source during export copy" }
+                            sink.write(buffer.array(), 0, size)
+                            remaining -= size
+                        }
+                        buffer.clear().limit(1)
+                        require(source.read(buffer) == -1) { "Extended source during export copy" }
+                    }
+                }, checkpoint = checkpoint).also {
+                    require(it.byteCount == byteCount && it.byteSha256 == byteSha256) { "Export stage differs from source" }
+                }
+            },
+        )) { "Missing source seal during export copy" }
+        return checkNotNull(copied)
     }
 
     /** Under the caller's exact exclusive lease, authenticate the known intent and re-establish the seal barriers before returning an actionable receipt. A null expected hash is only for a lagging journal. */
@@ -221,10 +268,13 @@ class DerivedFiles internal constructor(
 
     /** The metadata-only authorization callback fences destination setup after seal re-verification, and fences rename or final reuse again after setup. */
     @Synchronized
-    internal fun moveWithFence(sealed: SealedDerived, checkpoint: () -> Unit, authorize: () -> Unit): File {
+    internal fun moveWithFence(
+        sealed: SealedDerived, checkpoint: () -> Unit, allowVerifiedExisting: Boolean = true, authorize: () -> Unit,
+    ): File {
         val staged = sealed.staged
         staged.requireStore(paths.root)
         val observed = checkNotNull(inspect(staged.transactionId, sealed.sealSha256, checkpoint, durable = true, expected = sealed.observation)) { "Derived seal is missing" }
+        require(allowVerifiedExisting || !observed.finalPresent) { "Fresh derived target already exists" }
         val targetParent = checkNotNull(observed.target.parentFile)
         val stageParent = checkNotNull(observed.stage.parentFile)
         authorize()

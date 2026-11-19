@@ -188,7 +188,7 @@ internal class RoomFreshExportAssembly private constructor(
         /** The final reader is constructed privately by the existing retained entry; this is not an arbitrary callback or an attempt handle. */
         @JvmSynthetic
         internal suspend fun readRetainedTerminalSet(reader: RoomTerminalPngReads.Retained.AcquiredSetReader): List<RoomTerminalPngReads.Receipt> =
-            reader.read(admitted.prepared, ::checkTerminalSet, ::checkTerminalAttempt)
+            reader.read(admitted.prepared, lease, ::checkTerminalSet, ::checkTerminalAttempt, ::copyTransaction)
 
         private fun checkTerminalSet(context: CoroutineContext): () -> Unit {
             val service = issuingService
@@ -222,6 +222,45 @@ internal class RoomFreshExportAssembly private constructor(
         }
 
         private fun checkTerminalClocks(snapshot: SnapshotRead, context: CoroutineContext) {
+            checkClocks(context, snapshot::requireRetained)
+        }
+
+        /** Only the privately formed traversal receives this transaction entry. It runs on the original issuer, never on a caller-selected writer. */
+        private fun copyTransaction(context: CoroutineContext, full: Boolean, write: (Long, () -> Unit) -> Unit) {
+            val service = issuingService
+            val id = lease.jobId.value
+            val prepared = admitted.prepared
+            context.ensureActive()
+            service.storage(id) {
+                service.store.transaction {
+                    val snapshot = if (full) service.liveSnapshot(prepared) else null
+                    val checkpoint = {
+                        context.ensureActive()
+                        service.requireJobInput(prepared) { context.ensureActive() }
+                        service.requireJobPhase(id, "RUNNING", running.attempt, running.leaseOwner, running.leaseUntil)
+                        // Every write also checks the live header, including cancellation/retention changes between short phase transactions.
+                        val snapshotId = prepared.snapshot.snapshotId.value
+                        if (service.store.snapshotMetadataIsBounded(snapshotId) != true) invalid(id)
+                        val header = service.store.snapshot(snapshotId) ?: invalid(id)
+                        if (header.snapshotId != snapshotId || header.snapshotSha256 != prepared.snapshot.snapshotHash) invalid(id)
+                        if (header.state == "CANCELED") reject(id, OperationErrorCode.CANCELED, "export_snapshot_canceled")
+                        if (header.state != "FROZEN") reject(id, OperationErrorCode.REVISION_CONFLICT, "export_snapshot_not_fresh")
+                        checkClocks(context) { now ->
+                            if (snapshot != null) snapshot.requireRetained(now)
+                            if (header.retainedUntil <= now) reject(id, OperationErrorCode.SESSION_EXPIRED, "export_snapshot_expired")
+                        }
+                    }
+                    checkpoint()
+                    val audit = service.auditClock()
+                    if (audit < 0) invalid(id)
+                    write(audit, checkpoint)
+                    checkpoint()
+                }
+            }
+            context.ensureActive()
+        }
+
+        private fun checkClocks(context: CoroutineContext, requireRetained: (Long) -> Unit) {
             context.ensureActive()
             val id = lease.jobId.value
             if (issuingService.liveness.state(lease.owner) != LeaseOwnerState.ALIVE) {
@@ -231,7 +270,7 @@ internal class RoomFreshExportAssembly private constructor(
             if (JobLeaseFence.current(running, lease, issuingService.leaseClock()) == null) {
                 reject(id, OperationErrorCode.REVISION_CONFLICT, "job_lease_lost")
             }
-            snapshot.requireRetained(issuingService.auditClock())
+            requireRetained(issuingService.auditClock())
             context.ensureActive()
         }
 

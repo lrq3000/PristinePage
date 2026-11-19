@@ -6,15 +6,18 @@ import app.pristinepage.data.files.DerivedFileTarget
 import app.pristinepage.data.files.DerivedFiles
 import app.pristinepage.data.files.DerivedKind
 import app.pristinepage.data.model.ExportPageSnapshot
+import app.pristinepage.data.model.ArtifactId
 import app.pristinepage.data.model.JobId
 import app.pristinepage.data.model.OperationError
 import app.pristinepage.data.model.OperationErrorCode
 import app.pristinepage.data.model.OrdinaryExportProfile
+import app.pristinepage.data.model.PngExportItemIntent
 import app.pristinepage.data.model.RenderId
 import app.pristinepage.data.model.RepositoryFailure
 import app.pristinepage.data.model.TransactionId
 import java.io.File
 import java.util.Collections
+import java.util.UUID
 import kotlin.coroutines.CoroutineContext
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineDispatcher
@@ -67,10 +70,11 @@ internal class RoomTerminalPngReads(
         private val lifetime: OrdinaryExportLifetime,
         private val slot: (RoomFreshExportAssembly.Prepared, Int) -> Pair<JobId, ExportPageSnapshot>,
         private val setVerification: AcquiredSetVerification?,
+        private val journal: ExportJournal?,
     ) {
         constructor(store: PrivateImportStore.ExportComposition, profile: OrdinaryExportProfile) :
             this(RoomTerminalPngReads(RoomTerminalRenderReads(store.database, profile), store.files), store.owners, store.lifetime,
-                { prepared, ordinal -> prepared.terminalSlot(store, ordinal) }, store.terminalPngVerification)
+                { prepared, ordinal -> prepared.terminalSlot(store, ordinal) }, store.terminalPngVerification, ExportJournal.Room(store))
 
         init {
             require(owners.ownsCanonicalRoot(reader.files.canonicalRoot))
@@ -96,26 +100,56 @@ internal class RoomTerminalPngReads(
         suspend fun readAcquiredSet(acquired: RoomFreshExportAssembly.Acquired): List<Receipt> =
             AcquiredSetReader.start(this, acquired)
 
+        /** Host-only checkpoint. The Room composition cannot request a copy without a future in-scope co-commit. */
+        @JvmSynthetic
+        @RoomPngExportItemWrites.SyntheticJournal
+        internal suspend fun copyAcquiredForSyntheticTests(acquired: RoomFreshExportAssembly.Acquired) =
+            AcquiredSetReader.copy(this, acquired)
+
+        private sealed interface ExportJournal {
+            class Room(store: PrivateImportStore.ExportComposition) : ExportJournal {
+                val writes by lazy { RoomPngExportItemWrites(store.database) }
+            }
+
+            class Synthetic(val writes: RoomPngExportItemWrites) : ExportJournal
+        }
+
         // Only this final, privately constructed bridge receives the owned operations. It has no factory or callback that can hand them (or itself) to another consumer.
-        internal class AcquiredSetReader private constructor(private val retained: Retained) {
+        internal class AcquiredSetReader private constructor(
+            private val retained: Retained,
+            private val syntheticCopy: RoomPngExportItemWrites?,
+        ) {
             @JvmSynthetic
             internal suspend fun read(
                 prepared: RoomFreshExportAssembly.Prepared,
+                lease: JobLease,
                 checkSet: (CoroutineContext) -> () -> Unit,
                 checkAttempt: (CoroutineContext) -> Unit,
-            ): List<Receipt> = retained.readWithRunningFences(prepared, checkSet, checkAttempt)
+                copyTransaction: (CoroutineContext, Boolean, (Long, () -> Unit) -> Unit) -> Unit,
+            ): List<Receipt> = retained.readWithRunningFences(prepared, lease, checkSet, checkAttempt, syntheticCopy, copyTransaction)
 
             companion object {
                 @JvmSynthetic
                 internal suspend fun start(retained: Retained, acquired: RoomFreshExportAssembly.Acquired): List<Receipt> =
-                    acquired.readRetainedTerminalSet(AcquiredSetReader(retained))
+                    acquired.readRetainedTerminalSet(AcquiredSetReader(retained, null))
+
+                @JvmSynthetic
+                @RoomPngExportItemWrites.SyntheticJournal
+                internal suspend fun copy(retained: Retained, acquired: RoomFreshExportAssembly.Acquired) {
+                    val synthetic = retained.journal as? ExportJournal.Synthetic
+                        ?: retained.reader.refuse(acquired.lease.jobId, OperationErrorCode.INTEGRITY_FAILED, "png_export_copy_synthetic_only")
+                    acquired.readRetainedTerminalSet(AcquiredSetReader(retained, synthetic.writes))
+                }
             }
         }
 
         private suspend fun readWithRunningFences(
             prepared: RoomFreshExportAssembly.Prepared,
+            lease: JobLease,
             checkSet: (CoroutineContext) -> () -> Unit,
             checkAttempt: (CoroutineContext) -> Unit,
+            writes: RoomPngExportItemWrites?,
+            copyTransaction: (CoroutineContext, Boolean, (Long, () -> Unit) -> Unit) -> Unit,
         ): List<Receipt> = withContext(reader.dispatcher) {
             coroutineContext.ensureActive()
             val assembly = prepared.jobId
@@ -144,20 +178,110 @@ internal class RoomTerminalPngReads(
                         checkOrdinal()
                         verification.readback.verify(file, size, raster, cap, active).also { active() }
                     }
-                    val receipts = slots.map { (job, page, cap) ->
+                    val verified = slots.map { slot ->
+                        val (job, page, cap) = slot
                         active()
                         val expected = reader.metadata.load(job, page)
                         checkOrdinal()
-                        useBoundFinal(job, expected, cap, active) { it.read(guardedReadback) }.also { checkOrdinal() }
+                        val receipt = useBoundFinal(job, expected, cap, active) { it.read(guardedReadback) }
+                        checkOrdinal()
+                        VerifiedSlot(slot, expected, receipt)
                     }
                     // Re-read the complete frozen identity and bounded attempt after all file postchecks, while the same lane is still held.
-                    checkSet(context)
-                    Collections.unmodifiableList(receipts)
+                    if (writes == null) {
+                        checkSet(context)
+                        Collections.unmodifiableList(verified.map { it.receipt })
+                    } else {
+                        copyWithinLane(prepared, lease, verified, writes, active) { full, action -> copyTransaction(context, full, action) }
+                        emptyList() // This branch cannot return a copy result, file grant, or completion authorization.
+                    }
                 }
             }
         }
 
         private data class TerminalSlot(val job: JobId, val page: ExportPageSnapshot, val cap: Long)
+        private data class VerifiedSlot(val slot: TerminalSlot, val source: RoomTerminalRenderReads.Metadata, val receipt: Receipt)
+
+        /** This remains a step of the owning traversal; a future co-commit belongs at its last in-lane transaction, not after this returns. */
+        private fun copyWithinLane(
+            prepared: RoomFreshExportAssembly.Prepared, lease: JobLease, verified: List<VerifiedSlot>,
+            writes: RoomPngExportItemWrites, active: () -> Unit,
+            transaction: (Boolean, (Long, () -> Unit) -> Unit) -> Unit,
+        ) {
+            val job = prepared.jobId
+            val assembly = PngExportItemIntent.Assembly(prepared.snapshot.snapshotId, prepared.snapshot.snapshotHash,
+                job, prepared.digest, lease.owner, lease.generation, lease.generation, verified.size)
+            try {
+                val renderTransactions = verified.map { it.receipt.transactionId.value }
+                val renderIds = verified.map { it.receipt.renderId.value }
+                if (renderTransactions.toSet().size != verified.size || renderIds.toSet().size != verified.size) {
+                    reader.refuse(job, OperationErrorCode.INTEGRITY_FAILED, "png_export_copy_duplicate_render")
+                }
+                val ids = (renderTransactions + renderIds).toMutableSet()
+                fun newId(): String = UUID.randomUUID().toString().also { require(ids.add(it)) }
+                var budget = 0L
+                var total = 0L
+                val plans = verified.map { (slot, _, receipt) ->
+                    active()
+                    budget = Math.addExact(budget, slot.cap)
+                    total = Math.addExact(total, receipt.observed.byteCount)
+                    val item = PngExportItemIntent.Item(slot.page.ordinal, receipt.size, slot.job, receipt.renderId,
+                        receipt.transactionId, receipt.sealSha256, receipt.observed.byteSha256, receipt.observed.byteCount,
+                        receipt.observed.rasterSha256, ArtifactId(newId()), TransactionId(newId()))
+                    RoomPngExportItemWrites.Plan(assembly, item, slot.cap)
+                }
+                if (total > budget) throw DerivedByteLimitExceeded()
+                var intentAudit = -1L
+                transaction(true) { audit, fence ->
+                    writes.insertFreshSet(assembly, plans, audit, fence)
+                    intentAudit = audit
+                }
+
+                val moves = plans.mapIndexed { ordinal, plan ->
+                    val item = plan.item
+                    val source = verified[ordinal].source
+                    val target = DerivedFileTarget(DerivedKind.EXPORT, item.artifactId.value, assembly.snapshotId.value)
+                    var lastAudit = intentAudit
+                    fun advance(previous: String, next: String, seal: String? = null) {
+                        transaction(false) { audit, fence ->
+                            writes.advance(plan, previous, next, lastAudit, audit, seal, fence)
+                            lastAudit = audit
+                        }
+                    }
+                    advance("INTENT", "COPYING")
+                    val authorizeCopying = {
+                        transaction(false) { _, _ -> writes.authenticate(plan, "COPYING", lastAudit, null) }
+                    }
+                    // Observe the persisted attempt again after each long scan. The transaction ends before the file effect; the two are not atomic.
+                    val staged = reader.files.stageBoundExportCopy(item.renderTransactionId.value, item.renderSealSha256,
+                        DerivedFileTarget(DerivedKind.RENDER, item.renderId.value), OrdinaryRenderSealV1(source.intentPayload()).encode(item.rasterSha256),
+                        item.byteSha256, item.byteCount, plan.cap, item.exportTransactionId.value, target, active, authorizeCopying)
+                    // No destination seal until the source stream closed AND the bound source borrow finished its postchecks.
+                    val sealed = reader.files.sealWithFence(staged, plan.payload(), active, authorizeCopying)
+                    val seal = sealed.sealSha256
+                    advance("COPYING", "SEALED", seal)
+                    reader.files.moveWithFence(sealed, active, allowVerifiedExisting = false) {
+                        transaction(false) { _, _ -> writes.authenticate(plan, "SEALED", lastAudit, seal) }
+                    }
+                    advance("SEALED", "MOVED", seal)
+                    RoomPngExportItemReads.ExpectedMove(item, seal, plan.cap)
+                }
+                val checkMoved = writes.movedCheck(assembly, moves)
+                transaction(true) { _, _ -> checkMoved() }
+            } catch (canceled: CancellationException) {
+                throw canceled
+            } catch (failure: RepositoryFailure) {
+                throw failure
+            } catch (_: ArithmeticException) {
+                reader.refuse(job, OperationErrorCode.RESOURCE_LIMIT, "png_export_copy_byte_cap")
+            } catch (_: DerivedByteLimitExceeded) {
+                reader.refuse(job, OperationErrorCode.RESOURCE_LIMIT, "png_export_copy_byte_cap")
+            } catch (_: IllegalArgumentException) {
+                reader.refuse(job, OperationErrorCode.INTEGRITY_FAILED, "png_export_copy_binding_invalid")
+            } catch (_: Exception) {
+                reader.refuse(job, OperationErrorCode.STORAGE_FAILED, "png_export_copy_storage_failed", retryable = true)
+            }
+        }
 
         private fun <T> useBoundFinal(
             job: JobId, expected: RoomTerminalRenderReads.Metadata, maxBytes: Long, active: () -> Unit, consume: (RetainedFinal) -> T,
@@ -176,7 +300,16 @@ internal class RoomTerminalPngReads(
             internal fun forSyntheticTests(
                 reader: RoomTerminalPngReads, owners: FileOperationOwners, store: RoomFreshExportAssembly.SyntheticStore, lifetime: OrdinaryExportLifetime,
                 setVerification: AcquiredSetVerification? = null,
-            ): Retained = Retained(reader, owners, lifetime, { prepared, ordinal -> prepared.terminalSlot(store, lifetime, ordinal) }, setVerification)
+            ): Retained = Retained(reader, owners, lifetime, { prepared, ordinal -> prepared.terminalSlot(store, lifetime, ordinal) },
+                setVerification, null)
+
+            @JvmSynthetic
+            @RoomPngExportItemWrites.SyntheticJournal
+            internal fun forSyntheticCopyTests(
+                reader: RoomTerminalPngReads, owners: FileOperationOwners, store: RoomPngExportItemWrites.SyntheticStore,
+                lifetime: OrdinaryExportLifetime, setVerification: AcquiredSetVerification?,
+            ): Retained = Retained(reader, owners, lifetime, { prepared, ordinal -> prepared.terminalSlot(store, lifetime, ordinal) },
+                setVerification, ExportJournal.Synthetic(RoomPngExportItemWrites.forSyntheticTests(store)))
         }
     }
 
