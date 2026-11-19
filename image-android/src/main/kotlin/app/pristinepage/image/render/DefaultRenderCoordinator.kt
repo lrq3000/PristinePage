@@ -5,6 +5,7 @@ import app.pristinepage.core.pipeline.*
 import app.pristinepage.core.recipe.GeometryRecipe
 import app.pristinepage.core.recipe.SourceBinding
 import app.pristinepage.data.model.*
+import app.pristinepage.data.repository.ExportSourceBinding
 import app.pristinepage.image.decode.SourceDecoder
 import app.pristinepage.image.preview.PreviewProcessing
 import kotlinx.coroutines.CancellationException
@@ -19,14 +20,20 @@ import kotlinx.coroutines.withContext
 class DefaultRenderCoordinator @JvmOverloads constructor(private val decoder: SourceDecoder, private val geometry: GeometryEngine, private val appearance: AppearanceEngine, private val dispatcher: CoroutineDispatcher = PreviewProcessing.dispatcher) : RenderCoordinator {
     private val queue = Mutex()
 
-    override suspend fun render(request: RenderRequest): RenderResult {
+    override suspend fun render(request: RenderRequest): RenderResult = render(request, null)
+
+    /** Ordinary export only. The binding selects the admitted JOB original, not the frozen consumer's file; the caller retains the job authority. */
+    internal suspend fun renderForProducer(request: RenderRequest, expected: ExportSourceBinding): RenderResult =
+        render(request, expected)
+
+    private suspend fun render(request: RenderRequest, expected: ExportSourceBinding?): RenderResult {
         var completed: RenderResult? = null
         try {
             return withContext(dispatcher) {
                 queue.withLock {
                     val context = currentCoroutineContext()
                     context.ensureActive()
-                    val execution = Execution(request)
+                    val execution = Execution(request, expected)
                     val result = try { execution.run { context.ensureActive() } }
                     catch (canceled: CancellationException) { throw canceled }
                     catch (failure: RepositoryFailure) { execution.failure(status(failure.error.code), failure.error.safeMessageKey) }
@@ -42,7 +49,7 @@ class DefaultRenderCoordinator @JvmOverloads constructor(private val decoder: So
         }
     }
 
-    private inner class Execution(private val request: RenderRequest) {
+    private inner class Execution(private val request: RenderRequest, private val expected: ExportSourceBinding?) {
         private val records = ArrayList<StageRecord>()
         private var active: String? = null
         private var inputSize = request.recipe.geometry.source.sourceSize
@@ -50,12 +57,16 @@ class DefaultRenderCoordinator @JvmOverloads constructor(private val decoder: So
 
         suspend fun run(checkpoint: () -> Unit): RenderResult {
             checkpoint()
+            if (expected != null && (request.fallback != FallbackPolicy.FAIL || request.output.purpose != RenderPurpose.EXPORT)) {
+                refuse(OperationErrorCode.INVALID_INPUT, "invalid_producer_render_policy")
+            }
             preflight(request)
             var final: AppearanceRaster? = null
             var transferred = false
             try {
                 active = "source_decode_v1"
-                val decoded = decoder.decode(request.sourceId, request.output)
+                val decoded = if (expected == null) decoder.decode(request.sourceId, request.output)
+                    else decoder.decodeForProducer(request.sourceId, request.output, expected)
                 var sourceTransferred = false
                 try {
                     checkpoint()

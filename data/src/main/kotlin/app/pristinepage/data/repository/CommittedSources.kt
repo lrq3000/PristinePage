@@ -15,6 +15,11 @@ fun interface CommittedSources {
     suspend fun load(sourceId: SourceId): CommittedSource
 }
 
+/** Read the exact admitted JOB original through this same store. The caller retains its admission/acquisition and source ownership; the expected rows alone do not authorize a file read. */
+fun interface ProducerCommittedSources {
+    suspend fun loadForProducer(sourceId: SourceId, expected: ExportSourceBinding): CommittedSource
+}
+
 /** Read in the same metadata transaction BEFORE materializing Source/SourceBlob rows. Null is an absent SourceId; false covers malformed raw types/ranges/lengths or a missing/not-READY backing blob. The scalar must not hide SQLite64-bit values behind generated Int projections. */
 fun interface CommittedSourceQueries {
     fun sourceReadIsBounded(id: String): Boolean?

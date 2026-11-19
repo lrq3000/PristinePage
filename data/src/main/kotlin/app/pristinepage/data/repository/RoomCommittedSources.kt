@@ -10,8 +10,12 @@ import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.withContext
 
 /** Read-only exact binding and closed-byte proof. No provider, live page/recipe, decoder, pin update or filesystem mutation; file hashing/path resolution run after releasing the short metadata transaction. Immutable cooperative roots and a caller-held retained owner are required. */
-class RoomCommittedSources @JvmOverloads constructor(private val metadata: MetadataAccess, private val bounds: CommittedSourceQueries, private val files: SourceFiles, private val dispatcher: CoroutineDispatcher = Dispatchers.IO) : CommittedSources {
-    override suspend fun load(sourceId: SourceId): CommittedSource = withContext(dispatcher) {
+class RoomCommittedSources @JvmOverloads constructor(private val metadata: MetadataAccess, private val bounds: CommittedSourceQueries, private val files: SourceFiles, private val dispatcher: CoroutineDispatcher = Dispatchers.IO) : CommittedSources, ProducerCommittedSources {
+    override suspend fun load(sourceId: SourceId): CommittedSource = load(sourceId, null)
+
+    override suspend fun loadForProducer(sourceId: SourceId, expected: ExportSourceBinding): CommittedSource = load(sourceId, expected)
+
+    private suspend fun load(sourceId: SourceId, expected: ExportSourceBinding?): CommittedSource = withContext(dispatcher) {
         try {
             coroutineContext.ensureActive()
             val (source, blob) = metadata.transaction {
@@ -23,6 +27,13 @@ class RoomCommittedSources @JvmOverloads constructor(private val metadata: Metad
                 coroutineContext.ensureActive()
                 val source = metadata.queries.source(sourceId.value) ?: refuse(OperationErrorCode.INTEGRITY_FAILED, "committed_source_invalid", sourceId)
                 val blob = metadata.queries.sourceBlob(source.sourceBlobId) ?: refuse(OperationErrorCode.INTEGRITY_FAILED, "committed_source_invalid", sourceId)
+                if (expected != null) {
+                    // The decoder's projection omits row-only fields (e.g. ingest ID and creation times). Compare the exact snapshot before any path work; only positive live counters can vary.
+                    if (source.refCount <= 0 || blob.sourceCount <= 0 ||
+                        source.copy(refCount = expected.source.refCount) != expected.source ||
+                        blob.copy(sourceCount = expected.blob.sourceCount) != expected.blob
+                    ) refuse(OperationErrorCode.INTEGRITY_FAILED, "committed_source_binding_mismatch", sourceId)
+                }
                 source to blob
             }
             require(source.sourceId == sourceId.value && source.sourceBlobId == blob.sourceBlobId)

@@ -3,10 +3,13 @@ package app.pristinepage.image
 import app.pristinepage.core.image.RgbImage
 import app.pristinepage.core.pipeline.*
 import app.pristinepage.core.recipe.*
+import app.pristinepage.data.db.SourceBlobRow
+import app.pristinepage.data.db.SourceRow
 import app.pristinepage.data.model.*
 import app.pristinepage.data.repository.*
 import app.pristinepage.image.decode.*
 import app.pristinepage.image.render.AppearanceEngine
+import app.pristinepage.image.render.DefaultRenderCoordinator
 import app.pristinepage.image.render.GeometryEngine
 import java.io.File
 import java.nio.file.Files
@@ -25,6 +28,8 @@ class RenderCoordinatorTest {
         val budget = ImageAllocationBudget(capacity)
         val info = SourceInspection("image/png", PixelSize(width, height), PixelSize(width, height), 1, null, "fixture-srgb-v1", "b".repeat(64))
         val binding = SourceBinding(info.sourcePixelHash, info.normalizedSize, info.conversionFingerprint)
+        private val blobId = SourceBlobId(UUID.randomUUID().toString())
+        private val byteHash = "9f64a747e1b97f131fabb6b447296c9b6f0201e79fb3c5356e6c77e89b6a806a"
         val file: File
         var loads = 0; var decodes = 0
         var lastDecoded: RgbImage? = null
@@ -36,20 +41,88 @@ class RenderCoordinatorTest {
             file = Files.createTempFile(parent.toPath(), "source-", ".bin").toFile().apply { writeBytes(byteArrayOf(1, 2, 3, 4)) }
         }
         fun request(recipe: Recipe = Recipe(geometry = GeometryRecipe.None(binding)), output: PixelSize = PixelSize(width, height)) = RenderRequest(id.value, binding.sourcePixelHash, page.value, 1, recipe, OutputSpec(output, RenderPurpose.PREVIEW), 5, null, FallbackPolicy.FAIL)
-        fun coordinator(dispatcher: CoroutineDispatcher): RenderCoordinator {
-            val type = try { Class.forName("app.pristinepage.image.render.DefaultRenderCoordinator") } catch (_: ClassNotFoundException) { throw AssertionError("Default FAIL render coordinator is absent") }
-            val source = CommittedSources { requested -> assertEquals(id, requested); loads++; beforeLoad(); CommittedSource(id, SourceBlobId(UUID.randomUUID().toString()), "9f64a747e1b97f131fabb6b447296c9b6f0201e79fb3c5356e6c77e89b6a806a", 4, info, file) }
-            val decoder = SourceDecoder(source, SourceFileDecoder { requested, hash ->
-                assertEquals(file, requested); decodes++; beforeDecode()
+        fun admitted() = ExportSourceBinding(
+            SourceRow(id.value, blobId.value, info.sourcePixelHash, width, height, info.exifOrientation,
+                info.conversionFingerprint, null, 1, "READY", 1),
+            SourceBlobRow(blobId.value, byteHash, 4, info.mime, width, height,
+                "sources/${blobId.value}/original.bin", "READY", 1, UUID.randomUUID().toString(), 1),
+        )
+        fun committed() = CommittedSource(id, blobId, byteHash, 4, info, file)
+        fun ordinarySources(value: () -> CommittedSource = ::committed) = CommittedSources { requested ->
+            assertEquals(id, requested); loads++; beforeLoad(); value()
+        }
+        fun coordinator(dispatcher: CoroutineDispatcher, sources: CommittedSources = ordinarySources()): DefaultRenderCoordinator {
+            val decoder = SourceDecoder(sources, SourceFileDecoder { requested, hash ->
+                assertEquals(file, requested); assertEquals(byteHash, hash); decodes++; beforeDecode()
                 val permit = DecodeAdmission(budget).admit(4, width.toLong(), height.toLong(), 1)
                 val image = RgbImage(width, height, width * 3, pixels).also { lastDecoded = it }
                 val result = DecodedSource(info, image, permit, hash)
                 try { afterDecode(); result } catch (e: Throwable) { result.close(); throw e }
             })
-            return type.getConstructor(SourceDecoder::class.java, GeometryEngine::class.java, AppearanceEngine::class.java, CoroutineDispatcher::class.java).newInstance(decoder, GeometryEngine(budget), AppearanceEngine(budget), dispatcher) as RenderCoordinator
+            return DefaultRenderCoordinator(decoder, GeometryEngine(budget), AppearanceEngine(budget), dispatcher)
         }
     }
     private fun neutrals(vararg v: Int) = ByteArray(v.size * 3) { v[it / 3].toByte() }
+
+    @Test fun producerRouteCannotFallBackToOrdinaryUnboundSourceRead() = runTest {
+        val f = Fixture()
+        val coordinator = f.coordinator(UnconfinedTestDispatcher(testScheduler))
+        val request = f.request().copy(output = OutputSpec(PixelSize(3, 2), RenderPurpose.EXPORT), generation = 0)
+        val expected = f.admitted()
+        // This fixture supports ordinary reads only. A lost bound port must never reuse ordinary render, even if its returned bytes would match.
+        coordinator.renderForProducer(request, expected).use {
+            assertSame(request, it.request)
+            assertEquals(RenderStatus.UNAVAILABLE, it.status)
+            assertNull(it.image)
+        }
+        assertEquals(0, f.loads)
+        assertEquals(0, f.decodes)
+        assertEquals(0L, f.budget.usedBytes)
+    }
+
+    @Test fun producerRouteConsumesTheBoundViewOnceAndTransfersTheWholeFinalOwner() = runTest {
+        val f = Fixture()
+        val expected = f.admitted()
+        val alternate = Files.createTempFile(f.file.parentFile.toPath(), "other-source-", ".bin").toFile().apply {
+            writeBytes(byteArrayOf(4, 3, 2, 1))
+        }
+        var boundLoads = 0
+        val ordinary = f.ordinarySources {
+            CommittedSource(f.id, f.committed().sourceBlobId,
+                "ee10da4aefe61a37df1dee937ca3221afa3b2351f9ea34edbbb769573c6785f7", 4, f.info, alternate)
+        }
+        val sources = object : CommittedSources by ordinary, ProducerCommittedSources {
+            override suspend fun loadForProducer(sourceId: SourceId, expected: ExportSourceBinding): CommittedSource {
+                assertEquals(f.id, sourceId)
+                assertSame(frozen, expected)
+                boundLoads++
+                return f.committed()
+            }
+
+            private val frozen = expected
+        }
+        val coordinator = f.coordinator(UnconfinedTestDispatcher(testScheduler), sources)
+        val recipe = Recipe(geometry = GeometryRecipe.None(f.binding, outputQuarterTurns = 1), binary = BinaryRecipe.GrayscaleV1)
+        val request = f.request(recipe, PixelSize(2, 3)).copy(output = OutputSpec(PixelSize(2, 3), RenderPurpose.EXPORT), generation = 0)
+        val result = coordinator.renderForProducer(request, expected)
+        val image = result.use {
+            assertSame(request, it.request)
+            assertEquals(RenderStatus.OK, it.status)
+            assertEquals(listOf("source_decode_v1", "geometry_none_v1", "none_v1", "grayscale_v1"), it.stages.map { stage -> stage.stageId })
+            // Clockwise permutation of the six input triples, then floor-weighted grayscale. Neither transform is identity.
+            val raster = checkNotNull(it.image)
+            assertEquals(PixelSize(2, 3), PixelSize(raster.width, raster.height))
+            assertArrayEquals(neutrals(10, 1, 13, 4, 16, 7), raster.toPackedByteArray())
+            assertThrows(IllegalStateException::class.java) { f.lastDecoded!!.toPackedByteArray() }
+            assertTrue(f.budget.usedBytes > 0)
+            raster
+        }
+        assertThrows(IllegalStateException::class.java) { image.toPackedByteArray() }
+        assertEquals(1, boundLoads)
+        assertEquals(0, f.loads)
+        assertEquals(1, f.decodes)
+        assertEquals(0L, f.budget.usedBytes)
+    }
 
     @Test fun sourceGeometryAppearanceComposeOnceAndTransferTheWholeFinalOwner() = runTest {
         val f = Fixture(); val r = f.request(Recipe(geometry = GeometryRecipe.None(f.binding, outputQuarterTurns = 1)), PixelSize(2, 3))
