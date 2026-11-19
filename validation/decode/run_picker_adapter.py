@@ -68,9 +68,22 @@ class PickerAdapterRun:
     def path(self, suffix):
         return self.raw / (self.prefix + "-" + suffix)
 
-    def save(self, path, value):
+    def save(self, path, value, *, durable=False):
         temporary = path.with_name(path.name + "." + self.generation + ".tmp")
-        temporary.write_text(json.dumps(value, indent=2) + "\n", encoding="utf-8")
+        text = json.dumps(value, indent=2) + "\n"
+        if durable:
+            # Shutdown evidence must reach the filesystem before the shared records advertise release. Flush the complete file, then request a same-volume write-through replacement on Windows.
+            with temporary.open("w", encoding="utf-8") as stream:
+                stream.write(text)
+                stream.flush()
+                os.fsync(stream.fileno())
+            replace = ctypes.WinDLL("kernel32", use_last_error=True).MoveFileExW
+            replace.argtypes = [wt.LPCWSTR, wt.LPCWSTR, wt.DWORD]
+            replace.restype = wt.BOOL
+            if not replace(str(temporary), str(path), 0x1 | 0x8):  # REPLACE_EXISTING | WRITE_THROUGH
+                raise ctypes.WinError(ctypes.get_last_error())
+            return
+        temporary.write_text(text, encoding="utf-8")
         os.replace(temporary, path)
 
     def evidence(self, path):
@@ -263,9 +276,18 @@ class PickerAdapterRun:
 
     def shutdown(self):
         self.lock.mkdir()
+        unlock = True
+        record_versions, slot_versions = [], []
         attempt_token = None
+        verified_anchor = None
         try:
+            slot = json.loads(self.slot.read_text())
+            assert slot["state"] == "released" or (
+                slot["state"] == "held" and slot.get("owner") == OWNER and slot.get("generation") == self.generation
+            ), "Shared allocation slot is not released or held by this exact generation"
             record = self.owned()
+            record_versions.append(record)
+            slot_versions.append(slot)
             identities = record["runtime_processes"]
             assert len(identities) == 2, "Persist partial-launch obligation; do not invent original process identities"
             row = self.exact(self.inventory())
@@ -274,10 +296,14 @@ class PickerAdapterRun:
             # Matching numeric PIDs do not prove the current row is the original runtime: Windows can reuse them. Refuse before publishing shutdown authorization or issuing quit; retain the original ownership/reservation for reconciliation.
             assert all(state and state["start"] == start and state["running"] for state, (_, start) in zip(states, identities)), {"expected": identities, "observed": states}
             attempt_token = str(uuid.uuid4())
-            record.update(shutdown_ready=True, evidence_saved=True, state="shutdown_ready", shutdown_processes=identities, cleanup_attempt={"owner": OWNER, "generation": self.generation, "token": attempt_token, "state": "running", "started": now()})
+            held_slot = {"owner": OWNER, "generation": self.generation, "state": "held", "operation": "P04 picker adapter shutdown", "acquired": now()}
+            slot_versions.append(held_slot)
+            self.save(self.slot, held_slot)
+            pre_shutdown = self.path("pre-shutdown.json")
+            self.save(pre_shutdown, {"generation": self.generation, "processes": states, "transcriptPrefix": self.evidence(self.transcript)}, durable=True)
+            record = dict(record, shutdown_ready=True, evidence_saved=True, state="shutdown_ready", shutdown_processes=identities, cleanup_attempt={"owner": OWNER, "generation": self.generation, "token": attempt_token, "state": "running", "started": now()})
+            record_versions.append(record)
             self.save(self.record, record)
-            self.save(self.slot, {"owner": OWNER, "generation": self.generation, "state": "held", "operation": "P04 picker adapter shutdown", "acquired": now()})
-            self.save(self.path("pre-shutdown.json"), {"generation": self.generation, "processes": states, "transcriptPrefix": self.evidence(self.transcript)})
             self.command([CONSOLE, "quit", "--index", "2"])
             deadline = time.monotonic() + 60
             while True:
@@ -285,36 +311,74 @@ class PickerAdapterRun:
                 row = self.exact(rows)
                 states = [self.process(pid) for pid, _ in identities]
                 exited = all(state is None or state["start"] != start or not state["running"] for state, (_, start) in zip(states, identities))
-                stopped = self.command([CONSOLE, "isrunning", "--index", "2"]).strip() == "stop"
-                if stopped and int(row[4]) == 0 and int(row[5]) <= 0 and int(row[6]) <= 0 and exited:
+                running_state = self.command([CONSOLE, "isrunning", "--index", "2"]).strip()
+                if running_state == "stop" and int(row[4]) == 0 and int(row[5]) <= 0 and int(row[6]) <= 0 and exited:
                     break
                 if time.monotonic() >= deadline:
                     raise RuntimeError("Owned shutdown unverified")
                 time.sleep(1)
-            record["cleanup_attempt"].update(state="completed", finished=now())
-            record.update(owner=None, state="stopped-released", reservedKiB=0, shutdown_verified=True, stopped=now())
-            self.save(self.record, record)
-            self.save(self.slot, {"owner": OWNER, "generation": self.generation, "state": "released", "released": now()})
-            self.save(self.path("shutdown.json"), {"generation": self.generation, "originalProcesses": identities, "after": states, "ownedShutdownVerified": True, "usageReleased": True, "list2": rows, "remainingRunning": [row[:2] for row in rows if int(row[4]) != 0 or int(row[5]) > 0 or int(row[6]) > 0], "storageDeleted": False})
-            files = [path for path in self.raw.glob(self.prefix + "-*") if path.suffix in (".txt", ".json", ".jsonl") and path.name != self.prefix + "-final-manifest.json"]
+            # The immutable receipt describes the evidence checkpoint, not a later ownership transition. Actual release is witnessed by both same-generation shared records.
+            shutdown_proof = self.path("shutdown.json")
+            self.save(shutdown_proof, {"generation": self.generation, "stage": "verified-before-release", "originalProcesses": identities, "after": states, "ownedShutdownVerified": True, "usageReleased": False, "list2": rows, "isrunning": running_state, "remainingRunning": [row[:2] for row in rows if int(row[4]) != 0 or int(row[5]) > 0 or int(row[6]) > 0], "storageDeleted": False}, durable=True)
+            # All command appends have closed, including isrunning. Flush the existing required transcript before hashing it; a failure must block manifest publication and release.
+            with self.transcript.open("r+b") as transcript:
+                os.fsync(transcript.fileno())
             manifest = self.path("final-manifest.json")
-            self.save(manifest, {"generation": self.generation, "runner": self.evidence(Path(__file__).resolve()), "evidence": [self.evidence(path) for path in sorted(files)], "recordSnapshot": record})
-            record["runtime_evidence"] = str(manifest)
-            self.save(self.record, record)
-            print(json.dumps({"generation": self.generation, "ownedShutdownVerified": True, "processes": states, "manifestSha256": sha(manifest)}), flush=True)
-        except BaseException:
-            record = json.loads(self.record.read_text())
-            if record.get("generation") == self.generation:
-                attempt = record.get("cleanup_attempt")
-                if attempt_token is not None and attempt and attempt.get("token") == attempt_token and attempt.get("owner") == OWNER and attempt.get("generation") == self.generation and attempt.get("state") == "running":
-                    # All synchronous subprocess calls have ended/unwound. End ONLY this matching cleanup attempt; preserve usage ownership, original identities/reservations and the unresolved shutdown obligation.
-                    attempt.update(state="failed", finished=now())
-                record.update(state="shutdown_failed", owner=OWNER, shutdown_verified=False)
-                self.save(self.record, record)
-                self.save(self.slot, {"owner": OWNER, "generation": self.generation, "state": "released-with-unresolved-shutdown", "released": now()})
+            required = sorted((pre_shutdown, shutdown_proof, self.transcript), key=lambda path: path.name)
+            excluded = {path.name for path in (*required, manifest)}
+            # Retain ancillary hashes as observed provenance, not as part of the flushed shutdown proof.
+            ancillary = sorted((path for path in self.raw.glob(self.prefix + "-*") if path.suffix in (".txt", ".json", ".jsonl") and path.name not in excluded), key=lambda path: path.name)
+            self.save(manifest, {"generation": self.generation, "stage": "verified-before-release", "runner": self.evidence(Path(__file__).resolve()), "evidence": [self.evidence(path) for path in required], "ancillaryEvidence": [self.evidence(path) for path in ancillary], "recordSnapshot": record}, durable=True)
+            manifest_sha = sha(manifest)
+            verified_anchor = str(manifest)
+
+            assert json.loads(self.record.read_text()) == record and json.loads(self.slot.read_text()) == held_slot, "Shutdown ownership drifted before release"
+            released_record = dict(record, owner=None, state="stopped-released", reservedKiB=0, shutdown_verified=True,
+                                   stopped=now(), runtime_evidence=verified_anchor,
+                                   cleanup_attempt=dict(record["cleanup_attempt"], state="completed", finished=now()))
+            released_slot = {"owner": OWNER, "generation": self.generation, "state": "released", "released": now()}
+            # Keep the slot held until the instance write succeeds. Remember the would-be values before writing: a failed write can have taken effect.
+            record_versions.append(released_record)
+            self.save(self.record, released_record)
+            assert json.loads(self.slot.read_text()) == held_slot, "Shutdown slot drifted before release"
+            slot_versions.append(released_slot)
+            self.save(self.slot, released_slot)
+            assert json.loads(self.record.read_text()) == released_record and json.loads(self.slot.read_text()) == released_slot, "Shutdown release read-back mismatch"
+        except BaseException as primary:
+            if record_versions:
+                # Reconcile each record independently. Only the initially admitted snapshot or this attempt's exact intended writes can be replaced; a newer owner must survive even if reconciliation of the other record is possible.
+                errors = []
+                blocked = False
+                for path, versions, label in ((self.slot, slot_versions, "slot"), (self.record, record_versions, "instance")):
+                    try:
+                        current = json.loads(path.read_text())
+                        if current not in versions:
+                            raise RuntimeError(f"{label} no longer matches an admitted shutdown snapshot")
+                        if label == "slot":
+                            failed = {"owner": OWNER, "generation": self.generation, "state": "released-with-unresolved-shutdown", "released": now()}
+                        else:
+                            failed = dict(current, state="shutdown_failed", owner=OWNER, shutdown_verified=False,
+                                          reservedKiB=record_versions[0]["reservedKiB"])
+                            if verified_anchor is not None:
+                                failed["runtime_evidence"] = verified_anchor
+                            attempt = current.get("cleanup_attempt")
+                            if attempt_token is not None and attempt and attempt.get("token") == attempt_token and attempt.get("owner") == OWNER and attempt.get("generation") == self.generation:
+                                failed["cleanup_attempt"] = dict(attempt, state="failed", finished=now())
+                        self.save(path, failed)
+                        if json.loads(path.read_text()) != failed:
+                            raise RuntimeError(f"{label} blocker read-back mismatch")
+                        blocked = True
+                    except BaseException as exc:
+                        errors.append(f"{label}: {exc!r}")
+                if errors:
+                    # If neither allocator-visible blocker can be confirmed, fail closed by retaining the existing allocation lock for coordinator reconciliation.
+                    unlock = blocked
+                    raise RuntimeError(f"Shutdown reconciliation is incomplete (allocation lock retained: {not unlock}): {'; '.join(errors)}") from primary
             raise
         finally:
-            self.lock.rmdir()
+            if unlock:
+                self.lock.rmdir()
+        print(json.dumps({"generation": self.generation, "ownedShutdownVerified": True, "usageReleased": True, "processes": states, "manifestSha256": manifest_sha}), flush=True)
 
     def verify_inputs(self):
         """Read-only identity checks must finish before a claim or emulator mutation, including callers that do not run the adapter instrumentation."""

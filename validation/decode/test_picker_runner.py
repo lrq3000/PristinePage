@@ -35,7 +35,7 @@ class FailedVerification(runner.PickerAdapterRun):
         # Do not call real initialization: it inspects the worktree and loads an artifact record. Only actual shutdown/ownership/error bookkeeping logic is under test.
         self.generation = "synthetic-generation"
         self.record = MemoryPath({"owner": runner.OWNER, "generation": self.generation, "keep_running": False, "handoff_to": None, "runtime_processes": [[11, 101], [22, 202]], "cleanup_attempt": None, "reservedKiB": 4194304})
-        self.slot = MemoryPath()
+        self.slot = MemoryPath({"state": "released", "owner": runner.OWNER, "generation": self.generation})
         self.transcript = MemoryPath()
         self.lock = MemoryLock()
         self.quit_finished = False
@@ -60,7 +60,7 @@ class FailedVerification(runner.PickerAdapterRun):
     def evidence(self, path):
         return {"path": "synthetic-retained-transcript", "bytes": 0, "sha256": "a" * 64}
 
-    def save(self, path, value):
+    def save(self, path, value, *, durable=False):
         path.value = json.loads(json.dumps(value))
 
 
