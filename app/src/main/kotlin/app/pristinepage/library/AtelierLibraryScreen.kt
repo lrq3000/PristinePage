@@ -61,7 +61,7 @@ import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.launch
 
-@OptIn(ExperimentalMaterial3Api::class)
+@OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
 @Composable internal fun AtelierLibraryScreen(
     session: LibrarySession,
     preferences: AtelierPreferences,
@@ -69,6 +69,7 @@ import kotlinx.coroutines.launch
     loadThumbnail: suspend (DocumentSummary, DocumentPage) -> RenderedPreviewBitmap,
     onBatch: (DocumentOverview) -> Unit = {},
     onSelectPages: (DocumentOverview, PageId) -> Unit = { album, _ -> onBatch(album) },
+    onExport: (DocumentOverview) -> Unit = {},
     batchUndo: UndoId? = null,
     undoBatch: () -> Unit = {},
     closeBatchNotice: () -> Unit = {},
@@ -208,10 +209,16 @@ import kotlinx.coroutines.launch
             }
             HorizontalDivider(color = AtelierStyle.divider)
             Column(Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp)) {
-                if (overview != null && overview.pages.isNotEmpty()) TextButton(
-                    onClick = { onBatch(overview) }, enabled = canAcquire,
-                    modifier = Modifier.heightIn(min = AtelierStyle.touchTarget).testTag("atelier-batch-select"),
-                ) { Text(stringResource(R.string.atelier_batch_select)) }
+                if (overview != null && overview.pages.isNotEmpty()) FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    TextButton(onClick = { onBatch(overview) }, enabled = canAcquire,
+                        modifier = Modifier.heightIn(min = AtelierStyle.touchTarget).testTag("atelier-batch-select")) {
+                        Text(stringResource(R.string.atelier_batch_select))
+                    }
+                    OutlinedButton(onClick = { onExport(overview) }, enabled = canAcquire,
+                        modifier = Modifier.heightIn(min = AtelierStyle.touchTarget).testTag("album-export-all")) {
+                        Text(stringResource(R.string.album_export_title))
+                    }
+                }
                 Button(onClick = {
                     val album = overview?.document
                      if (openAtelier != null && album != null) openAtelier(album.title, album) else sheet = "sources"

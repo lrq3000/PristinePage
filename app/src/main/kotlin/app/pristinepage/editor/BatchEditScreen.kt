@@ -27,6 +27,8 @@ import app.pristinepage.R
 import app.pristinepage.core.geometry.GeometrySizing
 import app.pristinepage.core.pipeline.*
 import app.pristinepage.data.model.EditablePage
+import app.pristinepage.data.model.DocumentOverview
+import app.pristinepage.data.model.PageId
 import app.pristinepage.image.preview.RenderedPreviewBitmap
 import app.pristinepage.image.preview.RenderedPreviewBitmapLoader
 import app.pristinepage.library.errorText
@@ -38,7 +40,8 @@ import kotlinx.coroutines.sync.withPermit
 import kotlin.math.roundToInt
 
 @OptIn(ExperimentalLayoutApi::class)
-@Composable internal fun BatchEditScreen(host: BatchHost, owner: BatchEditViewModel, openGraph: suspend () -> ApplicationImports) {
+@Composable internal fun BatchEditScreen(host: BatchHost, owner: BatchEditViewModel, openGraph: suspend () -> ApplicationImports,
+    onExport: (DocumentOverview, Set<PageId>) -> Unit = { _, _ -> }) {
     val draft = owner.draft
     val selected = draft?.selection.orEmpty()
     val recipes = draft?.recipes.orEmpty()
@@ -120,11 +123,17 @@ import kotlin.math.roundToInt
             }
         }
         FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+            OutlinedButton(onClick = { host.album?.let { onExport(it, selected) } },
+                enabled = enabled && selected.isNotEmpty() && draft?.dirty == false,
+                modifier = Modifier.heightIn(min = 48.dp).testTag("album-export-selected")) {
+                Text(stringResource(R.string.album_export_selected))
+            }
             TextButton({ owner.edit { undo(); null } }, enabled = enabled && draft?.canUndo == true) { Text(stringResource(R.string.atelier_batch_undo)) }
             TextButton({ owner.edit { redo(); null } }, enabled = enabled && draft?.canRedo == true) { Text(stringResource(R.string.atelier_batch_redo)) }
             TextButton(::exit, enabled = !host.saving) { Text(stringResource(if (host.uncertain) R.string.atelier_batch_close else R.string.atelier_batch_cancel)) }
             Button(owner::done, enabled = enabled, modifier = Modifier.testTag("atelier-batch-done")) { Text(stringResource(R.string.atelier_batch_done)) }
         }
+        if (draft?.dirty == true) Text(stringResource(R.string.album_export_batch_unsaved), style = MaterialTheme.typography.bodySmall)
     }
     if (discard) AlertDialog(
         onDismissRequest = { discard = false },

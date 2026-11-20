@@ -46,6 +46,8 @@ import app.pristinepage.library.LibraryEvent
 import app.pristinepage.library.errorText
 import app.pristinepage.editor.BatchEditScreen
 import app.pristinepage.editor.BatchEditViewModel
+import app.pristinepage.export.AlbumExportDialog
+import app.pristinepage.export.AlbumExportViewModel
 import androidx.compose.runtime.LaunchedEffect
 import app.pristinepage.library.ApplicationLibraryActions
 import app.pristinepage.library.ImportLibraryViewModel
@@ -111,6 +113,12 @@ class MainActivity : ComponentActivity() {
                 return BatchEditViewModel(services::imports) as T
             }
         })[BatchEditViewModel::class.java]
+        val exportOwner = ViewModelProvider(this, object : ViewModelProvider.Factory {
+            @Suppress("UNCHECKED_CAST") override fun <T : ViewModel> create(modelClass: Class<T>): T {
+                require(modelClass == AlbumExportViewModel::class.java)
+                return AlbumExportViewModel(app, services::imports) as T
+            }
+        })[AlbumExportViewModel::class.java]
         val acquisition = ViewModelProvider(this, object : ViewModelProvider.Factory {
             @Suppress("UNCHECKED_CAST") override fun <T : ViewModel> create(modelClass: Class<T>): T {
                 require(modelClass == AtelierCaptureViewModel::class.java)
@@ -150,7 +158,7 @@ class MainActivity : ComponentActivity() {
             }
             if (acquiring.open) AtelierCaptureScreen(acquiring, acquisition, activityResultRegistry, settings.showCameraGrid, window, loadOriginal,
                 loadQueueTile = { source -> services.imports().originalPreview(source, longEdge = 224) })
-            else if (batch.album != null) BatchEditScreen(batch, batchOwner, services::imports)
+            else if (batch.album != null) BatchEditScreen(batch, batchOwner, services::imports) { album, pages -> exportOwner.review(album, pages) }
             else if (host.identity == null && camera != null) key(camera.batchId) {
                 CaptureScreen(camera, { retained.accept(LibraryEvent.CancelImport) }, settings.showCameraGrid) { still ->
                     retained.submitCapture(LibraryEvent.PhotoResult(camera, still))
@@ -167,6 +175,7 @@ class MainActivity : ComponentActivity() {
                 }
                 AtelierLibraryScreen(retained, app.atelierPreferences, { services.imports().store.catalog.load(it) }, loadThumbnail,
                      onBatch = { batchOwner.open(it) }, onSelectPages = batchOwner::open,
+                     onExport = { exportOwner.review(it, null) },
                      batchUndo = batch.undo?.takeIf { batch.savedDocument == library.selectedId },
                      undoBatch = batchOwner::undoSaved, closeBatchNotice = batchOwner::clearNotice,
                      batchBusy = batch.saving, batchError = batch.error?.takeIf { batch.savedDocument == library.selectedId },
@@ -217,6 +226,7 @@ class MainActivity : ComponentActivity() {
                     }
                 }
             }
+            AlbumExportDialog(exportOwner)
         } }
     }
 
