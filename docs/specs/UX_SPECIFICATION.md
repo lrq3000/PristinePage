@@ -1,5 +1,7 @@
 # Interaction, accessibility and algorithm comparison
 
+**Current Android design:** [Atelier](ATELIER.md) supersedes this document's older screen hierarchy and wireframe, including Home, mixed acquisition, the guided editor and the reopened-page ribbon. Continue to apply the behavior and quality requirements below where they do not conflict; the existing manual midpoint curve remains a separate algorithm from true cubic Bézier. Use the [Atelier design kit](../design/atelier/v1/README.md) for all new UI.
+
 ## Navigation and primary journeys
 
 Use four destinations: Library → Capture/Import → Page editor → Export review. Multi-page document overview is part of the editor, not a separate account/cloud workspace. The first run offers Take photo and Import photos; permission refusal still leaves import and library available. Avoid an onboarding wall or model download prerequisite.

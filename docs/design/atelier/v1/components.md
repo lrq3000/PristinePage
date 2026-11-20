@@ -1,0 +1,23 @@
+# Atelier v1 — Compose component patterns
+
+## Screen frame and actions
+
+Use a dark edge-to-edge root. Place app content inside safe-drawing insets, consume keyboard inset once on editable sheets, and do not count OS navigation space as usable control height. Header: Back on the leading side when nested, a title + optional muted context, one short trailing action. Keep text scalable; wrap or move nonprimary actions at narrow widths. Home uses the small `PristinePage` eyebrow over `Mes scans`. Only primary actions get mint fill (`primary` / `onPrimary`); transparent chrome and muted labels leave image and intent in focus. Use logical start/end except where the approved left/center/right physical positions on the camera and bottom nav matter in the French reference; mirror navigation affordances appropriately in RTL.
+
+**Home bar:** three equally weighted slots, current Albums label on the leading side, mint 58dp square-plus at center with 19dp corners, gear at trailing side. The Albums label is not a button that goes nowhere. **Camera:** three slots in the same order as the reference: 3×3 grid Importer, circular off-white shutter, Terminer/check. Shutter is visually and semantically distinct from `+`. Never use shape or tint alone to disambiguate icons.
+
+## Catalog cards and page grid
+
+Album cards use `surface`, light tone separation and restrained borders, a leading overlapping stack of up to three page thumbnails, title/date/count and trailing chevron. The entire card is one accessible action, not three thumbnail buttons. Keep thumbnail stacks quiet and avoid costly animation. The album opens in a two-column phone grid, more columns only when requested width allows useful tile width. Use ordinal text outside the image, no important text in thumbnail pixels. Lazy items have stable IDs; exact preview keys and bounded per-item requests ensure reused view slots cannot display a former page. For large font use more height or fewer columns before hiding an action.
+
+## Viewport, geometry and ribbon
+
+Use `canvas` behind the image. The viewport gets remaining space on normal screens, aspect-correct Fit, and a clearly labeled alternate view. Never bind image scale to button height. Constrained screens can scroll the tool panel or move actions below it while preserving a usable viewport; sheets must scroll independently. The visual shape anchor is small, with a larger 48dp hit region; guard gesture conflicts with resize/zoom or offer selection and explicit direction controls where targets overlap. Draw a dark under-stroke beneath the mint geometry line on both light and dark photos. Selection adds focus/handle shape, not just a hue shift.
+
+Ribbon order: Cadre (frame), Rotation (quarter-turn arrow), Correction (spark), Original (eye), Infos (information). Keep the short text visible under each icon, use a `selectedSurface` background and selected semantics, and let the row scroll horizontally when the font grows. The carousel uses the same selection states; visible cards and previous/next buttons are separate focusable actions. Disable an impossible action with a succinct reason; do not let disabled-looking cards imply a functioning provider. Wizard replaces the ribbon with a simple three-step indicator plus a single main button; announce the current step and distinguish completion with number/text as well as color.
+
+## Sheets, feedback and accessibility
+
+Bottom sheets are modal, with visible heading, close, structured choices and focus returned to the invoking control. Use `divider` for passive separation, `controlOutline` or an equivalent stronger edge where the boundary itself communicates interactivity, and `focus` for focus (do not use the dim divider as a focus ring). Use `textMuted` for readable metadata; preserve text/selection semantics in error and low emphasis states. Alerts must say what happened, whether prior work survived and what action is available. A snackbar is suitable after confirmed save, but an error that blocks progress needs persistent text and a recovery action. Loading placeholders must not represent success or introduce false content. Respect reduced motion/animator scale; never animate actual image processing as if a finished result were present.
+
+All actions have at least 48dp interactive area and unique localized descriptions. Selected, busy, previous, unavailable and failed states are exposed to TalkBack. Test a narrow layout and large text, valid/invalid states, keyboard focus, press and dismissal; test geometry editing and carousel navigation without dragging/swiping. Status messages never expose private paths or provider identifiers.

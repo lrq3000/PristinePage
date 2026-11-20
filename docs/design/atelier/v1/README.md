@@ -1,0 +1,9 @@
+# Atelier design kit 1.0.0
+
+Use these artifacts together: [Android interaction contract](../../../specs/ATELIER.md), [visual reference (direction C)](../../../superpowers/mockups/first-major-redesign.html), [tokens](tokens.json), [component patterns](components.md), and [branding](../../brand/README.md). The approved interface is dark, compact and image-first; the desktop frame, demo artwork, theme switch and fake providers are not app assets.
+
+The JSON is the versioned design authority. Android uses semantic Compose roles (with stable, offline values) and tests their alignment with these tokens. Geometry/CameraX use their own input, render and lifecycle policies; style cannot change what is saved or switch methods. Units are dp, sp and milliseconds as indicated. Leave platform font scaling, localized labels and system insets enabled. Use Android's default sans; no remote fonts, theme editions or dynamic recoloring are required.
+
+When adding a feature, name the user journey and primary action; choose an existing component pattern first, and add a new component only if it carries a distinct semantic role. Document the empty, busy, ready, failing and unavailable states, the Back behavior, and the equivalent action without a gesture. Keep the image the largest meaningful region on detail screens, especially on a 360dp-wide phone. Verify actual overflow, dark-theme contrast and focus with a native build. Change semantic values/patterns in a new kit revision and update Compose and examples together; do not silently alter the v1 reference.
+
+From the repository root, run `python -B validation/ui/verify_atelier_kit.py` to check the palette against the approved mockup, representative foreground/background contrast, internal links, and the standalone icon. This structural check does not replace Compose screenshots, Android accessibility tests or device evaluation.
