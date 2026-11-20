@@ -28,9 +28,18 @@ while read -r local_ref oid remote_ref remote_oid; do
 
     # Do not trust remote-tracking refs or exclude remote_oid: only the two
     # exact, previously verified public trees are grandfathered. Never log a private email.
-    emails=$(git log --format='%ae%n%ce' "$oid" "^$public_main" "^$public_design" --) ||
+    identities=$(git log --format='author:%ae%ncommitter:%ce' "$oid" "^$public_main" "^$public_design" --) ||
         deny "commit ancestry could not be inspected"
-    if [ -n "$emails" ] && printf '%s\n' "$emails" | grep -Fvxq -- "$public_email"; then
-        deny "a commit uses a non-approved author or committer identity"
+    if [ -n "$identities" ]; then
+        # Prefixes distinguish a blank address from the absence of outbound commits.
+        # An exact shell match avoids making an external matcher's errors look like success.
+        while IFS= read -r identity; do
+            case "$identity" in
+                "author:$public_email"|"committer:$public_email") ;;
+                *) deny "a commit uses a non-approved author or committer identity" ;;
+            esac
+        done <<EOF
+$identities
+EOF
     fi
 done
