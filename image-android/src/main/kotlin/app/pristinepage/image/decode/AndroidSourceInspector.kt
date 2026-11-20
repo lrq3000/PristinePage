@@ -15,6 +15,7 @@ import app.pristinepage.data.model.SourceInspection
 import java.io.File
 import java.io.FileNotFoundException
 import java.io.IOException
+import java.nio.ByteBuffer
 import java.security.MessageDigest
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlinx.coroutines.CancellationException
@@ -48,7 +49,7 @@ class AndroidSourceInspector @JvmOverloads constructor(private val budget: Image
                 val parserBytes = sourceParserBytes(file.length())
                 val header = budget.reserve(parserBytes).use {
                     val parsed = SourceContainer.read(file) { context.ensureActive() }
-                    verifyBytes(file, expectedByteSha256) { context.ensureActive() }
+                    if (parsed.jpegProjection == null) verifyBytes(file, expectedByteSha256) { context.ensureActive() }
                     parsed
                 }
                 val orientation = header.exifOrientation
@@ -56,13 +57,16 @@ class AndroidSourceInspector @JvmOverloads constructor(private val budget: Image
                 val permit = DecodeAdmission(budget).admit(file.length(), header.size.width.toLong(), header.size.height.toLong(), orientation)
                 var transferred = false
                 try {
-                    val bitmap = decodeStrict(file, header, permit) { context.ensureActive() }
+                    val codecSource = header.jpegProjection?.let { view ->
+                        ImageDecoder.createSource(ByteBuffer.wrap(view.read(file, expectedByteSha256) { context.ensureActive() }))
+                    } ?: ImageDecoder.createSource(file)
+                    val bitmap = decodeStrict(codecSource, header, permit) { context.ensureActive() }
                     try {
                         context.ensureActive()
                         // ImageDecoder applies EXIF itself; native asymmetric1..8 fixtures must verify this. Do NOT pass the stored EXIF to CanonicalSourcePixels a second time.
                         val image = CanonicalSourcePixels.normalize(bitmap.width, bitmap.height, 1, { y, row -> bitmap.getPixels(row, 0, bitmap.width, 0, y, bitmap.width, 1) }) { context.ensureActive() }
                         try {
-                            val fingerprint = SourceDecodePolicy.fingerprint(Build.VERSION.SDK_INT, Build.FINGERPRINT)
+                            val fingerprint = SourceDecodePolicy.fingerprint(Build.VERSION.SDK_INT, Build.FINGERPRINT, header.jpegProjection != null)
                             val hash = CanonicalSourcePixels.hash(image, fingerprint) { context.ensureActive() }
                             val inspection = SourceInspection(header.mime, header.size, permit.size, orientation, null, fingerprint, hash)
                             context.ensureActive()
@@ -81,9 +85,9 @@ class AndroidSourceInspector @JvmOverloads constructor(private val budget: Image
     }
 
     @TargetApi(28)
-    private fun decodeStrict(file: File, header: EncodedSourceHeader, permit: DecodePermit, checkpoint: () -> Unit): Bitmap {
+    private fun decodeStrict(source: ImageDecoder.Source, header: EncodedSourceHeader, permit: DecodePermit, checkpoint: () -> Unit): Bitmap {
         val bitmap = try {
-            ImageDecoder.decodeBitmap(ImageDecoder.createSource(file)) { decoder, info, _ ->
+            ImageDecoder.decodeBitmap(source) { decoder, info, _ ->
                 checkpoint()
                 if (info.isAnimated || info.mimeType != header.mime) refuse(OperationErrorCode.UNSUPPORTED_FORMAT, "source_codec_format_unsupported")
                 if (info.size.width != permit.size.width || info.size.height != permit.size.height) refuse(OperationErrorCode.INVALID_INPUT, "source_decode_dimension_mismatch")
@@ -125,14 +129,17 @@ class AndroidSourceInspector @JvmOverloads constructor(private val budget: Image
 
 /** The strict normalizer issues only this conversion version and currently records no embedded profile. */
 internal object SourceDecodePolicy {
-    fun fingerprint(sdk: Int, build: String): String {
+    fun fingerprint(sdk: Int, build: String, projectedJpeg: Boolean = false): String {
         val digest = MessageDigest.getInstance("SHA-256").digest(build.toByteArray(Charsets.UTF_8))
         val prefix = digest.take(8).joinToString("") { "%02x".format(it.toInt() and 255) }
-        return "android-imagedecoder-v2/api$sdk/$prefix/srgb-straight-white-exif-v1"
+        val base = "android-imagedecoder-v2/api$sdk/$prefix/srgb-straight-white-exif-v1"
+        return if (projectedJpeg) "$base/jpeg-camera-view-v1" else base
     }
 
     fun requireReproducible(inspection: SourceInspection, sdk: Int, build: String) {
-        if (inspection.conversionFingerprint != fingerprint(sdk, build)) {
+        if (inspection.conversionFingerprint != fingerprint(sdk, build) &&
+            (inspection.mime != "image/jpeg" || inspection.conversionFingerprint != fingerprint(sdk, build, projectedJpeg = true))
+        ) {
             throw RepositoryFailure(OperationError(OperationErrorCode.UNSUPPORTED_VERSION, false, "source_conversion_unavailable", null))
         }
         if (inspection.profileSha256 != null) {

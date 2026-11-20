@@ -1,6 +1,7 @@
 package app.pristinepage.image
 
 import app.pristinepage.core.pipeline.PixelSize
+import app.pristinepage.image.decode.SourceContainer
 import app.pristinepage.data.model.OperationErrorCode
 import app.pristinepage.data.model.RepositoryFailure
 import java.io.ByteArrayOutputStream
@@ -10,6 +11,7 @@ import java.lang.reflect.InvocationTargetException
 import java.nio.file.Files
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
+import java.security.MessageDigest
 import java.util.zip.CRC32
 import org.junit.Assert.*
 import org.junit.Test
@@ -98,6 +100,81 @@ class SourceContainerTest {
             val tiff = ByteBuffer.allocate(26).order(ByteOrder.LITTLE_ENDIAN).put('I'.code.toByte()).put('I'.code.toByte()).putShort(42).putInt(8).putShort(1).putShort(0x112).putShort(type.toShort()).putInt(count).putInt(8).putInt(0).array()
             reject(OperationErrorCode.INVALID_INPUT, jpeg(extra = segment(0xe1, "Exif\u0000\u0000".toByteArray() + tiff)))
         }
+    }
+
+    @Test fun jpegTreatsZeroOrientationAsUnspecified() {
+        val exif = ByteBuffer.allocate(26).order(ByteOrder.BIG_ENDIAN).putShort(0x4d4d).putShort(42).putInt(8)
+            .putShort(1).putShort(0x112).putShort(3).putInt(1).putInt(0).putInt(0).array()
+        val header = read(jpeg(extra = segment(0xe1, "Exif\u0000\u0000".toByteArray() + exif)))
+        assertEquals(1, get(header, "getExifOrientation"))
+    }
+
+    @Test fun cameraJpegWithAuxiliaryTagsAndOpaqueSuffixKeepsItsPrimaryOrientation() {
+        val header = read(compatJpeg(6, ByteArray(5420) { if (it % 5 == 0) 42 else 0 }))
+        assertEquals(6, get(header, "getExifOrientation"))
+        assertEquals(PixelSize(3, 2), get(header, "getSize"))
+    }
+
+    @Test fun compatibilityDoesNotAcceptLargeTrailersOrSecondaryImages() {
+        reject(OperationErrorCode.RESOURCE_LIMIT, compatJpeg(1, ByteArray(65537)))
+        reject(OperationErrorCode.UNSUPPORTED_FORMAT, compatJpeg(1, byteArrayOf(0, -1, -40, -1, -39)))
+        reject(OperationErrorCode.UNSUPPORTED_FORMAT, compatJpeg(1, byteArrayOf(0, 0, 0, 24) + "ftyp".toByteArray()))
+    }
+
+    @Test fun compatibilityDoesNotTreatAnAppendedRiffContainerAsVendorPadding() {
+        val avi = "RIFF".toByteArray() + byteArrayOf(4, 0, 0, 0) + "AVI ".toByteArray()
+        reject(OperationErrorCode.UNSUPPORTED_FORMAT, compatJpeg(0, byteArrayOf(0, 0) + avi))
+    }
+
+    @Test fun repeatedMakerNotesMustAllUseTheOpaqueUndefinedType() {
+        reject(OperationErrorCode.INVALID_INPUT, compatJpeg(6, byteArrayOf(0), firstMakerNoteType = 1))
+    }
+
+    @Test fun compatibilityDoesNotSkipDeclaredExifColor() {
+        reject(OperationErrorCode.UNSUPPORTED_FORMAT, compatJpeg(0, byteArrayOf(0), color = 2))
+    }
+
+    @Test fun codecViewReplacesExifAndAuthenticatesEvenTheUnsubmittedTrailer() {
+        val original = compatJpeg(6, byteArrayOf(42, 0, 42))
+        val root = File(System.getProperty("user.dir"), "build/test-source-containers").apply { mkdirs() }
+        val file = Files.createTempFile(root.toPath(), "jpeg-compat-", ".jpg").toFile().apply { writeBytes(original) }
+        val info = SourceContainer.read(file) {}
+        val view = requireNotNull(info.jpegProjection)
+        val hash = MessageDigest.getInstance("SHA-256").digest(original).joinToString("") { "%02x".format(it.toInt() and 255) }
+        val codecInput = view.read(file, hash) {}
+        assertArrayEquals(original, file.readBytes())
+        assertArrayEquals(byteArrayOf(-1, -39), codecInput.takeLast(2).toByteArray())
+        val syntheticView = Files.createTempFile(root.toPath(), "projected-", ".jpg").toFile().apply { writeBytes(codecInput) }
+        val checked = SourceContainer.read(syntheticView) {}
+        assertEquals(6, checked.exifOrientation)
+        assertNull("The platform must receive ordinary EXIF, never the relaxed input", checked.jpegProjection)
+        assertTrue(codecInput.size < original.size)
+        val changed = original.clone().apply { this[lastIndex] = 41 }
+        file.writeBytes(changed)
+        val failure = assertThrows(RepositoryFailure::class.java) { view.read(file, hash) {} }
+        assertEquals(OperationErrorCode.INTEGRITY_FAILED, failure.error.code)
+    }
+
+    @Test fun codecViewCanDiscardTheLargestLegalApp1WithoutGrowingItsScratchBuffer() {
+        val tiff = ByteBuffer.allocate(65527).order(ByteOrder.BIG_ENDIAN).putShort(0x4d4d).putShort(42).putInt(8)
+            .putShort(1).putShort(0x112).putShort(3).putInt(1).putInt(0).putInt(0).array()
+        val original = jpeg(extra = segment(0xe1, "Exif\u0000\u0000".toByteArray() + tiff))
+        val root = File(System.getProperty("user.dir"), "build/test-source-containers").apply { mkdirs() }
+        val file = Files.createTempFile(root.toPath(), "jpeg-max-app1-", ".jpg").toFile().apply { writeBytes(original) }
+        val hash = MessageDigest.getInstance("SHA-256").digest(original).joinToString("") { "%02x".format(it.toInt() and 255) }
+        val view = requireNotNull(SourceContainer.read(file) {}.jpegProjection)
+        assertEquals(1, get(read(view.read(file, hash) {}), "getExifOrientation"))
+        assertArrayEquals(original, file.readBytes())
+    }
+
+    private fun compatJpeg(orientation: Int, trailer: ByteArray, color: Int = 1, firstMakerNoteType: Int = 7): ByteArray {
+        val tiff = ByteBuffer.allocate(92).order(ByteOrder.BIG_ENDIAN).putShort(0x4d4d).putShort(42).putInt(8)
+        tiff.putShort(2).putShort(0x112).putShort(3).putInt(1).putShort(orientation.toShort()).putShort(0)
+        tiff.putShort(0x8769.toShort()).putShort(4).putInt(1).putInt(38).putInt(0)
+        tiff.putShort(4).putShort(0x10d).putShort(7).putInt(0).putInt(0)
+        repeat(2) { tiff.putShort(0x927c.toShort()).putShort(if (it == 0) firstMakerNoteType.toShort() else 7).putInt(1).putInt(0x2a000000) }
+        tiff.putShort(0xa001.toShort()).putShort(3).putInt(1).putShort(color.toShort()).putShort(0).putInt(0)
+        return jpeg(extra = segment(0xe1, "Exif\u0000\u0000".toByteArray() + tiff.array())) + trailer
     }
 
     @Test fun ordinaryLowDepthGrayscaleAndIndexedPngAreAdmittedForStrictDecode() {

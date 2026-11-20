@@ -8,7 +8,13 @@ import app.pristinepage.data.model.RepositoryFailure
 object TiffOrientation {
     fun read(bytes: ByteArray, checkpoint: () -> Unit): Int = Reader(bytes, checkpoint).read()
 
-    private class Reader(private val bytes: ByteArray, private val checkpoint: () -> Unit) {
+    /** These narrow exceptions are only safe when the complete APP1 is replaced before native decode. */
+    internal fun readCameraJpeg(bytes: ByteArray, checkpoint: () -> Unit): Pair<Int, Boolean> {
+        val reader = Reader(bytes, checkpoint, cameraJpeg = true)
+        return reader.read() to reader.needsProjection
+    }
+
+    private class Reader(private val bytes: ByteArray, private val checkpoint: () -> Unit, private val cameraJpeg: Boolean = false) {
         private val base = if (bytes.size >= 6 && bytes.copyOfRange(0, 6).contentEquals("Exif\u0000\u0000".toByteArray())) 6 else 0
         private val length = bytes.size - base
         private var little = false
@@ -16,6 +22,8 @@ object TiffOrientation {
         private var entries = 0
         private var charged = 0L
         private var orientation = 1
+        var needsProjection = false
+            private set
 
         fun read(): Int {
             checkpoint()
@@ -42,13 +50,25 @@ object TiffOrientation {
             entries += count
             range(offset + 2, count.toLong() * 12 + 4)
             val tags = HashSet<Int>()
+            var firstMakerNoteIsOpaque = false
             for (i in 0 until count) {
                 checkpoint()
                 val entry = (offset + 2 + i * 12L).toInt()
                 val tag = u16(entry)
                 val type = u16(entry + 2)
                 val components = u32(entry + 4)
-                if (!tags.add(tag) || type !in 1..13 || components == 0L) invalid()
+                val first = tags.add(tag)
+                if (first && tag == 0x927c) firstMakerNoteIsOpaque = type == 7
+                if (!first) {
+                    if (!cameraJpeg || primary || tag != 0x927c || type != 7 || !firstMakerNoteIsOpaque) invalid()
+                    needsProjection = true
+                }
+                if (type !in 1..13) invalid()
+                if (components == 0L) {
+                    if (!cameraJpeg || primary || tag != 0x010d || type != 7) invalid()
+                    needsProjection = true
+                    continue // An empty optional field has no payload or pointer.
+                }
                 val byteCount = components * TYPE_BYTES[type] // uint32 * at-most8 is safe in Long.
                 val value = if (byteCount <= 4) (entry + 8).toLong() else u32(entry + 8)
                 range(value, byteCount)
@@ -58,8 +78,10 @@ object TiffOrientation {
                     0x112 -> {
                         if (type != 3 || components != 1L) invalid()
                         val candidate = u16(value.toInt())
-                        if (candidate !in 1..8) invalid()
-                        if (primary) orientation = candidate
+                        if (candidate !in 1..8) {
+                            if (!cameraJpeg || candidate != 0) invalid()
+                            needsProjection = true // Undefined camera orientation means the sensor raster as stored.
+                        } else if (primary) orientation = candidate
                     }
                     0xa001 -> {
                         if (type != 3 || components != 1L) invalid()

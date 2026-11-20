@@ -8,6 +8,8 @@ import app.pristinepage.data.model.*
 import app.pristinepage.image.decode.ImageAllocationBudget
 import java.io.File
 import java.lang.reflect.InvocationTargetException
+import java.nio.ByteBuffer
+import java.nio.ByteOrder
 import java.util.UUID
 import app.pristinepage.image.EncodedImageFixtures.be
 import app.pristinepage.image.EncodedImageFixtures.chunk
@@ -71,11 +73,53 @@ class OrientationDecodeTest {
 
     @Test fun invalidExifAndTruncatedBytesRefuseWithoutLeakingTrackedMemory() = runBlocking {
         val budget = ImageAllocationBudget(32L * 1024 * 1024); val service = inspector(budget)
-        for (bytes in listOf(exif(jpeg(), 0), exif(jpeg(), 9), rgbaPng().dropLast(1).toByteArray(), jpeg().dropLast(2).toByteArray())) {
+        for (bytes in listOf(exif(jpeg(), 9), rgbaPng().dropLast(1).toByteArray(), jpeg().dropLast(2).toByteArray())) {
             val source = file(bytes)
             val error = try { service.inspect(source, sha(bytes)); throw AssertionError("Invalid source decoded") } catch (failure: RepositoryFailure) { failure.error }
             assertEquals(OperationErrorCode.INVALID_INPUT, error.code); assertEquals(0L, budget.usedBytes); assertArrayEquals(bytes, source.readBytes())
         }
+    }
+
+    @Test fun cameraJpegWithUndefinedOrientationAndTrailerDecodesUnrotatedWithoutChangingTheOriginal() = runBlocking {
+        val budget = ImageAllocationBudget(32L * 1024 * 1024)
+        val service = inspector(budget)
+        val normal = jpeg()
+        val baseline = decode(service, file(normal))
+        val pixels = (baseline as AutoCloseable).use { image(baseline).toPackedByteArray() }
+        val original = exif(normal, 0) + ByteArray(5420) { if (it % 5 == 0) 42 else 0 }
+        val source = file(original)
+        val compatible = decode(service, source)
+        (compatible as AutoCloseable).use {
+            assertEquals(1, inspection(compatible).exifOrientation)
+            assertArrayEquals(pixels, image(compatible).toPackedByteArray())
+        }
+        assertArrayEquals(original, source.readBytes())
+        assertEquals(0L, budget.usedBytes)
+    }
+
+    @Test fun projectedCameraJpegPreservesValidRotationAndHasAnIndependentConversionIdentity() = runBlocking {
+        val budget = ImageAllocationBudget(32L * 1024 * 1024)
+        val service = inspector(budget)
+        val normal = jpeg()
+        val strict = decode(service, file(exif(normal, 6)))
+        val fingerprint = inspection(strict).conversionFingerprint
+        val expected = (strict as AutoCloseable).use { image(strict).toPackedByteArray() }
+        val tiff = ByteBuffer.allocate(56).order(ByteOrder.BIG_ENDIAN).putShort(0x4d4d).putShort(42).putInt(8)
+        tiff.putShort(2).putShort(0x112).putShort(3).putInt(1).putShort(6).putShort(0)
+        tiff.putShort(0x8769.toShort()).putShort(4).putInt(1).putInt(38).putInt(0)
+        tiff.putShort(1).putShort(0x010d).putShort(7).putInt(0).putInt(0).putInt(0)
+        val app1 = "Exif\u0000\u0000".toByteArray() + tiff.array()
+        val bytes = normal.copyOfRange(0, 2) + byteArrayOf(-1, -31, 0, (app1.size + 2).toByte()) +
+            app1 + normal.copyOfRange(2, normal.size) + byteArrayOf(42, 0)
+        val source = file(bytes)
+        val projected = decode(service, source)
+        (projected as AutoCloseable).use {
+            assertEquals(6, inspection(projected).exifOrientation)
+            assertNotEquals(fingerprint, inspection(projected).conversionFingerprint)
+            assertArrayEquals(expected, image(projected).toPackedByteArray())
+        }
+        assertArrayEquals(bytes, source.readBytes())
+        assertEquals(0L, budget.usedBytes)
     }
 
     @Test fun changedByteIdentityCannotCreateAnInspection() = runBlocking {

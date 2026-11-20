@@ -10,7 +10,9 @@ import java.io.IOException
 import java.io.InputStream
 import java.util.zip.CRC32
 
-data class EncodedSourceHeader(val mime: String, val size: PixelSize, val exifOrientation: Int = 1)
+data class EncodedSourceHeader(val mime: String, val size: PixelSize, val exifOrientation: Int = 1) {
+    internal var jpegProjection: JpegDecodeView? = null
+}
 
 /** Bounded static-container preflight, NOT entropy/pixel decode validation. A strict codec must still decode the complete image and agree with this header. Unknown color transforms are refused rather than relabeled sRGB; later validated profile support may extend this unreleased policy explicitly. */
 object SourceContainer {
@@ -98,15 +100,31 @@ object SourceContainer {
         var scans = 0
         var markers = 0
         val exif = ExifState()
+        var exifSegment: LongRange? = null
+        var exifCompatible = false
         var marker = nextMarker(c)
         while (true) {
             c.checkpoint()
             if (++markers > 4096) refuse(OperationErrorCode.RESOURCE_LIMIT, "source_metadata_limit")
             if (marker == 0xd9) {
-                if (scans == 0 || c.remaining != 0L) invalid()
-                return EncodedSourceHeader("image/jpeg", size ?: invalid(), exif.orientation)
+                if (scans == 0) invalid()
+                val primaryBytes = c.position
+                if (c.remaining != 0L) {
+                    if (!exifCompatible) invalid()
+                    if (c.remaining > 65536L) refuse(OperationErrorCode.RESOURCE_LIMIT, "source_metadata_limit")
+                    // The opaque vendor suffix is never parsed natively. Do not turn a visibly compound container into a still image.
+                    val tail = c.bytes(c.remaining.toInt())
+                    val raw = tail.toString(Charsets.ISO_8859_1)
+                    if ("\u00ff\u00d8" in raw || "ftyp" in raw || "RIFF" in raw ||
+                        raw.contains("MotionPhoto", ignoreCase = true) || raw.contains("GainMap", ignoreCase = true)
+                    ) unsupported()
+                }
+                return EncodedSourceHeader("image/jpeg", size ?: invalid(), exif.orientation).also { header ->
+                    if (exifCompatible) header.jpegProjection = JpegDecodeView(primaryBytes.toInt(), checkNotNull(exifSegment), exif.orientation)
+                }
             }
             if (marker == 0xd8 || marker in 0xd0..0xd7 || marker == 0x01 || marker == 0x00) invalid()
+            val segmentStart = c.position - 2 // Ends with final FF and marker; any preceding fill FF remains legal.
             val n = (c.byte() * 256 + c.byte()) - 2
             if (n < 0 || n.toLong() > c.remaining) invalid()
             when {
@@ -128,7 +146,10 @@ object SourceContainer {
                 marker in 0xe0..0xef || marker == 0xfe -> {
                     c.metadata(n.toLong())
                     val f = c.bytes(n)
-                    if (marker == 0xe1 && f.size >= 6 && f.copyOfRange(0, 6).contentEquals("Exif\u0000\u0000".toByteArray())) exif.accept(f, c.checkpoint)
+                    if (marker == 0xe1 && f.size >= 6 && f.copyOfRange(0, 6).contentEquals("Exif\u0000\u0000".toByteArray())) {
+                        exifCompatible = exif.accept(f, c.checkpoint, cameraJpeg = true)
+                        exifSegment = segmentStart until c.position
+                    }
                     val text = f.toString(Charsets.ISO_8859_1)
                     if (marker == 0xe2 && (text.startsWith("ICC_PROFILE\u0000") || text.startsWith("MPF\u0000"))) unsupported()
                     if (marker == 0xeb || (marker == 0xe1 && (text.contains("hdrgm:", true) || text.contains("gainmap", true)))) unsupported()
@@ -204,16 +225,23 @@ object SourceContainer {
         var orientation: Int = 1
             private set
         private var seen = false
-        fun accept(bytes: ByteArray, checkpoint: () -> Unit) {
+        fun accept(bytes: ByteArray, checkpoint: () -> Unit, cameraJpeg: Boolean = false): Boolean {
             if (seen) invalid()
             seen = true
-            orientation = TiffOrientation.read(bytes, checkpoint)
+            if (!cameraJpeg) {
+                orientation = TiffOrientation.read(bytes, checkpoint)
+                return false
+            }
+            val (value, compatibility) = TiffOrientation.readCameraJpeg(bytes, checkpoint)
+            orientation = value
+            return compatibility
         }
     }
 
-    private class Cursor(private val input: InputStream, length: Long, val checkpoint: () -> Unit) {
+    private class Cursor(private val input: InputStream, private val length: Long, val checkpoint: () -> Unit) {
         var remaining: Long = length
             private set
+        val position: Long get() = length - remaining
         private var metadataBytes = 0L
         private var nextCheck = 65536
         private val scratch = ByteArray(65536)
