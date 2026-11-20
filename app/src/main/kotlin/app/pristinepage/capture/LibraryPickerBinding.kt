@@ -13,7 +13,7 @@ class LibraryPickerBinding(private val registry: ActivityResultRegistry, private
     private var registration: PhotoPickerRegistration? = null
 
     fun synchronize() {
-        val request = session.state.value.request
+        val request = session.state.value.request?.takeUnless { it.kind == PhotoImportKind.CAMERA }
         if (registeredId != request?.batchId) {
             close()
             if (request != null) {

@@ -1,6 +1,7 @@
 package app.pristinepage.library
 
 import app.pristinepage.capture.PhotoImportRequest
+import app.pristinepage.capture.PhotoImportKind
 import app.pristinepage.data.model.*
 import kotlinx.coroutines.flow.StateFlow
 
@@ -17,7 +18,7 @@ interface LibraryActions {
 }
 
 /** Only opaque identity may be placed in app saved state. A restored batch is not permission to relaunch a picker, reopen a URI, or infer a successful import. */
-data class LibraryIdentity @JvmOverloads constructor(val selected: DocumentId? = null, val pending: ImportSessionId? = null, val selectedPage: PageId? = null) {
+data class LibraryIdentity @JvmOverloads constructor(val selected: DocumentId? = null, val pending: ImportSessionId? = null, val selectedPage: PageId? = null, val kind: PhotoImportKind = PhotoImportKind.GALLERY) {
     init { require(selected != null || selectedPage == null) { "A selected page needs its document identity" } }
 }
 /** Transient process-private handoff, never saved UI state or scheduler data. URI-specific parsing/grants stay at the Activity/Android adapter; the session owns only immediate consumption lifetime. */
@@ -47,10 +48,12 @@ data class LibraryState(
 sealed interface LibraryEvent {
     data class Open(val id: DocumentId) : LibraryEvent
     data class SelectPage(val id: PageId) : LibraryEvent
-    data class NewDocument(val title: String, val importAfterCreate: Boolean = false) : LibraryEvent
+    data class NewDocument @JvmOverloads constructor(val title: String, val importAfterCreate: Boolean = false, val kind: PhotoImportKind = PhotoImportKind.GALLERY) : LibraryEvent
     data object More : LibraryEvent
     data object Refresh : LibraryEvent
     data object BeginImport : LibraryEvent
+    data object BeginFiles : LibraryEvent
+    data object BeginCapture : LibraryEvent
     data class PhotoResult(val request: PhotoImportRequest, val selection: LibraryPhotoResult) : LibraryEvent
     data object CancelImport : LibraryEvent
     data class PickerFailed(val request: PhotoImportRequest) : LibraryEvent

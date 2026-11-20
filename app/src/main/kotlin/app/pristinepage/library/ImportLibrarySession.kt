@@ -1,6 +1,7 @@
 package app.pristinepage.library
 
 import app.pristinepage.capture.PhotoImportRequest
+import app.pristinepage.capture.PhotoImportKind
 import app.pristinepage.data.model.*
 import java.util.Collections
 import kotlinx.coroutines.CancellationException
@@ -17,7 +18,7 @@ import kotlinx.coroutines.sync.withLock
 
 /** Main-confined state owned by a lifecycle-retained scope, not by one Activity registration. IO is delegated to the existing Application graph; only opaque IDs are restorable. No selected provider reference enters StateFlow, a saved identity or an error. */
 class ImportLibrarySession(private val actions: LibraryActions, restored: LibraryIdentity, private val scope: CoroutineScope) : LibrarySession {
-    private val current = MutableStateFlow(LibraryState(selectedId = restored.selected, selectedPage = restored.selectedPage, request = restored.pending?.let { PhotoImportRequest(it.value) }, phase = restored.pending?.let { ImportPhase.INTERRUPTED }))
+    private val current = MutableStateFlow(LibraryState(selectedId = restored.selected, selectedPage = restored.selectedPage, request = restored.pending?.let { PhotoImportRequest(it.value, restored.kind) }, phase = restored.pending?.let { ImportPhase.INTERRUPTED }))
     override val state: StateFlow<LibraryState> = current.asStateFlow()
     private val initialization = Mutex()
     private var started = false
@@ -27,7 +28,7 @@ class ImportLibrarySession(private val actions: LibraryActions, restored: Librar
 
     init { refresh(true) }
 
-    override fun identity() = LibraryIdentity(current.value.selectedId, current.value.request?.let { ImportSessionId(it.batchId) }, current.value.selectedPage)
+    override fun identity() = current.value.let { value -> LibraryIdentity(value.selectedId, value.request?.session, value.selectedPage, value.request?.kind ?: PhotoImportKind.GALLERY) }
 
     override fun claimPickerLaunch(batchId: ImportSessionId): Boolean {
         val value = current.value
@@ -54,7 +55,7 @@ class ImportLibrarySession(private val actions: LibraryActions, restored: Librar
                         val id = actions.create(event.title); ++navigation
                         current.value = current.value.copy(selectedId = id, selectedPage = null, document = null)
                         refresh(true).join()
-                        if (event.importAfterCreate) reserveFor(id)
+                        if (event.importAfterCreate) reserveFor(id, event.kind)
                     } finally { if (event.importAfterCreate) current.value = current.value.copy(preparingImport = false) }
                 }
             }
@@ -62,34 +63,42 @@ class ImportLibrarySession(private val actions: LibraryActions, restored: Librar
             LibraryEvent.More -> if (!current.value.loading && current.value.hasMore) {
                 current.value = current.value.copy(error = null); refresh(false)
             }
-            LibraryEvent.BeginImport -> prepare()
+            LibraryEvent.BeginImport -> prepare(PhotoImportKind.GALLERY)
+            LibraryEvent.BeginFiles -> prepare(PhotoImportKind.FILES)
+            LibraryEvent.BeginCapture -> prepare(PhotoImportKind.CAMERA)
             is LibraryEvent.PhotoResult -> consume(event)
             LibraryEvent.CancelImport -> abandon(null)
-            is LibraryEvent.PickerFailed -> if (current.value.request?.batchId == event.request.batchId) abandon(OperationError(OperationErrorCode.PROVIDER_UNAVAILABLE, false, "photo_picker_unavailable", event.request.batchId))
+            is LibraryEvent.PickerFailed -> if (current.value.request?.batchId == event.request.batchId) abandon(OperationError(OperationErrorCode.PROVIDER_UNAVAILABLE, false, if (event.request.kind == PhotoImportKind.FILES) "files_picker_unavailable" else "gallery_unavailable", event.request.batchId))
         }
     }
 
-    private fun prepare() {
+    private fun prepare(kind: PhotoImportKind) {
         val value = current.value
         val target = value.selectedId ?: return
         if (value.loading || value.request != null || value.preparingImport) return
         current.value = value.copy(loading = true, error = null, preparingImport = true)
         run(onFailure = { error -> current.value = current.value.copy(preparingImport = false); failed(error) }) {
-            try { reserveFor(target) }
+            try { reserveFor(target, kind) }
             finally { current.value = current.value.copy(preparingImport = false) }
         }
     }
 
-    private suspend fun reserveFor(target: DocumentId) {
+    private suspend fun reserveFor(target: DocumentId, kind: PhotoImportKind) {
         // Preparation admission is independent of navigation/loading and spans create through durable reservation. Never reread the visible destination after suspension or drop an existing durable request.
         check(current.value.preparingImport && current.value.request == null)
-        val request = actions.begin(actions.load(target).document)
-        current.value = current.value.copy(request = request, launchPending = true, phase = ImportPhase.WAITING_PICKER, results = emptyList(), resultBatch = null, loading = false)
+        val reserved = actions.begin(actions.load(target).document)
+        val request = PhotoImportRequest(reserved.batchId, kind)
+        current.value = current.value.copy(request = request, launchPending = kind != PhotoImportKind.CAMERA, phase = ImportPhase.WAITING_PICKER, results = emptyList(), resultBatch = null, loading = false)
     }
 
-    private fun consume(event: LibraryEvent.PhotoResult) {
+    /** A declined camera callback leaves the staged file owned by its writer, not the importer. */
+    internal fun submitCapture(event: LibraryEvent.PhotoResult): Boolean =
+        event.request.kind == PhotoImportKind.CAMERA && consume(event)
+
+    private fun consume(event: LibraryEvent.PhotoResult): Boolean {
         val value = current.value
-        if (value.request?.batchId != event.request.batchId || copying?.isActive == true || value.phase !in setOf(ImportPhase.WAITING_PICKER, ImportPhase.INTERRUPTED)) return
+        if (value.request?.batchId != event.request.batchId || value.request.kind != event.request.kind || copying?.isActive == true || value.phase !in setOf(ImportPhase.WAITING_PICKER, ImportPhase.INTERRUPTED)) return false
+        if (event.request.kind == PhotoImportKind.CAMERA && value.phase != ImportPhase.WAITING_PICKER) return false
         val selection = when (val result = event.selection) {
             is LibraryPhotoResult.Selected -> result.copy(references = result.references.toList())
             else -> result
@@ -109,6 +118,7 @@ class ImportLibrarySession(private val actions: LibraryActions, restored: Librar
             refresh(true).join()
         }
         copying!!.start()
+        return true
     }
 
     private fun abandon(reason: OperationError?) {

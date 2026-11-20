@@ -1,6 +1,7 @@
 package app.pristinepage
 
 import app.pristinepage.capture.PhotoImportRequest
+import app.pristinepage.capture.PhotoImportKind
 import app.pristinepage.data.model.*
 import app.pristinepage.library.*
 import java.lang.reflect.InvocationTargetException
@@ -17,6 +18,48 @@ import org.junit.Test
 /** State/controller boundary only; the native consumer must keep Application/Room/controller/codec wiring real. The fixture mirrors complete metadata/results and substitutes the suspend IO calls, not the state transitions being asserted. */
 @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
 class ImportLibrarySessionTest {
+    @Test fun cameraHandoffAcknowledgesOnlyAnActiveBatchAndRejectsDuplicateStill() = runTest {
+        val f = Fixture(); val session = session(f, LibraryIdentity(f.first), this); advanceUntilIdle()
+        session.accept(LibraryEvent.BeginCapture); advanceUntilIdle()
+        val request = session.state.value.request!!
+        val handoff = LibraryEvent.PhotoResult(request, f.selected)
+        val captureSession = session as ImportLibrarySession
+        val wrongBatch = LibraryEvent.PhotoResult(PhotoImportRequest(f.otherBatch.value, PhotoImportKind.CAMERA), f.selected)
+        assertFalse(captureSession.submitCapture(wrongBatch))
+        assertTrue(captureSession.submitCapture(handoff))
+        assertFalse(captureSession.submitCapture(handoff))
+        advanceUntilIdle()
+        assertEquals(1, f.deliveries)
+        assertFalse(captureSession.submitCapture(handoff))
+    }
+
+    @Test fun filesStayAnExplicitChoiceBoundToTheOriginalAlbum() = runTest {
+        val f = Fixture(); val session = session(f, LibraryIdentity(f.first), this); advanceUntilIdle()
+        session.accept(LibraryEvent.BeginFiles)
+        advanceUntilIdle()
+        session.accept(LibraryEvent.Open(f.second)); advanceUntilIdle()
+        assertEquals(f.first, f.begunDocument)
+        assertEquals(PhotoImportKind.FILES, session.state.value.request!!.kind)
+        assertTrue(session.claimPickerLaunch(f.batch))
+        assertFalse(session.claimPickerLaunch(f.batch))
+    }
+
+    @Test fun cancelingCameraRefusesALateStillEvenAfterAnAlbumSwitch() = runTest {
+        val f = Fixture(); val session = session(f, LibraryIdentity(f.first), this); advanceUntilIdle()
+        session.accept(LibraryEvent.BeginCapture)
+        advanceUntilIdle()
+        val request = session.state.value.request!!
+        assertEquals(PhotoImportKind.CAMERA, request.kind)
+        assertFalse("Camera must not launch an external image picker", session.claimPickerLaunch(f.batch))
+        session.accept(LibraryEvent.Open(f.second)); advanceUntilIdle()
+        session.accept(LibraryEvent.CancelImport); advanceUntilIdle()
+        session.accept(LibraryEvent.PhotoResult(request, f.selected)); advanceUntilIdle()
+        assertEquals(f.first, f.begunDocument)
+        assertEquals(listOf(f.batch), f.canceled)
+        assertEquals(0, f.deliveries)
+        assertNull(session.state.value.request)
+    }
+
     @Test fun initializationLoadsRetainedMetadataAndRecoveryWithoutInventingAnImport() = runTest {
         val f = Fixture(); val session = session(f, LibraryIdentity(f.first), this); advanceUntilIdle()
         assertFalse(session.state.value.loading); assertEquals(listOf(f.first, f.second), session.state.value.documents.map { it.documentId })

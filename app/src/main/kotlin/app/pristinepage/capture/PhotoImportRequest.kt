@@ -7,17 +7,23 @@ import app.pristinepage.data.model.OperationErrorCode
 import app.pristinepage.data.model.RepositoryFailure
 
 /** Identity of an already persisted BATCH, not a document choice or proof of provider access. Restoration never allocates a replacement: Room still validates existence, state and destination when a result is consumed. */
-class PhotoImportRequest(val batchId: String) {
+enum class PhotoImportKind { GALLERY, FILES, CAMERA }
+
+class PhotoImportRequest @JvmOverloads constructor(val batchId: String, val kind: PhotoImportKind = PhotoImportKind.GALLERY) {
     internal val session: ImportSessionId = try { ImportSessionId(batchId) }
     catch (_: IllegalArgumentException) { expired() }
 
     internal val registryKey: String get() = "pristinepage.photo.result.v1:$batchId"
 
     /** The app's saved state carries no source URI, user title, pixels or duplicate document/anchor authority. AndroidX owns its separate registry state. */
-    fun save(): Bundle = Bundle().apply { putString(SAVED_ID, batchId) }
+    fun save(): Bundle = Bundle().apply {
+        putString(SAVED_ID, batchId)
+        if (kind != PhotoImportKind.GALLERY) putString(SAVED_KIND, kind.name)
+    }
 
     companion object {
         private const val SAVED_ID = "pristinepage.photo.batch.v1"
+        private const val SAVED_KIND = "kind"
 
         @JvmStatic fun restore(saved: Bundle?): PhotoImportRequest? {
             if (saved == null) return null
@@ -26,7 +32,9 @@ class PhotoImportRequest(val batchId: String) {
                 // Bundle.getString logs type-warning values for a wrong type. Inspect without coercion so malformed private state never becomes a URI-bearing log message.
                 @Suppress("DEPRECATION")
                 val id = saved.get(SAVED_ID) as? String ?: expired()
-                PhotoImportRequest(id)
+                @Suppress("DEPRECATION")
+                val kind = if (saved.containsKey(SAVED_KIND)) PhotoImportKind.valueOf(saved.get(SAVED_KIND) as? String ?: expired()) else PhotoImportKind.GALLERY
+                PhotoImportRequest(id, kind)
             } catch (failure: RepositoryFailure) { throw failure }
             catch (_: RuntimeException) { expired() }
         }

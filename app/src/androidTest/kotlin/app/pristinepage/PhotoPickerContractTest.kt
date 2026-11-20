@@ -22,6 +22,38 @@ import org.junit.runner.RunWith
 class PhotoPickerContractTest {
     private val a = Uri.parse("content://fixture.documents/one")
     private val b = Uri.parse("content://fixture.documents/two")
+
+    @Test fun cameraStageIsPrivateReadOnlyAndPreservesEveryByte() {
+        val context = InstrumentationRegistry.getInstrumentation().targetContext
+        val id = UUID.randomUUID().toString()
+        val provider = context.packageManager.resolveContentProvider("${context.packageName}.capture-staging", 0)!!
+        assertFalse(provider.exported)
+        assertFalse(provider.grantUriPermissions)
+        val bytes = byteArrayOf(0xFF.toByte(), 0xD8.toByte(), 7, 0xFF.toByte(), 0xD9.toByte())
+        val stage = app.pristinepage.capture.CaptureStage(context, id)
+        try {
+            stage.create().writeBytes(bytes)
+            assertArrayEquals(bytes, context.contentResolver.openInputStream(stage.uri)!!.use { it.readBytes() })
+            assertThrows(java.io.FileNotFoundException::class.java) { context.contentResolver.openFileDescriptor(stage.uri, "w")?.close() }
+            assertThrows(java.io.FileNotFoundException::class.java) { context.contentResolver.openInputStream(stage.uri.buildUpon().appendPath("extra").build())?.close() }
+        } finally { stage.discard() }
+        assertThrows(java.io.FileNotFoundException::class.java) { context.contentResolver.openInputStream(stage.uri)?.close() }
+    }
+
+    @Test fun galleryNeverSilentlyOpensDocumentsAndFilesAlwaysDoes() {
+        val context = InstrumentationRegistry.getInstrumentation().targetContext
+        val gallery = app.pristinepage.capture.PhotoPickerContract().createIntent(context, Unit)
+        if (androidx.activity.result.contract.ActivityResultContracts.PickVisualMedia.isPhotoPickerAvailable(context)) {
+            assertTrue(gallery.action!!.contains("PICK_IMAGES"))
+        } else {
+            assertEquals(Intent.ACTION_PICK, gallery.action)
+            assertEquals("image/*", gallery.type)
+        }
+        val files = app.pristinepage.capture.PhotoPickerContract(app.pristinepage.capture.PhotoImportKind.FILES).createIntent(context, Unit)
+        assertEquals(Intent.ACTION_OPEN_DOCUMENT, files.action)
+        assertTrue(files.hasCategory(Intent.CATEGORY_OPENABLE))
+        assertTrue(files.getBooleanExtra(Intent.EXTRA_ALLOW_MULTIPLE, false))
+    }
     @Suppress("UNCHECKED_CAST")
     private fun contract(): ActivityResultContract<Unit, Any> {
         val type = try { Class.forName("app.pristinepage.capture.PhotoPickerContract") }
@@ -35,14 +67,12 @@ class PhotoPickerContractTest {
         return Intent().apply { clipData = data }
     }
 
-    @Test fun imageIntentUsesInstalledAndroidXAvailabilityAndOpenableFallbackWithoutBroadPermissions() {
+    @Test fun imageIntentUsesInstalledAndroidXAvailabilityAndGalleryFallbackWithoutBroadPermissions() {
         val context = InstrumentationRegistry.getInstrumentation().targetContext
         val intent = contract().createIntent(context, Unit)
         assertFalse(intent.action.isNullOrBlank())
-        if (intent.action == Intent.ACTION_OPEN_DOCUMENT) {
-            assertEquals("image/*", intent.type); assertTrue(intent.hasCategory(Intent.CATEGORY_OPENABLE))
-            assertTrue(intent.getBooleanExtra(Intent.EXTRA_ALLOW_MULTIPLE, false))
-            assertEquals(listOf("image/jpeg", "image/png", "image/webp"), intent.getStringArrayExtra(Intent.EXTRA_MIME_TYPES)!!.toList())
+        if (intent.action == Intent.ACTION_PICK) {
+            assertEquals("image/*", intent.type)
         } else {
             assertTrue(intent.action!!.contains("PICK_IMAGES"))
         }

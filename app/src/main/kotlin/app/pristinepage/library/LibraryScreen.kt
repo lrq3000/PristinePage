@@ -24,6 +24,7 @@ import androidx.compose.ui.semantics.selected
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import app.pristinepage.R
+import app.pristinepage.capture.PhotoImportKind
 import app.pristinepage.data.model.IngestResult
 import app.pristinepage.data.model.OperationErrorCode
 import app.pristinepage.data.model.PageId
@@ -34,16 +35,19 @@ import app.pristinepage.image.preview.OriginalPreviewBitmap
 @Composable fun LibraryScreen(session: LibrarySession, loadOriginal: (suspend (String) -> OriginalPreviewBitmap)? = null, onEdit: ((DocumentId, PageId) -> Unit)? = null) {
     val state by session.state.collectAsStateWithLifecycle()
     val newTitle = stringResource(R.string.new_document)
+    val canAcquire = !state.loading && !state.preparingImport && state.request == null
+    fun acquire(kind: PhotoImportKind, existing: LibraryEvent) {
+        session.accept(if (state.selectedId == null) LibraryEvent.NewDocument(newTitle, importAfterCreate = true, kind = kind) else existing)
+    }
     Column(Modifier.fillMaxSize().safeDrawingPadding().verticalScroll(rememberScrollState()).padding(24.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {
         Text(stringResource(R.string.app_name), style = MaterialTheme.typography.headlineMedium)
         Text(stringResource(R.string.library_notice))
         Button(onClick = { session.accept(LibraryEvent.NewDocument(newTitle)) }, enabled = !state.loading, modifier = actionModifier().testTag("create-document")) { Text(newTitle) }
-        Button(onClick = {
-            if (state.selectedId == null) session.accept(LibraryEvent.NewDocument(newTitle, importAfterCreate = true)) else session.accept(LibraryEvent.BeginImport)
-        }, enabled = !state.loading && !state.preparingImport && state.request == null, modifier = actionModifier().testTag("import-photos")) { Text(stringResource(R.string.import_photos)) }
-        Button(onClick = {}, enabled = false, modifier = actionModifier()) { Text(stringResource(R.string.take_photo)) }
+        Button(onClick = { acquire(PhotoImportKind.CAMERA, LibraryEvent.BeginCapture) }, enabled = canAcquire, modifier = actionModifier().testTag("take-photo")) { Text(stringResource(R.string.take_photo)) }
+        Button(onClick = { acquire(PhotoImportKind.GALLERY, LibraryEvent.BeginImport) }, enabled = canAcquire, modifier = actionModifier().testTag("import-photos")) { Text(stringResource(R.string.import_photos)) }
+        Button(onClick = { acquire(PhotoImportKind.FILES, LibraryEvent.BeginFiles) }, enabled = canAcquire, modifier = actionModifier().testTag("import-files")) { Text(stringResource(R.string.import_files)) }
         if (state.loading) CircularProgressIndicator()
-        state.error?.let { Text(errorText(it.code), color = MaterialTheme.colorScheme.error) }
+        state.error?.let { Text(acquisitionError(it), color = MaterialTheme.colorScheme.error) }
         Button(onClick = { session.accept(LibraryEvent.Refresh) }, enabled = !state.loading, modifier = actionModifier()) { Text(stringResource(R.string.refresh_library)) }
         if ((state.recovery?.blocked ?: 0) > 0) Text(stringResource(R.string.recovery_attention))
         state.request?.let {
@@ -61,7 +65,7 @@ import app.pristinepage.image.preview.OriginalPreviewBitmap
             val message = when (result) {
                 is IngestResult.Committed -> stringResource(R.string.item_saved, index + 1)
                 is IngestResult.Pending -> stringResource(R.string.item_pending, index + 1)
-                is IngestResult.Rejected -> stringResource(R.string.item_rejected, index + 1, errorText(result.error.code))
+                is IngestResult.Rejected -> stringResource(R.string.item_rejected, index + 1, acquisitionError(result.error))
             }
             Text(message)
         }
@@ -94,6 +98,15 @@ import app.pristinepage.image.preview.OriginalPreviewBitmap
 }
 
 private fun actionModifier() = Modifier.fillMaxWidth().heightIn(min = 48.dp)
+
+@Composable private fun acquisitionError(error: app.pristinepage.data.model.OperationError): String = when (error.safeMessageKey) {
+    "gallery_unavailable" -> stringResource(R.string.gallery_unavailable)
+    "files_picker_unavailable" -> stringResource(R.string.files_picker_unavailable)
+    "camera_permission_denied" -> stringResource(R.string.camera_permission_denied)
+    "camera_unavailable" -> stringResource(R.string.camera_unavailable)
+    "camera_capture_failed" -> stringResource(R.string.camera_capture_failed)
+    else -> errorText(error.code)
+}
 
 @Composable internal fun errorText(code: OperationErrorCode): String = stringResource(when (code) {
     OperationErrorCode.CANCELED -> R.string.error_canceled

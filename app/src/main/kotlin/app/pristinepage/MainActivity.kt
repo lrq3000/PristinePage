@@ -19,6 +19,7 @@ import androidx.compose.material3.darkColorScheme
 import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
@@ -29,6 +30,8 @@ import androidx.lifecycle.lifecycleScope
 import androidx.lifecycle.repeatOnLifecycle
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import app.pristinepage.capture.LibraryPickerBinding
+import app.pristinepage.capture.CaptureScreen
+import app.pristinepage.capture.PhotoImportKind
 import app.pristinepage.data.model.DocumentId
 import app.pristinepage.data.model.ImportSessionId
 import app.pristinepage.data.model.PageId
@@ -42,6 +45,7 @@ import app.pristinepage.library.ImportLibraryViewModel
 import app.pristinepage.library.LibraryIdentity
 import app.pristinepage.library.LibraryScreen
 import app.pristinepage.library.LibrarySession
+import app.pristinepage.library.ImportPhase
 import app.pristinepage.image.preview.OriginalPreviewBitmap
 import app.pristinepage.image.preview.OriginalPreviewBitmapLoader
 import app.pristinepage.image.preview.OriginalPreviewLoader
@@ -74,7 +78,7 @@ class MainActivity : ComponentActivity() {
         val factory = object : ViewModelProvider.Factory {
             @Suppress("UNCHECKED_CAST") override fun <T : ViewModel> create(modelClass: Class<T>): T {
                 require(modelClass == ImportLibraryViewModel::class.java)
-                return ImportLibraryViewModel(ApplicationLibraryActions(services::imports), restored) as T
+                return ImportLibraryViewModel(ApplicationLibraryActions(applicationContext, services::imports), restored) as T
             }
         }
         val retained = ViewModelProvider(this, factory)[ImportLibraryViewModel::class.java].session
@@ -101,8 +105,15 @@ class MainActivity : ComponentActivity() {
         setContent { AppTheme {
             val host by editorOwner.state.collectAsStateWithLifecycle()
             val editing by editorOwner.session.collectAsStateWithLifecycle()
+            val library by retained.state.collectAsStateWithLifecycle()
+            val camera = library.request?.takeIf { it.kind == PhotoImportKind.CAMERA && library.phase == ImportPhase.WAITING_PICKER }
             fun leaveEditor() { editorOwner.closeEditor(); retained.accept(LibraryEvent.Refresh) }
-            if (host.identity == null) LibraryScreen(retained, loadOriginal) { document, page -> editorOwner.open(document.value, page.value) }
+            if (host.identity == null && camera != null) key(camera.batchId) {
+                CaptureScreen(camera, { retained.accept(LibraryEvent.CancelImport) }) { still ->
+                    retained.submitCapture(LibraryEvent.PhotoResult(camera, still))
+                }
+            }
+            else if (host.identity == null) LibraryScreen(retained, loadOriginal) { document, page -> editorOwner.open(document.value, page.value) }
             else {
                 val selected = editing
                 if (selected != null) PageEditorScreen().Content(selected, ::leaveEditor)
@@ -125,6 +136,7 @@ class MainActivity : ComponentActivity() {
             outState.putBundle(SAVED, Bundle().apply {
                 identity.selected?.let { putString(SELECTED, it.value) }
                 identity.pending?.let { putString(PENDING, it.value) }
+                if (identity.pending != null) putString(ACQUISITION, identity.kind.name)
                 identity.selectedPage?.let { putString(PAGE, it.value) }
             })
         }
@@ -139,6 +151,7 @@ class MainActivity : ComponentActivity() {
         const val SAVED = "pristinepage.library.identity.v1"
         const val SELECTED = "document"
         const val PENDING = "batch"
+        const val ACQUISITION = "acquisition"
         const val EDITOR = "pristinepage.editor.identity.v1"
         const val PAGE = "page"
         @Suppress("DEPRECATION") fun restoreEditor(saved: Bundle?): EditorIdentity? {
@@ -152,7 +165,7 @@ class MainActivity : ComponentActivity() {
             val raw = saved?.get(SAVED) ?: return LibraryIdentity()
             require(raw is Bundle)
             fun id(key: String): String? = if (raw.containsKey(key)) (raw.get(key) as? String ?: throw IllegalArgumentException("Invalid saved identity")) else null
-            return LibraryIdentity(id(SELECTED)?.let(::DocumentId), id(PENDING)?.let(::ImportSessionId), id(PAGE)?.let(::PageId))
+            return LibraryIdentity(id(SELECTED)?.let(::DocumentId), id(PENDING)?.let(::ImportSessionId), id(PAGE)?.let(::PageId), id(ACQUISITION)?.let(PhotoImportKind::valueOf) ?: PhotoImportKind.GALLERY)
         }
     }
 }

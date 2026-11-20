@@ -17,16 +17,28 @@ sealed interface PhotoSelection {
     class Rejected(val error: OperationError) : PhotoSelection
 }
 
-/** Reuse AndroidX availability/system/backport/document fallback without requiring Play services or selecting a path solely from SDK level. Parsing is ours because the default deduplicated URI set cannot represent the required ordinal duplicate semantics. */
-class PhotoPickerContract : ActivityResultContract<Unit, PhotoSelection>() {
+/** Keep the gallery and document browsing choices separate. Parsing preserves ordinal duplicates and consumes only selected, content-backed results. */
+class PhotoPickerContract @JvmOverloads constructor(private val kind: PhotoImportKind = PhotoImportKind.GALLERY) : ActivityResultContract<Unit, PhotoSelection>() {
     private val delegate = ActivityResultContracts.PickMultipleVisualMedia(100)
 
-    override fun createIntent(context: Context, input: Unit): Intent = delegate.createIntent(context, PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)).apply {
-        if (action == Intent.ACTION_OPEN_DOCUMENT) {
+    override fun createIntent(context: Context, input: Unit): Intent = when (kind) {
+        PhotoImportKind.FILES -> Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
+            type = "image/*"
             addCategory(Intent.CATEGORY_OPENABLE)
+            putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true)
             putExtra(Intent.EXTRA_MIME_TYPES, arrayOf("image/jpeg", "image/png", "image/webp"))
         }
+        PhotoImportKind.GALLERY -> {
+            if (ActivityResultContracts.PickVisualMedia.isPhotoPickerAvailable(context)) {
+                val picker = delegate.createIntent(context, PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly))
+                if (picker.action != Intent.ACTION_OPEN_DOCUMENT) picker else galleryIntent()
+            } else galleryIntent()
+        }
+        PhotoImportKind.CAMERA -> error("Camera uses its own preview, not a picker")
     }
+
+    // On older devices this may be single-select; never silently replace the user's gallery choice by DocumentsUI.
+    private fun galleryIntent() = Intent(Intent.ACTION_PICK).setType("image/*")
 
     override fun parseResult(resultCode: Int, intent: Intent?): PhotoSelection {
         if (resultCode != Activity.RESULT_OK) return PhotoSelection.Canceled
