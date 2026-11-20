@@ -4,6 +4,7 @@ import app.pristinepage.core.pipeline.PixelSize
 import app.pristinepage.data.model.OperationError
 import app.pristinepage.data.model.OperationErrorCode
 import app.pristinepage.data.model.RepositoryFailure
+import app.pristinepage.data.model.JpegSampling
 import java.io.EOFException
 import java.io.File
 import java.io.IOException
@@ -16,6 +17,18 @@ data class EncodedSourceHeader(val mime: String, val size: PixelSize, val exifOr
 
 /** Bounded static-container preflight, NOT entropy/pixel decode validation. A strict codec must still decode the complete image and agree with this header. Unknown color transforms are refused rather than relabeled sRGB; later validated profile support may extend this unreleased policy explicitly. */
 object SourceContainer {
+    /** A stricter profile for our own encoder. Import still accepts reviewed camera metadata. */
+    internal fun verifyExportJpeg(file: File, expected: PixelSize, sampling: JpegSampling, checkpoint: () -> Unit) {
+        try {
+            val length = file.length()
+            if (length !in 4..104_857_600L) invalid()
+            val header = file.inputStream().buffered(65536).use { jpeg(Cursor(it, length, checkpoint), sampling) }
+            if (header.size != expected) invalid()
+        } catch (failure: RepositoryFailure) { throw failure }
+        catch (_: EOFException) { invalid() }
+        catch (_: IOException) { refuse(OperationErrorCode.STORAGE_FAILED, "export_jpeg_read_failed", true) }
+    }
+
     fun read(file: File, checkpoint: () -> Unit): EncodedSourceHeader {
         try {
             val length = file.length()
@@ -94,7 +107,7 @@ object SourceContainer {
         invalid()
     }
 
-    private fun jpeg(c: Cursor): EncodedSourceHeader {
+    private fun jpeg(c: Cursor, export: JpegSampling? = null): EncodedSourceHeader {
         if (c.byte() != 255 || c.byte() != 216) invalid()
         var size: PixelSize? = null
         var scans = 0
@@ -102,6 +115,7 @@ object SourceContainer {
         val exif = ExifState()
         var exifSegment: LongRange? = null
         var exifCompatible = false
+        var jfif = false
         var marker = nextMarker(c)
         while (true) {
             c.checkpoint()
@@ -134,6 +148,15 @@ object SourceContainer {
                     val components = f[5].toInt() and 255
                     if (f[0].toInt() != 8 || components !in setOf(1, 3)) unsupported()
                     if (n != 6 + 3 * components) invalid()
+                    if (export != null) {
+                        val y = when (export) {
+                            JpegSampling.YUV444 -> 0x11
+                            JpegSampling.YUV422 -> 0x21
+                            JpegSampling.YUV420 -> 0x22
+                        }
+                        if (marker != 0xc0 || components != 3 || f[6] != 1.toByte() || f[9] != 2.toByte() || f[12] != 3.toByte() ||
+                            (f[7].toInt() and 255) != y || f[10] != 0x11.toByte() || f[13] != 0x11.toByte()) unsupported()
+                    }
                     size = dimensions(((f[3].toInt() and 255) * 256 + (f[4].toInt() and 255)).toLong(), ((f[1].toInt() and 255) * 256 + (f[2].toInt() and 255)).toLong())
                 }
                 marker in 0xc0..0xcf && marker !in setOf(0xc4, 0xc8, 0xcc) -> unsupported()
@@ -144,8 +167,13 @@ object SourceContainer {
                     continue
                 }
                 marker in 0xe0..0xef || marker == 0xfe -> {
+                    if (export != null && (marker != 0xe0 || jfif || n != 14 || markers != 1)) unsupported()
                     c.metadata(n.toLong())
                     val f = c.bytes(n)
+                    if (export != null) {
+                        if (!f.copyOfRange(0, 5).contentEquals("JFIF\u0000".encodeToByteArray()) || f[12] != 0.toByte() || f[13] != 0.toByte()) unsupported()
+                        jfif = true
+                    }
                     if (marker == 0xe1 && f.size >= 6 && f.copyOfRange(0, 6).contentEquals("Exif\u0000\u0000".toByteArray())) {
                         exifCompatible = exif.accept(f, c.checkpoint, cameraJpeg = true)
                         exifSegment = segmentStart until c.position

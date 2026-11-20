@@ -3,6 +3,7 @@ package app.pristinepage.image
 import app.pristinepage.core.pipeline.PixelSize
 import app.pristinepage.image.decode.SourceContainer
 import app.pristinepage.data.model.OperationErrorCode
+import app.pristinepage.data.model.JpegSampling
 import app.pristinepage.data.model.RepositoryFailure
 import java.io.ByteArrayOutputStream
 import java.io.DataOutputStream
@@ -38,9 +39,28 @@ class SourceContainerTest {
     }
     private fun png(w: Int = 3, h: Int = 2, extra: ByteArray = byteArrayOf(), depth: Int = 8, color: Int = 2): ByteArray = byteArrayOf(-119, 80, 78, 71, 13, 10, 26, 10) + chunk("IHDR", be(w, h) + byteArrayOf(depth.toByte(), color.toByte(), 0, 0, 0)) + extra + chunk("IDAT", byteArrayOf(0)) + chunk("IEND", byteArrayOf())
     private fun segment(marker: Int, data: ByteArray): ByteArray { val n = data.size + 2; return byteArrayOf(-1, marker.toByte(), (n ushr 8).toByte(), n.toByte()) + data }
-    private fun jpeg(components: Int = 3, extra: ByteArray = byteArrayOf()): ByteArray {
-        val sof = byteArrayOf(8, 0, 2, 0, 3, components.toByte()) + ByteArray(components * 3) { if (it % 3 == 0) (it / 3 + 1).toByte() else 0x11 }
+    private fun jpeg(components: Int = 3, extra: ByteArray = byteArrayOf(), ySampling: Int = 0x11): ByteArray {
+        val sof = byteArrayOf(8, 0, 2, 0, 3, components.toByte()) + ByteArray(components * 3) {
+            if (it % 3 == 0) (it / 3 + 1).toByte() else if (it == 1) ySampling.toByte() else 0x11
+        }
         return byteArrayOf(-1, -40) + extra + segment(0xc0, sof) + segment(0xda, byteArrayOf(1, 1, 0, 0, 63, 0)) + byteArrayOf(1, 2, 3, -1, 0, 4, -1, -39)
+    }
+
+    @Test fun exportJpegAcceptsDeclaredSamplingButRejectsCommentsAndWrongGeometry() {
+        val root = File("build/test-source-containers").apply { mkdirs() }
+        val file = Files.createTempFile(root.toPath(), "export-jpeg-", ".jpg").toFile()
+        fun verify(sampling: JpegSampling, size: PixelSize = PixelSize(3, 2)) =
+            SourceContainer.verifyExportJpeg(file, size, sampling) {}
+        file.writeBytes(jpeg(ySampling = 0x22))
+        verify(JpegSampling.YUV420)
+        assertThrows(RepositoryFailure::class.java) { verify(JpegSampling.YUV444) }
+        assertThrows(RepositoryFailure::class.java) { verify(JpegSampling.YUV420, PixelSize(2, 3)) }
+        file.writeBytes(jpeg(extra = segment(0xfe, "Private label".encodeToByteArray()), ySampling = 0x22))
+        assertThrows(RepositoryFailure::class.java) { verify(JpegSampling.YUV420) }
+        file.writeBytes(jpeg(extra = segment(0xe0, "JFIF\u0000".encodeToByteArray() + byteArrayOf(1, 1, 0, 0, 1, 0, 1, 0, 0)), ySampling = 0x22))
+        verify(JpegSampling.YUV420)
+        file.writeBytes(jpeg(extra = segment(0xe0, "JFIF\u0000".encodeToByteArray() + byteArrayOf(1, 1, 0, 0, 1, 0, 1, 1, 1)), ySampling = 0x22))
+        assertThrows(RepositoryFailure::class.java) { verify(JpegSampling.YUV420) }
     }
     private fun webp(extra: ByteArray = byteArrayOf()): ByteArray {
         val data = byteArrayOf(0x2f, 2, 0x40, 0, 0) // VP8L signature,width3,height2; entropy intentionally absent.
