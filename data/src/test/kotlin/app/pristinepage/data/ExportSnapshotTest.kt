@@ -23,6 +23,62 @@ import org.junit.Test
 
 /** Real freeze business logic; only unavailable Room and external file/capability checks are projected. A native transaction/file-proof gate must follow before freeze acceptance. No rendering or source file is fabricated by these metadata tests. */
 class ExportSnapshotTest {
+    private val namedJpeg = JpegSettings(92, "android_bitmap", 1, JpegChromaPolicy.PLATFORM_VERIFIED, JpegSampling.YUV420)
+
+    @Test fun namedSubsetFreezesOnlyReviewedPagesAndRetainsTheirOriginalPositions() = runTest {
+        val h = Harness(5)
+        val title = h.f.metadata.documents.getValue(h.f.document.value).title
+        val selected = listOf(h.settings.pages[1], h.settings.pages[4])
+        h.settings = ExportSettings(ExportFormat.IMAGE_ZIP, selected, null, namedJpeg, emptyList(), AlbumExportScope(title, listOf(2, 5)))
+        val frozen = h.freeze() as ExportSnapshot
+        assertEquals(selected.map { it.pageId }, frozen.pages.map { it.pageId })
+        assertEquals(listOf(0, 1), frozen.pages.map { it.ordinal })
+        assertTrue(h.pageJobs().isEmpty())
+        val job = h.jobs.values.single()
+        assertEquals("ALBUM_ARTIFACT", job.kind)
+        assertEquals(frozen.snapshotId.value, job.snapshotId)
+        assertEquals("named-album-out-v1/${frozen.snapshotId.value}", job.idempotenceKey)
+        assertEquals(listOf(2, 5), h.load().settings.albumScope?.positions)
+        assertEquals(title, h.load().settings.albumScope?.title)
+        assertTrue(h.recipeReads.all { it.first in selected.map { page -> page.pageId.value } })
+    }
+
+    @Test fun namedSubsetRejectsWrongReviewedPositionWithoutWritingAnything() = runTest {
+        val h = Harness(5)
+        val title = h.f.metadata.documents.getValue(h.f.document.value).title
+        h.settings = ExportSettings(ExportFormat.JPEG, listOf(h.settings.pages[1]), null, namedJpeg, emptyList(), AlbumExportScope(title, listOf(1)))
+        assertEquals(OperationErrorCode.REVISION_CONFLICT, h.freezeError()?.code)
+        assertTrue(h.writes.isEmpty())
+        assertTrue(h.recipeReads.isEmpty())
+    }
+
+    @Test fun namedSubsetCannotPublishIfTitleChangesDuringAdmissionEvenWithoutRevisionBump() = runTest {
+        val h = Harness(5)
+        val original = h.f.metadata.documents.getValue(h.f.document.value)
+        h.settings = ExportSettings(ExportFormat.JPEG, listOf(h.settings.pages[1]), null, namedJpeg, emptyList(),
+            AlbumExportScope(original.title, listOf(2)))
+        h.onAdmission = { h.f.metadata.documents[original.documentId] = original.copy(title = "Other"); null }
+        assertEquals(OperationErrorCode.REVISION_CONFLICT, h.freezeError()?.code)
+        assertTrue(h.writes.isEmpty())
+    }
+
+    @Test fun namedSubsetCannotPublishIfASelectedPositionMovesDuringAdmission() = runTest {
+        val h = Harness(5)
+        val title = h.f.metadata.documents.getValue(h.f.document.value).title
+        h.settings = ExportSettings(ExportFormat.JPEG, listOf(h.settings.pages[1]), null, namedJpeg, emptyList(),
+            AlbumExportScope(title, listOf(2)))
+        h.onAdmission = {
+            val pages = h.f.metadata.pages
+            val second = pages.getValue(h.f.pageIds[1].value)
+            val third = pages.getValue(h.f.pageIds[2].value)
+            pages[second.pageId] = second.copy(ordinal = 2)
+            pages[third.pageId] = third.copy(ordinal = 1)
+            null
+        }
+        assertEquals(OperationErrorCode.REVISION_CONFLICT, h.freezeError()?.code)
+        assertTrue(h.writes.isEmpty())
+    }
+
     private class Harness(count: Int = 2, private val backend: String = "reference") {
         val f = RepositoryFixture(count)
         val snapshots = linkedMapOf<String, ExportSnapshotRow>()

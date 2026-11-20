@@ -158,10 +158,12 @@ class RoomExportSnapshots private constructor(
                 // Capture the owning coroutine context, not a newly-created Job. Known cancellation during preflight cannot cause an invisible snapshot publication.
                 coroutineContext.ensureActive()
                 queries.insertSnapshot(ExportSnapshotRow(snapshotId.value, documentId.value, expectedDocumentRevision, prepared.identity.snapshotHash, ExportSettingsCodec.encode(settings), "FROZEN", now, Long.MAX_VALUE))
+                val named = settings.albumScope != null
                 val jobIds = ArrayList<JobId>()
                 for (page in prepared.rows) {
                     queries.insertExportPage(page)
                     pin("EXPORT_PAGE", "export-page-v1/${snapshotId.value}/${page.ordinal}", page.sourceId, now)
+                    if (named) continue // The single named producer consumes these pins directly and does not promise a separate render cache.
                     val recipe = RecipeCodec.decode(page.recipe)
                     val request = RenderRequest(page.sourceId, page.pixelSha256, page.originalPageId, page.recipeRevision, recipe, settings.pages[page.ordinal].output, 0, null, FallbackPolicy.FAIL)
                     val identity = RenderJobIdentity.create(request, emptyMap(), page.assetSetSha256, page.conversionFingerprint, rendererVersion, encodingVersion, backend, precision)
@@ -177,8 +179,10 @@ class RoomExportSnapshots private constructor(
                     }
                     jobIds += JobId(jobId)
                 }
-                val input = ExportAssemblyInput.encode(snapshotId, prepared.identity.snapshotHash, jobIds)
-                queries.insertExportJob(job(uuid(), "EXPORT_ASSEMBLY", ExportAssemblyInput.key(snapshotId), ExportAssemblyInput.digest(input), input, snapshotId.value, now))
+                val input = if (named) NamedAlbumJobInput.encode(snapshot) else ExportAssemblyInput.encode(snapshotId, prepared.identity.snapshotHash, jobIds)
+                val kind = if (named) NamedAlbumJobInput.KIND else "EXPORT_ASSEMBLY"
+                val key = if (named) NamedAlbumJobInput.key(snapshotId) else ExportAssemblyInput.key(snapshotId)
+                queries.insertExportJob(job(uuid(), kind, key, ExportAssemblyInput.digest(input), input, snapshotId.value, now))
                 snapshot
             }
         } catch (canceled: CancellationException) { throw canceled }
@@ -201,16 +205,24 @@ class RoomExportSnapshots private constructor(
         val count = bounds.activePageCount(documentId.value)
         if (count !in 1L..100L) reject(OperationErrorCode.INVALID_INPUT, "invalid_export_pages", documentId.value)
         if (!bounds.activePagesReadIsBounded(documentId.value)) reject(OperationErrorCode.INTEGRITY_FAILED, "export_page_metadata_invalid", documentId.value)
-        if (count != settings.pages.size.toLong()) reject(OperationErrorCode.INVALID_INPUT, "invalid_export_pages", documentId.value)
-        val pages = q.activePages(documentId.value)
-        if (pages.size.toLong() != count || pages.map { it.pageId }.toSet().size != pages.size) reject(OperationErrorCode.INTEGRITY_FAILED, "export_page_metadata_invalid", documentId.value)
+        val album = settings.albumScope
+        if (album == null && count != settings.pages.size.toLong()) reject(OperationErrorCode.INVALID_INPUT, "invalid_export_pages", documentId.value)
+        val active = q.activePages(documentId.value)
+        if (active.size.toLong() != count || active.map { it.pageId }.toSet().size != active.size ||
+            active.withIndex().any { (ordinal, page) -> page.documentId != documentId.value || page.state != "ACTIVE" ||
+                page.ordinal != ordinal || page.currentRecipeRevision < 1 }) {
+            reject(OperationErrorCode.INTEGRITY_FAILED, "export_page_metadata_invalid", documentId.value)
+        }
+        if (album != null && (album.title != document.title || album.positions.last() > active.size)) {
+            reject(OperationErrorCode.REVISION_CONFLICT, "export_pages_changed", documentId.value)
+        }
+        val pages = album?.positions?.map { active[it - 1] } ?: active
 
         val masks = "[]".toByteArray()
         val providers = profile.providerDescriptor()
         val budget = ExportSnapshotIdentity.MetadataBudget(ExportSettingsCodec.encode(settings).size)
         // Both preparations run this bounded pass inside their own transaction. Admit the entire exact reviewed set before the first recipe BLOB projection; indexed revision lookups neither scan nor count retained history.
         for ((ordinal, page) in pages.withIndex()) {
-            if (page.documentId != documentId.value || page.state != "ACTIVE" || page.ordinal != ordinal || page.currentRecipeRevision < 1) reject(OperationErrorCode.INTEGRITY_FAILED, "export_page_metadata_invalid", documentId.value)
             if (page.pageId != settings.pages[ordinal].pageId.value) reject(OperationErrorCode.REVISION_CONFLICT, "export_pages_changed", documentId.value)
             try { requireOpaqueId(page.sourceId) } catch (_: IllegalArgumentException) { reject(OperationErrorCode.INTEGRITY_FAILED, "export_page_metadata_invalid", documentId.value) }
             when (bounds.sourceReadIsBounded(page.sourceId)) {

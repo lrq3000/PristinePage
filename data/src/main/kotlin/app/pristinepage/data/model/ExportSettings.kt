@@ -9,7 +9,7 @@ import app.pristinepage.core.pipeline.requireWellFormedUnicode
 import java.util.Collections
 import kotlinx.serialization.Serializable
 
-@Serializable enum class ExportFormat { PDF, JPEG, PNG }
+@Serializable enum class ExportFormat { PDF, JPEG, PNG, IMAGE_ZIP }
 @Serializable enum class PdfPageRule { IMAGE_ASPECT, A4_PORTRAIT, A4_LANDSCAPE }
 @Serializable enum class PdfMarginRule { NONE, UNIFORM_POINTS }
 @Serializable enum class JpegChromaPolicy { YUV444, PLATFORM_VERIFIED }
@@ -49,7 +49,20 @@ import kotlinx.serialization.Serializable
 }
 
 /** Own immutable reviewed lists before suspension or persistence. Structural validity does not establish renderer/provider/rights/codec/resource support or admit100pages to a PDF writer. Canonical persistence encoding is separate from this in-memory contract. */
-class ExportSettings(val format: ExportFormat, pages: List<PageOutputSettings>, val pdf: PdfSettings?, val jpeg: JpegSettings?, acceptedDegraded: List<AcceptedExecution>) {
+class AlbumExportScope(val title: String, positions: List<Int>) {
+    val positions: List<Int> = Collections.unmodifiableList(ArrayList(positions))
+
+    init {
+        require(title.length in 1..160 && title.isNotBlank() && title == title.trim())
+        requireWellFormedUnicode(title)
+        require(this.positions.size in 1..100 && this.positions.all { it in 1..100 } &&
+            this.positions.zipWithNext().all { (a, b) -> a < b })
+    }
+}
+
+/** Review binds image settings and the exact optional named album scope before any export work begins. */
+class ExportSettings @JvmOverloads constructor(val format: ExportFormat, pages: List<PageOutputSettings>, val pdf: PdfSettings?, val jpeg: JpegSettings?,
+    acceptedDegraded: List<AcceptedExecution>, val albumScope: AlbumExportScope? = null) {
     val pages: List<PageOutputSettings> = Collections.unmodifiableList(ArrayList(pages))
     val acceptedDegraded: List<AcceptedExecution> = Collections.unmodifiableList(ArrayList(acceptedDegraded))
 
@@ -57,9 +70,11 @@ class ExportSettings(val format: ExportFormat, pages: List<PageOutputSettings>, 
         require(this.pages.size in 1..100 && this.pages.map { it.pageId }.toSet().size == this.pages.size)
         require(when (format) {
             ExportFormat.PDF -> pdf != null && jpeg == null
-            ExportFormat.JPEG -> jpeg != null && pdf == null
-            ExportFormat.PNG -> pdf == null && jpeg == null
+            ExportFormat.JPEG -> jpeg != null && pdf == null && (albumScope == null || this.pages.size == 1)
+            ExportFormat.PNG -> pdf == null && jpeg == null && albumScope == null
+            ExportFormat.IMAGE_ZIP -> jpeg != null && pdf == null && this.pages.size > 1 && albumScope != null
         })
+        require(albumScope == null || albumScope.positions.size == this.pages.size && this.acceptedDegraded.isEmpty())
         require(this.acceptedDegraded.map { it.pageId }.toSet().size == this.acceptedDegraded.size)
         require(this.acceptedDegraded.map { it.renderId }.toSet().size == this.acceptedDegraded.size)
         val accepted = this.acceptedDegraded.associateBy { it.pageId }
