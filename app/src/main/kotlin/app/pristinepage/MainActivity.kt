@@ -21,6 +21,7 @@ import androidx.compose.runtime.saveable.rememberSaveableStateHolder
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
+import androidx.core.view.WindowCompat
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
@@ -37,7 +38,7 @@ import app.pristinepage.data.model.DocumentPage
 import app.pristinepage.data.model.DocumentSummary
 import app.pristinepage.data.model.ImportSessionId
 import app.pristinepage.data.model.PageId
-import app.pristinepage.design.AtelierTheme
+import app.pristinepage.design.CarnetTheme
 import app.pristinepage.editor.EditorIdentity
 import app.pristinepage.editor.EditorViewModel
 import app.pristinepage.editor.PageEditorScreen
@@ -74,6 +75,10 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         if (!BuildPolicy.supportsApi(Build.VERSION.SDK_INT)) { finish(); return }
         enableEdgeToEdge()
+        WindowCompat.getInsetsController(window, window.decorView).apply {
+            isAppearanceLightStatusBars = true
+            isAppearanceLightNavigationBars = true
+        }
         val restored = try { restore(savedInstanceState) to restoreEditor(savedInstanceState) } catch (_: RuntimeException) {
             // Invalid saved identity cannot invent a replacement request/destination. The explicit library action still discovers durable pending insertions without reopening temporary provider references.
             setContent { AppTheme { Column(Modifier.fillMaxSize().safeDrawingPadding().padding(24.dp)) {
@@ -147,7 +152,7 @@ class MainActivity : ComponentActivity() {
                     acquisition.acknowledgeSave()
                 }
             }
-            if (acquiring.open) AtelierCaptureScreen(acquiring, acquisition, activityResultRegistry, settings.showCameraGrid, loadOriginal)
+            if (acquiring.open) AtelierCaptureScreen(acquiring, acquisition, activityResultRegistry, settings.showCameraGrid, window, loadOriginal)
             else if (batch.album != null) BatchEditScreen(batch, batchOwner, services::imports)
             else if (host.identity == null && camera != null) key(camera.batchId) {
                 CaptureScreen(camera, { retained.accept(LibraryEvent.CancelImport) }, settings.showCameraGrid) { still ->
@@ -242,7 +247,7 @@ class MainActivity : ComponentActivity() {
 }
 
 @Composable private fun AppTheme(content: @Composable () -> Unit) {
-    AtelierTheme {
+    CarnetTheme {
         Surface(Modifier.fillMaxSize(), content = content)
     }
 }

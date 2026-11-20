@@ -2,6 +2,7 @@ package app.pristinepage.capture
 
 import android.Manifest
 import android.content.pm.PackageManager
+import android.view.Window
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.ActivityResultRegistry
@@ -9,6 +10,7 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.camera.view.PreviewView
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.Image
+import androidx.compose.foundation.background
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
@@ -18,6 +20,7 @@ import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
@@ -29,6 +32,7 @@ import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
+import androidx.core.view.WindowCompat
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
@@ -37,6 +41,7 @@ import app.pristinepage.R
 import app.pristinepage.data.model.OperationError
 import app.pristinepage.data.model.OperationErrorCode
 import app.pristinepage.data.model.DocumentPage
+import app.pristinepage.design.CarnetViewfinderTheme
 import app.pristinepage.editor.PageEditorScreen
 import app.pristinepage.editor.shapeBlocksApply
 import app.pristinepage.image.preview.OriginalPreviewBitmap
@@ -51,6 +56,7 @@ import kotlinx.coroutines.withTimeoutOrNull
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable internal fun AtelierCaptureScreen(
     state: AtelierCaptureState, owner: AtelierCaptureViewModel, registry: ActivityResultRegistry, grid: Boolean,
+    window: Window,
     loadOriginal: suspend (String) -> OriginalPreviewBitmap,
 ) {
     val draft = state.draft
@@ -124,7 +130,22 @@ import kotlinx.coroutines.withTimeoutOrNull
                 modifier = Modifier.testTag("atelier-finish-import")) { Text(stringResource(R.string.atelier_finish_import)) }
         }
     } else {
-        AtelierViewfinder(state, owner, registry, grid, ::back, { review = true }, loadOriginal)
+        DisposableEffect(window) {
+            val bars = WindowCompat.getInsetsController(window, window.decorView)
+            val lightStatus = bars.isAppearanceLightStatusBars
+            val lightNavigation = bars.isAppearanceLightNavigationBars
+            bars.isAppearanceLightStatusBars = false
+            bars.isAppearanceLightNavigationBars = false
+            onDispose {
+                bars.isAppearanceLightStatusBars = lightStatus
+                bars.isAppearanceLightNavigationBars = lightNavigation
+            }
+        }
+        CarnetViewfinderTheme {
+            Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
+                AtelierViewfinder(state, owner, registry, grid, ::back, { review = true }, loadOriginal)
+            }
+        }
     }
     LaunchedEffect(draft?.editing) { if (draft?.editing == true) review = false }
     if (confirmSkip && draft?.editing == true && draft.step == 0) AlertDialog(
@@ -225,7 +246,8 @@ import kotlinx.coroutines.withTimeoutOrNull
             Text(stringResource(R.string.atelier_import_interrupted))
             TextButton(owner::cancelPending) { Text(stringResource(R.string.atelier_import_clear_pending)) }
         }
-        Box(Modifier.fillMaxWidth().weight(1f), contentAlignment = Alignment.Center) {
+        Box(Modifier.fillMaxWidth().weight(1f).clip(MaterialTheme.shapes.medium)
+            .background(MaterialTheme.colorScheme.surface), contentAlignment = Alignment.Center) {
             if (granted && draft != null) {
                 val preview = remember(context) { PreviewView(context).apply { implementationMode = PreviewView.ImplementationMode.COMPATIBLE } }
                 AndroidView(factory = { preview }, modifier = Modifier.fillMaxSize().testTag("camera-preview"))
@@ -252,6 +274,7 @@ import kotlinx.coroutines.withTimeoutOrNull
                 }
                 if (idle && ready && camera?.hasFlash == true) {
                     FilterChip(flash, { flash = !flash }, { Text(stringResource(if (flash) R.string.atelier_flash_on else R.string.atelier_flash_off)) },
+                        colors = FilterChipDefaults.filterChipColors(containerColor = MaterialTheme.colorScheme.surface),
                         modifier = Modifier.align(Alignment.TopEnd).padding(8.dp).heightIn(min = 48.dp).testTag("atelier-camera-flash"))
                 }
             } else if (draft != null) Column(horizontalAlignment = Alignment.CenterHorizontally) {

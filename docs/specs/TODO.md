@@ -43,6 +43,10 @@ T-05 / `ATELIER-IMPORT-FEEDBACK-01`, input `7253025`: reuse the existing order-a
 
 Input `ceb7e57`; after the T-05 feedback milestone, resume the accepted [Home plan](../superpowers/plans/2026-11-20-atelier-home.md) for saved thumbnails. Exclusive changes: `AtelierThumbnailLoader.kt`, its host test, `AtelierLibraryScreen.kt`, `MainActivity.kt`, the saved-Undo revision signal in `BatchEditViewModel.kt`, English strings and the linked plan/checkpoint. Reuse the guarded editable page reader, renderer and display owner; no schema, data mutation, dependency, signing or device change. Scope closes only the thumbnail host witness, not T-10/AT-01.
 
+### Carnet continuation — T-10 / CARNET-PRESENTATION-01
+
+Input `3b2f6f1` on `feat/carnet-redesign`: [approved Carnet design](../design/carnet/README.md) and [presentation plan](../superpowers/plans/2026-11-20-carnet-presentation.md). Scope is presentation and the Home thumbnail preference: Compose theme, library/camera chrome, settings, English resources, focused tests and evidence. Preserve renderer, data layer, schema and previously gated acceptance.
+
 ### Atelier geometry continuation — T-06 / ATELIER-CUBIC-02
 
 Input `1abe2fb`; independent read-only review covers the projective map, actual edge reparameterization, corner residuals, topology, stretch and support. The outward proof, distinct `atelier_bezier_v1` recipe, real paired raster and Atelier controls are locally implemented and have host tests. A second review identified exact-chord restoration, signed-zero and rounded subdivision limits; the updated [ATELIER_BEZIER](ATELIER_BEZIER.md) records the semantics. The legacy codec remains unchanged. Android saving/reopening, accessible interaction and broader geometry/fidelity checks remain open; no midpoint algorithm substitutes for Bézier.

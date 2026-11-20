@@ -117,6 +117,13 @@
     <string name="atelier_new">New scan</string>
     <string name="atelier_default_title">Scan %1$s</string>
     <string name="atelier_settings">Settings</string>
+    <string name="carnet_home_thumbnails">Home thumbnails</string>
+    <string name="carnet_stack">Stack</string>
+    <string name="carnet_stack_help">Overlap up to three pages.</string>
+    <string name="carnet_row">Row</string>
+    <string name="carnet_row_help">Swipe or use the arrows to see every page.</string>
+    <string name="carnet_thumbnails_previous">Scroll to earlier thumbnails</string>
+    <string name="carnet_thumbnails_next">Scroll to later thumbnails</string>
     <string name="atelier_sort">Sort albums</string>
     <string name="atelier_sort_modified">Last modified</string>
     <string name="atelier_sort_created">Date created</string>

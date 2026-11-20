@@ -6,14 +6,18 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyRow
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.selection.selectable
+import androidx.compose.foundation.selection.selectableGroup
 import androidx.compose.foundation.selection.toggleable
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -22,6 +26,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.testTag
@@ -29,6 +34,7 @@ import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.heading
+import androidx.compose.ui.semantics.isTraversalGroup
 import androidx.compose.ui.semantics.selected
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.style.TextOverflow
@@ -43,6 +49,7 @@ import app.pristinepage.capture.PhotoImportKind
 import app.pristinepage.data.model.*
 import app.pristinepage.design.AtelierPreferences
 import app.pristinepage.design.AtelierStyle
+import app.pristinepage.design.HomeThumbnailLayout
 import app.pristinepage.image.preview.RenderedPreviewBitmap
 import java.text.DateFormat
 import java.util.Date
@@ -51,6 +58,7 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.awaitCancellation
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.launch
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable internal fun AtelierLibraryScreen(
@@ -99,7 +107,7 @@ import kotlinx.coroutines.ensureActive
                 val album = state.document?.document
                 if (home || album == null) {
                     Text(stringResource(if (home) R.string.atelier_home else R.string.atelier_album), Modifier.semantics { heading() },
-                        style = MaterialTheme.typography.headlineSmall)
+                        style = if (home) MaterialTheme.typography.displaySmall else MaterialTheme.typography.headlineSmall)
                 } else {
                     TextButton(
                         modifier = Modifier.heightIn(min = AtelierStyle.touchTarget).testTag("atelier-rename"),
@@ -131,7 +139,8 @@ import kotlinx.coroutines.ensureActive
                     item { Text(stringResource(R.string.atelier_empty), Modifier.padding(vertical = 12.dp)) }
                 }
                 items(state.documents, key = { it.documentId.value }) { album ->
-                    AlbumCard(album, creation, loadOverview, loadThumbnail, canClose, thumbnailsCurrent(album)) { session.accept(LibraryEvent.Open(album.documentId)) }
+                    AlbumCard(album, creation, preferencesState.homeThumbnailLayout, loadOverview, loadThumbnail,
+                        canClose, thumbnailsCurrent(album)) { session.accept(LibraryEvent.Open(album.documentId)) }
                 }
                 if (state.hasMore) item {
                     TextButton(onClick = { session.accept(LibraryEvent.More) }, enabled = !state.loading) { Text(stringResource(R.string.more_documents)) }
@@ -141,7 +150,7 @@ import kotlinx.coroutines.ensureActive
             Row(Modifier.fillMaxWidth().heightIn(min = 76.dp).padding(horizontal = 12.dp), verticalAlignment = Alignment.CenterVertically) {
                 Text(stringResource(R.string.atelier_albums), Modifier.weight(1f), style = MaterialTheme.typography.labelMedium)
                 FilledIconButton(onClick = { if (openAtelier == null) sheet = "sources" else openAtelier(title, null) }, enabled = canAcquire,
-                    modifier = Modifier.size(58.dp).testTag("atelier-new"), shape = RoundedCornerShape(19.dp)) {
+                     modifier = Modifier.size(58.dp).testTag("atelier-new"), shape = CircleShape) {
                     Icon(painterResource(R.drawable.ic_atelier_plus), stringResource(R.string.atelier_new), Modifier.size(29.dp))
                 }
                 Box(Modifier.weight(1f), contentAlignment = Alignment.CenterEnd) {
@@ -212,6 +221,24 @@ import kotlinx.coroutines.ensureActive
     val stopSheet = { sheet = null }
     when (sheet) {
         "settings" -> AtelierSheet(R.string.atelier_settings, stopSheet) {
+            Text(stringResource(R.string.carnet_home_thumbnails), Modifier.semantics { heading() }, style = MaterialTheme.typography.titleMedium)
+            Column(Modifier.selectableGroup()) {
+                HomeThumbnailLayout.entries.forEach { layout ->
+                    val selected = layout == preferencesState.homeThumbnailLayout
+                    val isStack = layout == HomeThumbnailLayout.STACK
+                    Row(Modifier.fillMaxWidth().heightIn(min = AtelierStyle.touchTarget)
+                        .testTag("home-thumbnails-${layout.name.lowercase(Locale.ROOT)}")
+                        .selectable(selected, role = Role.RadioButton, onClick = { preferences.setHomeThumbnailLayout(layout) }),
+                        verticalAlignment = Alignment.CenterVertically) {
+                        RadioButton(selected, onClick = null)
+                        Column(Modifier.padding(start = 12.dp)) {
+                            Text(stringResource(if (isStack) R.string.carnet_stack else R.string.carnet_row))
+                            Text(stringResource(if (isStack) R.string.carnet_stack_help else R.string.carnet_row_help),
+                                style = MaterialTheme.typography.bodySmall)
+                        }
+                    }
+                }
+            }
             SwitchRow(R.string.atelier_grid, preferencesState.showCameraGrid, "atelier-grid-setting", preferences::setShowCameraGrid)
             SwitchRow(R.string.atelier_created, preferencesState.showCreationInNameSort, "atelier-date-setting", preferences::setShowCreationInNameSort)
             Text(stringResource(R.string.atelier_date_setting_note), style = MaterialTheme.typography.bodySmall)
@@ -243,7 +270,7 @@ import kotlinx.coroutines.ensureActive
 }
 
 @Composable private fun AlbumCard(
-    album: DocumentSummary, creation: Boolean,
+    album: DocumentSummary, creation: Boolean, layout: HomeThumbnailLayout,
     load: suspend (DocumentId) -> DocumentOverview,
     thumbnail: suspend (DocumentSummary, DocumentPage) -> RenderedPreviewBitmap,
     enabled: Boolean, thumbnailsCurrent: Boolean, onOpen: () -> Unit,
@@ -257,31 +284,90 @@ import kotlinx.coroutines.ensureActive
                 val result = loader(album.documentId)
                 currentCoroutineContext().ensureActive()
                 if (result.document.documentRevision == album.documentRevision && result.document.documentId == album.documentId) {
-                    pages = result.pages.take(3)
+                    pages = result.pages
                 } else failed = true
             } catch (canceled: CancellationException) { throw canceled }
             catch (_: Exception) { failed = true }
         }
     }
+    val displayed = remember(layout, pages) { layout.pages(pages) }
     Surface(onClick = onOpen, enabled = enabled, modifier = Modifier.fillMaxWidth().heightIn(min = 94.dp)
-        .testTag("atelier-album-${album.documentId.value}"), shape = RoundedCornerShape(AtelierStyle.surfaceRadius)) {
-        Row(Modifier.padding(9.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-            if (album.pageCount > 0) {
-                Box(Modifier.size(width = 88.dp, height = 60.dp), contentAlignment = Alignment.CenterStart) {
-                    if (failed) Text(stringResource(R.string.atelier_thumbnail_failed), style = MaterialTheme.typography.labelSmall)
-                    if (!thumbnailsCurrent || pages.isEmpty() && !failed) Box(Modifier.size(48.dp, 60.dp).background(AtelierStyle.canvas, RoundedCornerShape(4.dp)))
-                    if (thumbnailsCurrent) pages.forEachIndexed { index, page ->
-                        key(page.pageId) { AtelierThumbnail(album, page, thumbnail, Modifier.offset(x = (19 * index).dp).size(48.dp, 60.dp)) }
-                    }
+        .testTag("atelier-album-${album.documentId.value}"), shape = RoundedCornerShape(AtelierStyle.surfaceRadius),
+        border = androidx.compose.foundation.BorderStroke(1.dp, MaterialTheme.colorScheme.outline)) {
+        if (layout == HomeThumbnailLayout.ROW) {
+            Column(Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                AlbumCardDetails(album, creation)
+                if (album.pageCount > 0) {
+                    // Metadata is bounded by the album contract. Only composed tiles own a bitmap/render.
+                    if (thumbnailsCurrent && displayed.isNotEmpty()) {
+                        AlbumThumbnailRow(album, displayed, thumbnail)
+                    } else ThumbnailPlaceholder(failed && thumbnailsCurrent)
                 }
             }
-            Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
-                Text(album.title, style = MaterialTheme.typography.titleMedium, maxLines = 2, overflow = TextOverflow.Ellipsis)
-                Text(stringResource(R.string.saved_page_count, album.pageCount), style = MaterialTheme.typography.bodySmall)
-                val timestamp = if (creation) album.createdAt else album.updatedAt
-                if (timestamp != null) Text(stringResource(if (creation) R.string.atelier_created_date else R.string.atelier_modified_date,
-                    date(Date(timestamp))), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        } else {
+            Row(Modifier.padding(10.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                if (album.pageCount > 0) {
+                    Box(Modifier.size(width = 94.dp, height = 66.dp), contentAlignment = Alignment.CenterStart) {
+                        if (!thumbnailsCurrent || displayed.isEmpty()) ThumbnailPlaceholder(failed && thumbnailsCurrent)
+                        else displayed.forEachIndexed { index, page ->
+                            key(page.pageId) {
+                                AtelierThumbnail(album, page, thumbnail, Modifier.offset(x = (4 + 19 * index).dp)
+                                    .size(44.dp, 58.dp).graphicsLayer { rotationZ = when (index) { 0 -> -8f; 2 -> 8f; else -> 0f } })
+                            }
+                        }
+                    }
+                }
+                AlbumCardDetails(album, creation, Modifier.weight(1f))
             }
+        }
+    }
+}
+
+@Composable internal fun AlbumThumbnailRow(
+    album: DocumentSummary, pages: List<DocumentPage>,
+    thumbnail: suspend (DocumentSummary, DocumentPage) -> RenderedPreviewBitmap,
+) {
+    val scroll = rememberLazyListState()
+    val scope = rememberCoroutineScope()
+    Row(Modifier.fillMaxWidth().semantics { isTraversalGroup = true }, verticalAlignment = Alignment.CenterVertically) {
+        ThumbnailScrollButton(previous = true, enabled = scroll.canScrollBackward) {
+            scope.launch { scroll.scrollToItem((scroll.firstVisibleItemIndex - 1).coerceAtLeast(0)) }
+        }
+        LazyRow(Modifier.weight(1f).testTag("home-thumbnail-row-${album.documentId.value}"), state = scroll,
+            horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+            items(pages, key = { it.pageId.value }) { page ->
+                AtelierThumbnail(album, page, thumbnail, Modifier.size(48.dp, 60.dp)
+                    .testTag("carnet-thumbnail-${page.ordinal}"))
+            }
+        }
+        ThumbnailScrollButton(previous = false, enabled = scroll.canScrollForward) {
+            scope.launch { scroll.scrollToItem((scroll.firstVisibleItemIndex + 1).coerceAtMost(pages.lastIndex)) }
+        }
+    }
+}
+
+@Composable private fun ThumbnailScrollButton(previous: Boolean, enabled: Boolean, onClick: () -> Unit) {
+    IconButton(onClick, enabled = enabled, modifier = Modifier.size(AtelierStyle.touchTarget)
+        .testTag(if (previous) "carnet-thumbnails-previous" else "carnet-thumbnails-next")) {
+        Icon(painterResource(R.drawable.ic_atelier_back),
+            stringResource(if (previous) R.string.carnet_thumbnails_previous else R.string.carnet_thumbnails_next),
+            modifier = Modifier.graphicsLayer { scaleX = if (previous) 1f else -1f })
+    }
+}
+
+@Composable private fun ThumbnailPlaceholder(failed: Boolean) {
+    if (failed) Text(stringResource(R.string.atelier_thumbnail_failed), style = MaterialTheme.typography.labelSmall)
+    else Box(Modifier.size(48.dp, 60.dp).background(AtelierStyle.canvas, RoundedCornerShape(4.dp)))
+}
+
+@Composable private fun AlbumCardDetails(album: DocumentSummary, creation: Boolean, modifier: Modifier = Modifier) {
+    Column(modifier, verticalArrangement = Arrangement.spacedBy(3.dp)) {
+        Text(album.title, style = MaterialTheme.typography.titleMedium, maxLines = 2, overflow = TextOverflow.Ellipsis)
+        Text(stringResource(R.string.saved_page_count, album.pageCount), style = MaterialTheme.typography.bodySmall)
+        val timestamp = if (creation) album.createdAt else album.updatedAt
+        if (timestamp != null) {
+            Text(stringResource(if (creation) R.string.atelier_created_date else R.string.atelier_modified_date, date(Date(timestamp))),
+                style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
     }
 }
