@@ -3,10 +3,15 @@ package app.pristinepage.image.export
 import android.graphics.Color
 import android.graphics.Bitmap
 import android.graphics.pdf.PdfRenderer
+import android.os.Build
+import android.os.Bundle
+import android.os.Debug
 import android.os.ParcelFileDescriptor
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import app.pristinepage.core.pipeline.PixelSize
+import app.pristinepage.data.model.OperationErrorCode
+import app.pristinepage.data.model.RepositoryFailure
 import app.pristinepage.image.decode.ImageAllocationBudget
 import java.io.File
 import kotlinx.coroutines.runBlocking
@@ -16,6 +21,73 @@ import org.junit.runner.RunWith
 
 @RunWith(AndroidJUnit4::class)
 class AlbumPdfExportTest {
+    @Test fun recordMemoryThroughRepeatedMixedAspectCandidateWritesAndReadback() = runBlocking {
+        val instrumentation = InstrumentationRegistry.getInstrumentation()
+        val file = File.createTempFile("album-profile-", ".pdf", instrumentation.targetContext.cacheDir)
+        val budget = ImageAllocationBudget(64L * 1024 * 1024)
+        // Nearly the provisional aggregate ceiling; mixed aspect and distinct, incompressible page samples defeat trivial deduplication.
+        val sizes = listOf(PixelSize(1024, 1024), PixelSize(768, 1360))
+        val notes = StringBuilder("sdk=${Build.VERSION.SDK_INT} abi=${Build.SUPPORTED_ABIS.first()} pixels=2093056\n")
+        fun sample(phase: String) {
+            val hwm = File("/proc/self/status").useLines { lines -> lines.firstOrNull { it.startsWith("VmHWM:") } }
+            requireNotNull(hwm)
+            notes.append("$phase ${hwm.substringAfter(':').trim()} peak RSS; ${Debug.getPss()} KiB PSS; ${Debug.getNativeHeapAllocatedSize()} native bytes\n")
+        }
+        try {
+            sample("baseline")
+            repeat(3) { cycle ->
+                AlbumPdf(budget).buildCandidate(sizes, {}) { index ->
+                    val size = sizes[index]
+                    Bitmap.createBitmap(size.width, size.height, Bitmap.Config.ARGB_8888, false).apply {
+                        try {
+                            val random = java.util.Random(211L + index + cycle * 17L)
+                            val row = IntArray(size.width)
+                            for (y in 0 until size.height) {
+                                for (x in row.indices) row[x] = random.nextInt(0x1000000) or 0xff000000.toInt()
+                                setPixels(row, 0, row.size, 0, y, row.size, 1)
+                            }
+                        } catch (failure: Throwable) { recycle(); throw failure }
+                    }
+                }.use { prepared ->
+                    sample("$cycle prepared")
+                    file.outputStream().use { prepared.write(it) {} }
+                    assertTrue(file.length() in 1..(32L * 1024 * 1024))
+                    sample("$cycle written")
+                    prepared.verify(file) {}
+                    sample("$cycle verified")
+                }
+                assertEquals(0L, budget.usedBytes)
+                sample("$cycle closed")
+            }
+        } finally {
+            instrumentation.sendStatus(0, Bundle().apply { putString("stream", notes.toString()) })
+            file.delete()
+        }
+    }
+
+    @Test fun independentlyReadableSameSizePagesAreRejectedWhenReordered() = runBlocking {
+        val scratch = InstrumentationRegistry.getInstrumentation().targetContext.cacheDir
+        val file = File.createTempFile("album-swapped-", ".pdf", scratch)
+        val budget = ImageAllocationBudget(64L * 1024 * 1024)
+        val size = PixelSize(120, 80)
+        val writer = AlbumPdf(budget)
+        try {
+            suspend fun book(colors: List<Int>) = writer.buildCandidate(listOf(size, size), {}) { i ->
+                Bitmap.createBitmap(size.width, size.height, Bitmap.Config.ARGB_8888).apply { eraseColor(colors[i]) }
+            }
+            book(listOf(Color.BLUE, Color.RED)).use { changed ->
+                file.outputStream().use { changed.write(it) {} }
+                changed.verify(file) {}
+            }
+            book(listOf(Color.RED, Color.BLUE)).use { expected ->
+                val failure = assertThrows(RepositoryFailure::class.java) { expected.verify(file) {} }
+                assertEquals(OperationErrorCode.INTEGRITY_FAILED, failure.error.code)
+                assertEquals("export_pdf_page_pixels", failure.error.safeMessageKey)
+            }
+            assertEquals(0L, budget.usedBytes)
+        } finally { file.delete() }
+    }
+
     @Test fun candidatePlatformDocumentIsReadableInTheRequestedMixedAspectOrder() = runBlocking {
         val scratch = InstrumentationRegistry.getInstrumentation().targetContext.cacheDir
         val result = File.createTempFile("album-test-", ".pdf", scratch)

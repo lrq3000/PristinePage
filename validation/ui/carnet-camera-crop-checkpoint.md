@@ -39,6 +39,12 @@ The T-11 continuation ran the same offline command with `:image-android:compileD
 
 Runtime reentry requires exact current-artifact and named-instance approval and preflight. First exercise source-preserving capture/import and crop controls, then verify JPEG/ZIP bytes and the Save as / Share failure and success paths using synthetic data. Physical flash, a measured PDF writer profile, process-death recovery, and the mandatory neural and broader release gates remain open.
 
+### Goal resumption after connecting album export
+
+- Double-tap insertion must exclude actual crop vertices, not tangent handles. A tangent can lie exactly on a valid insertion site (including at one third on a straight edge). The host regression for creating a duplicate at a corner failed before the fix; the real touch path now uses the same pure hit test. The compiled Android gesture witness checks a double tap near an on-edge tangent and retains the actual render and Undo assertions. It also exercises viewport bounds and the magnifier during an in-progress corner drag.
+- For PDF, independently rasterize the closed PDF with `PdfRenderer` and compare each page’s opaque color samples to its matching retained raster drawn into the physical page rectangle. Same-size swaps, blanks, malformed sample extent and substantial local ink loss have explicit regression vectors. The bounded sample is not a full-page fidelity proof. A separate Android-only diagnostic records process peak RSS (VmHWM), PSS and native heap across three mixed-aspect write/readback cycles near the provisional aggregate ceiling; measurement on the exact backend is still required. No measured-profile registry entry or user-facing PDF availability has been inferred from code or compilation.
+- Current offline full verification: 1,394 JVM cases, 146 host SQLite cases, no failures/errors/skips, both Android test targets compiled, lint 0 errors/21 warnings/1 hint. The new Android gesture, sampling, and profile witnesses were not executed. The earlier acceptance requirements remain open.
+
 ## Independent review dispositions
 
 The original source review identified two consequential defects and one future export naming issue. It found no defect in the outward-rounded subdivision, mutex cancellation ownership, gallery dirty-state guard or initial batch-selection scope. The original review did not run Android or test the modified source itself.

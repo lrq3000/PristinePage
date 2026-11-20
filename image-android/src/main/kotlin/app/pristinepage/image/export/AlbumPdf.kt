@@ -1,7 +1,9 @@
 package app.pristinepage.image.export
 
 import android.graphics.Bitmap
+import android.graphics.Canvas
 import android.graphics.Color
+import android.graphics.Matrix
 import android.graphics.Paint
 import android.graphics.RectF
 import android.graphics.pdf.PdfDocument
@@ -49,12 +51,7 @@ internal class AlbumPdf(private val budget: ImageAllocationBudget) {
                 val page = doc.startPage(PdfDocument.PageInfo.Builder(size.width, size.height, index + 1).create())
                 try {
                     page.canvas.drawColor(Color.WHITE)
-                    val scale = minOf(size.width.toFloat() / raster.width, size.height.toFloat() / raster.height)
-                    val width = scale * raster.width
-                    val height = scale * raster.height
-                    val x = (size.width - width) / 2
-                    val y = (size.height - height) / 2
-                    page.canvas.drawBitmap(raster, null, RectF(x, y, x + width, y + height), paint)
+                    page.canvas.drawBitmap(raster, null, placement(size, raster), paint)
                 } finally { doc.finishPage(page) }
             }
             return object : NamedAlbumExports.PreparedArtifact {
@@ -64,7 +61,7 @@ internal class AlbumPdf(private val budget: ImageAllocationBudget) {
                     checkpoint()
                 }
                 override fun verify(closed: File, checkpoint: () -> Unit) =
-                    verifyPdf(closed, points, checkpoint)
+                    verifyPdf(closed, points, bitmaps, checkpoint)
 
                 override fun close() {
                     try { doc.close() } finally { try { bitmaps.forEach(Bitmap::recycle) } finally { hold.close() } }
@@ -76,7 +73,7 @@ internal class AlbumPdf(private val budget: ImageAllocationBudget) {
         }
     }
 
-    private fun verifyPdf(file: File, points: List<PixelSize>, checkpoint: () -> Unit) {
+    private fun verifyPdf(file: File, points: List<PixelSize>, originals: List<Bitmap>, checkpoint: () -> Unit) {
         val descriptor = ParcelFileDescriptor.open(file, ParcelFileDescriptor.MODE_READ_ONLY)
         val reader = try { PdfRenderer(descriptor) } catch (failure: Throwable) { descriptor.close(); throw failure }
         reader.use {
@@ -85,12 +82,44 @@ internal class AlbumPdf(private val budget: ImageAllocationBudget) {
                 checkpoint()
                 it.openPage(index).use { page ->
                     require(page.width == size.width && page.height == size.height)
-                    val sample = Bitmap.createBitmap(minOf(128, size.width), minOf(128, size.height), Bitmap.Config.ARGB_8888)
-                    try { page.render(sample, null, null, PdfRenderer.Page.RENDER_MODE_FOR_DISPLAY) }
-                    finally { sample.recycle() }
+                    val sampleSize = sampledSize(size)
+                    val w = sampleSize.width
+                    val h = sampleSize.height
+                    val transform = Matrix().apply { setScale(w.toFloat() / size.width, h.toFloat() / size.height) }
+                    val sample = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
+                    val actual = IntArray(w * h)
+                    val expected = IntArray(w * h)
+                    try {
+                        page.render(sample, null, transform, PdfRenderer.Page.RENDER_MODE_FOR_DISPLAY)
+                        sample.getPixels(actual, 0, w, 0, 0, w, h)
+                        checkpoint()
+                        // Render the matching retained input independently of the PDF container and decoder, with identical physical placement.
+                        sample.eraseColor(Color.WHITE)
+                        val canvas = Canvas(sample)
+                        canvas.concat(transform)
+                        val original = originals[index]
+                        canvas.drawBitmap(original, null, placement(size, original), Paint(Paint.FILTER_BITMAP_FLAG))
+                        sample.getPixels(expected, 0, w, 0, 0, w, h)
+                        if (!PdfPageEvidence.matches(expected, actual)) refuse(OperationErrorCode.INTEGRITY_FAILED, "export_pdf_page_pixels")
+                    } finally { sample.recycle() }
                 }
             }
         }
+    }
+
+    private fun placement(points: PixelSize, raster: Bitmap): RectF {
+        val scale = minOf(points.width.toFloat() / raster.width, points.height.toFloat() / raster.height)
+        val w = raster.width * scale
+        val h = raster.height * scale
+        val x = (points.width - w) / 2
+        val y = (points.height - h) / 2
+        return RectF(x, y, x + w, y + h)
+    }
+
+    private fun sampledSize(points: PixelSize): PixelSize {
+        val edge = maxOf(points.width, points.height)
+        val cap = minOf(edge, 128)
+        return PixelSize(maxOf(1, points.width * cap / edge), maxOf(1, points.height * cap / edge))
     }
 
     companion object {
