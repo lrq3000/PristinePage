@@ -157,11 +157,9 @@ import kotlin.math.roundToInt
             detectTapGestures(onDoubleTap = { position ->
                 val cubic = current as? GeometryRecipe.Bezier ?: return@detectTapGestures
                 val rect = fitted(size.width.toFloat(), size.height.toFloat(), w, h)
-                if (nearestBezierControl(cubic.contour, position, rect, 8.dp.toPx(), chosen) == null) {
-                    nearestInsertion(cubic.contour, position, rect, 22.dp.toPx())?.let { hit ->
-                        session.insertBezier(hit.control.side, hit.control.segment, hit.t)
-                        select(hit.control)
-                    }
+                nearestInsertion(cubic.contour, position, rect, 22.dp.toPx(), 8.dp.toPx())?.let { hit ->
+                    session.insertBezier(hit.control.side, hit.control.segment, hit.t)
+                    select(hit.control)
                 }
             }, onTap = { position ->
                 val cubic = current as? GeometryRecipe.Bezier ?: return@detectTapGestures
@@ -289,10 +287,16 @@ private fun nearestBezierControl(contour: BezierContour, touch: Offset, rect: Re
     }.minByOrNull { it.second }?.takeIf { it.second <= radius }?.first
 }
 
-private data class EdgeHit(val control: BezierControl, val t: Double)
+internal data class EdgeHit(val control: BezierControl, val t: Double)
 
 /** Bounded nearest-site search on the actual drawn cubic, not the chord between endpoints. */
-private fun nearestInsertion(contour: BezierContour, touch: Offset, rect: Rect, radius: Float): EdgeHit? {
+internal fun nearestInsertion(contour: BezierContour, touch: Offset, rect: Rect, radius: Float, nodeRadius: Float): EdgeHit? {
+    // Double taps reserve actual node positions, not floating handles that can lie on the insertion edge.
+    if (ContourSide.entries.any { side ->
+        val segments = contour.edge(side).segments
+        segments.any { (project(it.start, rect) - touch).getDistance() <= nodeRadius } ||
+            (project(segments.last().end, rect) - touch).getDistance() <= nodeRadius
+    }) return null
     fun position(piece: BezierSegment, t: Double): Offset {
         val s = 1 - t
         val c = doubleArrayOf(s * s * s, 3 * s * s * t, 3 * s * t * t, t * t * t)

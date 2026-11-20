@@ -79,6 +79,28 @@ class EditorShapeScreenTest {
         assertEquals(PointPx(.2, .1), (session.state.value.draft!!.geometry as GeometryRecipe.Perspective).quad.tl)
         assertEquals(28, displayedSample(session, 80, 0))
 
+        val stable = session.state.value.draft
+        val canvas = compose.onNodeWithTag("atelier-frame-canvas").performScrollTo()
+        val bounds = canvas.getUnclippedBoundsInRoot()
+        try {
+            canvas.performTouchInput {
+                val scale = minOf(width / 101f, height / 81f)
+                val corner = Offset(center.x - 101f * scale * .3f, center.y - 81f * scale * .4f)
+                down(corner)
+                moveTo(corner + Offset(101f * scale * .12f, 0f), delayMillis = 25)
+            }
+            compose.onNodeWithTag("carnet-crop-magnifier").assertIsDisplayed()
+            assertEquals(bounds, canvas.getUnclippedBoundsInRoot())
+        } finally {
+            canvas.performTouchInput { if (currentPosition() != null) up() }
+        }
+        compose.onNodeWithTag("carnet-crop-magnifier").assertDoesNotExist()
+        waitForResult(session, "perspective_v1")
+        assertNotEquals(stable, session.state.value.draft)
+        click("editor-undo")
+        waitForResult(session, "perspective_v1")
+        assertEquals(stable, session.state.value.draft)
+
         val beforeDrag = session.state.value.draft
         compose.onNodeWithTag("editor-shape-x").performScrollTo().performTouchInput {
             fun point(fraction: Float) = Offset(width * fraction, center.y)
@@ -149,6 +171,18 @@ class EditorShapeScreenTest {
         waitForResult(reopened, "geometry_none_v1")
         val flat = displayedSample(reopened, 80, 50)
         click("editor-shape-bezier")
+        waitForResult(reopened, "atelier_bezier_v1")
+        // Use the actual fitted source viewport, not the rotated output extent. The first tangent sits at one third of the straight edge.
+        compose.onNodeWithTag("atelier-frame-canvas").performScrollTo().performTouchInput {
+            val scale = minOf(width / 101f, height / 81f)
+            doubleClick(Offset(center.x - 101f * scale / 6f, center.y - 81f * scale / 2f + 2f))
+        }
+        compose.waitUntil(10_000) {
+            (reopened.state.value.draft?.geometry as? GeometryRecipe.Bezier)?.contour?.top?.segments?.size == 2
+        }
+        waitForResult(reopened, "atelier_bezier_v1")
+        click("editor-undo")
+        waitForResult(reopened, "atelier_bezier_v1")
         click("atelier-bezier-insert")
         click("atelier-bezier-remove")
         waitForResult(reopened, "atelier_bezier_v1")
