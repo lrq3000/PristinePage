@@ -92,6 +92,7 @@ class ExportSnapshotTest {
         }
         private val metadata = object : MetadataAccess {
             override val queries: CatalogQueries get() = catalog
+            override fun isHiddenAtelierDraft(documentId: String) = f.metadata.isHiddenAtelierDraft(documentId)
             override fun <T> transaction(action: () -> T): T = f.metadata.transaction {
                 val s = snapshots.toMap(); val p = pages.toMap(); val j = jobs.toMap()
                 try { action() } catch (failure: Throwable) {
@@ -254,6 +255,15 @@ class ExportSnapshotTest {
         }
     }
     private fun get(target: Any, name: String) = target.javaClass.methods.single { it.name.startsWith(name) && it.parameterCount == 0 }.invoke(target)
+
+    @Test fun exportCannotFreezeHiddenDraftByIdOrOpenItsSource() = runTest {
+        val h = Harness()
+        h.f.metadata.hiddenDraftDocuments.add(h.f.document.value)
+        h.onProof = { fail("Hidden draft reached source proof") }
+        assertEquals(OperationErrorCode.SOURCE_UNAVAILABLE, h.freezeError()?.code)
+        assertTrue(h.typedReads.isEmpty())
+        assertTrue(h.writes.isEmpty())
+    }
 
     @Test fun atomicFreezeCreatesCompleteOrderedRowsSourcePinsAndPendingJobIntents() = runTest {
         val h = Harness(); val frozen = h.freeze(); val row = h.snapshots.values.single()

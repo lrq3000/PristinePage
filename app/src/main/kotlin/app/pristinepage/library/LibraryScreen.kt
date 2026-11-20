@@ -99,7 +99,7 @@ import app.pristinepage.image.preview.OriginalPreviewBitmap
 
 private fun actionModifier() = Modifier.fillMaxWidth().heightIn(min = 48.dp)
 
-@Composable private fun acquisitionError(error: app.pristinepage.data.model.OperationError): String = when (error.safeMessageKey) {
+@Composable internal fun acquisitionError(error: app.pristinepage.data.model.OperationError): String = when (error.safeMessageKey) {
     "gallery_unavailable" -> stringResource(R.string.gallery_unavailable)
     "files_picker_unavailable" -> stringResource(R.string.files_picker_unavailable)
     "camera_permission_denied" -> stringResource(R.string.camera_permission_denied)

@@ -28,6 +28,14 @@ class IngestIntentTest {
         var rejectPhaseState: String? = null
         val metadata = object : MetadataAccess {
             override val queries: CatalogQueries get() = catalog
+            override fun isHiddenAtelierDraft(documentId: String): Boolean = catalog.isHiddenAtelierDraft(documentId)
+            override fun retainedAtelierCopyAttempts(documentId: String): Long {
+                check(catalog.inTransaction)
+                return files.values.count {
+                    val item = sessions[it.ownerId]
+                    it.kind == "INGEST" && item?.kind == "ITEM" && item.documentId == documentId
+                }.toLong()
+            }
             override fun <T> transaction(action: () -> T): T {
                 val s = sessions.toMap(); val f = files.toMap(); val j = jobs.toMap(); val b = blobs.toMap()
                 return try { catalog.transaction(action) }

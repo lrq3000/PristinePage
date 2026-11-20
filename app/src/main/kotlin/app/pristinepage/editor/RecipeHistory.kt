@@ -26,6 +26,14 @@ class RecipeHistory(initial: Recipe, private val limit: Int = 20) {
         if (current != start) recordUndo(start)
     }
 
+    internal fun cancelGesture(): Boolean {
+        val start = gestureStart ?: return false
+        gestureStart = null
+        val moved = current != start
+        current = start
+        return moved
+    }
+
     fun replace(recipe: Recipe): Boolean {
         require(recipe.geometry.source == accepted.geometry.source) { "A page draft cannot rebind its source" }
         if (recipe == current) return false

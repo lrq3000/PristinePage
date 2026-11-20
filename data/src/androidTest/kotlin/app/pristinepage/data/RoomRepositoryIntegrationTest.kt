@@ -90,14 +90,16 @@ class RoomRepositoryIntegrationTest {
 
     @Test fun unsupportedFutureDatabaseIsNotDestructivelyReset() = runBlocking {
         Fixture().use { f ->
-            f.database.openHelper.writableDatabase.execSQL("PRAGMA user_version=2")
+            val database = f.database.openHelper.writableDatabase
+            val futureVersion = database.version + 1
+            database.version = futureVersion
             f.database.close()
             var rejected = false
             try { f.reopen(); f.database.catalog().document(f.document.value) }
             catch (_: IllegalStateException) { rejected = true }
             assertTrue("An unsupported populated schema must not be reset", rejected)
             SQLiteDatabase.openDatabase(f.context.getDatabasePath(f.name).path, null, SQLiteDatabase.OPEN_READONLY).use { raw ->
-                assertEquals(2, raw.version)
+                assertEquals(futureVersion, raw.version)
                 raw.rawQuery("SELECT COUNT(*) FROM Page", null).use { cursor -> assertTrue(cursor.moveToFirst()); assertEquals(2L, cursor.getLong(0)) }
             }
         }

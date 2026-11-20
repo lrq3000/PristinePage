@@ -102,6 +102,17 @@ class EditorSessionTest {
         assertEquals(wide,s.page!!.recipe); assertTrue(f.saves.isEmpty()); s.close(); assertEquals(f.renderer.outputs.size,f.renderer.releases)
     }
 
+    @Test fun counterclockwiseRotationIsAnUndoableOutputTurnAndDoesNotWriteTheSource() = runTest {
+        val f = Fixture(); val s = f.session(this); advanceUntilIdle()
+        s.command("rotateCounterclockwise"); advanceUntilIdle()
+        val turned = f.renderer.requests.last().recipe
+        assertEquals(3, turned.geometry.outputQuarterTurns)
+        assertEquals(original.geometry.source, turned.geometry.source)
+        s.command("undo"); advanceUntilIdle()
+        assertEquals(original, f.renderer.requests.last().recipe)
+        s.close()
+    }
+
     @Test fun rapidEditsReplaceQueuedWorkInsteadOfRenderingEveryIntermediateDraft() = runTest {
         val f = Fixture(); val s = f.session(this); advanceUntilIdle(); val first = f.renderer.requests.single()
         s.edit(white); s.edit(rotated); advanceUntilIdle()

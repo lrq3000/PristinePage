@@ -3,6 +3,29 @@ package app.pristinepage.editor
 import app.pristinepage.core.pipeline.PointPx
 import app.pristinepage.core.pipeline.QuadPx
 import app.pristinepage.core.recipe.GeometryRecipe
+import app.pristinepage.core.recipe.BezierContour
+import app.pristinepage.core.recipe.ContourSide
+
+internal enum class BezierPart { START, OUTGOING, INCOMING, END }
+internal data class BezierControl(val side: ContourSide, val segment: Int, val part: BezierPart) {
+    fun read(contour: BezierContour): PointPx? {
+        val item = contour.edge(side).segments.getOrNull(segment) ?: return null
+        return when (part) {
+            BezierPart.START -> item.start.takeIf { segment > 0 }
+            BezierPart.OUTGOING -> item.outgoing
+            BezierPart.INCOMING -> item.incoming
+            BezierPart.END -> item.end.takeIf { segment < contour.edge(side).segments.lastIndex }
+        }
+    }
+
+    fun move(contour: BezierContour, point: PointPx): BezierContour = when (part) {
+        BezierPart.START -> contour.moveNode(side, segment, point)
+        BezierPart.OUTGOING -> contour.moveHandle(side, segment, true, point)
+        BezierPart.INCOMING -> contour.moveHandle(side, segment, false, point)
+        BezierPart.END -> contour.moveNode(side, segment + 1, point)
+    }
+    val nodeIndex get() = when (part) { BezierPart.START -> segment; BezierPart.END -> segment + 1; else -> null }
+}
 
 internal enum class ShapePoint {
     TOP_LEFT, TOP_RIGHT, BOTTOM_RIGHT, BOTTOM_LEFT, TOP_MIDPOINT, BOTTOM_MIDPOINT;
@@ -30,12 +53,19 @@ internal object EditorShapes {
             geometry.source, wholeImage, outputQuarterTurns = geometry.outputQuarterTurns,
         ) else geometry
         is GeometryRecipe.ManualCurve -> geometry.cornersOnly()
+        is GeometryRecipe.Bezier -> GeometryRecipe.Perspective(geometry.source, geometry.contour.quad, geometry.targetRule, outputQuarterTurns = geometry.outputQuarterTurns)
         else -> geometry
     }
 
     fun manualCurve(geometry: GeometryRecipe): GeometryRecipe =
-        (if (geometry is GeometryRecipe.None) perspective(geometry) else geometry).let {
+        (if (geometry is GeometryRecipe.None || geometry is GeometryRecipe.Bezier) perspective(geometry) else geometry).let {
             if (it is GeometryRecipe.Perspective) straightCurve(it) else it
+        }
+
+    fun bezier(geometry: GeometryRecipe): GeometryRecipe =
+        (if (geometry is GeometryRecipe.Bezier) geometry else perspective(geometry)).let {
+            if (it is GeometryRecipe.Perspective) GeometryRecipe.Bezier(it.source, BezierContour.straight(it.quad),
+                it.targetRule, outputQuarterTurns = it.outputQuarterTurns) else it
         }
 
     private fun GeometryRecipe.ManualCurve.cornersOnly() =

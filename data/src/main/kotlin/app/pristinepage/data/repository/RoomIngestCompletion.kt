@@ -17,8 +17,8 @@ import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.withContext
 
 /** Only consumes an already MOVED, inspected source. Hash/readback is outside Room; visibility, ownership and journal/job completion share the subsequent short transaction. SourceStore still owns provider copy/admission/inspection/phase transitions; this helper neither performs nor claims them. */
-class RoomIngestCompletion @JvmOverloads constructor(private val metadata: MetadataAccess, private val sessions: ImportSessionQueries, private val journal: IngestPreparationQueries, private val sources: IngestCompletionQueries, private val jobs: JobLeaseQueries, private val files: SourceFiles, private val auditClock: () -> Long = System::currentTimeMillis, private val leaseClock: () -> Long = SystemClock::elapsedRealtime, private val dispatcher: CoroutineDispatcher = Dispatchers.IO) : IngestCompletion, IngestReplay {
-    constructor(database: PristineDatabase, files: SourceFiles) : this(RoomMetadataAccess(database), database.importSessions(), database.ingestPreparation(), database.ingestCompletion(), database.jobLeases(), files)
+class RoomIngestCompletion @JvmOverloads constructor(private val metadata: MetadataAccess, private val sessions: ImportSessionQueries, private val journal: IngestPreparationQueries, private val sources: IngestCompletionQueries, private val jobs: JobLeaseQueries, private val files: SourceFiles, private val auditClock: () -> Long = System::currentTimeMillis, private val leaseClock: () -> Long = SystemClock::elapsedRealtime, private val dispatcher: CoroutineDispatcher = Dispatchers.IO, private val drafts: AtelierDraftDao? = null) : IngestCompletion, IngestReplay {
+    constructor(database: PristineDatabase, files: SourceFiles) : this(RoomMetadataAccess(database), database.importSessions(), database.ingestPreparation(), database.ingestCompletion(), database.jobLeases(), files, drafts = database.atelierDrafts())
     private val completion = JobLeaseTransactions(metadata, jobs, auditClock, leaseClock)
 
     override suspend fun commit(intent: IngestJournalIntent, lease: JobLease): IngestResult = process(intent, lease)
@@ -114,6 +114,9 @@ class RoomIngestCompletion @JvmOverloads constructor(private val metadata: Metad
         val child = sessions.session(intent.sessionId.value) ?: reject(OperationErrorCode.SESSION_EXPIRED, "import_item_unavailable", intent)
         val parent = child.parentSessionId?.let(sessions::session) ?: reject(OperationErrorCode.SESSION_EXPIRED, "import_session_unavailable", intent)
         if (child.kind != "ITEM" || child.state != "INGESTING" || child.transactionId != intent.transactionId.value || child.plannedPageId != intent.pageId.value || child.documentId != intent.documentId.value || child.expiresAt <= now || parent.kind != "BATCH" || parent.state != "RESERVED" || parent.documentId != child.documentId || parent.expiresAt <= now) reject(OperationErrorCode.SESSION_EXPIRED, "import_session_unavailable", intent)
+        if (drafts?.refusesDraftIngest(intent.documentId.value, parent.sessionId) == true) {
+            reject(OperationErrorCode.SESSION_EXPIRED, "import_session_unavailable", intent)
+        }
         val doc = q.document(intent.documentId.value) ?: reject(OperationErrorCode.SOURCE_UNAVAILABLE, "document_unavailable", intent)
         if (doc.lifecycle != "ACTIVE") reject(OperationErrorCode.SOURCE_UNAVAILABLE, "document_not_active", intent)
         val old = q.activePages(doc.documentId)

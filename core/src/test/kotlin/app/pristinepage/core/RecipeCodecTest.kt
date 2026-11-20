@@ -1,9 +1,57 @@
 package app.pristinepage.core
 
+import app.pristinepage.core.pipeline.*
+import app.pristinepage.core.recipe.*
 import org.junit.Assert.*
 import org.junit.Test
 
 class RecipeCodecTest {
+    @Test fun restoringTheCanonicalHandleAlsoRestoresTheOriginalCanonicalRecipe() {
+        val binding = SourceBinding("a".repeat(64), PixelSize(121, 91), "srgb-v1")
+        val frame = QuadPx(PointPx(-0.0, 0.0), PointPx(1.0, 0.0), PointPx(1.0, 1.0), PointPx(0.0, 1.0))
+        val original = BezierContour.straight(frame).insert(ContourSide.TOP, 0, .4)
+        val handle = original.top.segments.first().outgoing
+        val modified = original.moveHandle(ContourSide.TOP, 0, true, handle.copy(y = .05))
+        val restored = modified.moveHandle(ContourSide.TOP, 0, true, handle)
+        assertTrue(restored.straight)
+        assertEquals(frame.tl, restored.top.segments.first().start)
+        fun bytes(contour: BezierContour) = RecipeCodec.encode(Recipe(geometry = GeometryRecipe.Bezier(binding, contour)))
+        assertArrayEquals(bytes(original), bytes(restored))
+        assertTrue((RecipeCodec.decode(bytes(restored)).geometry as GeometryRecipe.Bezier).contour.straight)
+    }
+
+    @Test fun movingAndRemovingACubicJoinPreservesPinnedCornersAndOuterHandles() {
+        val frame = QuadPx(PointPx(0.0, 0.0), PointPx(1.0, 0.0), PointPx(1.0, 1.0), PointPx(0.0, 1.0))
+        val contour = BezierContour.straight(frame).insert(ContourSide.TOP, 0, .5)
+        val moved = contour.moveNode(ContourSide.TOP, 1, PointPx(.5, .125))
+        assertEquals(.125, moved.top.segments[0].incoming.y, 0.0)
+        assertEquals(.125, moved.top.segments[1].outgoing.y, 0.0)
+        assertEquals(contour.top.segments[0].outgoing, moved.top.segments[0].outgoing)
+        assertEquals(contour.right, moved.right)
+        assertEquals(frame, moved.quad)
+        val merged = moved.removeNode(ContourSide.TOP, 1).top.segments.single()
+        assertEquals(frame.tl, merged.start)
+        assertEquals(frame.tr, merged.end)
+        assertEquals(moved.top.segments[0].outgoing, merged.outgoing)
+        assertEquals(moved.top.segments[1].incoming, merged.incoming)
+    }
+
+    @Test fun cubicContourReopensWithItsKnotsAndExactEditedHandle() {
+        val binding = SourceBinding("a".repeat(64), PixelSize(121, 91), "srgb-v1")
+        val frame = QuadPx(PointPx(0.0, 0.0), PointPx(1.0, 0.0), PointPx(1.0, 1.0), PointPx(0.0, 1.0))
+        val straight = BezierContour.straight(frame).insert(ContourSide.TOP, 0, .4)
+        val edited = straight.moveHandle(ContourSide.TOP, 1, outgoing = true, PointPx(.6, .03))
+        val recipe = Recipe(geometry = GeometryRecipe.Bezier(binding, edited, outputQuarterTurns = 1))
+        val bytes = RecipeCodec.encode(recipe)
+        assertTrue(bytes.decodeToString().contains("\"kind\":\"atelier_bezier_v1\""))
+        val reopened = RecipeCodec.decode(bytes)
+        assertEquals(recipe, reopened)
+        assertNotEquals(RecipeCodec.hash(recipe.copy(geometry = GeometryRecipe.Bezier(binding, straight, outputQuarterTurns = 1))), RecipeCodec.hash(reopened))
+        assertEquals(1, reopened.geometry.outputQuarterTurns)
+        assertEquals(binding, reopened.geometry.source)
+        assertEquals(PointPx(.6, .03), (reopened.geometry as GeometryRecipe.Bezier).contour.top.segments[1].outgoing)
+    }
+
     private val source = """{"sourcePixelHash":"${"a".repeat(64)}","sourceSize":{"width":3,"height":2},"orientationColorConversionVersion":"srgb-v1"}"""
     private val minimal get() = """{"geometry":{"kind":"none_v1","source":$source}}"""
     private fun decode(json: String) = CoreApi.function("recipe.RecipeCodec", "decode", json.toByteArray())!!

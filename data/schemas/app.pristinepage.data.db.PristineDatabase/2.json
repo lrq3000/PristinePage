@@ -1,0 +1,2507 @@
+{
+  "formatVersion": 1,
+  "database": {
+    "version": 2,
+    "identityHash": "5304c7d098e79af9ee800bdb8422aec3",
+    "entities": [
+      {
+        "tableName": "Document",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`documentId` TEXT NOT NULL, `title` TEXT NOT NULL, `documentRevision` INTEGER NOT NULL, `lifecycle` TEXT NOT NULL, `createdAt` INTEGER NOT NULL, `updatedAt` INTEGER NOT NULL, `deletedAt` INTEGER, PRIMARY KEY(`documentId`))",
+        "fields": [
+          {
+            "fieldPath": "documentId",
+            "columnName": "documentId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "title",
+            "columnName": "title",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "documentRevision",
+            "columnName": "documentRevision",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "lifecycle",
+            "columnName": "lifecycle",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "createdAt",
+            "columnName": "createdAt",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "updatedAt",
+            "columnName": "updatedAt",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "deletedAt",
+            "columnName": "deletedAt",
+            "affinity": "INTEGER"
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "documentId"
+          ]
+        },
+        "indices": [
+          {
+            "name": "index_Document_lifecycle_updatedAt",
+            "unique": false,
+            "columnNames": [
+              "lifecycle",
+              "updatedAt"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_Document_lifecycle_updatedAt` ON `${TABLE_NAME}` (`lifecycle`, `updatedAt`)"
+          }
+        ]
+      },
+      {
+        "tableName": "SourceBlob",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`sourceBlobId` TEXT NOT NULL, `byteSha256` TEXT NOT NULL, `byteCount` INTEGER NOT NULL, `mime` TEXT NOT NULL, `encodedWidth` INTEGER NOT NULL, `encodedHeight` INTEGER NOT NULL, `relativePath` TEXT NOT NULL, `state` TEXT NOT NULL, `sourceCount` INTEGER NOT NULL, `ingestTransactionId` TEXT NOT NULL, `createdAt` INTEGER NOT NULL, PRIMARY KEY(`sourceBlobId`))",
+        "fields": [
+          {
+            "fieldPath": "sourceBlobId",
+            "columnName": "sourceBlobId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "byteSha256",
+            "columnName": "byteSha256",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "byteCount",
+            "columnName": "byteCount",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "mime",
+            "columnName": "mime",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "encodedWidth",
+            "columnName": "encodedWidth",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "encodedHeight",
+            "columnName": "encodedHeight",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "relativePath",
+            "columnName": "relativePath",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "state",
+            "columnName": "state",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "sourceCount",
+            "columnName": "sourceCount",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "ingestTransactionId",
+            "columnName": "ingestTransactionId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "createdAt",
+            "columnName": "createdAt",
+            "affinity": "INTEGER",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "sourceBlobId"
+          ]
+        },
+        "indices": [
+          {
+            "name": "index_SourceBlob_relativePath",
+            "unique": true,
+            "columnNames": [
+              "relativePath"
+            ],
+            "orders": [],
+            "createSql": "CREATE UNIQUE INDEX IF NOT EXISTS `index_SourceBlob_relativePath` ON `${TABLE_NAME}` (`relativePath`)"
+          },
+          {
+            "name": "index_SourceBlob_byteSha256_byteCount",
+            "unique": false,
+            "columnNames": [
+              "byteSha256",
+              "byteCount"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_SourceBlob_byteSha256_byteCount` ON `${TABLE_NAME}` (`byteSha256`, `byteCount`)"
+          },
+          {
+            "name": "index_SourceBlob_state",
+            "unique": false,
+            "columnNames": [
+              "state"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_SourceBlob_state` ON `${TABLE_NAME}` (`state`)"
+          }
+        ]
+      },
+      {
+        "tableName": "Source",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`sourceId` TEXT NOT NULL, `sourceBlobId` TEXT NOT NULL, `pixelSha256` TEXT NOT NULL, `width` INTEGER NOT NULL, `height` INTEGER NOT NULL, `exifOrientation` INTEGER NOT NULL, `conversionFingerprint` TEXT NOT NULL, `profileSha256` TEXT, `refCount` INTEGER NOT NULL, `state` TEXT NOT NULL, `createdAt` INTEGER NOT NULL, PRIMARY KEY(`sourceId`), FOREIGN KEY(`sourceBlobId`) REFERENCES `SourceBlob`(`sourceBlobId`) ON UPDATE NO ACTION ON DELETE RESTRICT )",
+        "fields": [
+          {
+            "fieldPath": "sourceId",
+            "columnName": "sourceId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "sourceBlobId",
+            "columnName": "sourceBlobId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "pixelSha256",
+            "columnName": "pixelSha256",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "width",
+            "columnName": "width",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "height",
+            "columnName": "height",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "exifOrientation",
+            "columnName": "exifOrientation",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "conversionFingerprint",
+            "columnName": "conversionFingerprint",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "profileSha256",
+            "columnName": "profileSha256",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "refCount",
+            "columnName": "refCount",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "state",
+            "columnName": "state",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "createdAt",
+            "columnName": "createdAt",
+            "affinity": "INTEGER",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "sourceId"
+          ]
+        },
+        "indices": [
+          {
+            "name": "index_Source_sourceBlobId_conversionFingerprint",
+            "unique": true,
+            "columnNames": [
+              "sourceBlobId",
+              "conversionFingerprint"
+            ],
+            "orders": [],
+            "createSql": "CREATE UNIQUE INDEX IF NOT EXISTS `index_Source_sourceBlobId_conversionFingerprint` ON `${TABLE_NAME}` (`sourceBlobId`, `conversionFingerprint`)"
+          },
+          {
+            "name": "index_Source_pixelSha256",
+            "unique": false,
+            "columnNames": [
+              "pixelSha256"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_Source_pixelSha256` ON `${TABLE_NAME}` (`pixelSha256`)"
+          }
+        ],
+        "foreignKeys": [
+          {
+            "table": "SourceBlob",
+            "onDelete": "RESTRICT",
+            "onUpdate": "NO ACTION",
+            "columns": [
+              "sourceBlobId"
+            ],
+            "referencedColumns": [
+              "sourceBlobId"
+            ]
+          }
+        ]
+      },
+      {
+        "tableName": "Page",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`pageId` TEXT NOT NULL, `documentId` TEXT NOT NULL, `sourceId` TEXT NOT NULL, `currentRecipeRevision` INTEGER NOT NULL, `state` TEXT NOT NULL, `ordinal` INTEGER, `removedAt` INTEGER, `createdAt` INTEGER NOT NULL, PRIMARY KEY(`pageId`), FOREIGN KEY(`documentId`) REFERENCES `Document`(`documentId`) ON UPDATE NO ACTION ON DELETE RESTRICT , FOREIGN KEY(`sourceId`) REFERENCES `Source`(`sourceId`) ON UPDATE NO ACTION ON DELETE RESTRICT , FOREIGN KEY(`pageId`, `currentRecipeRevision`) REFERENCES `RecipeRevision`(`pageId`, `recipeRevision`) ON UPDATE NO ACTION ON DELETE NO ACTION DEFERRABLE INITIALLY DEFERRED)",
+        "fields": [
+          {
+            "fieldPath": "pageId",
+            "columnName": "pageId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "documentId",
+            "columnName": "documentId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "sourceId",
+            "columnName": "sourceId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "currentRecipeRevision",
+            "columnName": "currentRecipeRevision",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "state",
+            "columnName": "state",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "ordinal",
+            "columnName": "ordinal",
+            "affinity": "INTEGER"
+          },
+          {
+            "fieldPath": "removedAt",
+            "columnName": "removedAt",
+            "affinity": "INTEGER"
+          },
+          {
+            "fieldPath": "createdAt",
+            "columnName": "createdAt",
+            "affinity": "INTEGER",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "pageId"
+          ]
+        },
+        "indices": [
+          {
+            "name": "index_Page_documentId_state_ordinal",
+            "unique": false,
+            "columnNames": [
+              "documentId",
+              "state",
+              "ordinal"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_Page_documentId_state_ordinal` ON `${TABLE_NAME}` (`documentId`, `state`, `ordinal`)"
+          },
+          {
+            "name": "index_Page_documentId_ordinal",
+            "unique": true,
+            "columnNames": [
+              "documentId",
+              "ordinal"
+            ],
+            "orders": [],
+            "createSql": "CREATE UNIQUE INDEX IF NOT EXISTS `index_Page_documentId_ordinal` ON `${TABLE_NAME}` (`documentId`, `ordinal`)"
+          },
+          {
+            "name": "index_Page_sourceId",
+            "unique": false,
+            "columnNames": [
+              "sourceId"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_Page_sourceId` ON `${TABLE_NAME}` (`sourceId`)"
+          },
+          {
+            "name": "index_Page_pageId_currentRecipeRevision",
+            "unique": false,
+            "columnNames": [
+              "pageId",
+              "currentRecipeRevision"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_Page_pageId_currentRecipeRevision` ON `${TABLE_NAME}` (`pageId`, `currentRecipeRevision`)"
+          }
+        ],
+        "foreignKeys": [
+          {
+            "table": "Document",
+            "onDelete": "RESTRICT",
+            "onUpdate": "NO ACTION",
+            "columns": [
+              "documentId"
+            ],
+            "referencedColumns": [
+              "documentId"
+            ]
+          },
+          {
+            "table": "Source",
+            "onDelete": "RESTRICT",
+            "onUpdate": "NO ACTION",
+            "columns": [
+              "sourceId"
+            ],
+            "referencedColumns": [
+              "sourceId"
+            ]
+          },
+          {
+            "table": "RecipeRevision",
+            "onDelete": "NO ACTION",
+            "onUpdate": "NO ACTION",
+            "columns": [
+              "pageId",
+              "currentRecipeRevision"
+            ],
+            "referencedColumns": [
+              "pageId",
+              "recipeRevision"
+            ]
+          }
+        ]
+      },
+      {
+        "tableName": "RecipeRevision",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`pageId` TEXT NOT NULL, `recipeRevision` INTEGER NOT NULL, `sourceId` TEXT NOT NULL, `recipeSchemaVersion` INTEGER NOT NULL, `canonicalRecipe` BLOB NOT NULL, `recipeSha256` TEXT NOT NULL, `parentRevision` INTEGER, `createdAt` INTEGER NOT NULL, PRIMARY KEY(`pageId`, `recipeRevision`), FOREIGN KEY(`pageId`) REFERENCES `Page`(`pageId`) ON UPDATE NO ACTION ON DELETE RESTRICT , FOREIGN KEY(`sourceId`) REFERENCES `Source`(`sourceId`) ON UPDATE NO ACTION ON DELETE RESTRICT , FOREIGN KEY(`pageId`, `parentRevision`) REFERENCES `RecipeRevision`(`pageId`, `recipeRevision`) ON UPDATE NO ACTION ON DELETE RESTRICT )",
+        "fields": [
+          {
+            "fieldPath": "pageId",
+            "columnName": "pageId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "recipeRevision",
+            "columnName": "recipeRevision",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "sourceId",
+            "columnName": "sourceId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "recipeSchemaVersion",
+            "columnName": "recipeSchemaVersion",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "canonicalRecipe",
+            "columnName": "canonicalRecipe",
+            "affinity": "BLOB",
+            "notNull": true
+          },
+          {
+            "fieldPath": "recipeSha256",
+            "columnName": "recipeSha256",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "parentRevision",
+            "columnName": "parentRevision",
+            "affinity": "INTEGER"
+          },
+          {
+            "fieldPath": "createdAt",
+            "columnName": "createdAt",
+            "affinity": "INTEGER",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "pageId",
+            "recipeRevision"
+          ]
+        },
+        "indices": [
+          {
+            "name": "index_RecipeRevision_sourceId",
+            "unique": false,
+            "columnNames": [
+              "sourceId"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_RecipeRevision_sourceId` ON `${TABLE_NAME}` (`sourceId`)"
+          },
+          {
+            "name": "index_RecipeRevision_pageId_parentRevision",
+            "unique": false,
+            "columnNames": [
+              "pageId",
+              "parentRevision"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_RecipeRevision_pageId_parentRevision` ON `${TABLE_NAME}` (`pageId`, `parentRevision`)"
+          }
+        ],
+        "foreignKeys": [
+          {
+            "table": "Page",
+            "onDelete": "RESTRICT",
+            "onUpdate": "NO ACTION",
+            "columns": [
+              "pageId"
+            ],
+            "referencedColumns": [
+              "pageId"
+            ]
+          },
+          {
+            "table": "Source",
+            "onDelete": "RESTRICT",
+            "onUpdate": "NO ACTION",
+            "columns": [
+              "sourceId"
+            ],
+            "referencedColumns": [
+              "sourceId"
+            ]
+          },
+          {
+            "table": "RecipeRevision",
+            "onDelete": "RESTRICT",
+            "onUpdate": "NO ACTION",
+            "columns": [
+              "pageId",
+              "parentRevision"
+            ],
+            "referencedColumns": [
+              "pageId",
+              "recipeRevision"
+            ]
+          }
+        ]
+      },
+      {
+        "tableName": "ImportSession",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`sessionId` TEXT NOT NULL, `parentSessionId` TEXT, `kind` TEXT NOT NULL, `documentId` TEXT NOT NULL, `anchorPageId` TEXT, `selectionOrdinal` INTEGER, `plannedPageId` TEXT, `uriText` TEXT, `state` TEXT NOT NULL, `expectedMembershipToken` TEXT NOT NULL, `transactionId` TEXT, `createdAt` INTEGER NOT NULL, `expiresAt` INTEGER NOT NULL, `errorCode` TEXT, PRIMARY KEY(`sessionId`), FOREIGN KEY(`parentSessionId`) REFERENCES `ImportSession`(`sessionId`) ON UPDATE NO ACTION ON DELETE RESTRICT , FOREIGN KEY(`documentId`) REFERENCES `Document`(`documentId`) ON UPDATE NO ACTION ON DELETE RESTRICT )",
+        "fields": [
+          {
+            "fieldPath": "sessionId",
+            "columnName": "sessionId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "parentSessionId",
+            "columnName": "parentSessionId",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "kind",
+            "columnName": "kind",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "documentId",
+            "columnName": "documentId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "anchorPageId",
+            "columnName": "anchorPageId",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "selectionOrdinal",
+            "columnName": "selectionOrdinal",
+            "affinity": "INTEGER"
+          },
+          {
+            "fieldPath": "plannedPageId",
+            "columnName": "plannedPageId",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "uriText",
+            "columnName": "uriText",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "state",
+            "columnName": "state",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "expectedMembershipToken",
+            "columnName": "expectedMembershipToken",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "transactionId",
+            "columnName": "transactionId",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "createdAt",
+            "columnName": "createdAt",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "expiresAt",
+            "columnName": "expiresAt",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "errorCode",
+            "columnName": "errorCode",
+            "affinity": "TEXT"
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "sessionId"
+          ]
+        },
+        "indices": [
+          {
+            "name": "index_ImportSession_parentSessionId_selectionOrdinal",
+            "unique": true,
+            "columnNames": [
+              "parentSessionId",
+              "selectionOrdinal"
+            ],
+            "orders": [],
+            "createSql": "CREATE UNIQUE INDEX IF NOT EXISTS `index_ImportSession_parentSessionId_selectionOrdinal` ON `${TABLE_NAME}` (`parentSessionId`, `selectionOrdinal`)"
+          },
+          {
+            "name": "index_ImportSession_plannedPageId",
+            "unique": true,
+            "columnNames": [
+              "plannedPageId"
+            ],
+            "orders": [],
+            "createSql": "CREATE UNIQUE INDEX IF NOT EXISTS `index_ImportSession_plannedPageId` ON `${TABLE_NAME}` (`plannedPageId`)"
+          },
+          {
+            "name": "index_ImportSession_transactionId",
+            "unique": true,
+            "columnNames": [
+              "transactionId"
+            ],
+            "orders": [],
+            "createSql": "CREATE UNIQUE INDEX IF NOT EXISTS `index_ImportSession_transactionId` ON `${TABLE_NAME}` (`transactionId`)"
+          },
+          {
+            "name": "index_ImportSession_documentId_state",
+            "unique": false,
+            "columnNames": [
+              "documentId",
+              "state"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_ImportSession_documentId_state` ON `${TABLE_NAME}` (`documentId`, `state`)"
+          }
+        ],
+        "foreignKeys": [
+          {
+            "table": "ImportSession",
+            "onDelete": "RESTRICT",
+            "onUpdate": "NO ACTION",
+            "columns": [
+              "parentSessionId"
+            ],
+            "referencedColumns": [
+              "sessionId"
+            ]
+          },
+          {
+            "table": "Document",
+            "onDelete": "RESTRICT",
+            "onUpdate": "NO ACTION",
+            "columns": [
+              "documentId"
+            ],
+            "referencedColumns": [
+              "documentId"
+            ]
+          }
+        ]
+      },
+      {
+        "tableName": "UndoEntry",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`undoId` TEXT NOT NULL, `documentId` TEXT NOT NULL, `beforeState` BLOB NOT NULL, `afterState` BLOB NOT NULL, `action` TEXT NOT NULL, `appliedDocumentRevision` INTEGER NOT NULL, `expiresAt` INTEGER NOT NULL, `state` TEXT NOT NULL, PRIMARY KEY(`undoId`), FOREIGN KEY(`documentId`) REFERENCES `Document`(`documentId`) ON UPDATE NO ACTION ON DELETE RESTRICT )",
+        "fields": [
+          {
+            "fieldPath": "undoId",
+            "columnName": "undoId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "documentId",
+            "columnName": "documentId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "beforeState",
+            "columnName": "beforeState",
+            "affinity": "BLOB",
+            "notNull": true
+          },
+          {
+            "fieldPath": "afterState",
+            "columnName": "afterState",
+            "affinity": "BLOB",
+            "notNull": true
+          },
+          {
+            "fieldPath": "action",
+            "columnName": "action",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "appliedDocumentRevision",
+            "columnName": "appliedDocumentRevision",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "expiresAt",
+            "columnName": "expiresAt",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "state",
+            "columnName": "state",
+            "affinity": "TEXT",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "undoId"
+          ]
+        },
+        "indices": [
+          {
+            "name": "index_UndoEntry_documentId_state_expiresAt",
+            "unique": false,
+            "columnNames": [
+              "documentId",
+              "state",
+              "expiresAt"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_UndoEntry_documentId_state_expiresAt` ON `${TABLE_NAME}` (`documentId`, `state`, `expiresAt`)"
+          }
+        ],
+        "foreignKeys": [
+          {
+            "table": "Document",
+            "onDelete": "RESTRICT",
+            "onUpdate": "NO ACTION",
+            "columns": [
+              "documentId"
+            ],
+            "referencedColumns": [
+              "documentId"
+            ]
+          }
+        ]
+      },
+      {
+        "tableName": "Confirmation",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`confirmationId` TEXT NOT NULL, `documentId` TEXT NOT NULL, `documentRevision` INTEGER NOT NULL, `action` TEXT NOT NULL, `pageCount` INTEGER NOT NULL, `expiresAt` INTEGER NOT NULL, `consumedAt` INTEGER, PRIMARY KEY(`confirmationId`), FOREIGN KEY(`documentId`) REFERENCES `Document`(`documentId`) ON UPDATE NO ACTION ON DELETE RESTRICT )",
+        "fields": [
+          {
+            "fieldPath": "confirmationId",
+            "columnName": "confirmationId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "documentId",
+            "columnName": "documentId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "documentRevision",
+            "columnName": "documentRevision",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "action",
+            "columnName": "action",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "pageCount",
+            "columnName": "pageCount",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "expiresAt",
+            "columnName": "expiresAt",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "consumedAt",
+            "columnName": "consumedAt",
+            "affinity": "INTEGER"
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "confirmationId"
+          ]
+        },
+        "indices": [
+          {
+            "name": "index_Confirmation_documentId",
+            "unique": false,
+            "columnNames": [
+              "documentId"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_Confirmation_documentId` ON `${TABLE_NAME}` (`documentId`)"
+          },
+          {
+            "name": "index_Confirmation_expiresAt",
+            "unique": false,
+            "columnNames": [
+              "expiresAt"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_Confirmation_expiresAt` ON `${TABLE_NAME}` (`expiresAt`)"
+          }
+        ],
+        "foreignKeys": [
+          {
+            "table": "Document",
+            "onDelete": "RESTRICT",
+            "onUpdate": "NO ACTION",
+            "columns": [
+              "documentId"
+            ],
+            "referencedColumns": [
+              "documentId"
+            ]
+          }
+        ]
+      },
+      {
+        "tableName": "Mask",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`maskId` TEXT NOT NULL, `sourceId` TEXT NOT NULL, `kind` TEXT NOT NULL, `sha256` TEXT NOT NULL, `width` INTEGER NOT NULL, `height` INTEGER NOT NULL, `relativePath` TEXT NOT NULL, `encodingVersion` INTEGER NOT NULL, `refCount` INTEGER NOT NULL, `state` TEXT NOT NULL, PRIMARY KEY(`maskId`), FOREIGN KEY(`sourceId`) REFERENCES `Source`(`sourceId`) ON UPDATE NO ACTION ON DELETE RESTRICT )",
+        "fields": [
+          {
+            "fieldPath": "maskId",
+            "columnName": "maskId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "sourceId",
+            "columnName": "sourceId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "kind",
+            "columnName": "kind",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "sha256",
+            "columnName": "sha256",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "width",
+            "columnName": "width",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "height",
+            "columnName": "height",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "relativePath",
+            "columnName": "relativePath",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "encodingVersion",
+            "columnName": "encodingVersion",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "refCount",
+            "columnName": "refCount",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "state",
+            "columnName": "state",
+            "affinity": "TEXT",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "maskId"
+          ]
+        },
+        "indices": [
+          {
+            "name": "index_Mask_relativePath",
+            "unique": true,
+            "columnNames": [
+              "relativePath"
+            ],
+            "orders": [],
+            "createSql": "CREATE UNIQUE INDEX IF NOT EXISTS `index_Mask_relativePath` ON `${TABLE_NAME}` (`relativePath`)"
+          },
+          {
+            "name": "index_Mask_sourceId_kind",
+            "unique": false,
+            "columnNames": [
+              "sourceId",
+              "kind"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_Mask_sourceId_kind` ON `${TABLE_NAME}` (`sourceId`, `kind`)"
+          }
+        ],
+        "foreignKeys": [
+          {
+            "table": "Source",
+            "onDelete": "RESTRICT",
+            "onUpdate": "NO ACTION",
+            "columns": [
+              "sourceId"
+            ],
+            "referencedColumns": [
+              "sourceId"
+            ]
+          }
+        ]
+      },
+      {
+        "tableName": "RecipeMask",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`pageId` TEXT NOT NULL, `recipeRevision` INTEGER NOT NULL, `maskId` TEXT NOT NULL, `role` TEXT NOT NULL, PRIMARY KEY(`pageId`, `recipeRevision`, `maskId`), FOREIGN KEY(`pageId`, `recipeRevision`) REFERENCES `RecipeRevision`(`pageId`, `recipeRevision`) ON UPDATE NO ACTION ON DELETE RESTRICT , FOREIGN KEY(`maskId`) REFERENCES `Mask`(`maskId`) ON UPDATE NO ACTION ON DELETE RESTRICT )",
+        "fields": [
+          {
+            "fieldPath": "pageId",
+            "columnName": "pageId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "recipeRevision",
+            "columnName": "recipeRevision",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "maskId",
+            "columnName": "maskId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "role",
+            "columnName": "role",
+            "affinity": "TEXT",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "pageId",
+            "recipeRevision",
+            "maskId"
+          ]
+        },
+        "indices": [
+          {
+            "name": "index_RecipeMask_maskId",
+            "unique": false,
+            "columnNames": [
+              "maskId"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_RecipeMask_maskId` ON `${TABLE_NAME}` (`maskId`)"
+          }
+        ],
+        "foreignKeys": [
+          {
+            "table": "RecipeRevision",
+            "onDelete": "RESTRICT",
+            "onUpdate": "NO ACTION",
+            "columns": [
+              "pageId",
+              "recipeRevision"
+            ],
+            "referencedColumns": [
+              "pageId",
+              "recipeRevision"
+            ]
+          },
+          {
+            "table": "Mask",
+            "onDelete": "RESTRICT",
+            "onUpdate": "NO ACTION",
+            "columns": [
+              "maskId"
+            ],
+            "referencedColumns": [
+              "maskId"
+            ]
+          }
+        ]
+      },
+      {
+        "tableName": "SourceReference",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`ownerType` TEXT NOT NULL, `ownerId` TEXT NOT NULL, `sourceId` TEXT NOT NULL, `createdAt` INTEGER NOT NULL, PRIMARY KEY(`ownerType`, `ownerId`, `sourceId`), FOREIGN KEY(`sourceId`) REFERENCES `Source`(`sourceId`) ON UPDATE NO ACTION ON DELETE RESTRICT )",
+        "fields": [
+          {
+            "fieldPath": "ownerType",
+            "columnName": "ownerType",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "ownerId",
+            "columnName": "ownerId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "sourceId",
+            "columnName": "sourceId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "createdAt",
+            "columnName": "createdAt",
+            "affinity": "INTEGER",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "ownerType",
+            "ownerId",
+            "sourceId"
+          ]
+        },
+        "indices": [
+          {
+            "name": "index_SourceReference_sourceId",
+            "unique": false,
+            "columnNames": [
+              "sourceId"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_SourceReference_sourceId` ON `${TABLE_NAME}` (`sourceId`)"
+          }
+        ],
+        "foreignKeys": [
+          {
+            "table": "Source",
+            "onDelete": "RESTRICT",
+            "onUpdate": "NO ACTION",
+            "columns": [
+              "sourceId"
+            ],
+            "referencedColumns": [
+              "sourceId"
+            ]
+          }
+        ]
+      },
+      {
+        "tableName": "MaskReference",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`ownerType` TEXT NOT NULL, `ownerId` TEXT NOT NULL, `maskId` TEXT NOT NULL, `createdAt` INTEGER NOT NULL, PRIMARY KEY(`ownerType`, `ownerId`, `maskId`), FOREIGN KEY(`maskId`) REFERENCES `Mask`(`maskId`) ON UPDATE NO ACTION ON DELETE RESTRICT )",
+        "fields": [
+          {
+            "fieldPath": "ownerType",
+            "columnName": "ownerType",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "ownerId",
+            "columnName": "ownerId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "maskId",
+            "columnName": "maskId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "createdAt",
+            "columnName": "createdAt",
+            "affinity": "INTEGER",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "ownerType",
+            "ownerId",
+            "maskId"
+          ]
+        },
+        "indices": [
+          {
+            "name": "index_MaskReference_maskId",
+            "unique": false,
+            "columnNames": [
+              "maskId"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_MaskReference_maskId` ON `${TABLE_NAME}` (`maskId`)"
+          }
+        ],
+        "foreignKeys": [
+          {
+            "table": "Mask",
+            "onDelete": "RESTRICT",
+            "onUpdate": "NO ACTION",
+            "columns": [
+              "maskId"
+            ],
+            "referencedColumns": [
+              "maskId"
+            ]
+          }
+        ]
+      },
+      {
+        "tableName": "AssetPin",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`ownerType` TEXT NOT NULL, `ownerId` TEXT NOT NULL, `assetSha256` TEXT NOT NULL, `providerId` TEXT NOT NULL, `manifest` BLOB NOT NULL, PRIMARY KEY(`ownerType`, `ownerId`, `assetSha256`))",
+        "fields": [
+          {
+            "fieldPath": "ownerType",
+            "columnName": "ownerType",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "ownerId",
+            "columnName": "ownerId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "assetSha256",
+            "columnName": "assetSha256",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "providerId",
+            "columnName": "providerId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "manifest",
+            "columnName": "manifest",
+            "affinity": "BLOB",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "ownerType",
+            "ownerId",
+            "assetSha256"
+          ]
+        },
+        "indices": [
+          {
+            "name": "index_AssetPin_assetSha256",
+            "unique": false,
+            "columnNames": [
+              "assetSha256"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_AssetPin_assetSha256` ON `${TABLE_NAME}` (`assetSha256`)"
+          }
+        ]
+      },
+      {
+        "tableName": "RenderReference",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`ownerType` TEXT NOT NULL, `ownerId` TEXT NOT NULL, `renderId` TEXT NOT NULL, `createdAt` INTEGER NOT NULL, `expiresAt` INTEGER, PRIMARY KEY(`ownerType`, `ownerId`, `renderId`), FOREIGN KEY(`renderId`) REFERENCES `RenderedPage`(`renderId`) ON UPDATE NO ACTION ON DELETE RESTRICT )",
+        "fields": [
+          {
+            "fieldPath": "ownerType",
+            "columnName": "ownerType",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "ownerId",
+            "columnName": "ownerId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "renderId",
+            "columnName": "renderId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "createdAt",
+            "columnName": "createdAt",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "expiresAt",
+            "columnName": "expiresAt",
+            "affinity": "INTEGER"
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "ownerType",
+            "ownerId",
+            "renderId"
+          ]
+        },
+        "indices": [
+          {
+            "name": "index_RenderReference_renderId",
+            "unique": false,
+            "columnNames": [
+              "renderId"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_RenderReference_renderId` ON `${TABLE_NAME}` (`renderId`)"
+          }
+        ],
+        "foreignKeys": [
+          {
+            "table": "RenderedPage",
+            "onDelete": "RESTRICT",
+            "onUpdate": "NO ACTION",
+            "columns": [
+              "renderId"
+            ],
+            "referencedColumns": [
+              "renderId"
+            ]
+          }
+        ]
+      },
+      {
+        "tableName": "ExportSnapshot",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`snapshotId` TEXT NOT NULL, `documentId` TEXT NOT NULL, `documentRevision` INTEGER NOT NULL, `snapshotSha256` TEXT NOT NULL, `settings` BLOB NOT NULL, `state` TEXT NOT NULL, `createdAt` INTEGER NOT NULL, `retainedUntil` INTEGER NOT NULL, PRIMARY KEY(`snapshotId`), FOREIGN KEY(`documentId`) REFERENCES `Document`(`documentId`) ON UPDATE NO ACTION ON DELETE RESTRICT )",
+        "fields": [
+          {
+            "fieldPath": "snapshotId",
+            "columnName": "snapshotId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "documentId",
+            "columnName": "documentId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "documentRevision",
+            "columnName": "documentRevision",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "snapshotSha256",
+            "columnName": "snapshotSha256",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "settings",
+            "columnName": "settings",
+            "affinity": "BLOB",
+            "notNull": true
+          },
+          {
+            "fieldPath": "state",
+            "columnName": "state",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "createdAt",
+            "columnName": "createdAt",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "retainedUntil",
+            "columnName": "retainedUntil",
+            "affinity": "INTEGER",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "snapshotId"
+          ]
+        },
+        "indices": [
+          {
+            "name": "index_ExportSnapshot_documentId",
+            "unique": false,
+            "columnNames": [
+              "documentId"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_ExportSnapshot_documentId` ON `${TABLE_NAME}` (`documentId`)"
+          },
+          {
+            "name": "index_ExportSnapshot_snapshotSha256",
+            "unique": false,
+            "columnNames": [
+              "snapshotSha256"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_ExportSnapshot_snapshotSha256` ON `${TABLE_NAME}` (`snapshotSha256`)"
+          },
+          {
+            "name": "index_ExportSnapshot_state_createdAt",
+            "unique": false,
+            "columnNames": [
+              "state",
+              "createdAt"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_ExportSnapshot_state_createdAt` ON `${TABLE_NAME}` (`state`, `createdAt`)"
+          }
+        ],
+        "foreignKeys": [
+          {
+            "table": "Document",
+            "onDelete": "RESTRICT",
+            "onUpdate": "NO ACTION",
+            "columns": [
+              "documentId"
+            ],
+            "referencedColumns": [
+              "documentId"
+            ]
+          }
+        ]
+      },
+      {
+        "tableName": "ExportPage",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`snapshotId` TEXT NOT NULL, `ordinal` INTEGER NOT NULL, `originalPageId` TEXT NOT NULL, `sourceId` TEXT NOT NULL, `sourceBlobId` TEXT NOT NULL, `byteSha256` TEXT NOT NULL, `pixelSha256` TEXT NOT NULL, `width` INTEGER NOT NULL, `height` INTEGER NOT NULL, `conversionFingerprint` TEXT NOT NULL, `recipeRevision` INTEGER NOT NULL, `recipeSchemaVersion` INTEGER NOT NULL, `recipe` BLOB NOT NULL, `recipeSha256` TEXT NOT NULL, `masks` BLOB NOT NULL, `providers` BLOB NOT NULL, `assetSetSha256` TEXT NOT NULL, `rendererVersion` TEXT NOT NULL, `requestedOutputWidth` INTEGER NOT NULL, `requestedOutputHeight` INTEGER NOT NULL, `outputWidth` INTEGER NOT NULL, `outputHeight` INTEGER NOT NULL, `fallbackPolicy` TEXT NOT NULL, `acceptedRenderId` TEXT, `acceptedExecutionSha256` TEXT, PRIMARY KEY(`snapshotId`, `ordinal`), FOREIGN KEY(`snapshotId`) REFERENCES `ExportSnapshot`(`snapshotId`) ON UPDATE NO ACTION ON DELETE RESTRICT , FOREIGN KEY(`sourceId`) REFERENCES `Source`(`sourceId`) ON UPDATE NO ACTION ON DELETE RESTRICT , FOREIGN KEY(`sourceBlobId`) REFERENCES `SourceBlob`(`sourceBlobId`) ON UPDATE NO ACTION ON DELETE RESTRICT , FOREIGN KEY(`acceptedRenderId`) REFERENCES `RenderedPage`(`renderId`) ON UPDATE NO ACTION ON DELETE RESTRICT )",
+        "fields": [
+          {
+            "fieldPath": "snapshotId",
+            "columnName": "snapshotId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "ordinal",
+            "columnName": "ordinal",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "originalPageId",
+            "columnName": "originalPageId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "sourceId",
+            "columnName": "sourceId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "sourceBlobId",
+            "columnName": "sourceBlobId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "byteSha256",
+            "columnName": "byteSha256",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "pixelSha256",
+            "columnName": "pixelSha256",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "width",
+            "columnName": "width",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "height",
+            "columnName": "height",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "conversionFingerprint",
+            "columnName": "conversionFingerprint",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "recipeRevision",
+            "columnName": "recipeRevision",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "recipeSchemaVersion",
+            "columnName": "recipeSchemaVersion",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "recipe",
+            "columnName": "recipe",
+            "affinity": "BLOB",
+            "notNull": true
+          },
+          {
+            "fieldPath": "recipeSha256",
+            "columnName": "recipeSha256",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "masks",
+            "columnName": "masks",
+            "affinity": "BLOB",
+            "notNull": true
+          },
+          {
+            "fieldPath": "providers",
+            "columnName": "providers",
+            "affinity": "BLOB",
+            "notNull": true
+          },
+          {
+            "fieldPath": "assetSetSha256",
+            "columnName": "assetSetSha256",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "rendererVersion",
+            "columnName": "rendererVersion",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "requestedOutputWidth",
+            "columnName": "requestedOutputWidth",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "requestedOutputHeight",
+            "columnName": "requestedOutputHeight",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "outputWidth",
+            "columnName": "outputWidth",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "outputHeight",
+            "columnName": "outputHeight",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "fallbackPolicy",
+            "columnName": "fallbackPolicy",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "acceptedRenderId",
+            "columnName": "acceptedRenderId",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "acceptedExecutionSha256",
+            "columnName": "acceptedExecutionSha256",
+            "affinity": "TEXT"
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "snapshotId",
+            "ordinal"
+          ]
+        },
+        "indices": [
+          {
+            "name": "index_ExportPage_sourceId",
+            "unique": false,
+            "columnNames": [
+              "sourceId"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_ExportPage_sourceId` ON `${TABLE_NAME}` (`sourceId`)"
+          },
+          {
+            "name": "index_ExportPage_sourceBlobId",
+            "unique": false,
+            "columnNames": [
+              "sourceBlobId"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_ExportPage_sourceBlobId` ON `${TABLE_NAME}` (`sourceBlobId`)"
+          },
+          {
+            "name": "index_ExportPage_acceptedRenderId",
+            "unique": false,
+            "columnNames": [
+              "acceptedRenderId"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_ExportPage_acceptedRenderId` ON `${TABLE_NAME}` (`acceptedRenderId`)"
+          },
+          {
+            "name": "index_ExportPage_snapshotId_originalPageId",
+            "unique": true,
+            "columnNames": [
+              "snapshotId",
+              "originalPageId"
+            ],
+            "orders": [],
+            "createSql": "CREATE UNIQUE INDEX IF NOT EXISTS `index_ExportPage_snapshotId_originalPageId` ON `${TABLE_NAME}` (`snapshotId`, `originalPageId`)"
+          }
+        ],
+        "foreignKeys": [
+          {
+            "table": "ExportSnapshot",
+            "onDelete": "RESTRICT",
+            "onUpdate": "NO ACTION",
+            "columns": [
+              "snapshotId"
+            ],
+            "referencedColumns": [
+              "snapshotId"
+            ]
+          },
+          {
+            "table": "Source",
+            "onDelete": "RESTRICT",
+            "onUpdate": "NO ACTION",
+            "columns": [
+              "sourceId"
+            ],
+            "referencedColumns": [
+              "sourceId"
+            ]
+          },
+          {
+            "table": "SourceBlob",
+            "onDelete": "RESTRICT",
+            "onUpdate": "NO ACTION",
+            "columns": [
+              "sourceBlobId"
+            ],
+            "referencedColumns": [
+              "sourceBlobId"
+            ]
+          },
+          {
+            "table": "RenderedPage",
+            "onDelete": "RESTRICT",
+            "onUpdate": "NO ACTION",
+            "columns": [
+              "acceptedRenderId"
+            ],
+            "referencedColumns": [
+              "renderId"
+            ]
+          }
+        ]
+      },
+      {
+        "tableName": "Job",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`jobId` TEXT NOT NULL, `kind` TEXT NOT NULL, `idempotenceKey` TEXT NOT NULL, `canonicalInputSha256` TEXT NOT NULL, `snapshotId` TEXT, `pageOrdinal` INTEGER, `input` BLOB NOT NULL, `state` TEXT NOT NULL, `attempt` INTEGER NOT NULL, `leaseOwner` TEXT, `leaseUntil` INTEGER, `leaseGeneration` INTEGER NOT NULL, `checkpoint` BLOB, `errorCode` TEXT, `createdAt` INTEGER NOT NULL, `updatedAt` INTEGER NOT NULL, PRIMARY KEY(`jobId`), FOREIGN KEY(`snapshotId`) REFERENCES `ExportSnapshot`(`snapshotId`) ON UPDATE NO ACTION ON DELETE RESTRICT )",
+        "fields": [
+          {
+            "fieldPath": "jobId",
+            "columnName": "jobId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "kind",
+            "columnName": "kind",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "idempotenceKey",
+            "columnName": "idempotenceKey",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "canonicalInputSha256",
+            "columnName": "canonicalInputSha256",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "snapshotId",
+            "columnName": "snapshotId",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "pageOrdinal",
+            "columnName": "pageOrdinal",
+            "affinity": "INTEGER"
+          },
+          {
+            "fieldPath": "input",
+            "columnName": "input",
+            "affinity": "BLOB",
+            "notNull": true
+          },
+          {
+            "fieldPath": "state",
+            "columnName": "state",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "attempt",
+            "columnName": "attempt",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "leaseOwner",
+            "columnName": "leaseOwner",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "leaseUntil",
+            "columnName": "leaseUntil",
+            "affinity": "INTEGER"
+          },
+          {
+            "fieldPath": "leaseGeneration",
+            "columnName": "leaseGeneration",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "checkpoint",
+            "columnName": "checkpoint",
+            "affinity": "BLOB"
+          },
+          {
+            "fieldPath": "errorCode",
+            "columnName": "errorCode",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "createdAt",
+            "columnName": "createdAt",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "updatedAt",
+            "columnName": "updatedAt",
+            "affinity": "INTEGER",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "jobId"
+          ]
+        },
+        "indices": [
+          {
+            "name": "index_Job_idempotenceKey",
+            "unique": true,
+            "columnNames": [
+              "idempotenceKey"
+            ],
+            "orders": [],
+            "createSql": "CREATE UNIQUE INDEX IF NOT EXISTS `index_Job_idempotenceKey` ON `${TABLE_NAME}` (`idempotenceKey`)"
+          },
+          {
+            "name": "index_Job_state_leaseUntil",
+            "unique": false,
+            "columnNames": [
+              "state",
+              "leaseUntil"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_Job_state_leaseUntil` ON `${TABLE_NAME}` (`state`, `leaseUntil`)"
+          },
+          {
+            "name": "index_Job_snapshotId_pageOrdinal",
+            "unique": false,
+            "columnNames": [
+              "snapshotId",
+              "pageOrdinal"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_Job_snapshotId_pageOrdinal` ON `${TABLE_NAME}` (`snapshotId`, `pageOrdinal`)"
+          }
+        ],
+        "foreignKeys": [
+          {
+            "table": "ExportSnapshot",
+            "onDelete": "RESTRICT",
+            "onUpdate": "NO ACTION",
+            "columns": [
+              "snapshotId"
+            ],
+            "referencedColumns": [
+              "snapshotId"
+            ]
+          }
+        ]
+      },
+      {
+        "tableName": "RenderedPage",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`renderId` TEXT NOT NULL, `jobId` TEXT NOT NULL, `sourceId` TEXT NOT NULL, `pageId` TEXT NOT NULL, `recipeRevision` INTEGER NOT NULL, `cacheKey` TEXT NOT NULL, `execution` BLOB NOT NULL, `executionSha256` TEXT NOT NULL, `relativePath` TEXT NOT NULL, `byteSha256` TEXT NOT NULL, `rasterPixelSha256` TEXT NOT NULL, `byteCount` INTEGER NOT NULL, `width` INTEGER NOT NULL, `height` INTEGER NOT NULL, `renderStatus` TEXT NOT NULL, `state` TEXT NOT NULL, PRIMARY KEY(`renderId`), FOREIGN KEY(`jobId`) REFERENCES `Job`(`jobId`) ON UPDATE NO ACTION ON DELETE RESTRICT , FOREIGN KEY(`sourceId`) REFERENCES `Source`(`sourceId`) ON UPDATE NO ACTION ON DELETE RESTRICT )",
+        "fields": [
+          {
+            "fieldPath": "renderId",
+            "columnName": "renderId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "jobId",
+            "columnName": "jobId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "sourceId",
+            "columnName": "sourceId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "pageId",
+            "columnName": "pageId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "recipeRevision",
+            "columnName": "recipeRevision",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "cacheKey",
+            "columnName": "cacheKey",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "execution",
+            "columnName": "execution",
+            "affinity": "BLOB",
+            "notNull": true
+          },
+          {
+            "fieldPath": "executionSha256",
+            "columnName": "executionSha256",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "relativePath",
+            "columnName": "relativePath",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "byteSha256",
+            "columnName": "byteSha256",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "rasterPixelSha256",
+            "columnName": "rasterPixelSha256",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "byteCount",
+            "columnName": "byteCount",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "width",
+            "columnName": "width",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "height",
+            "columnName": "height",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "renderStatus",
+            "columnName": "renderStatus",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "state",
+            "columnName": "state",
+            "affinity": "TEXT",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "renderId"
+          ]
+        },
+        "indices": [
+          {
+            "name": "index_RenderedPage_jobId",
+            "unique": false,
+            "columnNames": [
+              "jobId"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_RenderedPage_jobId` ON `${TABLE_NAME}` (`jobId`)"
+          },
+          {
+            "name": "index_RenderedPage_sourceId",
+            "unique": false,
+            "columnNames": [
+              "sourceId"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_RenderedPage_sourceId` ON `${TABLE_NAME}` (`sourceId`)"
+          },
+          {
+            "name": "index_RenderedPage_cacheKey",
+            "unique": true,
+            "columnNames": [
+              "cacheKey"
+            ],
+            "orders": [],
+            "createSql": "CREATE UNIQUE INDEX IF NOT EXISTS `index_RenderedPage_cacheKey` ON `${TABLE_NAME}` (`cacheKey`)"
+          },
+          {
+            "name": "index_RenderedPage_relativePath",
+            "unique": true,
+            "columnNames": [
+              "relativePath"
+            ],
+            "orders": [],
+            "createSql": "CREATE UNIQUE INDEX IF NOT EXISTS `index_RenderedPage_relativePath` ON `${TABLE_NAME}` (`relativePath`)"
+          }
+        ],
+        "foreignKeys": [
+          {
+            "table": "Job",
+            "onDelete": "RESTRICT",
+            "onUpdate": "NO ACTION",
+            "columns": [
+              "jobId"
+            ],
+            "referencedColumns": [
+              "jobId"
+            ]
+          },
+          {
+            "table": "Source",
+            "onDelete": "RESTRICT",
+            "onUpdate": "NO ACTION",
+            "columns": [
+              "sourceId"
+            ],
+            "referencedColumns": [
+              "sourceId"
+            ]
+          }
+        ]
+      },
+      {
+        "tableName": "ExportArtifact",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`artifactId` TEXT NOT NULL, `snapshotId` TEXT NOT NULL, `ordinal` INTEGER NOT NULL, `mime` TEXT NOT NULL, `relativePath` TEXT NOT NULL, `byteSha256` TEXT NOT NULL, `byteCount` INTEGER NOT NULL, `pageCount` INTEGER NOT NULL, `verification` TEXT NOT NULL, `state` TEXT NOT NULL, `createdAt` INTEGER NOT NULL, PRIMARY KEY(`artifactId`), FOREIGN KEY(`snapshotId`) REFERENCES `ExportSnapshot`(`snapshotId`) ON UPDATE NO ACTION ON DELETE RESTRICT )",
+        "fields": [
+          {
+            "fieldPath": "artifactId",
+            "columnName": "artifactId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "snapshotId",
+            "columnName": "snapshotId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "ordinal",
+            "columnName": "ordinal",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "mime",
+            "columnName": "mime",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "relativePath",
+            "columnName": "relativePath",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "byteSha256",
+            "columnName": "byteSha256",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "byteCount",
+            "columnName": "byteCount",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "pageCount",
+            "columnName": "pageCount",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "verification",
+            "columnName": "verification",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "state",
+            "columnName": "state",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "createdAt",
+            "columnName": "createdAt",
+            "affinity": "INTEGER",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "artifactId"
+          ]
+        },
+        "indices": [
+          {
+            "name": "index_ExportArtifact_snapshotId_ordinal",
+            "unique": true,
+            "columnNames": [
+              "snapshotId",
+              "ordinal"
+            ],
+            "orders": [],
+            "createSql": "CREATE UNIQUE INDEX IF NOT EXISTS `index_ExportArtifact_snapshotId_ordinal` ON `${TABLE_NAME}` (`snapshotId`, `ordinal`)"
+          },
+          {
+            "name": "index_ExportArtifact_relativePath",
+            "unique": true,
+            "columnNames": [
+              "relativePath"
+            ],
+            "orders": [],
+            "createSql": "CREATE UNIQUE INDEX IF NOT EXISTS `index_ExportArtifact_relativePath` ON `${TABLE_NAME}` (`relativePath`)"
+          },
+          {
+            "name": "index_ExportArtifact_state",
+            "unique": false,
+            "columnNames": [
+              "state"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_ExportArtifact_state` ON `${TABLE_NAME}` (`state`)"
+          }
+        ],
+        "foreignKeys": [
+          {
+            "table": "ExportSnapshot",
+            "onDelete": "RESTRICT",
+            "onUpdate": "NO ACTION",
+            "columns": [
+              "snapshotId"
+            ],
+            "referencedColumns": [
+              "snapshotId"
+            ]
+          }
+        ]
+      },
+      {
+        "tableName": "FileTransaction",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`transactionId` TEXT NOT NULL, `kind` TEXT NOT NULL, `ownerId` TEXT NOT NULL, `state` TEXT NOT NULL, `stagingPath` TEXT, `finalPath` TEXT, `sealSha256` TEXT, `expectedByteSha256` TEXT, `expectedByteCount` INTEGER, `payload` BLOB NOT NULL, `attempt` INTEGER NOT NULL, `errorCode` TEXT, `updatedAt` INTEGER NOT NULL, PRIMARY KEY(`transactionId`))",
+        "fields": [
+          {
+            "fieldPath": "transactionId",
+            "columnName": "transactionId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "kind",
+            "columnName": "kind",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "ownerId",
+            "columnName": "ownerId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "state",
+            "columnName": "state",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "stagingPath",
+            "columnName": "stagingPath",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "finalPath",
+            "columnName": "finalPath",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "sealSha256",
+            "columnName": "sealSha256",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "expectedByteSha256",
+            "columnName": "expectedByteSha256",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "expectedByteCount",
+            "columnName": "expectedByteCount",
+            "affinity": "INTEGER"
+          },
+          {
+            "fieldPath": "payload",
+            "columnName": "payload",
+            "affinity": "BLOB",
+            "notNull": true
+          },
+          {
+            "fieldPath": "attempt",
+            "columnName": "attempt",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "errorCode",
+            "columnName": "errorCode",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "updatedAt",
+            "columnName": "updatedAt",
+            "affinity": "INTEGER",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "transactionId"
+          ]
+        },
+        "indices": [
+          {
+            "name": "index_FileTransaction_kind_ownerId_attempt",
+            "unique": true,
+            "columnNames": [
+              "kind",
+              "ownerId",
+              "attempt"
+            ],
+            "orders": [],
+            "createSql": "CREATE UNIQUE INDEX IF NOT EXISTS `index_FileTransaction_kind_ownerId_attempt` ON `${TABLE_NAME}` (`kind`, `ownerId`, `attempt`)"
+          },
+          {
+            "name": "index_FileTransaction_state_updatedAt",
+            "unique": false,
+            "columnNames": [
+              "state",
+              "updatedAt"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_FileTransaction_state_updatedAt` ON `${TABLE_NAME}` (`state`, `updatedAt`)"
+          }
+        ]
+      },
+      {
+        "tableName": "Publication",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`publicationId` TEXT NOT NULL, `artifactId` TEXT NOT NULL, `targetUri` TEXT, `state` TEXT NOT NULL, `consentId` TEXT NOT NULL, `targetCreatedByAttempt` INTEGER NOT NULL, `expectedSha256` TEXT NOT NULL, `expectedByteCount` INTEGER NOT NULL, `sentByteCount` INTEGER NOT NULL, `readbackSha256` TEXT, `errorCode` TEXT, `createdAt` INTEGER NOT NULL, `updatedAt` INTEGER NOT NULL, PRIMARY KEY(`publicationId`), FOREIGN KEY(`artifactId`) REFERENCES `ExportArtifact`(`artifactId`) ON UPDATE NO ACTION ON DELETE RESTRICT )",
+        "fields": [
+          {
+            "fieldPath": "publicationId",
+            "columnName": "publicationId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "artifactId",
+            "columnName": "artifactId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "targetUri",
+            "columnName": "targetUri",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "state",
+            "columnName": "state",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "consentId",
+            "columnName": "consentId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "targetCreatedByAttempt",
+            "columnName": "targetCreatedByAttempt",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "expectedSha256",
+            "columnName": "expectedSha256",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "expectedByteCount",
+            "columnName": "expectedByteCount",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "sentByteCount",
+            "columnName": "sentByteCount",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "readbackSha256",
+            "columnName": "readbackSha256",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "errorCode",
+            "columnName": "errorCode",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "createdAt",
+            "columnName": "createdAt",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "updatedAt",
+            "columnName": "updatedAt",
+            "affinity": "INTEGER",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "publicationId"
+          ]
+        },
+        "indices": [
+          {
+            "name": "index_Publication_artifactId_state",
+            "unique": false,
+            "columnNames": [
+              "artifactId",
+              "state"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_Publication_artifactId_state` ON `${TABLE_NAME}` (`artifactId`, `state`)"
+          }
+        ],
+        "foreignKeys": [
+          {
+            "table": "ExportArtifact",
+            "onDelete": "RESTRICT",
+            "onUpdate": "NO ACTION",
+            "columns": [
+              "artifactId"
+            ],
+            "referencedColumns": [
+              "artifactId"
+            ]
+          }
+        ]
+      },
+      {
+        "tableName": "ShareLease",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`shareId` TEXT NOT NULL, `artifactId` TEXT NOT NULL, `relativePath` TEXT NOT NULL, `state` TEXT NOT NULL, `createdAt` INTEGER NOT NULL, `expiresAt` INTEGER NOT NULL, `explicitPackages` BLOB, PRIMARY KEY(`shareId`), FOREIGN KEY(`artifactId`) REFERENCES `ExportArtifact`(`artifactId`) ON UPDATE NO ACTION ON DELETE RESTRICT )",
+        "fields": [
+          {
+            "fieldPath": "shareId",
+            "columnName": "shareId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "artifactId",
+            "columnName": "artifactId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "relativePath",
+            "columnName": "relativePath",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "state",
+            "columnName": "state",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "createdAt",
+            "columnName": "createdAt",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "expiresAt",
+            "columnName": "expiresAt",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "explicitPackages",
+            "columnName": "explicitPackages",
+            "affinity": "BLOB"
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "shareId"
+          ]
+        },
+        "indices": [
+          {
+            "name": "index_ShareLease_artifactId",
+            "unique": false,
+            "columnNames": [
+              "artifactId"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_ShareLease_artifactId` ON `${TABLE_NAME}` (`artifactId`)"
+          },
+          {
+            "name": "index_ShareLease_relativePath",
+            "unique": true,
+            "columnNames": [
+              "relativePath"
+            ],
+            "orders": [],
+            "createSql": "CREATE UNIQUE INDEX IF NOT EXISTS `index_ShareLease_relativePath` ON `${TABLE_NAME}` (`relativePath`)"
+          },
+          {
+            "name": "index_ShareLease_state_expiresAt",
+            "unique": false,
+            "columnNames": [
+              "state",
+              "expiresAt"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_ShareLease_state_expiresAt` ON `${TABLE_NAME}` (`state`, `expiresAt`)"
+          }
+        ],
+        "foreignKeys": [
+          {
+            "table": "ExportArtifact",
+            "onDelete": "RESTRICT",
+            "onUpdate": "NO ACTION",
+            "columns": [
+              "artifactId"
+            ],
+            "referencedColumns": [
+              "artifactId"
+            ]
+          }
+        ]
+      },
+      {
+        "tableName": "AtelierDraft",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`draftId` TEXT NOT NULL, `stagingDocumentId` TEXT NOT NULL, `targetDocumentId` TEXT, `targetRevision` INTEGER, `state` TEXT NOT NULL, `generation` INTEGER NOT NULL, `step` INTEGER NOT NULL, `selectedPageId` TEXT, `committedDocumentId` TEXT, `createdAt` INTEGER NOT NULL, `activeBatchId` TEXT, `receiptPageIds` TEXT, PRIMARY KEY(`draftId`), FOREIGN KEY(`stagingDocumentId`) REFERENCES `Document`(`documentId`) ON UPDATE NO ACTION ON DELETE RESTRICT )",
+        "fields": [
+          {
+            "fieldPath": "draftId",
+            "columnName": "draftId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "stagingDocumentId",
+            "columnName": "stagingDocumentId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "targetDocumentId",
+            "columnName": "targetDocumentId",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "targetRevision",
+            "columnName": "targetRevision",
+            "affinity": "INTEGER"
+          },
+          {
+            "fieldPath": "state",
+            "columnName": "state",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "generation",
+            "columnName": "generation",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "step",
+            "columnName": "step",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "selectedPageId",
+            "columnName": "selectedPageId",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "committedDocumentId",
+            "columnName": "committedDocumentId",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "createdAt",
+            "columnName": "createdAt",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "activeBatchId",
+            "columnName": "activeBatchId",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "receiptPageIds",
+            "columnName": "receiptPageIds",
+            "affinity": "TEXT"
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "draftId"
+          ]
+        },
+        "indices": [
+          {
+            "name": "index_AtelierDraft_stagingDocumentId",
+            "unique": true,
+            "columnNames": [
+              "stagingDocumentId"
+            ],
+            "orders": [],
+            "createSql": "CREATE UNIQUE INDEX IF NOT EXISTS `index_AtelierDraft_stagingDocumentId` ON `${TABLE_NAME}` (`stagingDocumentId`)"
+          }
+        ],
+        "foreignKeys": [
+          {
+            "table": "Document",
+            "onDelete": "RESTRICT",
+            "onUpdate": "NO ACTION",
+            "columns": [
+              "stagingDocumentId"
+            ],
+            "referencedColumns": [
+              "documentId"
+            ]
+          }
+        ]
+      }
+    ],
+    "setupQueries": [
+      "CREATE TABLE IF NOT EXISTS room_master_table (id INTEGER PRIMARY KEY,identity_hash TEXT)",
+      "INSERT OR REPLACE INTO room_master_table (id,identity_hash) VALUES(42, '5304c7d098e79af9ee800bdb8422aec3')"
+    ]
+  }
+}

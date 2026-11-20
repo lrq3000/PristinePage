@@ -1,7 +1,7 @@
 package app.pristinepage.data.repository
 
-import app.pristinepage.core.pipeline.Recipe
-import app.pristinepage.core.pipeline.requireWellFormedUnicode
+import app.pristinepage.core.geometry.GeometrySizing
+import app.pristinepage.core.pipeline.*
 import app.pristinepage.core.recipe.AppearanceRecipe
 import app.pristinepage.core.recipe.GeometryRecipe
 import app.pristinepage.core.recipe.RecipeCodec
@@ -33,8 +33,11 @@ class RoomDocumentRepository @JvmOverloads constructor(private val metadata: Met
     private val json = Json { encodeDefaults = true; ignoreUnknownKeys = false }
     private class Conflict(val actual: Long) : RuntimeException()
     private data class MaskState(val pageId: String, val revision: Long, val links: List<RecipeMaskRow>, val identities: List<MaskRow>)
-    private data class Prepared(val page: PageRow, val current: RecipeRevisionRow, val recipe: Recipe, val bytes: ByteArray, val hash: String, val masks: MaskState, val restored: RecipeRevisionRow?)
+    private data class Prepared(val page: PageRow, val current: RecipeRevisionRow, val recipe: Recipe, val bytes: ByteArray, val hash: String, val masks: MaskState, val restored: RecipeRevisionRow?, val sourceBlob: String)
     private data class PreparationSnapshot(val page: PageRow, val current: RecipeRevisionRow, val source: SourceRow, val masks: MaskState, val restored: RecipeRevisionRow?)
+    private data class DraftEdit(val id: String, val generation: Long)
+    private data class DraftPublication(val row: AtelierDraftRow, val staged: DocumentRow, val target: DocumentRow?, val pages: List<PageRow>, val targetPageCount: Int)
+    private data class PublicationProof(val prepared: Prepared, val original: SourceBlobRow)
     // Missing raw-query support is unavailable, never permission to fall back to unsafe generated SELECT-star projections. Keep existing constructors/bridges; real Room exposes both ports through the same DAO.
     private val bounds: EditablePageQueries get() = q as? EditablePageQueries ?: reject(OperationErrorCode.PROVIDER_UNAVAILABLE, "metadata_guards_unavailable")
 
@@ -87,6 +90,225 @@ class RoomDocumentRepository @JvmOverloads constructor(private val metadata: Met
                 SaveRecipeResult.Saved(pageId, after.currentRecipeRevision, nextDoc, prepared.hash)
             }
         }
+    }
+
+    /** This internal path calls the trusted renderer itself; a hash, cached preview or success asserted by the UI is not render evidence. */
+    internal suspend fun checkpointDraftRecipe(draftId: String, generation: Long, pageId: PageId, expectedRevision: Long,
+        recipe: Recipe, renderer: RenderCoordinator): SaveRecipeResult = withContext(dispatcher) {
+        command<SaveRecipeResult>({ SaveRecipeResult.Conflict(it) }, { SaveRecipeResult.Rejected(it) }) {
+            try { requireOpaqueId(draftId); require(generation > 0 && expectedRevision > 0) }
+            catch (_: IllegalArgumentException) { reject(OperationErrorCode.INVALID_INPUT, "invalid_draft_checkpoint", pageId.value) }
+            val draft = DraftEdit(draftId, generation)
+            val prepared = prepare(pageId.value, recipe, draft = draft)
+            if (prepared.current.recipeRevision != expectedRevision) throw Conflict(prepared.current.recipeRevision)
+            val output = try { GeometrySizing.output(recipe.geometry, RenderPurpose.PREVIEW, 1024) }
+            catch (_: IllegalArgumentException) { reject(OperationErrorCode.INVALID_MAP, "draft_render_size_invalid", pageId.value) }
+            val request = RenderRequest(prepared.page.sourceId, recipe.geometry.source.sourcePixelHash, pageId.value,
+                expectedRevision, recipe, output, generation, null, FallbackPolicy.FAIL)
+            verifyCheckpointRender(renderer, request)
+            metadata.transaction {
+                val doc = activeDocument(prepared.page.documentId, draft)
+                val page = verifyLive(prepared, expectedRevision, rejectMasks = true) { it.currentRecipeRevision }
+                coroutineContext.ensureActive()
+                if (prepared.current.canonicalRecipe.contentEquals(prepared.bytes)) {
+                    return@transaction SaveRecipeResult.Saved(pageId, page.currentRecipeRevision, doc.documentRevision, prepared.hash)
+                }
+                val now = clock()
+                val nextDoc = next(doc.documentRevision)
+                val after = append(page, prepared.bytes, prepared.hash, emptyList(), now)
+                updateDocument(doc.copy(documentRevision = nextDoc, updatedAt = now))
+                // If cancellation is already visible here, the pointer, history and pins must roll back together.
+                coroutineContext.ensureActive()
+                SaveRecipeResult.Saved(pageId, after.currentRecipeRevision, nextDoc, prepared.hash)
+            }
+        }
+    }
+
+    private suspend fun verifyCheckpointRender(renderer: RenderCoordinator, request: RenderRequest) {
+        try {
+            renderer.render(request).use { result ->
+                kotlinx.coroutines.currentCoroutineContext().ensureActive()
+                if (result.request != request) reject(OperationErrorCode.INTEGRITY_FAILED, "draft_render_identity_changed", request.pageId)
+                if (result.status != RenderStatus.OK) {
+                    val code = when (result.status) {
+                        RenderStatus.INVALID_MAP -> OperationErrorCode.INVALID_MAP
+                        RenderStatus.INVALID_INPUT -> OperationErrorCode.INVALID_INPUT
+                        RenderStatus.UNAVAILABLE -> OperationErrorCode.PROVIDER_UNAVAILABLE
+                        RenderStatus.RESOURCE_LIMIT -> OperationErrorCode.RESOURCE_LIMIT
+                        RenderStatus.CANCELED -> OperationErrorCode.CANCELED
+                        RenderStatus.STORAGE_FAILED -> OperationErrorCode.STORAGE_FAILED
+                        else -> OperationErrorCode.PROCESSING_FAILED
+                    }
+                    reject(code, "draft_render_failed", request.pageId)
+                }
+                val size = request.output.size
+                val image = result.image ?: reject(OperationErrorCode.INTEGRITY_FAILED, "draft_render_missing_pixels", request.pageId)
+                if (image.width != size.width || image.height != size.height) reject(OperationErrorCode.INTEGRITY_FAILED, "draft_render_size_invalid", request.pageId)
+                try { image.getUnsigned(0, 0, 0) } catch (_: IllegalStateException) {
+                    reject(OperationErrorCode.INTEGRITY_FAILED, "draft_render_not_live", request.pageId)
+                }
+            }
+        } catch (canceled: CancellationException) { throw canceled }
+        catch (failure: RepositoryFailure) { throw failure }
+        catch (_: OutOfMemoryError) { reject(OperationErrorCode.RESOURCE_LIMIT, "draft_render_allocation_failed", request.pageId) }
+        catch (_: Exception) { reject(OperationErrorCode.PROCESSING_FAILED, "draft_render_failed", request.pageId) }
+    }
+
+    /** Re-prove every requested page before publishing; never use a completed recipe hash alone as proof of available, current pixels. */
+    internal suspend fun publishAtelierDraft(drafts: AtelierDraftDao, draftId: String, generation: Long,
+        witnessed: List<AtelierPageWitness>, renderer: RenderCoordinator): AtelierPublicationReceipt = withContext(dispatcher) {
+        try {
+            requireOpaqueId(draftId)
+            if (!metadata.ownsAtelierPublication(drafts)) reject(OperationErrorCode.INVALID_INPUT, "draft_transaction_owner_mismatch", draftId)
+            if (generation < 1 || witnessed.size !in 1..RoomAtelierDrafts.MAX_ITEMS_PER_DRAFT) reject(OperationErrorCode.REVISION_CONFLICT, "draft_preview_changed", draftId)
+            val inputs = witnessed.toList()
+            val scope = DraftEdit(draftId, generation)
+            val initial = metadata.transaction {
+                val row = publicationRow(drafts, draftId)
+                replayPublication(row, generation, inputs)?.let { return@transaction it }
+                publicationSnapshot(row, scope, inputs)
+            }
+            if (initial is AtelierPublicationReceipt) return@withContext initial
+            val snapshot = initial as DraftPublication
+            val editable = RoomEditablePages(metadata, bounds, dispatcher)
+            val prepared = try {
+                inputs.map { witness ->
+                    val page = editable.loadForDraft(draftId, generation, witness.page)
+                    val item = prepare(witness.page.value, page.recipe, draft = scope)
+                    if (page.recipeRevision != witness.revision || item.current.recipeRevision != witness.revision ||
+                        item.hash != witness.recipeHash || item.current.recipeSha256 != witness.recipeHash) {
+                        reject(OperationErrorCode.REVISION_CONFLICT, "draft_preview_changed", witness.page.value)
+                    }
+                    val original = metadata.transaction { publicationOriginal(drafts, item, scope, witness.revision) }
+                    val output = try { GeometrySizing.output(item.recipe.geometry, RenderPurpose.PREVIEW, 1024) }
+                    catch (_: IllegalArgumentException) { reject(OperationErrorCode.INVALID_MAP, "draft_render_size_invalid", witness.page.value) }
+                    verifyCheckpointRender(renderer, RenderRequest(item.page.sourceId, item.recipe.geometry.source.sourcePixelHash,
+                        witness.page.value, witness.revision, item.recipe, output, generation, null, FallbackPolicy.FAIL))
+                    PublicationProof(item, original)
+                }
+            } catch (failure: RepositoryFailure) {
+                // A concurrent identical save can close the editing scope between two reads. A committed exact receipt, not a missing draft, determines that outcome.
+                if (failure.error.code in setOf(OperationErrorCode.SOURCE_UNAVAILABLE, OperationErrorCode.REVISION_CONFLICT)) {
+                    coroutineContext.ensureActive()
+                    metadata.transaction { replayPublication(publicationRow(drafts, draftId), generation, inputs) }
+                        ?.let { return@withContext it }
+                }
+                throw failure
+            }
+            metadata.transaction {
+                coroutineContext.ensureActive()
+                val row = publicationRow(drafts, draftId)
+                replayPublication(row, generation, inputs)?.let { return@transaction it }
+                val live = publicationSnapshot(row, scope, inputs)
+                if (live != snapshot) reject(OperationErrorCode.REVISION_CONFLICT, "draft_changed", draftId)
+                val pages = prepared.mapIndexed { index, proof ->
+                    val original = publicationOriginal(drafts, proof.prepared, scope, inputs[index].revision)
+                    if (original != proof.original) {
+                        reject(OperationErrorCode.INTEGRITY_FAILED, "draft_source_changed", inputs[index].page.value)
+                    }
+                    live.pages[index]
+                }
+                val now = clock()
+                val document = DocumentId(live.target?.documentId ?: live.staged.documentId)
+                val saved = if (live.target == null) {
+                    updateDocument(live.staged.copy(createdAt = now, updatedAt = now))
+                    pages.map { PageId(it.pageId) }
+                } else {
+                    // Do not rebind IDs authenticated by the staging ingest journal. Create independent page and recipe owners in the target.
+                    val appended = prepared.mapIndexed { index, proof ->
+                        coroutineContext.ensureActive()
+                        val id = PageId(uuid())
+                        val source = pages[index].sourceId
+                        q.insertPage(PageRow(id.value, document.value, source, 1, "ACTIVE", live.targetPageCount + index, null, now))
+                        q.insertRecipe(RecipeRevisionRow(id.value, 1, source, 1, proof.prepared.bytes.copyOf(), proof.prepared.hash, null, now))
+                        pinSource("PAGE", id.value, source, now)
+                        pinSource("RECIPE_HISTORY", recipeOwner(id.value, 1), source, now)
+                        id
+                    }
+                    updateDocument(live.target.copy(documentRevision = next(live.target.documentRevision), updatedAt = now))
+                    appended
+                }
+                val receipt = AtelierPublicationReceipt(generation, document, inputs, saved)
+                if (drafts.update(row.copy(state = "COMMITTED", generation = next(generation),
+                        committedDocumentId = document.value, receiptPageIds = receipt.encode())) != 1) {
+                    reject(OperationErrorCode.STORAGE_FAILED, "draft_receipt_write_failed", draftId)
+                }
+                coroutineContext.ensureActive()
+                receipt
+            }
+        } catch (canceled: CancellationException) { throw canceled }
+        catch (failure: RepositoryFailure) { throw failure }
+        catch (_: Conflict) { reject(OperationErrorCode.REVISION_CONFLICT, "draft_preview_changed", draftId) }
+        catch (_: IllegalArgumentException) { reject(OperationErrorCode.INTEGRITY_FAILED, "draft_publication_invalid", draftId) }
+        catch (_: Exception) { reject(OperationErrorCode.STORAGE_FAILED, "draft_publication_failed", draftId) }
+    }
+
+    private fun publicationOriginal(drafts: AtelierDraftDao, prepared: Prepared, scope: DraftEdit, revision: Long): SourceBlobRow {
+        activeDocument(prepared.page.documentId, scope)
+        val page = verifyLive(prepared, revision, rejectMasks = true) { it.currentRecipeRevision }
+        val source = boundedSource(page.sourceId)
+        if (source.sourceBlobId != prepared.sourceBlob ||
+            !drafts.publicationHasPins(page.sourceId, page.pageId, recipeOwner(page.pageId, page.currentRecipeRevision))) {
+            reject(OperationErrorCode.INTEGRITY_FAILED, "draft_source_changed", page.pageId)
+        }
+        // The joined scalar source guard has already bounded this blob row. Mutable reference counts do not identify original bytes.
+        val blob = q.sourceBlob(source.sourceBlobId) ?: reject(OperationErrorCode.INTEGRITY_FAILED, "draft_source_changed", page.pageId)
+        requireSha256(blob.byteSha256)
+        TransactionId(blob.ingestTransactionId)
+        return blob.copy(sourceCount = 0)
+    }
+
+    private fun publicationRow(drafts: AtelierDraftDao, id: String): AtelierDraftRow {
+        when (drafts.publicationReceiptIsBounded(id, AtelierPublicationReceipt.MAX_ENCODED_BYTES)) {
+            null -> reject(OperationErrorCode.SESSION_EXPIRED, "draft_unavailable", id)
+            false -> reject(OperationErrorCode.INTEGRITY_FAILED, "draft_receipt_invalid", id)
+            true -> Unit
+        }
+        return drafts.draft(id) ?: reject(OperationErrorCode.INTEGRITY_FAILED, "draft_unavailable", id)
+    }
+
+    private fun replayPublication(row: AtelierDraftRow, generation: Long, inputs: List<AtelierPageWitness>): AtelierPublicationReceipt? {
+        if (row.state != "COMMITTED") return null
+        val receipt = AtelierPublicationReceipt.decode(requireNotNull(row.receiptPageIds))
+        val destination = DocumentId(row.targetDocumentId ?: row.stagingDocumentId)
+        require(row.committedDocumentId == destination.value && row.generation == next(receipt.generation))
+        require(if (row.targetDocumentId == null) receipt.witnessed.map { it.page } == receipt.saved
+            else receipt.witnessed.none { it.page in receipt.saved })
+        if (receipt.replay(destination, generation, inputs) == null) reject(OperationErrorCode.REVISION_CONFLICT, "draft_preview_changed", row.draftId)
+        return receipt
+    }
+
+    private fun publicationSnapshot(row: AtelierDraftRow, draft: DraftEdit, inputs: List<AtelierPageWitness>): DraftPublication {
+        if (row.step != 2 || row.draftId != draft.id || row.state != "EDITING" || row.generation != draft.generation ||
+            row.activeBatchId != null || row.committedDocumentId != null || row.receiptPageIds != null) {
+            reject(OperationErrorCode.REVISION_CONFLICT, "draft_review_incomplete", row.draftId)
+        }
+        val staged = activeDocument(row.stagingDocumentId, draft)
+        if (q.hasPendingImport(staged.documentId)) reject(OperationErrorCode.REVISION_CONFLICT, "finish_import_before_editing", row.draftId)
+        val count = bounds.activePageCount(staged.documentId)
+        if (count != inputs.size.toLong() || !bounds.activePagesReadIsBounded(staged.documentId)) {
+            reject(OperationErrorCode.REVISION_CONFLICT, "draft_preview_changed", row.draftId)
+        }
+        val pages = q.activePages(staged.documentId)
+        if (pages.map { it.pageId to it.currentRecipeRevision } != inputs.map { it.page.value to it.revision }) {
+            reject(OperationErrorCode.REVISION_CONFLICT, "draft_preview_changed", row.draftId)
+        }
+        val target = row.targetDocumentId?.let {
+            activeDocument(DocumentId(it).value).also { saved ->
+                if (saved.deletedAt != null) reject(OperationErrorCode.SOURCE_UNAVAILABLE, "document_unavailable", saved.documentId)
+            }
+        }
+        if (target?.documentRevision != row.targetRevision ||
+            (target != null && q.hasPendingImport(target.documentId))) {
+            reject(OperationErrorCode.REVISION_CONFLICT, "draft_target_changed", row.draftId)
+        }
+        val targetCount = if (target == null) 0 else {
+            if (!bounds.activePagesReadIsBounded(target.documentId)) reject(OperationErrorCode.INTEGRITY_FAILED, "invalid_page_order", target.documentId)
+            val savedCount = bounds.activePageCount(target.documentId)
+            if (savedCount !in 0L..(100L - count)) reject(OperationErrorCode.RESOURCE_LIMIT, "document_page_limit", target.documentId)
+            savedCount.toInt()
+        }
+        return DraftPublication(row, staged, target, pages, targetCount)
     }
 
     override suspend fun renameDocument(documentId: DocumentId, expectedDocumentRevision: Long, title: String): DocumentMutationResult = withContext(dispatcher) {
@@ -381,16 +603,18 @@ class RoomDocumentRepository @JvmOverloads constructor(private val metadata: Met
         } catch (_: Exception) { reject(OperationErrorCode.INTEGRITY_FAILED, "invalid_undo_metadata") }
     }
 
-    private fun prepare(pageId: String, recipe: Recipe, restoreRevision: Long? = null): Prepared {
+    private fun prepare(pageId: String, recipe: Recipe, restoreRevision: Long? = null, draft: DraftEdit? = null): Prepared {
         // Raw scalar checks and their typed reads share a short snapshot. The recipe BLOB is bounded BEFORE Room's getBlob/getLong.toInt and detached before codec/capability work outside the lock.
         val snapshot = metadata.transaction {
             val page = boundedPage(pageId)
             if (page.state != "ACTIVE") reject(OperationErrorCode.INVALID_INPUT, "page_not_active", pageId)
-            activeDocument(page.documentId)
+            activeDocument(page.documentId, draft)
             val source = boundedSource(page.sourceId)
             val current = boundedRecipe(page, page.currentRecipeRevision)
             val restored = restoreRevision?.let { boundedRecipe(page, it) }
-            PreparationSnapshot(page, current, source, checkedMasks(page.sourceId, pageId, restoreRevision ?: page.currentRecipeRevision), restored)
+            val maskRevision = restoreRevision ?: page.currentRecipeRevision
+            val masks = if (draft == null) checkedMasks(page.sourceId, pageId, maskRevision) else unmaskedDraft(pageId, maskRevision)
+            PreparationSnapshot(page, current, source, masks, restored)
         }
         val page = snapshot.page; val current = snapshot.current
         checkBinding(page, snapshot.source, decodeRecipe(current), OperationErrorCode.INTEGRITY_FAILED)
@@ -403,10 +627,10 @@ class RoomDocumentRepository @JvmOverloads constructor(private val metadata: Met
         val masks = snapshot.masks
         if (recipe.geometry is GeometryRecipe.RoughCropDewarp || recipe.appearance is AppearanceRecipe.ProviderAppearanceV1) reject(OperationErrorCode.PROVIDER_UNAVAILABLE, "provider_asset_pinning_not_ready", pageId)
         admission.check(recipe, masks.links.any { it.role == "PROTECTION" })?.let { throw RepositoryFailure(it) }
-        return Prepared(page, current, recipe, RecipeCodec.encode(recipe), RecipeCodec.hash(recipe), masks, restored)
+        return Prepared(page, current, recipe, RecipeCodec.encode(recipe), RecipeCodec.hash(recipe), masks, restored, snapshot.source.sourceBlobId)
     }
 
-    private fun verifyLive(prepared: Prepared, expectedRevision: Long, conflictRevision: (PageRow) -> Long): PageRow {
+    private fun verifyLive(prepared: Prepared, expectedRevision: Long, rejectMasks: Boolean = false, conflictRevision: (PageRow) -> Long): PageRow {
         val page = boundedPage(prepared.page.pageId)
         if (page.currentRecipeRevision != expectedRevision) throw Conflict(conflictRevision(page))
         if (page.state != "ACTIVE" || page.documentId != prepared.page.documentId || page.sourceId != prepared.page.sourceId) reject(OperationErrorCode.INVALID_INPUT, "page_membership_changed", page.pageId)
@@ -419,8 +643,16 @@ class RoomDocumentRepository @JvmOverloads constructor(private val metadata: Met
             if (!sameRevision(restored, expected)) reject(OperationErrorCode.INTEGRITY_FAILED, "recipe_history_changed", page.pageId)
         }
         // Reference counts may legitimately change between admission and commit; immutable mask identity and its association may not. Revalidate the entire captured metadata set before any command writes, without opening mask files under Room's writer lock.
-        if (checkedMasks(page.sourceId, prepared.masks.pageId, prepared.masks.revision) != prepared.masks) reject(OperationErrorCode.INTEGRITY_FAILED, "mask_history_changed", page.pageId)
+        val masks = if (rejectMasks) unmaskedDraft(prepared.masks.pageId, prepared.masks.revision)
+            else checkedMasks(page.sourceId, prepared.masks.pageId, prepared.masks.revision)
+        if (masks != prepared.masks) reject(OperationErrorCode.INTEGRITY_FAILED, "mask_history_changed", page.pageId)
         return page
+    }
+
+    private fun unmaskedDraft(pageId: String, revision: Long): MaskState {
+        // The draft renderer has no durable mask input. Check scalar existence before loading any typed mask row.
+        if (bounds.recipeHasMasks(pageId, revision)) reject(OperationErrorCode.PROVIDER_UNAVAILABLE, "editable_masks_unavailable", pageId)
+        return MaskState(pageId, revision, emptyList(), emptyList())
     }
 
     private fun append(page: PageRow, bytes: ByteArray, hash: String, masks: List<RecipeMaskRow>, now: Long): PageRow {
@@ -525,7 +757,12 @@ class RoomDocumentRepository @JvmOverloads constructor(private val metadata: Met
         return recipe
     }
 
-    private fun activeDocument(id: String): DocumentRow {
+    private fun activeDocument(id: String, draft: DraftEdit? = null): DocumentRow {
+        if (draft == null) {
+            if (metadata.isHiddenAtelierDraft(id)) reject(OperationErrorCode.SOURCE_UNAVAILABLE, "document_unavailable", id)
+        } else if (metadata.atelierEditingDocument(draft.id, draft.generation) != id) {
+            reject(OperationErrorCode.REVISION_CONFLICT, "draft_changed", draft.id)
+        }
         when (bounds.documentReadIsBounded(id)) {
             null -> reject(OperationErrorCode.SOURCE_UNAVAILABLE, "document_unavailable", id)
             false -> reject(OperationErrorCode.INTEGRITY_FAILED, "document_metadata_invalid", id)

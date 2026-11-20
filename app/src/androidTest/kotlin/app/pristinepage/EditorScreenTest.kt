@@ -26,12 +26,13 @@ class EditorScreenTest {
             val session = withContext(Dispatchers.Main) { EditorSession(doc.value,page.pageId.value,ApplicationEditorActions { graph },graph.renderer,scope,RenderedPreviewBitmapLoader(graph.budget)) }
             try {
                 compose.runOnUiThread { compose.activity.setContent { MaterialTheme { screen.Content(session) {} } } }
-                ready(); compose.onNodeWithTag("editor-rotate").performScrollTo().performClick()
+                ready(); compose.onNodeWithTag("editor-tool-rotate").performClick()
+                compose.onNodeWithTag("editor-rotate").performScrollTo().performClick()
                 compose.waitUntil(10_000) { session.state.value.draft?.geometry?.outputQuarterTurns == 1 && session.preview.value.request?.recipe?.geometry?.outputQuarterTurns == 1 && session.preview.value.display != null && !session.preview.value.processing }
                 compose.onNodeWithTag("editor-preview").performScrollTo().assertIsDisplayed()
                 compose.onNodeWithTag("editor-unsaved").assertExists()
                 assertEquals(0,graph.store.editablePages.load(doc,page.pageId).recipe.geometry.outputQuarterTurns)
-                compose.onNodeWithTag("editor-apply").performScrollTo().performClick()
+                compose.onNodeWithTag("editor-apply").performClick()
                 compose.waitUntil(10_000) { session.state.value.page?.recipeRevision == 2L && !session.state.value.dirty && !session.state.value.saving }
                 compose.onNodeWithTag("editor-unsaved").assertDoesNotExist(); assertEquals(1,graph.store.editablePages.load(doc,page.pageId).recipe.geometry.outputQuarterTurns)
                 assertEquals(1,f.providerOpens); assertArrayEquals(f.png,graph.store.committedSources.load(page.sourceId).file.readBytes())
@@ -47,7 +48,8 @@ class EditorScreenTest {
             val session = withContext(Dispatchers.Main) { EditorSession(doc.value,page.pageId.value,ApplicationEditorActions { graph },graph.renderer,scope,RenderedPreviewBitmapLoader(graph.budget)) }
             try {
                 compose.runOnUiThread { compose.activity.setContent { MaterialTheme { screen.Content(session) { exited = true } } } }
-                ready(); compose.onNodeWithTag("editor-look-paper").performScrollTo().performClick()
+                ready(); compose.onNodeWithTag("editor-tool-looks").performClick()
+                compose.onNodeWithTag("editor-look-paper").performScrollTo().performClick()
                 compose.onNodeWithTag("editor-back").performScrollTo().performClick(); compose.onNodeWithTag("editor-exit-choice").assertExists()
                 compose.onNodeWithTag("editor-keep-editing").performClick(); compose.onNodeWithTag("editor-exit-choice").assertDoesNotExist()
                 assertTrue(session.state.value.dirty); assertEquals(1L,graph.store.editablePages.load(doc,page.pageId).recipeRevision)

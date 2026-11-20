@@ -1,0 +1,28 @@
+# Atelier acquisition implementation plan
+
+> **For agentic workers:** Use `executing-plans` and `test-driven-development`. This is an incremental supplement to T-05/T-09, not a replacement for the existing implementation plan.
+
+**Goal:** Capture or import multiple pages, edit them through the guided workflow, then publish one album or append to one saved album. Unfinished work must not leak into Home.
+
+**Spec:** [Atelier](../../specs/ATELIER.md) and [staging storage](../../specs/ATELIER_ACQUISITION_STORAGE.md).
+
+**Architecture:** Use additive Room staging metadata and the existing journal, source owners, editable recipes and renderer. App state uses opaque IDs and translates user actions; it does not launch a picker from restored stale URI data. Camera, Gallery and Files keep separate routes.
+
+**Constraints:** No app-data reset, no replacement of JPEG decoding, no original-byte changes, no extra acquisition/permissions, no device other than the already approved target, and English app-owned UI.
+
+- [x] **Schema and visibility (local host checkpoint):** `data/.../db/{PristineDatabase,AtelierDraftDao,CatalogDao}.kt`, `data/.../repository/{PrivateImportStore,RoomDocumentCatalog,RoomEditablePages,RoomDocumentRepository}.kt`, exported schema, host SQL and a compile-checked native migration witness. Draft creation and visibility are transactional; ordinary catalog, editor and document mutations cannot access hidden staging. Actual Android migration/recovery execution is an acceptance item below.
+- [ ] **Ingest and finish:** `data/.../repository/{RoomAtelierDrafts,RoomImportSessions,RoomIngestCompletion,RoomEditablePages,RoomDocumentRepository}.kt`. The internal baseline reserves and fences exact batches, freezes only after copy settles, leaves stale batches fenced across thaw, charges interrupted copies against the provisional payload cap, and shares the saved editor's canonical loader with the exact editing generation. The private recipe checkpoint requires an exact successful render and rechecks the draft generation and recipe revision. Before exposing this flow, verify final membership and ownership, reconcile terminal capacity without losing originals, and add new-album exposure and append in one receipt-bearing transaction. Test duplicate publication, revised target, pending target import, and cancellation/rollback boundaries.
+- [ ] **Compose consuming flow:** `app/.../capture/{AtelierCaptureScreen,AtelierCaptureViewModel}.kt` and existing picker/Activity adapters now connect direct camera, separate source routes, the ordered draft queue and the three editor panels. Process restart offers resume without replaying a grant. Host build, lint and test compilation are not Android acceptance; verify first-run, independent page checkpoints, repeated capture, save/reopen and source retention on-device.
+- [ ] **Acceptance:** Full offline unit suites, actual host SQLite against Room-exported schema, compile app/data Android tests, independent storage and lifecycle review, then real Android mixed-source ingest/save/reopen/append once authorized device readiness is established.
+
+**Review focus:** An unfinished ingested page must never look saved; malformed or stale data must never become a public album; legacy journals must still confirm the original source binding; paused or lost provider permission must not silently remove successful pages; concurrent edits/imports on an append target must not be overwritten.
+
+**Checkpoint ruling:** Neither the launcher nor any public service consumes this draft API. Do not implement publication by trusting caller-supplied recipe hashes or generation alone. Require a source-bound canonical recipe, an exact successful current render, and an ordered persisted receipt mapping each reviewed staging revision/hash to its saved page. The first publication candidate was removed rather than leaving a path that could acknowledge the wrong request. Preserve the earlier private data and prove these behaviors with synthetic/admitted sources before wiring the wizard.
+
+**Next publication witnesses:** In the same staged fixture, assert that a pending target batch blocks a save without advancing the target revision; a second appended-page write failure rolls back the first appended page and both source owners; exact lost-acknowledgment retries preserve the full ordered mapping while altered input refuses. For final proof, render every requested page in order outside the writer lock, then recheck generation, membership, recipe bytes, source binding and ownership under one transaction before exposing a new album or appending. Never persist or reuse a rendered raster as proof of a later revision.
+
+**AT-02 mixed-selection feedback (`ATELIER-IMPORT-FEEDBACK-01`, `7253025`):** Reuse all ordered child results rather than picking the first failure. Keep the durable queue as the only source of accepted-page membership and show details of the latest attempt separately. The result summary is process-local, contains no provider references or committed-source identities and does not replace durable pending-import recovery.
+
+- [x] Add focused app tests for original 1-based failed/pending item positions, an unnumbered picker-level error, silent picker cancellation, and replacement of a stale report. The first build refused the missing state adapter; both tests then ran successfully.
+- [x] Wire the summary into both acquisition and review using existing reason labels and a scrollable detail dialog for numbered results. No ingest/store/schema change.
+- [x] Verify the affected app JVM suite, English resources, lint and Android-test compilation. The actual mixed-source witness remains unexecuted.

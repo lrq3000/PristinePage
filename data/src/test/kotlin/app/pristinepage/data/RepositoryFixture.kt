@@ -15,6 +15,11 @@ import kotlinx.coroutines.Dispatchers
 
 /** Only Android Room is substituted. Full production row types, canonical codec and repository business commands remain real; later actual Room rollback/process-death tests must validate this port's platform adapter. */
 internal class MemoryMetadata : MetadataAccess, CatalogQueries, EditablePageQueries {
+    val hiddenDraftDocuments = mutableSetOf<String>()
+    override fun isHiddenAtelierDraft(documentId: String): Boolean {
+        check(inTransaction)
+        return documentId in hiddenDraftDocuments
+    }
     val documents = linkedMapOf<String, DocumentRow>()
     val pages = linkedMapOf<String, PageRow>()
     val sources = linkedMapOf<String, SourceRow>()
@@ -28,6 +33,8 @@ internal class MemoryMetadata : MetadataAccess, CatalogQueries, EditablePageQuer
     val pendingImports = mutableSetOf<String>()
     var inTransaction = false
     var failRecipeInsertAt: Int? = null
+    var afterRecipeInsert: () -> Unit = {}
+    var beforeRecipeMasksRead: () -> Unit = {}
     var failPageUpdateAt: Int? = null
     private var recipeWrites = 0
     private var pageWrites = 0
@@ -95,7 +102,10 @@ internal class MemoryMetadata : MetadataAccess, CatalogQueries, EditablePageQuer
     override fun activeImportIds(documentId: String): List<String> = error("Recipe fixture has no import-session rows")
     override fun recipe(pageId: String, revision: Long) = recipes[pageId to revision]
     override fun maxRecipeRevision(pageId: String) = recipes.keys.filter { it.first == pageId }.maxOfOrNull { it.second } ?: 0
-    override fun recipeMasks(pageId: String, revision: Long) = associations.values.filter { it.pageId == pageId && it.recipeRevision == revision }
+    override fun recipeMasks(pageId: String, revision: Long): List<RecipeMaskRow> {
+        beforeRecipeMasksRead()
+        return associations.values.filter { it.pageId == pageId && it.recipeRevision == revision }
+    }
     override fun mask(id: String) = masks[id]
     override fun undo(id: String) = undos[id]
     override fun hasPendingImport(documentId: String) = documentId in pendingImports
@@ -106,6 +116,7 @@ internal class MemoryMetadata : MetadataAccess, CatalogQueries, EditablePageQuer
     override fun insertRecipe(row: RecipeRevisionRow) {
         if (++recipeWrites == failRecipeInsertAt) throw IOException("synthetic database write failure")
         check(recipes.putIfAbsent(row.pageId to row.recipeRevision, row) == null)
+        afterRecipeInsert()
     }
     override fun insertReference(row: SourceReferenceRow): Long = if (references.putIfAbsent(Triple(row.ownerType, row.ownerId, row.sourceId), row) == null) 1 else -1
     override fun countSourceReferences(sourceId: String): Long = references.values.count { it.sourceId == sourceId }.toLong()

@@ -16,6 +16,67 @@ import org.junit.Test
 
 @OptIn(ExperimentalCoroutinesApi::class)
 class EditorShapeTest {
+    @Test fun cubicGestureIsCancelableAndOneUndoRestoresTheWholeChain() = checkShape {
+        editor.selectBezier()
+        val before = editor.state.value.draft
+        val handle = BezierControl(ContourSide.TOP, 0, BezierPart.OUTGOING)
+        val canceled = checkNotNull(editor.beginBezierDrag(handle))
+        editor.moveBezier(handle, PointPx(1.0 / 3, .04), canceled)
+        editor.endBezierDrag(canceled, cancel = true)
+        assertEquals(before, editor.state.value.draft)
+        val drag = checkNotNull(editor.beginBezierDrag(handle))
+        editor.moveBezier(handle, PointPx(1.0 / 3, .05), drag)
+        editor.moveBezier(handle, PointPx(1.0 / 3, .07), drag)
+        editor.endBezierDrag(drag)
+        val edited = editor.state.value.draft
+        assertNotEquals(before, edited)
+        editor.undo()
+        assertEquals(before, editor.state.value.draft)
+        editor.redo()
+        advanceUntilIdle()
+        editor.apply()
+        advanceUntilIdle()
+        assertEquals(listOf(edited), saves)
+    }
+
+    @Test fun wizardCheckpointOnlyAllowsNavigationAfterTheExactDirtyFrameSaves() = checkShape {
+        val proposed = base.copy(geometry = perspective.copy(quad = full.copy(tl = PointPx(.2, .1))))
+        editor.edit(proposed)
+        assertFalse(editor.checkpointForNavigation())
+        assertTrue(saves.isEmpty())
+        advanceUntilIdle()
+        assertTrue(editor.checkpointForNavigation())
+        assertEquals(listOf(proposed), saves)
+        assertFalse(editor.state.value.exitReady)
+        assertFalse(editor.state.value.dirty)
+        assertTrue(editor.checkpointForNavigation())
+        assertEquals(listOf(proposed), saves)
+    }
+
+    @Test fun canvasDragChangesTwoAxesTogetherAndRejectsCrossedCorners() = checkShape {
+        editor.selectPerspective()
+        advanceUntilIdle()
+        val before = editor.state.value.draft
+        assertTrue(editor.beginFrameDrag(ShapePoint.TOP_LEFT))
+        editor.dragFrameCorner("TOP_LEFT", .15, .13)
+        editor.dragFrameCorner("TOP_LEFT", .16, .14)
+        advanceUntilIdle()
+        val quad = (editor.state.value.draft!!.geometry as GeometryRecipe.Perspective).quad
+        assertEquals(.16, quad.tl.x, 0.0)
+        assertEquals(.14, quad.tl.y, 0.0)
+        editor.dragFrameCorner("TOP_LEFT", .95, .95)
+        assertEquals(quad, (editor.state.value.draft!!.geometry as GeometryRecipe.Perspective).quad)
+        editor.endFrameDrag()
+        editor.undo()
+        assertEquals(before, editor.state.value.draft)
+        assertTrue(editor.beginFrameDrag(ShapePoint.TOP_LEFT))
+        editor.dragFrameCorner("TOP_LEFT", .15, .13)
+        editor.endFrameDrag(cancel = true)
+        assertEquals(before, editor.state.value.draft)
+        editor.redo()
+        assertEquals(quad, (editor.state.value.draft!!.geometry as GeometryRecipe.Perspective).quad)
+    }
+
     @Test fun labeledCornerAndWholeImageResetRenderOnTheSelectedPageAndUndoRestoresTheShape() = checkShape {
         assertEquals(0, sample(preview(), 80, 0))
         editor.selectPerspective()

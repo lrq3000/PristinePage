@@ -1,0 +1,35 @@
+<resources>
+    <string name="atelier_import_pause">Leave this scan?</string>
+    <string name="atelier_import_pause_body">Keep the imported pages for later, or abandon this draft without changing any saved album.</string>
+    <string name="atelier_import_pause_dirty_body">Keeping the draft saves your imported pages and previously applied edits. Edits on this page that have not been applied will be lost.</string>
+    <string name="atelier_import_keep_draft">Keep draft</string>
+    <string name="atelier_import_resume_title">Resume an unfinished scan?</string>
+    <string name="atelier_import_resume_new">The unfinished scan is for a new album. It will not change an existing album.</string>
+    <string name="atelier_import_resume_append">The unfinished scan is already linked to an album. Resuming keeps that destination.</string>
+    <string name="atelier_import_resume">Resume scan</string>
+    <string name="atelier_import_count">Imported: %1$d</string>
+    <string name="atelier_import_abandon">Abandon draft</string>
+    <string name="atelier_import_sources">Import photos</string>
+    <string name="atelier_import_gallery">From gallery</string>
+    <string name="atelier_import_files">From files</string>
+    <string name="atelier_finish_import">Finish importing</string>
+    <string name="atelier_review_import">Review pages</string>
+    <string name="atelier_review_add_more">Take another photo or import</string>
+    <string name="atelier_import_interrupted">An import was interrupted. Pages that finished importing are still here.</string>
+    <string name="atelier_import_issues">View import issues (%1$d)</string>
+    <string name="atelier_import_issue_title">Latest import issues</string>
+    <string name="atelier_import_item_pending">Item %1$d: import did not finish</string>
+    <string name="atelier_import_clear_pending">Cancel unfinished import</string>
+    <string name="atelier_import_without_camera">Camera access is off. You can still import from the gallery or from files.</string>
+    <string name="atelier_import_retry_camera">Enable camera</string>
+    <string name="atelier_camera_retry">Retry camera</string>
+    <string name="atelier_flash_on">Flash on</string>
+    <string name="atelier_flash_off">Flash off</string>
+    <string name="atelier_wizard_frame">Perspective</string>
+    <string name="atelier_wizard_progress">Step %1$d of 3 · %2$s</string>
+    <string name="atelier_wizard_next">Next</string>
+    <string name="atelier_wizard_skip_frame">Skip perspective</string>
+    <string name="atelier_wizard_skip_frame_title">Use the whole image?</string>
+    <string name="atelier_wizard_skip_frame_body">This replaces the frame on all newly imported pages. Rotation, correction, and pages already in the album stay unchanged.</string>
+    <string name="atelier_wizard_save">Save album</string>
+</resources>

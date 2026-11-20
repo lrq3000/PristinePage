@@ -33,6 +33,8 @@ android {
         targetCompatibility = JavaVersion.VERSION_17
     }
     testOptions.unitTests.isReturnDefaultValues = false
+    // MigrationTestHelper reads the exact exported identities, not a copied or handwritten fixture schema.
+    sourceSets.getByName("androidTest").assets.srcDir("schemas")
 }
 kotlin {
     jvmToolchain(21)

@@ -11,6 +11,7 @@ import androidx.test.platform.app.InstrumentationRegistry
 import app.pristinepage.core.pipeline.PointPx
 import app.pristinepage.core.pipeline.RenderStatus
 import app.pristinepage.core.recipe.BinaryRecipe
+import app.pristinepage.core.recipe.ContourSide
 import app.pristinepage.core.recipe.GeometryRecipe
 import app.pristinepage.data.model.IngestResult
 import app.pristinepage.editor.EditorSession
@@ -55,15 +56,17 @@ class EditorShapeScreenTest {
         compose.waitUntil(10_000) { !library.state.value.loading }
         compose.runOnUiThread { library.accept(LibraryEvent.Open(doc)) }
         compose.waitUntil(10_000) { library.state.value.document?.pages?.size == 2 && !library.state.value.loading }
-        click("original-page-${second.pageId.value}")
-        click("edit-selected-page")
+        compose.onNodeWithTag("original-page-${second.pageId.value}").performClick()
         val host = compose.runOnUiThread { ViewModelProvider(compose.activity)[EditorViewModel::class.java] }
         compose.waitUntil(10_000) { host.session.value?.preview?.value?.display != null }
         val session = checkNotNull(host.session.value)
         val original = checkNotNull(session.state.value.draft)
         assertEquals(second.pageId, session.state.value.page!!.pageId)
+        compose.onNodeWithTag("editor-tool-looks").performClick()
         click("editor-look-gray")
+        compose.onNodeWithTag("editor-tool-rotate").performClick()
         click("editor-rotate")
+        compose.onNodeWithTag("editor-tool-shape").performClick()
         click("editor-shape-perspective")
         coordinate("x", .2f)
         coordinate("y", .1f)
@@ -123,10 +126,10 @@ class EditorShapeScreenTest {
 
         click("editor-undo")
         waitForResult(session, "manual_ruled_v1")
-        click("editor-back")
+        compose.onNodeWithTag("editor-back").performClick()
         compose.onNodeWithTag("editor-apply-exit").assertIsEnabled().performClick()
         compose.waitUntil(10_000) { host.session.value == null && !library.state.value.loading }
-        click("edit-selected-page")
+        compose.onNodeWithTag("original-page-${second.pageId.value}").performClick()
         compose.waitUntil(10_000) { host.session.value?.state?.value?.page?.recipeRevision == 2L }
         val reopened = checkNotNull(host.session.value)
         waitForResult(reopened, "manual_ruled_v1")
@@ -134,6 +137,30 @@ class EditorShapeScreenTest {
         assertEquals(valid, reopened.state.value.draft)
         assertEquals(original.geometry.source, reopened.state.value.draft!!.geometry.source)
         assertEquals(1L, graph.store.editablePages.load(doc, pages[0].pageId).recipeRevision)
+        assertArrayEquals(png, graph.store.committedSources.load(second.sourceId).file.readBytes())
+
+        compose.onNodeWithTag("editor-tool-shape").performClick()
+        click("editor-shape-reset")
+        waitForResult(reopened, "geometry_none_v1")
+        val flat = displayedSample(reopened, 80, 50)
+        click("editor-shape-bezier")
+        click("atelier-bezier-insert")
+        click("atelier-bezier-remove")
+        waitForResult(reopened, "atelier_bezier_v1")
+        repeat(4) { click("atelier-bezier-down") }
+        waitForResult(reopened, "atelier_bezier_v1")
+        val curvedValue = displayedSample(reopened, 80, 50)
+        assertTrue(curvedValue > flat)
+        val cubic = checkNotNull(reopened.state.value.draft)
+        assertEquals(.05, (cubic.geometry as GeometryRecipe.Bezier).contour.edge(ContourSide.TOP).segments.first().outgoing.y, 1e-12)
+        compose.onNodeWithTag("editor-apply").assertIsEnabled().performClick()
+        compose.waitUntil(10_000) { host.session.value == null && !library.state.value.loading }
+        compose.onNodeWithTag("original-page-${second.pageId.value}").performClick()
+        compose.waitUntil(10_000) { host.session.value?.state?.value?.page?.recipeRevision == 3L }
+        val afterReopen = checkNotNull(host.session.value)
+        waitForResult(afterReopen, "atelier_bezier_v1")
+        assertEquals(cubic, afterReopen.state.value.draft)
+        assertEquals(curvedValue, displayedSample(afterReopen, 80, 50))
         assertArrayEquals(png, graph.store.committedSources.load(second.sourceId).file.readBytes())
     }
 
@@ -194,7 +221,7 @@ class EditorShapeScreenTest {
     private fun assertRefused(session: EditorSession, failure: RenderStatus) {
         compose.waitUntil(10_000) { session.preview.value.failure == failure && session.preview.value.previous }
         compose.onNodeWithTag("editor-previous").performScrollTo().assertIsDisplayed()
-        compose.onNodeWithTag("editor-apply").performScrollTo().assertIsNotEnabled()
+        compose.onNodeWithTag("editor-apply").assertIsNotEnabled()
         click("editor-back")
         compose.onNodeWithTag("editor-apply-exit").assertIsNotEnabled()
         compose.onNodeWithTag("editor-keep-editing").performClick()

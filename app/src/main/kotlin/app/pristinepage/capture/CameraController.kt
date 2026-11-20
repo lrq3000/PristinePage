@@ -22,7 +22,7 @@ internal class CameraController(
     context: Context,
     private val owner: LifecycleOwner,
     private val view: PreviewView,
-    private val stage: CaptureStage,
+    private val defaultStage: CaptureStage?,
     private val ready: (Boolean) -> Unit,
     private val result: (LibraryPhotoResult) -> Boolean,
 ) : AutoCloseable {
@@ -34,6 +34,9 @@ internal class CameraController(
     private var shooting = false
     private var finished = false
     private var ownsStage = false
+    private var activeStage: CaptureStage? = null
+    var hasFlash = false
+        private set
     private var cameraState: LiveData<CameraState>? = null
     private val streamObserver = Observer<PreviewView.StreamState> { ready(isReady()) }
     private val stateObserver = Observer<CameraState> { state ->
@@ -49,7 +52,9 @@ internal class CameraController(
                 val lens = if (ownerProvider.hasCamera(CameraSelector.DEFAULT_BACK_CAMERA)) CameraSelector.DEFAULT_BACK_CAMERA else CameraSelector.DEFAULT_FRONT_CAMERA
                 provider = ownerProvider
                 preview.surfaceProvider = view.surfaceProvider
-                cameraState = ownerProvider.bindToLifecycle(owner, lens, preview, capture).cameraInfo.cameraState
+                val info = ownerProvider.bindToLifecycle(owner, lens, preview, capture).cameraInfo
+                hasFlash = info.hasFlashUnit()
+                cameraState = info.cameraState
                 cameraState?.observe(owner, stateObserver)
                 view.previewStreamState.observe(owner, streamObserver)
             } catch (_: SecurityException) {
@@ -64,11 +69,13 @@ internal class CameraController(
         cameraState?.value?.let { it.type == CameraState.Type.OPEN && it.error == null } == true &&
         view.previewStreamState.value == PreviewView.StreamState.STREAMING
 
-    fun takePhoto(): Boolean {
+    fun takePhoto(stage: CaptureStage = checkNotNull(defaultStage), flash: Boolean = false): Boolean {
         if (!isReady()) return false
+        activeStage = stage
         shooting = true
         ready(false)
         try {
+            capture.flashMode = if (flash && hasFlash) ImageCapture.FLASH_MODE_ON else ImageCapture.FLASH_MODE_OFF
             capture.targetRotation = view.display?.rotation ?: Surface.ROTATION_0
             val file = stage.create()
             ownsStage = true
@@ -101,7 +108,7 @@ internal class CameraController(
     private fun discardOwnedStage() {
         if (ownsStage) {
             ownsStage = false
-            stage.discard()
+            activeStage?.discard()
         }
     }
 

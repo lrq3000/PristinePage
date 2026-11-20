@@ -47,7 +47,7 @@ class RoomIngestPreparation @JvmOverloads constructor(private val metadata: Meta
                 if (child.state != "BOUND") reject(OperationErrorCode.INTEGRITY_FAILED, "ingest_intent_missing", sessionId.value)
                 if (pages.size >= 100) reject(OperationErrorCode.RESOURCE_LIMIT, "document_page_limit", doc.documentId)
                 val intent = IngestJournalIntent(TransactionId(newId()), sessionId, DocumentId(doc.documentId), PageId(child.plannedPageId), SourceBlobId(newId()), SourceId(newId()), JobId(newId()), 1)
-                insertIngestIntent(ingest, intent, now)
+                insertIngestIntent(metadata, ingest, intent, now)
                 if (sessions.updateSession(child.copy(state = "INGESTING", transactionId = intent.transactionId.value)) != 1) reject(OperationErrorCode.INTEGRITY_FAILED, "import_item_unavailable", sessionId.value)
                 intent
             }

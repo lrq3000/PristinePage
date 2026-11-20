@@ -61,11 +61,18 @@ private fun geometryValid(source: SourceBinding, schema: Int, turns: Int, quad: 
         override val mode: GeometryMode get() = GeometryMode.ROUGH_CROP_DEWARP
     }
 
+    @Serializable @SerialName("atelier_bezier_v1") data class Bezier(override val source: SourceBinding, val contour: BezierContour,
+        val targetRule: TargetRule = TargetRule.EdgeExtents, override val schemaVersion: Int = 1, override val outputQuarterTurns: Int = 0) : GeometryRecipe() {
+        init { geometryValid(source, schemaVersion, outputQuarterTurns, contour.quad); require(targetRule != TargetRule.CropAspect) }
+        override val mode: GeometryMode get() = GeometryMode.ATELIER_BEZIER
+    }
+
     fun withOutputQuarterTurns(turns: Int): GeometryRecipe = when (this) {
         is None -> copy(outputQuarterTurns = turns)
         is Perspective -> copy(outputQuarterTurns = turns)
         is ManualCurve -> copy(outputQuarterTurns = turns)
         is RoughCropDewarp -> copy(outputQuarterTurns = turns)
+        is Bezier -> copy(outputQuarterTurns = turns)
     }
 }
 

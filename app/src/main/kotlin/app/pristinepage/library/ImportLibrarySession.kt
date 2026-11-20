@@ -4,6 +4,7 @@ import app.pristinepage.capture.PhotoImportRequest
 import app.pristinepage.capture.PhotoImportKind
 import app.pristinepage.data.model.*
 import java.util.Collections
+import java.util.Locale
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CoroutineStart
@@ -25,6 +26,9 @@ class ImportLibrarySession(private val actions: LibraryActions, restored: Librar
     private var navigation = 0L
     private var metadataGeneration = 0L
     private var copying: Job? = null
+    private var metadataRead: Job? = null
+    private var albumLocale = Locale.getDefault()
+    private var albumCursor: AlbumPosition? = null
 
     init { refresh(true) }
 
@@ -41,13 +45,29 @@ class ImportLibrarySession(private val actions: LibraryActions, restored: Librar
         when (event) {
             is LibraryEvent.Open -> {
                 ++navigation
-                current.value = current.value.copy(selectedId = event.id, selectedPage = current.value.selectedPage.takeIf { current.value.selectedId == event.id }, document = null, loading = true, error = null)
+                val same = current.value.selectedId == event.id
+                current.value = current.value.copy(selectedId = event.id, selectedPage = current.value.selectedPage.takeIf { same }, document = null, loading = true, error = null,
+                    results = if (same) current.value.results else emptyList(), resultBatch = current.value.resultBatch.takeIf { same })
                 refresh(true, includeList = false)
             }
             is LibraryEvent.SelectPage -> {
                 val value = current.value
                 if (value.document?.pages?.any { it.pageId == event.id } == true) current.value = value.copy(selectedPage = event.id)
             }
+            LibraryEvent.CloseAlbum -> {
+                if (current.value.request != null || current.value.preparingImport || current.value.renaming) return
+                ++navigation
+                current.value = current.value.copy(selectedId = null, selectedPage = null, document = null, error = null, renameResult = null)
+                refresh(true)
+            }
+            is LibraryEvent.SetAlbumSort -> {
+                if (event.locale == albumLocale && event.order == current.value.albumOrder) return
+                albumLocale = event.locale
+                current.value = current.value.copy(albumOrder = event.order, documents = emptyList(), hasMore = false)
+                refresh(true)
+            }
+            is LibraryEvent.RenameAlbum -> rename(event)
+            LibraryEvent.ClearRenameResult -> if (!current.value.renaming) current.value = current.value.copy(renameResult = null)
             is LibraryEvent.NewDocument -> if (!current.value.loading && (!event.importAfterCreate || (!current.value.preparingImport && current.value.request == null))) {
                 current.value = current.value.copy(loading = true, error = null, preparingImport = current.value.preparingImport || event.importAfterCreate)
                 run(onFailure = { error -> if (event.importAfterCreate) current.value = current.value.copy(preparingImport = false); failed(error) }) {
@@ -60,6 +80,7 @@ class ImportLibrarySession(private val actions: LibraryActions, restored: Librar
                 }
             }
             LibraryEvent.Refresh -> { current.value = current.value.copy(error = null); refresh(true) }
+            LibraryEvent.RefreshAlbum -> { current.value = current.value.copy(error = null); refresh(true, includeList = false) }
             LibraryEvent.More -> if (!current.value.loading && current.value.hasMore) {
                 current.value = current.value.copy(error = null); refresh(false)
             }
@@ -69,6 +90,28 @@ class ImportLibrarySession(private val actions: LibraryActions, restored: Librar
             is LibraryEvent.PhotoResult -> consume(event)
             LibraryEvent.CancelImport -> abandon(null)
             is LibraryEvent.PickerFailed -> if (current.value.request?.batchId == event.request.batchId) abandon(OperationError(OperationErrorCode.PROVIDER_UNAVAILABLE, false, if (event.request.kind == PhotoImportKind.FILES) "files_picker_unavailable" else "gallery_unavailable", event.request.batchId))
+        }
+    }
+
+    private fun rename(event: LibraryEvent.RenameAlbum) {
+        val value = current.value
+        val document = value.document?.document ?: return
+        if (value.renaming || value.request != null || value.preparingImport || value.selectedId != event.documentId || document.documentId != event.documentId) return
+        val title = event.title.trim()
+        if (event.expectedDocumentRevision != document.documentRevision) {
+            current.value = value.copy(renameResult = DocumentMutationResult.Conflict(document.documentRevision))
+            refresh(true, includeList = false)
+            return
+        }
+        if (title == document.title) {
+            current.value = value.copy(renameResult = DocumentMutationResult.Applied(document.documentRevision, emptyList(), null))
+            return
+        }
+        current.value = value.copy(renaming = true, renameResult = null)
+        run(onFailure = { error -> current.value = current.value.copy(renaming = false, renameResult = DocumentMutationResult.Rejected(error)) }) {
+            val result = actions.rename(document.documentId, event.expectedDocumentRevision, title)
+            current.value = current.value.copy(renaming = false, renameResult = result)
+            if (result !is DocumentMutationResult.Rejected) refresh(true, includeList = false).join()
         }
     }
 
@@ -146,16 +189,28 @@ class ImportLibrarySession(private val actions: LibraryActions, restored: Librar
 
     private fun refresh(reset: Boolean, includeList: Boolean = true): Job {
         val token = ++metadataGeneration
+        metadataRead?.cancel()
         val selected = current.value.selectedId
         val nav = navigation
         current.value = current.value.copy(loading = true)
         return run(onFailure = { error -> if (token == metadataGeneration && nav == navigation) failed(error) }) {
             if (includeList) reload(reset, token)
             loadSelected(selected, nav, token)
-        }
+        }.also { metadataRead = it }
     }
 
     private suspend fun reload(reset: Boolean, token: Long) {
+        val ordered = actions as? OrderedLibraryActions
+        if (ordered != null) {
+            val page = ordered.listAlbums(current.value.albumOrder, albumLocale, if (reset) null else albumCursor, 50)
+            if (token == metadataGeneration) {
+                albumCursor = page.next
+                // A remote/concurrent writer may move an album across cursors. Avoid duplicate lazy keys even before the next explicit refresh.
+                val albums = if (reset) page.albums else (current.value.documents + page.albums).distinctBy { it.documentId }
+                current.value = current.value.copy(documents = owned(albums), hasMore = page.next != null)
+            }
+            return
+        }
         val after = if (reset) null else current.value.documents.lastOrNull()?.documentId
         val documents = actions.list(after, 50)
         if (token == metadataGeneration) current.value = current.value.copy(documents = owned(if (reset) documents else current.value.documents + documents), hasMore = documents.size == 50)

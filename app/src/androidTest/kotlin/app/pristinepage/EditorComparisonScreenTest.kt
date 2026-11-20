@@ -39,7 +39,8 @@ class EditorComparisonScreenTest {
                 val draft = initial.copy(geometry = initial.geometry.withOutputQuarterTurns(1),appearance = AppearanceRecipe.PaperGainV1(strength = .75),denoise = DenoiseRecipe.BilateralLumaV1(),detail = DetailRecipe.LumaDetail7V1(),binary = BinaryRecipe.GrayscaleV1)
                 compose.runOnUiThread { session.edit(draft) }
                 waitFor(session,draft,EditorView.RESULT)
-                compose.onNodeWithTag("editor-view-input").performScrollTo().performClick()
+                 compose.onNodeWithTag("editor-tool-looks").performClick()
+                 compose.onNodeWithTag("editor-view-input").performScrollTo().performClick()
                 waitFor(session,Recipe(geometry = draft.geometry),EditorView.GEOMETRY_INPUT)
                 compose.onNodeWithTag("editor-preview").performScrollTo().assertContentDescriptionEquals("Geometry input preview, before all appearance and finishing")
                 assertPixels(session,2,3,intArrayOf(0xffffffff.toInt(),0xffff0000.toInt(),0xff000000.toInt(),0xff00ff00.toInt(),0xff010203.toInt(),0xff0000ff.toInt()))
@@ -49,7 +50,7 @@ class EditorComparisonScreenTest {
                 compose.onNodeWithTag("editor-preview").performScrollTo().assertContentDescriptionEquals("Original photograph preview, uncropped and without user rotation")
                 assertPixels(session,3,2,sourcePixels)
                 assertEquals(draft,session.state.value.draft); assertTrue(session.state.value.dirty)
-                compose.onNodeWithTag("editor-apply").performScrollTo().performClick()
+                 compose.onNodeWithTag("editor-apply").performClick()
                 compose.waitUntil(10_000) { session.state.value.page?.recipeRevision == 2L && !session.state.value.saving && !session.state.value.dirty }
                 waitFor(session,draft,EditorView.RESULT)
                 compose.onNodeWithTag("editor-preview").performScrollTo().assertContentDescriptionEquals("Rendered page preview, resized for display")

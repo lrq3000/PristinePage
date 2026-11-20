@@ -1,0 +1,426 @@
+package app.pristinepage.library
+
+import androidx.activity.compose.BackHandler
+import androidx.compose.foundation.Image
+import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.grid.GridCells
+import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
+import androidx.compose.foundation.lazy.grid.items
+import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.selection.selectable
+import androidx.compose.foundation.selection.toggleable
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.*
+import androidx.compose.runtime.*
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalConfiguration
+import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.heading
+import androidx.compose.ui.semantics.selected
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.dp
+import androidx.core.os.ConfigurationCompat
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.compose.LocalLifecycleOwner
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import androidx.lifecycle.repeatOnLifecycle
+import app.pristinepage.R
+import app.pristinepage.capture.PhotoImportKind
+import app.pristinepage.data.model.*
+import app.pristinepage.design.AtelierPreferences
+import app.pristinepage.design.AtelierStyle
+import app.pristinepage.image.preview.RenderedPreviewBitmap
+import java.text.DateFormat
+import java.util.Date
+import java.util.Locale
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.awaitCancellation
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable internal fun AtelierLibraryScreen(
+    session: LibrarySession,
+    preferences: AtelierPreferences,
+    loadOverview: suspend (DocumentId) -> DocumentOverview,
+    loadThumbnail: suspend (DocumentSummary, DocumentPage) -> RenderedPreviewBitmap,
+    onBatch: (DocumentOverview) -> Unit = {},
+    batchUndo: UndoId? = null,
+    undoBatch: () -> Unit = {},
+    closeBatchNotice: () -> Unit = {},
+    batchBusy: Boolean = false,
+    batchError: OperationErrorCode? = null,
+    thumbnailsCurrent: (DocumentSummary) -> Boolean = { true },
+    openAtelier: ((String, DocumentSummary?) -> Unit)? = null,
+    onEdit: (DocumentId, PageId) -> Unit,
+) {
+    val state by session.state.collectAsStateWithLifecycle()
+    val preferencesState by preferences.settings.collectAsStateWithLifecycle()
+    val locale = ConfigurationCompat.getLocales(LocalConfiguration.current)[0] ?: Locale.getDefault()
+    LaunchedEffect(session, preferencesState.order, locale) {
+        session.accept(LibraryEvent.SetAlbumSort(preferencesState.order, locale))
+    }
+    var sheet by rememberSaveable { mutableStateOf<String?>(null) }
+    val home = state.selectedId == null
+    val overview = state.document
+    val canAcquire = !state.loading && !state.preparingImport && state.request == null && !state.renaming
+    val canClose = state.request == null && !state.preparingImport && !state.renaming
+    val title = stringResource(R.string.atelier_default_title, date(Date(), includeTime = false))
+    fun acquire(kind: PhotoImportKind) {
+        sheet = null
+        if (home) {
+            session.accept(LibraryEvent.NewDocument(title, importAfterCreate = true, kind = kind))
+        } else session.accept(when (kind) {
+            PhotoImportKind.CAMERA -> LibraryEvent.BeginCapture
+            PhotoImportKind.GALLERY -> LibraryEvent.BeginImport
+            PhotoImportKind.FILES -> LibraryEvent.BeginFiles
+        })
+    }
+    BackHandler(enabled = !home && canClose && sheet == null) { session.accept(LibraryEvent.CloseAlbum) }
+    Column(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background).safeDrawingPadding()) {
+        Row(Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 6.dp), verticalAlignment = Alignment.CenterVertically) {
+            if (!home) AtelierIcon(R.drawable.ic_atelier_back, R.string.atelier_back, "atelier-home-back", canClose) { session.accept(LibraryEvent.CloseAlbum) }
+            Column(Modifier.weight(1f).padding(horizontal = 4.dp)) {
+                if (home) Text(stringResource(R.string.app_name), style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                val album = state.document?.document
+                if (home || album == null) {
+                    Text(stringResource(if (home) R.string.atelier_home else R.string.atelier_album), Modifier.semantics { heading() },
+                        style = MaterialTheme.typography.headlineSmall)
+                } else {
+                    TextButton(
+                        modifier = Modifier.heightIn(min = AtelierStyle.touchTarget).testTag("atelier-rename"),
+                        enabled = canAcquire, onClick = { session.accept(LibraryEvent.ClearRenameResult); sheet = "rename" },
+                        contentPadding = PaddingValues(0.dp),
+                    ) {
+                        Text("${album.title}  ✎", Modifier.semantics { heading() },
+                            style = MaterialTheme.typography.titleLarge, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                    }
+                    Text(stringResource(R.string.saved_page_count, album.pageCount), style = MaterialTheme.typography.bodySmall)
+                }
+            }
+            if (home) AtelierIcon(R.drawable.ic_atelier_sort, R.string.atelier_sort, "atelier-sort") { sheet = "sort" }
+        }
+
+        if (state.loading) LinearProgressIndicator(Modifier.fillMaxWidth())
+        if (home) {
+            val creation = when (preferencesState.order) {
+                AlbumOrder.CREATED -> true
+                AlbumOrder.MODIFIED -> false
+                else -> preferencesState.showCreationInNameSort
+            }
+            LazyColumn(Modifier.weight(1f).fillMaxWidth().testTag("atelier-album-list"),
+                contentPadding = PaddingValues(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                item { Text(stringResource(preferencesState.order.label()), style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant) }
+                item { LibraryFeedback(state, session) }
+                if (state.documents.isEmpty() && !state.loading && state.error == null) {
+                    item { Text(stringResource(R.string.atelier_empty), Modifier.padding(vertical = 12.dp)) }
+                }
+                items(state.documents, key = { it.documentId.value }) { album ->
+                    AlbumCard(album, creation, loadOverview, loadThumbnail, canClose, thumbnailsCurrent(album)) { session.accept(LibraryEvent.Open(album.documentId)) }
+                }
+                if (state.hasMore) item {
+                    TextButton(onClick = { session.accept(LibraryEvent.More) }, enabled = !state.loading) { Text(stringResource(R.string.more_documents)) }
+                }
+            }
+            HorizontalDivider(color = AtelierStyle.divider)
+            Row(Modifier.fillMaxWidth().heightIn(min = 76.dp).padding(horizontal = 12.dp), verticalAlignment = Alignment.CenterVertically) {
+                Text(stringResource(R.string.atelier_albums), Modifier.weight(1f), style = MaterialTheme.typography.labelMedium)
+                FilledIconButton(onClick = { if (openAtelier == null) sheet = "sources" else openAtelier(title, null) }, enabled = canAcquire,
+                    modifier = Modifier.size(58.dp).testTag("atelier-new"), shape = RoundedCornerShape(19.dp)) {
+                    Icon(painterResource(R.drawable.ic_atelier_plus), stringResource(R.string.atelier_new), Modifier.size(29.dp))
+                }
+                Box(Modifier.weight(1f), contentAlignment = Alignment.CenterEnd) {
+                    AtelierIcon(R.drawable.ic_atelier_settings, R.string.atelier_settings, "atelier-settings") { sheet = "settings" }
+                }
+            }
+        } else {
+            val selectedId = state.selectedId
+            key(selectedId) {
+                LazyVerticalGrid(GridCells.Adaptive(148.dp), Modifier.weight(1f).fillMaxWidth().testTag("document-overview"),
+                    contentPadding = PaddingValues(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    item(span = { androidx.compose.foundation.lazy.grid.GridItemSpan(maxLineSpan) }) {
+                        Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                             LibraryFeedback(state, session)
+                             if (batchUndo != null && batchError == null) {
+                                 Text(stringResource(R.string.atelier_batch_saved))
+                                 TextButton(onClick = undoBatch, enabled = !batchBusy) { Text(stringResource(R.string.atelier_batch_undo_saved)) }
+                             }
+                             if (batchError != null) {
+                                 Text(errorText(batchError), color = MaterialTheme.colorScheme.error)
+                                 TextButton(onClick = closeBatchNotice) { Text(stringResource(R.string.atelier_batch_dismiss)) }
+                             }
+                            Text(stringResource(R.string.atelier_all_pages), style = MaterialTheme.typography.titleMedium)
+                            overview?.document?.updatedAt?.let { Text(stringResource(R.string.atelier_modified_date, date(Date(it)))) }
+                            if (overview?.pages?.isEmpty() == true) Text(stringResource(R.string.no_saved_pages))
+                        }
+                    }
+                    items(overview?.pages.orEmpty(), key = { it.pageId.value }) { page ->
+                        Surface(
+                            modifier = Modifier.fillMaxWidth().testTag("original-page-${page.pageId.value}")
+                                .semantics { selected = state.selectedPage == page.pageId }
+                                .clickable(enabled = canAcquire && overview != null, role = Role.Button) {
+                                    overview?.let {
+                                        session.accept(LibraryEvent.SelectPage(page.pageId))
+                                        onEdit(it.document.documentId, page.pageId)
+                                    }
+                                },
+                            shape = RoundedCornerShape(AtelierStyle.surfaceRadius), color = MaterialTheme.colorScheme.surface,
+                        ) {
+                            Column(Modifier.padding(6.dp)) {
+                                 val album = checkNotNull(overview).document
+                                 val thumbnailSize = Modifier.fillMaxWidth().aspectRatio(1.18f)
+                                 if (thumbnailsCurrent(album)) AtelierThumbnail(album, page, loadThumbnail, thumbnailSize)
+                                 else Box(thumbnailSize.background(AtelierStyle.canvas, RoundedCornerShape(4.dp)))
+                                Text(stringResource(R.string.page_number, page.ordinal + 1), Modifier.padding(6.dp))
+                            }
+                        }
+                    }
+                }
+            }
+            HorizontalDivider(color = AtelierStyle.divider)
+            Column(Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp)) {
+                if (overview != null && overview.pages.isNotEmpty()) TextButton(
+                    onClick = { onBatch(overview) }, enabled = canAcquire,
+                    modifier = Modifier.heightIn(min = AtelierStyle.touchTarget).testTag("atelier-batch-select"),
+                ) { Text(stringResource(R.string.atelier_batch_select)) }
+                Button(onClick = {
+                    val album = overview?.document
+                    if (openAtelier != null && album != null) openAtelier(title, album) else sheet = "sources"
+                }, enabled = canAcquire, modifier = Modifier.fillMaxWidth()
+                    .heightIn(min = AtelierStyle.touchTarget).testTag("atelier-add-pages")) {
+                    Text(stringResource(R.string.atelier_add_pages))
+                }
+            }
+        }
+    }
+    val stopSheet = { sheet = null }
+    when (sheet) {
+        "settings" -> AtelierSheet(R.string.atelier_settings, stopSheet) {
+            SwitchRow(R.string.atelier_grid, preferencesState.showCameraGrid, "atelier-grid-setting", preferences::setShowCameraGrid)
+            SwitchRow(R.string.atelier_created, preferencesState.showCreationInNameSort, "atelier-date-setting", preferences::setShowCreationInNameSort)
+            Text(stringResource(R.string.atelier_date_setting_note), style = MaterialTheme.typography.bodySmall)
+        }
+        "sort" -> AtelierSheet(R.string.atelier_sort, stopSheet) {
+            AlbumOrder.entries.forEach { order ->
+                val selected = preferencesState.order == order
+                Row(Modifier.fillMaxWidth().heightIn(min = AtelierStyle.touchTarget).testTag("atelier-sort-${order.name}")
+                    .selectable(selected, role = Role.RadioButton, onClick = { preferences.setOrder(order); stopSheet() }),
+                    verticalAlignment = Alignment.CenterVertically) {
+                    RadioButton(selected, onClick = null)
+                    Text(stringResource(order.label()), Modifier.padding(start = 12.dp))
+                }
+            }
+        }
+        "sources" -> AtelierSheet(if (home) R.string.atelier_new else R.string.atelier_add_pages, stopSheet) {
+            AcquisitionAction(R.string.take_photo, "take-photo", canAcquire) { acquire(PhotoImportKind.CAMERA) }
+            AcquisitionAction(R.string.import_photos, "import-photos", canAcquire) { acquire(PhotoImportKind.GALLERY) }
+            AcquisitionAction(R.string.import_files, "import-files", canAcquire) { acquire(PhotoImportKind.FILES) }
+            if (home) AcquisitionAction(R.string.new_document, "create-document", canAcquire) {
+                stopSheet()
+                session.accept(LibraryEvent.NewDocument(title))
+            }
+        }
+        "rename" -> overview?.document?.let { album ->
+            RenameSheet(album, state, session) { stopSheet() }
+        }
+    }
+}
+
+@Composable private fun AlbumCard(
+    album: DocumentSummary, creation: Boolean,
+    load: suspend (DocumentId) -> DocumentOverview,
+    thumbnail: suspend (DocumentSummary, DocumentPage) -> RenderedPreviewBitmap,
+    enabled: Boolean, thumbnailsCurrent: Boolean, onOpen: () -> Unit,
+) {
+    var pages by remember(album.documentId, album.documentRevision) { mutableStateOf(emptyList<DocumentPage>()) }
+    var failed by remember(album.documentId, album.documentRevision) { mutableStateOf(false) }
+    val loader by rememberUpdatedState(load)
+    LaunchedEffect(album.documentId, album.documentRevision) {
+        if (album.pageCount > 0) {
+            try {
+                val result = loader(album.documentId)
+                currentCoroutineContext().ensureActive()
+                if (result.document.documentRevision == album.documentRevision && result.document.documentId == album.documentId) {
+                    pages = result.pages.take(3)
+                } else failed = true
+            } catch (canceled: CancellationException) { throw canceled }
+            catch (_: Exception) { failed = true }
+        }
+    }
+    Surface(onClick = onOpen, enabled = enabled, modifier = Modifier.fillMaxWidth().heightIn(min = 94.dp)
+        .testTag("atelier-album-${album.documentId.value}"), shape = RoundedCornerShape(AtelierStyle.surfaceRadius)) {
+        Row(Modifier.padding(9.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+            if (album.pageCount > 0) {
+                Box(Modifier.size(width = 88.dp, height = 60.dp), contentAlignment = Alignment.CenterStart) {
+                    if (failed) Text(stringResource(R.string.atelier_thumbnail_failed), style = MaterialTheme.typography.labelSmall)
+                    if (!thumbnailsCurrent || pages.isEmpty() && !failed) Box(Modifier.size(48.dp, 60.dp).background(AtelierStyle.canvas, RoundedCornerShape(4.dp)))
+                    if (thumbnailsCurrent) pages.forEachIndexed { index, page ->
+                        key(page.pageId) { AtelierThumbnail(album, page, thumbnail, Modifier.offset(x = (19 * index).dp).size(48.dp, 60.dp)) }
+                    }
+                }
+            }
+            Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
+                Text(album.title, style = MaterialTheme.typography.titleMedium, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                Text(stringResource(R.string.saved_page_count, album.pageCount), style = MaterialTheme.typography.bodySmall)
+                val timestamp = if (creation) album.createdAt else album.updatedAt
+                if (timestamp != null) Text(stringResource(if (creation) R.string.atelier_created_date else R.string.atelier_modified_date,
+                    date(Date(timestamp))), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+        }
+    }
+}
+
+@Composable private fun AtelierThumbnail(album: DocumentSummary, page: DocumentPage,
+    loader: suspend (DocumentSummary, DocumentPage) -> RenderedPreviewBitmap, modifier: Modifier) {
+    val lifecycle = LocalLifecycleOwner.current.lifecycle
+    val load by rememberUpdatedState(loader)
+    var ready by remember(album.documentId, album.documentRevision, page) { mutableStateOf<RenderedPreviewBitmap?>(null) }
+    var failed by remember(album.documentId, album.documentRevision, page) { mutableStateOf(false) }
+    LaunchedEffect(lifecycle, album.documentId, album.documentRevision, page) {
+        lifecycle.repeatOnLifecycle(Lifecycle.State.STARTED) {
+            var resource: RenderedPreviewBitmap? = null
+            try {
+                failed = false
+                resource = load(album, page)
+                currentCoroutineContext().ensureActive()
+                ready = resource
+                awaitCancellation()
+            } catch (canceled: CancellationException) { throw canceled }
+            catch (_: Exception) { failed = true }
+            finally { ready = null; resource?.close() }
+        }
+    }
+    Box(modifier.clip(RoundedCornerShape(4.dp)).background(AtelierStyle.canvas), contentAlignment = Alignment.Center) {
+        ready?.let { Image(it.bitmap.asImageBitmap(), stringResource(R.string.atelier_saved_thumbnail_description, page.ordinal + 1),
+            Modifier.fillMaxSize(), contentScale = ContentScale.Crop) }
+        if (failed) Text(stringResource(R.string.atelier_thumbnail_failed), Modifier.padding(3.dp), style = MaterialTheme.typography.labelSmall)
+    }
+}
+
+@Composable private fun LibraryFeedback(state: LibraryState, session: LibrarySession) {
+    Column {
+        state.error?.let {
+            Text(acquisitionError(it), color = MaterialTheme.colorScheme.error)
+            TextButton(onClick = { session.accept(LibraryEvent.Refresh) }, enabled = !state.loading) { Text(stringResource(R.string.refresh_library)) }
+        }
+        if ((state.recovery?.blocked ?: 0) > 0) Text(stringResource(R.string.recovery_attention))
+        if (state.request != null) {
+            Text(stringResource(when (state.phase) {
+                ImportPhase.COPYING -> R.string.import_copying
+                ImportPhase.CANCELING -> R.string.import_canceling
+                ImportPhase.INTERRUPTED -> R.string.import_interrupted
+                else -> R.string.import_waiting
+            }))
+            TextButton(onClick = { session.accept(LibraryEvent.CancelImport) }, enabled = state.phase != ImportPhase.CANCELING) {
+                Text(stringResource(R.string.cancel_import))
+            }
+        }
+        if (state.phase == ImportPhase.CANCELED) Text(stringResource(R.string.import_canceled))
+        state.results.forEachIndexed { i, result ->
+            when (result) {
+                is IngestResult.Committed -> Text(stringResource(R.string.item_saved, i + 1))
+                is IngestResult.Pending -> Text(stringResource(R.string.item_pending, i + 1))
+                is IngestResult.Rejected -> Text(stringResource(R.string.item_rejected, i + 1, acquisitionError(result.error)))
+            }
+        }
+    }
+}
+
+@Composable private fun RenameSheet(album: DocumentSummary, state: LibraryState, session: LibrarySession, onClose: () -> Unit) {
+    var text by rememberSaveable(album.documentId.value) { mutableStateOf(album.title) }
+    var revision by rememberSaveable(album.documentId.value) { mutableLongStateOf(album.documentRevision) }
+    LaunchedEffect(state.renameResult) {
+        if (state.renameResult is DocumentMutationResult.Applied) {
+            session.accept(LibraryEvent.ClearRenameResult)
+            onClose()
+        }
+    }
+    AtelierSheet(R.string.atelier_rename, { if (!state.renaming) { session.accept(LibraryEvent.ClearRenameResult); onClose() } }, canDismiss = !state.renaming) {
+        // Reject an over-limit edit before saving it in a Bundle; rejecting the whole edit cannot split a surrogate pair.
+        OutlinedTextField(text, { if (it.length <= 160) text = it }, enabled = !state.renaming, singleLine = true,
+            modifier = Modifier.fillMaxWidth().testTag("atelier-title-field"), label = { Text(stringResource(R.string.atelier_title)) })
+        val failure = state.renameResult
+        when (failure) {
+            is DocumentMutationResult.Conflict -> {
+                Text(errorText(OperationErrorCode.REVISION_CONFLICT), color = MaterialTheme.colorScheme.error)
+                TextButton(onClick = { revision = album.documentRevision; session.accept(LibraryEvent.ClearRenameResult) },
+                    enabled = !state.loading && album.documentRevision >= failure.actualRevision) {
+                    Text(stringResource(R.string.atelier_use_current_revision))
+                }
+                if (album.documentRevision < failure.actualRevision) {
+                    TextButton(onClick = { session.accept(LibraryEvent.RefreshAlbum) }, enabled = !state.loading) {
+                        Text(stringResource(R.string.refresh_library))
+                    }
+                }
+            }
+            is DocumentMutationResult.Rejected -> Text(acquisitionError(failure.error), color = MaterialTheme.colorScheme.error)
+            else -> Unit
+        }
+        Button(
+            enabled = !state.renaming && !state.loading && text.trim().length in 1..160 && failure !is DocumentMutationResult.Conflict,
+            onClick = { session.accept(LibraryEvent.RenameAlbum(album.documentId, revision, text)) },
+            modifier = Modifier.fillMaxWidth().heightIn(min = AtelierStyle.touchTarget).testTag("atelier-save-title"),
+        ) { Text(stringResource(R.string.atelier_save_title)) }
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable private fun AtelierSheet(title: Int, onClose: () -> Unit, canDismiss: Boolean = true, content: @Composable ColumnScope.() -> Unit) {
+    val dismissible by rememberUpdatedState(canDismiss)
+    val sheet = rememberModalBottomSheetState(confirmValueChange = { it != SheetValue.Hidden || dismissible })
+    ModalBottomSheet(onDismissRequest = onClose, sheetState = sheet, containerColor = MaterialTheme.colorScheme.background) {
+        Column(Modifier.fillMaxWidth().verticalScroll(rememberScrollState()).padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Text(stringResource(title), Modifier.semantics { heading() }, style = MaterialTheme.typography.titleLarge)
+            content()
+            TextButton(onClick = onClose, enabled = canDismiss, modifier = Modifier.heightIn(min = AtelierStyle.touchTarget)) { Text(stringResource(R.string.atelier_close)) }
+        }
+    }
+}
+
+@Composable private fun AcquisitionAction(label: Int, tag: String, enabled: Boolean, onClick: () -> Unit) {
+    OutlinedButton(onClick = onClick, enabled = enabled, modifier = Modifier.fillMaxWidth().heightIn(min = AtelierStyle.touchTarget).testTag(tag)) {
+        Text(stringResource(label))
+    }
+}
+
+@Composable private fun SwitchRow(label: Int, checked: Boolean, tag: String, change: (Boolean) -> Unit) {
+    Row(Modifier.fillMaxWidth().heightIn(min = AtelierStyle.touchTarget).testTag(tag).toggleable(checked, role = Role.Switch, onValueChange = change),
+        horizontalArrangement = Arrangement.spacedBy(12.dp), verticalAlignment = Alignment.CenterVertically) {
+        Text(stringResource(label), Modifier.weight(1f))
+        Switch(checked, onCheckedChange = null)
+    }
+}
+
+@Composable private fun AtelierIcon(icon: Int, label: Int, tag: String, enabled: Boolean = true, onClick: () -> Unit) {
+    IconButton(onClick = onClick, enabled = enabled, modifier = Modifier.size(AtelierStyle.touchTarget).testTag(tag)) {
+        Icon(painterResource(icon), stringResource(label))
+    }
+}
+
+private fun AlbumOrder.label() = when (this) {
+    AlbumOrder.MODIFIED -> R.string.atelier_sort_modified
+    AlbumOrder.CREATED -> R.string.atelier_sort_created
+    AlbumOrder.TITLE_AZ -> R.string.atelier_sort_az
+    AlbumOrder.TITLE_ZA -> R.string.atelier_sort_za
+}
+
+// Keep the user’s local time zone, but do not mix non-English month names into app-owned text.
+private fun date(value: Date, includeTime: Boolean = true): String =
+    (if (includeTime) DateFormat.getDateTimeInstance(DateFormat.MEDIUM, DateFormat.SHORT, Locale.ENGLISH)
+    else DateFormat.getDateInstance(DateFormat.MEDIUM, Locale.ENGLISH)).format(value)

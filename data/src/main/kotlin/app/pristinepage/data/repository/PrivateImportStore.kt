@@ -3,6 +3,7 @@ package app.pristinepage.data.repository
 import android.content.Context
 import androidx.room.Room
 import app.pristinepage.data.db.PristineDatabase
+import app.pristinepage.data.db.AtelierDraftMigration
 import app.pristinepage.data.files.DerivedFiles
 import app.pristinepage.data.files.SourceFiles
 import app.pristinepage.data.files.SourceInspector
@@ -30,9 +31,13 @@ class PrivateImportStore private constructor(
     val lifecycle: ImportSessionLifecycle,
     val sources: BoundSourceIngest,
     val committedSources: CommittedSources,
-    val catalog: DocumentCatalog,
+    private val documentCatalog: RoomDocumentCatalog,
     val editablePages: EditablePages,
+    internal val atelierDrafts: RoomAtelierDrafts,
+    val atelier: AtelierAcquisition,
 ) : AutoCloseable {
+    val catalog: DocumentCatalog get() = documentCatalog
+    val albums: AlbumCatalog get() = documentCatalog
     private val exportLifetime = OrdinaryExportLifetime(database::close)
 
     override fun close() = exportLifetime.close()
@@ -90,7 +95,8 @@ class PrivateImportStore private constructor(
             try {
                 return withContext(Dispatchers.IO) {
                     coroutineContext.ensureActive()
-                    val database = Room.databaseBuilder(context.applicationContext, PristineDatabase::class.java, "pristinepage.db").build()
+                val database = Room.databaseBuilder(context.applicationContext, PristineDatabase::class.java, "pristinepage.db")
+                    .addMigrations(AtelierDraftMigration).build()
                     opened = database
                     database.openHelper.writableDatabase
                     val root = File(context.applicationContext.filesDir, "store").canonicalFile
@@ -105,7 +111,13 @@ class PrivateImportStore private constructor(
                     // Direct/test callers remain fail-closed by default. Application supplies the image-owned structural policy explicitly; data never imports rendering or infers capability from a stored recipe name.
                     val documents = RoomDocumentRepository(metadata, admission, recovery = recovery)
                     coroutineContext.ensureActive()
-                    PrivateImportStore(database, root, owners, verification, documents, sessions, sessions, sessions, sources, RoomCommittedSources(metadata, database.catalog(), files), RoomDocumentCatalog(metadata, database.catalog()), RoomEditablePages(metadata, database.catalog()))
+                    val drafts = database.atelierDrafts()
+                    val draftOwner = RoomAtelierDrafts(metadata, drafts, sessions)
+                    val editable = RoomEditablePages(metadata, database.catalog())
+                    PrivateImportStore(database, root, owners, verification, documents, sessions, sessions, sessions, sources,
+                        RoomCommittedSources(metadata, database.catalog(), files),
+                        RoomDocumentCatalog(metadata, database.catalog()),
+                        editable, draftOwner, AtelierAcquisition(draftOwner, drafts, editable, documents))
                 }
             } catch (failure: Throwable) {
                 // Preserve the initiating structured failure/cancellation even if close encounters another storage fault. No reset, schema rewrite or file cleanup is attempted.

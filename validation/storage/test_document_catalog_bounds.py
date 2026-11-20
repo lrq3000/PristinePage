@@ -6,6 +6,7 @@ import unittest
 from uuid import UUID
 
 import test_room_schema
+from test_atelier_stage_schema import migrate
 
 
 DAO = Path(__file__).resolve().parents[2] / "data/src/main/kotlin/app/pristinepage/data/db/CatalogDao.kt"
@@ -16,6 +17,7 @@ class DocumentCatalogBoundsTest(unittest.TestCase):
         fixture = test_room_schema.RoomSchemaTest()
         self.db = fixture.open_schema()
         self.addCleanup(fixture.doCleanups)
+        migrate(self.db)
         # Keep exported constraints intact but defer cross-row checks in this uncommitted corruption fixture. The read guard must inspect malformed stored bindings before any attempted repair or typed row projection.
         self.db.execute("PRAGMA defer_foreign_keys=ON")
         self.doc, self.source, self.blob, self.page = [str(UUID(int=i)) for i in (1, 2, 3, 4)]
@@ -35,8 +37,39 @@ class DocumentCatalogBoundsTest(unittest.TestCase):
         if match.group(3) is not None:
             constant = re.search(r'const val ' + match.group(3) + r'\s*=\s*"""((?:(?!""").)*)"""', source, re.S)
             self.assertIsNotNone(constant, "Referenced catalog SQL constant is absent")
-            return constant.group(1)
-        return match.group(1) if match.group(1) is not None else match.group(2)
+            sql = constant.group(1)
+        else:
+            sql = match.group(1) if match.group(1) is not None else match.group(2)
+        if "$HIDDEN_ATELIER_DOCUMENT" in sql:
+            draft_source = DAO.with_name("AtelierDraftDao.kt").read_text(encoding="utf-8")
+            visibility = re.search(r'HIDDEN_ATELIER_DOCUMENT = """(.*?)"""', draft_source, re.S)
+            self.assertIsNotNone(visibility)
+            sql = sql.replace("$HIDDEN_ATELIER_DOCUMENT", visibility.group(1))
+        return sql
+
+    def test_saved_library_excludes_active_abandoned_and_appended_staging_but_admits_published_new_album(self):
+        by_id = lambda: [row[0] for row in self.query("activeDocumentIdsAfter", after=None, limit=50)]
+        by_album = lambda: [row[0] for row in self.query("activeAlbumRowsAfter", after=None, limit=50)]
+        self.assertEqual([self.doc], by_album())
+        self.db.execute("""INSERT INTO AtelierDraft (draftId,stagingDocumentId,state,generation,step,createdAt)
+            VALUES ('draft',?,'ACQUIRING',1,0,0)""", (self.doc,))
+        for state in ("ACQUIRING", "EDITING", "ABANDONED", "COMMITTED", "UNKNOWN"):
+            self.db.execute("UPDATE AtelierDraft SET state=?", (state,))
+            self.assertEqual([], by_id())
+            self.assertEqual([], by_album())
+        self.db.execute("UPDATE AtelierDraft SET state='COMMITTED', committedDocumentId=stagingDocumentId")
+        for malformed in (None, "not a receipt", f"atelier-publish-v1\n99\n{self.doc}\ninvalid", "x" * 1401):
+            self.db.execute("UPDATE AtelierDraft SET receiptPageIds=?", (malformed,))
+            self.assertEqual([], by_id())
+            self.assertEqual([], by_album())
+        page_id = str(UUID(int=4))
+        receipt = f"atelier-publish-v1\n1\n{self.doc}\n{page_id},1,{'a' * 64},{page_id}"
+        self.db.execute("UPDATE AtelierDraft SET generation=2, step=2, receiptPageIds=?", (receipt,))
+        self.assertEqual([self.doc], by_id())
+        self.assertEqual([self.doc], by_album())
+        self.db.execute("UPDATE AtelierDraft SET targetDocumentId='target', committedDocumentId='target'")
+        self.assertEqual([], by_id())
+        self.assertEqual([], by_album())
 
     def query(self, method, **bindings):
         return self.db.execute(self.sql(method), bindings)
@@ -83,6 +116,22 @@ class DocumentCatalogBoundsTest(unittest.TestCase):
                 rows = list(self.query("activeDocumentIdsAfter", after=None, limit=2))
                 self.assertEqual([("",)], rows)
                 self.db.execute("UPDATE Document SET documentId=?", (self.doc,))
+
+    def test_album_chunk_preserves_raw_timestamp_values_and_uses_the_id_cursor(self):
+        self.db.execute("UPDATE Document SET createdAt=12, updatedAt=24")
+        next_id = str(UUID(int=20))
+        self.db.execute("INSERT INTO Document VALUES (?,'Next',2,'ACTIVE',7,45,NULL)", (next_id,))
+        self.assertEqual([(self.doc, "Synthetic", 1, "ACTIVE", 12, 24, None)],
+                         list(self.query("activeAlbumRowsAfter", after=None, limit=1)))
+        self.assertEqual([(next_id, "Next", 2, "ACTIVE", 7, 45, None)],
+                         list(self.query("activeAlbumRowsAfter", after=self.doc, limit=1)))
+
+    def test_album_chunk_does_not_materialize_a_large_title_or_coerce_bad_storage_into_a_valid_row(self):
+        self.db.execute("UPDATE Document SET title=?", ("x" * 4096,))
+        row = self.query("activeAlbumRowsAfter", after=None, limit=1).fetchone()
+        self.assertEqual(("", ""), row[:2])
+        self.db.execute("UPDATE Document SET title='Valid', updatedAt=1.5")
+        self.assertEqual("", self.query("activeAlbumRowsAfter", after=None, limit=1).fetchone()[0])
 
     def test_count_and_contiguity_guard_rejects_oversized_or_gapped_active_set(self):
         self.assertEqual(1, self.query("activePageCount", documentId=self.doc).fetchone()[0])

@@ -50,7 +50,7 @@ class RoomIngestAttempts @JvmOverloads constructor(private val metadata: Metadat
                 // QUARANTINED retires unvalidated evidence in place; this is not a file move, byte-corruption verdict or cancellation of the user's ITEM. CAS failure after either write aborts the entire metadata transaction.
                 if (phases.updateIngestPhase(row.copy(state = "QUARANTINED", updatedAt = now), row.state) != 1) lost(intent)
                 if (jobs.updateLease(job.copy(state = "INTERRUPTED", leaseOwner = null, leaseUntil = null, updatedAt = now), recordedGeneration) != 1) lost(intent)
-                insertIngestIntent(journal, next, now)
+                insertIngestIntent(metadata, journal, next, now)
                 if (sessions.updateSession(child.copy(transactionId = next.transactionId.value, errorCode = null)) != 1) lost(intent)
                 next
             }
