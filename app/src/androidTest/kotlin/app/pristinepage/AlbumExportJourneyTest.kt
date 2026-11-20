@@ -2,6 +2,8 @@ package app.pristinepage
 
 import android.graphics.Bitmap
 import android.graphics.Color
+import android.net.Uri
+import androidx.core.content.FileProvider
 import androidx.compose.ui.test.*
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.lifecycle.ViewModelProvider
@@ -13,6 +15,7 @@ import app.pristinepage.image.export.AlbumArtifactEncoder
 import app.pristinepage.library.ImportLibraryViewModel
 import app.pristinepage.library.LibraryEvent
 import java.io.File
+import java.io.FileNotFoundException
 import java.util.UUID
 import java.util.zip.ZipInputStream
 import kotlinx.coroutines.runBlocking
@@ -89,6 +92,38 @@ class AlbumExportJourneyTest {
                 assertNull(zip.nextEntry)
             }
             assertEquals(overview.pages, graph.store.catalog.load(document).pages)
+
+            // Exercise the real provider against the same verified sparse archive without dispatching an external app.
+            val shareId = UUID.randomUUID().toString()
+            val folder = File(context.filesDir, "shared-exports/$shareId")
+            check(folder.mkdirs())
+            val share = File(folder, result.filename)
+            try {
+                check(share.createNewFile())
+                store.copy(result) { source, _ -> share.outputStream().use { source.copyTo(it) } }
+                val authority = "${context.packageName}.finished-exports"
+                val uri = FileProvider.getUriForFile(context, authority, share)
+                assertThrows(FileNotFoundException::class.java) { context.contentResolver.openFileDescriptor(uri, "r")?.close() }
+                store.recordShare(result, shareId, result.filename)
+                context.contentResolver.openInputStream(uri)!!.use { inputStream ->
+                    ZipInputStream(inputStream).use { zip ->
+                        assertEquals("${title}_1.jpg", zip.nextEntry.name)
+                        zip.closeEntry()
+                        assertEquals("${title}_3.jpg", zip.nextEntry.name)
+                        zip.closeEntry()
+                        assertNull(zip.nextEntry)
+                    }
+                }
+                assertThrows(FileNotFoundException::class.java) { context.contentResolver.openFileDescriptor(uri, "rw")?.close() }
+                val foreign = Uri.withAppendedPath(checkNotNull(uri.buildUpon().path("/finished_exports/$shareId").build()), "Unrelated.zip")
+                assertThrows(FileNotFoundException::class.java) { context.contentResolver.openFileDescriptor(foreign, "r")?.close() }
+                store.revokeShare(result, shareId)
+                assertTrue(share.exists()) // Metadata revocation blocks new opens independently of unlink.
+                assertThrows(FileNotFoundException::class.java) { context.contentResolver.openFileDescriptor(uri, "r")?.close() }
+            } finally {
+                share.delete()
+                folder.delete()
+            }
         } finally { files.forEach { it.delete() } }
     }
 }
