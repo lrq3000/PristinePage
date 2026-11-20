@@ -47,6 +47,12 @@ Input `ceb7e57`; after the T-05 feedback milestone, resume the accepted [Home pl
 
 Input `3b2f6f1` on `feat/carnet-redesign`: [approved Carnet design](../design/carnet/README.md) and [presentation plan](../superpowers/plans/2026-11-20-carnet-presentation.md). Scope is presentation and the Home thumbnail preference: Compose theme, library/camera chrome, settings, English resources, focused tests and evidence. Preserve renderer, data layer, schema and previously gated acceptance.
 
+### Carnet corrective continuation — T-09 / CARNET-CAPTURE-CROP-01
+
+Public input `b60f5b9`, isolated Carnet corrective worktree. Uses the existing T-04/T-05 capture, T-06 map, and T-10 ordered catalog prerequisites. Scope is app camera/editor/navigation and host witnesses, tightly coupled decode budgeting/contour shape proof, and the [corrective checkpoint](../../validation/ui/carnet-camera-crop-checkpoint.md). No change to published `main`, persistent schema, input bytes, accepted plan or device authorization.
+
+The operator added ordered gallery swipe, configurable new-album names (`pristinepage_%date_%time` by default), long-press page selection, and JPEG/ZIP/PDF export of an album or an explicit subset. The same checkpoint records T-11 prerequisites and the required immutable naming rule (`%album_%position.jpg`, `%album.zip`, `%album.pdf`), with original album position, not output index. The tested app-side review metadata does not construct an export or authorize its publication. Scope does not activate a second writer or bypass `PRIVATE_READY`.
+
 ### Atelier geometry continuation — T-06 / ATELIER-CUBIC-02
 
 Input `1abe2fb`; independent read-only review covers the projective map, actual edge reparameterization, corner residuals, topology, stretch and support. The outward proof, distinct `atelier_bezier_v1` recipe, real paired raster and Atelier controls are locally implemented and have host tests. A second review identified exact-chord restoration, signed-zero and rounded subdivision limits; the updated [ATELIER_BEZIER](ATELIER_BEZIER.md) records the semantics. The legacy codec remains unchanged. Android saving/reopening, accessible interaction and broader geometry/fidelity checks remain open; no midpoint algorithm substitutes for Bézier.
