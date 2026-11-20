@@ -183,6 +183,18 @@ class EditorShapeScreenTest {
         waitForResult(reopened, "atelier_bezier_v1")
         click("editor-undo")
         waitForResult(reopened, "atelier_bezier_v1")
+        click("carnet-bezier-place")
+        compose.onNodeWithTag("carnet-bezier-place").assertIsSelected()
+        compose.onNodeWithTag("atelier-frame-canvas").performScrollTo().performTouchInput {
+            val scale = minOf(width / 101f, height / 81f)
+            click(Offset(center.x + 101f * scale / 6f, center.y - 81f * scale / 2f + 2f))
+        }
+        compose.waitUntil(10_000) {
+            (reopened.state.value.draft?.geometry as? GeometryRecipe.Bezier)?.contour?.top?.segments?.size == 2
+        }
+        compose.onNodeWithTag("carnet-bezier-place").assertIsNotSelected()
+        click("editor-undo")
+        waitForResult(reopened, "atelier_bezier_v1")
         click("atelier-bezier-insert")
         click("atelier-bezier-remove")
         waitForResult(reopened, "atelier_bezier_v1")

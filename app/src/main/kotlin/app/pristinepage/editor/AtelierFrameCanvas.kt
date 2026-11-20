@@ -63,6 +63,8 @@ import kotlin.math.roundToInt
     session: EditorSession,
     cubicControl: BezierControl? = null,
     onSelectBezier: (BezierControl) -> Unit = {},
+    placeBezierPoint: Boolean = false,
+    onPointPlaced: () -> Unit = {},
     onSourceReady: (suspend (android.graphics.Bitmap) -> Unit)? = null,
 ) {
     val lifecycle = LocalLifecycleOwner.current.lifecycle
@@ -105,6 +107,8 @@ import kotlin.math.roundToInt
     val current by rememberUpdatedState(geometry)
     val chosen by rememberUpdatedState(cubicControl)
     val select by rememberUpdatedState(onSelectBezier)
+    val placing by rememberUpdatedState(placeBezierPoint)
+    val placed by rememberUpdatedState(onPointPlaced)
     val w = image.output.size.width
     val h = image.output.size.height
     val points = EditorShapes.points(geometry)
@@ -154,14 +158,20 @@ import kotlin.math.roundToInt
             }
         }.pointerInput(w, h, enabled, session) {
             if (!enabled) return@pointerInput
-            detectTapGestures(onDoubleTap = { position ->
-                val cubic = current as? GeometryRecipe.Bezier ?: return@detectTapGestures
+            fun insertAt(position: Offset) {
+                val cubic = current as? GeometryRecipe.Bezier ?: return
                 val rect = fitted(size.width.toFloat(), size.height.toFloat(), w, h)
                 nearestInsertion(cubic.contour, position, rect, 22.dp.toPx(), 8.dp.toPx())?.let { hit ->
                     session.insertBezier(hit.control.side, hit.control.segment, hit.t)
                     select(hit.control)
+                    placed()
                 }
-            }, onTap = { position ->
+            }
+            detectTapGestures(onDoubleTap = ::insertAt, onTap = { position ->
+                if (placing) {
+                    insertAt(position)
+                    return@detectTapGestures
+                }
                 val cubic = current as? GeometryRecipe.Bezier ?: return@detectTapGestures
                 val rect = fitted(size.width.toFloat(), size.height.toFloat(), w, h)
                 nearestBezierControl(cubic.contour, position, rect, 26.dp.toPx(), chosen)?.let(select)

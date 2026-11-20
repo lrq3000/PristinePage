@@ -72,6 +72,7 @@ class PageEditorScreen(
         var seedAttempted by rememberSaveable(state.page?.pageId?.value) { mutableStateOf(false) }
         var seedFeedback by rememberSaveable(state.page?.pageId?.value) { mutableStateOf(false) }
         var bezierSelection by remember(session) { mutableStateOf<BezierControl?>(null) }
+        var placeBezierPoint by remember(session, panel, state.draft?.geometry is GeometryRecipe.Bezier) { mutableStateOf(false) }
         val mayBrowse = editable && !state.dirty && !state.confirmExit && panel.isEmpty() && !information
         val swipePrevious by rememberUpdatedState(previousPage)
         val swipeNext by rememberUpdatedState(nextPage)
@@ -169,6 +170,8 @@ class PageEditorScreen(
                     (frame is GeometryRecipe.Perspective || frame is GeometryRecipe.ManualCurve || frame is GeometryRecipe.Bezier || seed)) {
                     AtelierFrameCanvas(page.sourceId.value, frame, editable, loadOriginal, session, bezierSelection,
                         onSelectBezier = { bezierSelection = it },
+                        placeBezierPoint = placeBezierPoint,
+                        onPointPlaced = { placeBezierPoint = false },
                         onSourceReady = if (!seed) null else { bitmap ->
                             try {
                                 val quad = detectAtelierFrame(bitmap)
@@ -179,6 +182,11 @@ class PageEditorScreen(
                         })
                     if (frame is GeometryRecipe.Bezier) {
                         Text(stringResource(R.string.carnet_bezier_touch_help))
+                        FilterChip(
+                            selected = placeBezierPoint, onClick = { placeBezierPoint = !placeBezierPoint }, enabled = editable,
+                            label = { Text(stringResource(if (placeBezierPoint) R.string.carnet_bezier_choose_spot else R.string.carnet_bezier_place_point)) },
+                            modifier = Modifier.heightIn(min = 48.dp).testTag("carnet-bezier-place"),
+                        )
                         AtelierBezierControls(frame, editable, session, bezierSelection) { bezierSelection = it }
                     }
                     if (frame is GeometryRecipe.ManualCurve) {
