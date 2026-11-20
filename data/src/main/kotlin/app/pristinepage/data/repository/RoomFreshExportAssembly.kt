@@ -3,6 +3,7 @@ package app.pristinepage.data.repository
 import android.os.SystemClock
 import app.pristinepage.core.pipeline.FallbackPolicy
 import app.pristinepage.data.db.ExportSnapshotDao
+import app.pristinepage.data.db.ExportSnapshotRow
 import app.pristinepage.data.db.JobRow
 import app.pristinepage.data.db.PristineDatabase
 import app.pristinepage.data.model.*
@@ -24,6 +25,7 @@ internal class RoomFreshExportAssembly private constructor(
     private val leaseClock: () -> Long = SystemClock::elapsedRealtime,
     private val dispatcher: CoroutineDispatcher = Dispatchers.IO,
     private val lifetime: OrdinaryExportLifetime? = null,
+    private val namedAlbum: Boolean = false,
 ) {
     constructor(database: PristineDatabase, liveness: LeaseOwnerLiveness, preflight: suspend (ExportSnapshot, List<JobId>) -> OperationError?) : this(
         RoomStore(database), liveness, preflight,
@@ -81,14 +83,15 @@ internal class RoomFreshExportAssembly private constructor(
         private val frozen: SnapshotRead,
         private val issuer: Store,
         private val lifetime: OrdinaryExportLifetime?,
+        private val namedAlbum: Boolean,
     ) {
-        private val input = ExportAssemblyInput.encode(snapshot.snapshotId, snapshot.snapshotHash, orderedJobIds)
-        val key = ExportAssemblyInput.key(snapshot.snapshotId)
+        private val input = if (namedAlbum) NamedAlbumJobInput.encode(snapshot) else ExportAssemblyInput.encode(snapshot.snapshotId, snapshot.snapshotHash, orderedJobIds)
+        val key = if (namedAlbum) NamedAlbumJobInput.key(snapshot.snapshotId) else ExportAssemblyInput.key(snapshot.snapshotId)
         val digest = ExportAssemblyInput.digest(input)
         fun inputBytes(): ByteArray = input.copyOf()
 
         fun requireIssuer(service: RoomFreshExportAssembly) {
-            if (!issuer.sameIssuer(service.store) || lifetime !== service.lifetime) {
+            if (!issuer.sameIssuer(service.store) || lifetime !== service.lifetime || namedAlbum != service.namedAlbum) {
                 reject(jobId.value, OperationErrorCode.INTEGRITY_FAILED, "export_assembly_store_mismatch")
             }
         }
@@ -111,7 +114,7 @@ internal class RoomFreshExportAssembly private constructor(
             return job to page
         }
 
-        fun matches(row: JobRow): Boolean = row.jobId == jobId.value && row.kind == "EXPORT_ASSEMBLY" &&
+        fun matches(row: JobRow): Boolean = row.jobId == jobId.value && row.kind == (if (namedAlbum) NamedAlbumJobInput.KIND else "EXPORT_ASSEMBLY") &&
             row.snapshotId == snapshot.snapshotId.value && row.pageOrdinal == null && row.idempotenceKey == key &&
             row.canonicalInputSha256 == digest && row.input.contentEquals(input)
 
@@ -127,12 +130,15 @@ internal class RoomFreshExportAssembly private constructor(
                 coroutineContext.ensureActive()
                 val snapshot = service.storage(id.value, captured::authenticate)
                 // Metadata prefilter only; the render proof owns exact ordinary descriptor/recipe validation before terminal I/O.
-                if (snapshot.settings.format != ExportFormat.PNG || snapshot.settings.acceptedDegraded.isNotEmpty() ||
+                val formatAccepted = if (service.namedAlbum) snapshot.settings.albumScope != null &&
+                    snapshot.settings.format in setOf(ExportFormat.JPEG, ExportFormat.IMAGE_ZIP, ExportFormat.PDF)
+                    else snapshot.settings.albumScope == null && snapshot.settings.format == ExportFormat.PNG
+                if (!formatAccepted || snapshot.settings.acceptedDegraded.isNotEmpty() ||
                     snapshot.pages.any { it.fallbackPolicy != FallbackPolicy.FAIL || !it.masks.contentEquals("[]".encodeToByteArray()) ||
                         it.assetSetHash != OrdinaryExportProfile.emptyAssetSetHash }
                 ) reject(id.value, OperationErrorCode.PROVIDER_UNAVAILABLE, "export_assembly_ordinary_png_required")
-                val (jobId, references) = service.assembly.loadForSnapshot(snapshot)
-                Prepared(snapshot, references, jobId, captured, service.store, service.lifetime).also { coroutineContext.ensureActive() }
+                val (jobId, references) = service.assembly.loadForSnapshot(snapshot, service.namedAlbum)
+                Prepared(snapshot, references, jobId, captured, service.store, service.lifetime, service.namedAlbum).also { coroutineContext.ensureActive() }
             }
         }
     }
@@ -189,6 +195,63 @@ internal class RoomFreshExportAssembly private constructor(
         @JvmSynthetic
         internal suspend fun readRetainedTerminalSet(reader: RoomTerminalPngReads.Retained.AcquiredSetReader): List<RoomTerminalPngReads.Receipt> =
             reader.read(admitted.prepared, lease, ::checkTerminalSet, ::checkTerminalAttempt, ::copyTransaction, ::finishPrivateSet)
+
+        internal fun albumTransaction(context: CoroutineContext, block: (Long, () -> Unit) -> Unit) {
+            check(issuingService.namedAlbum)
+            copyTransaction(context, full = false, block)
+        }
+
+        /** Foreground unwind only. Crash recovery needs independent positive owner-death evidence and must not use this path. */
+        internal fun failAlbum(context: CoroutineContext, error: OperationErrorCode, write: (Long) -> Unit) {
+            val service = issuingService
+            check(service.namedAlbum)
+            val prepared = admitted.prepared
+            val active = { context.ensureActive() }
+            service.store.transaction {
+                val live = service.liveSnapshot(prepared)
+                val row = service.readJob(prepared, "RUNNING", running.attempt, running.leaseOwner, running.leaseUntil, active)
+                if (!sameRow(row, running)) conflict(lease.jobId.value)
+                checkTerminalClocks(live, context)
+                val now = service.auditClock()
+                write(now)
+                checkTerminalClocks(live, context)
+                val terminal = if (error == OperationErrorCode.CANCELED) "CANCELED" else "FAILED"
+                if (service.store.updateLease(row.copy(state = terminal, leaseOwner = null, leaseUntil = null, errorCode = error.name, updatedAt = now),
+                        lease.generation) != 1) conflict(lease.jobId.value)
+                checkTerminalClocks(live, context)
+            }
+        }
+
+        internal fun completeAlbum(context: CoroutineContext, write: (ExportSnapshotRow, Long) -> Unit, verify: () -> Unit) {
+            val service = issuingService
+            check(service.namedAlbum)
+            val prepared = admitted.prepared
+            val active = { context.ensureActive() }
+            var rereadSucceeded = false
+            JobLeaseTransactions(service.store, service.store, service.auditClock, service.leaseClock).completeGuarded(lease,
+                readAdmitted = {
+                    if (rereadSucceeded) service.readJob(prepared, "SUCCEEDED", running.attempt, active = active, afterWrite = true)
+                    else service.readJob(prepared, "RUNNING", running.attempt, running.leaseOwner, running.leaseUntil, active).also {
+                        if (!sameRow(running, it)) conflict(lease.jobId.value)
+                    }
+                },
+                live = { service.liveness.state(lease.owner) == LeaseOwnerState.ALIVE },
+                active = active,
+                commitMetadata = {
+                    val live = service.liveSnapshot(prepared)
+                    checkTerminalClocks(live, context)
+                    write(live.record, service.auditClock())
+                },
+                verifyMetadata = {
+                    verify()
+                    val final = SnapshotRead.capture(service.store, prepared.snapshot.snapshotId, service.auditClock)
+                    prepared.requireSameSnapshot(final)
+                    if (final.record.state != "PRIVATE_READY") invalid(lease.jobId.value)
+                    final.requireRetained(service.auditClock())
+                    rereadSucceeded = true
+                },
+            )
+        }
 
         private fun finishPrivateSet(context: CoroutineContext, completion: RoomPngPrivateCompletion.Set) {
             val service = issuingService
@@ -402,6 +465,9 @@ internal class RoomFreshExportAssembly private constructor(
         internal fun forOrdinaryExport(
             store: PrivateImportStore.ExportComposition, preflight: suspend (ExportSnapshot, List<JobId>) -> OperationError?,
         ): RoomFreshExportAssembly = RoomFreshExportAssembly(RoomStore(store.database), store.owners, preflight, lifetime = store.lifetime)
+
+        internal fun forNamedAlbum(store: PrivateImportStore.ExportComposition, preflight: suspend (ExportSnapshot, List<JobId>) -> OperationError?) =
+            RoomFreshExportAssembly(RoomStore(store.database), store.owners, preflight, lifetime = store.lifetime, namedAlbum = true)
 
         @JvmSynthetic
         internal fun forSyntheticTests(

@@ -44,6 +44,7 @@ class PrivateImportStore private constructor(
 
     // Internal only and lazy: the import-only path does not construct derived-file or export participants.
     internal val ordinaryExport: OrdinaryExport by lazy { ExportComposition.bind(this) }
+    val albumExports: NamedAlbumExports by lazy { ExportComposition.bindNamed(this) }
 
     /** Only guarded services cross this boundary. In particular, no caller can retrieve or supply this store's write ports. */
     internal class OrdinaryExport private constructor(private val composition: ExportComposition) {
@@ -72,6 +73,7 @@ class PrivateImportStore private constructor(
 
         companion object {
             internal fun bind(store: PrivateImportStore): OrdinaryExport = OrdinaryExport.from(ExportComposition(store))
+            internal fun bindNamed(store: PrivateImportStore): NamedAlbumExports = NamedAlbumExports(ExportComposition(store))
         }
     }
 
