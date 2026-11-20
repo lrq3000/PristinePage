@@ -16,6 +16,9 @@ import app.pristinepage.image.render.DefaultRenderCoordinator
 import app.pristinepage.image.render.GeometryEngine
 import app.pristinepage.image.render.AppearanceEngine
 import app.pristinepage.image.render.ClassicalRecipeAdmission
+import app.pristinepage.image.preview.OriginalPreviewBitmap
+import app.pristinepage.image.preview.OriginalPreviewBitmapLoader
+import app.pristinepage.image.preview.OriginalPreviewLoader
 import java.io.FileNotFoundException
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
@@ -57,6 +60,12 @@ class ApplicationServices(context: Context, private val budget: ImageAllocationB
 
 /** One identity/lifetime for foreground import and later source consumption. Reports describe implemented recovery domains only; a blocked report is not successful provider resumption or all-domain integrity proof. */
 class ApplicationImports internal constructor(val store: PrivateImportStore, val photoImports: PhotoImportController, val decoder: SourceDecoder, val budget: ImageAllocationBudget, val startupRecovery: RecoveryReport) {
+    private val previewDecodeQueue = Mutex()
+    private val originals = OriginalPreviewBitmapLoader(OriginalPreviewLoader(store.committedSources, decoder, budget), budget)
     /** One queue per initialized Application graph, sharing the SAME decoded/intermediate/retained-output allowance. A val, not a factory/getter: Activity/editor consumers must not create independent processing slots or budgets. Construction opens no files and starts no work. */
-    val renderer: RenderCoordinator = DefaultRenderCoordinator(decoder, GeometryEngine(budget), AppearanceEngine(budget))
+    val renderer: RenderCoordinator = DefaultRenderCoordinator(decoder, GeometryEngine(budget), AppearanceEngine(budget), queue = previewDecodeQueue)
+
+    /** Source overlays and recipe results can be requested together, but cannot both hold a full-source decode. */
+    internal suspend fun originalPreview(sourceId: String, longEdge: Int = 1024): OriginalPreviewBitmap =
+        previewDecodeQueue.withLock { originals.load(sourceId, longEdge) }
 }

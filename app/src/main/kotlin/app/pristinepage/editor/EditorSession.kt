@@ -120,9 +120,9 @@ class EditorSession @JvmOverloads constructor(documentId: String, pageId: String
         changeBezier { if (control.read(it) != null) control.move(it, point) else it }
     }
 
-    internal fun insertBezier(side: app.pristinepage.core.recipe.ContourSide, segment: Int) {
+    internal fun insertBezier(side: app.pristinepage.core.recipe.ContourSide, segment: Int, t: Double = .5) {
         endBezierDrag()
-        changeBezier { it.insert(side, segment, .5) }
+        changeBezier { it.insert(side, segment, t) }
     }
 
     internal fun removeBezier(side: app.pristinepage.core.recipe.ContourSide, index: Int) {
@@ -137,26 +137,29 @@ class EditorSession @JvmOverloads constructor(documentId: String, pageId: String
         val geometry = draft.geometry as? GeometryRecipe.Bezier ?: return
         val next = try { change(geometry.contour) } catch (_: IllegalArgumentException) { return }
         catch (_: IndexOutOfBoundsException) { return }
+        if (next.quad != geometry.contour.quad && !validFrame(EditorShapes.perspective(geometry.copy(contour = next)) as GeometryRecipe.Perspective)) return
         replaceDraft(edits, draft.copy(geometry = geometry.copy(contour = next)))
     }
     internal class ShapeDrag(val label: ShapePoint, val horizontal: Boolean)
 
     fun dragFrameCorner(id: String, x: Double, y: Double) {
-        val point = ShapePoint.entries.firstOrNull { it.name == id && it.ordinal < 4 } ?: return
+        val point = ShapePoint.entries.firstOrNull { it.name == id } ?: return
         if (frameDrag != null && frameDrag != point) return
         if (!active || current.value.confirmExit || !x.isFinite() || !y.isFinite() || x !in 0.0..1.0 || y !in 0.0..1.0) return
         val edits = editable() ?: return
         val draft = edits.current
-        val geometry = draft.geometry as? GeometryRecipe.Perspective ?: return
-        val candidate = geometry.copy(quad = point.replaceIn(geometry.quad, PointPx(x, y)))
-        if (!validFrame(candidate)) return
+        val geometry = draft.geometry
+        if (point !in EditorShapes.points(geometry)) return
+        val candidate = EditorShapes.setPoint(geometry, point, PointPx(x, y))
+        val frame = EditorShapes.perspective(candidate) as? GeometryRecipe.Perspective ?: return
+        if (!validFrame(frame)) return
         endShapeDrag()
         replaceDraft(edits, draft.copy(geometry = candidate))
     }
 
     internal fun beginFrameDrag(point: ShapePoint): Boolean {
         val edits = editable() ?: return false
-        if (!active || current.value.confirmExit || point.ordinal >= 4 || edits.current.geometry !is GeometryRecipe.Perspective) return false
+        if (!active || current.value.confirmExit || point !in EditorShapes.points(edits.current.geometry)) return false
         endShapeDrag()
         endFrameDrag()
         endBezierDrag()
@@ -175,8 +178,10 @@ class EditorSession @JvmOverloads constructor(documentId: String, pageId: String
 
     internal fun useDetectedFrame(expected: GeometryRecipe, quad: QuadPx): Boolean {
         val edits = editable() ?: return false
-        val geometry = edits.current.geometry as? GeometryRecipe.Perspective ?: return false
-        if (!active || current.value.confirmExit || geometry != expected || frameDrag != null || shapeDrag != null) return false
+        val original = edits.current.geometry
+        if (!active || current.value.confirmExit || original != expected || frameDrag != null || shapeDrag != null || bezierDrag != null) return false
+        if (original !is GeometryRecipe.None && original !is GeometryRecipe.Perspective) return false
+        val geometry = EditorShapes.perspective(original) as? GeometryRecipe.Perspective ?: return false
         val candidate = geometry.copy(quad = quad)
         if (!validFrame(candidate)) return false
         edit(edits.current.copy(geometry = candidate))
@@ -244,7 +249,8 @@ class EditorSession @JvmOverloads constructor(documentId: String, pageId: String
         try {
             generation = Math.addExact(generation, 1)
             val output = GeometrySizing.output(recipe.geometry, RenderPurpose.PREVIEW, 1024)
-            scheduler.schedule(RenderRequest(page.sourceId.value, recipe.geometry.source.sourcePixelHash, page.pageId.value, page.recipeRevision, recipe, output, generation, null, FallbackPolicy.FAIL), view)
+            scheduler.schedule(RenderRequest(page.sourceId.value, recipe.geometry.source.sourcePixelHash, page.pageId.value, page.recipeRevision, recipe, output, generation, null, FallbackPolicy.FAIL), view,
+                interactive = frameDrag != null || bezierDrag != null || shapeDrag != null)
         } catch (_: IllegalArgumentException) {
             scheduler.rejectSizing(page.pageId.value, page.sourceId.value, recipe.geometry.source, RenderStatus.INVALID_INPUT)
         } catch (_: ArithmeticException) {

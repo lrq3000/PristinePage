@@ -104,6 +104,7 @@ private fun actionModifier() = Modifier.fillMaxWidth().heightIn(min = 48.dp)
     "files_picker_unavailable" -> stringResource(R.string.files_picker_unavailable)
     "camera_permission_denied" -> stringResource(R.string.camera_permission_denied)
     "camera_unavailable" -> stringResource(R.string.camera_unavailable)
+    "camera_flash_unavailable" -> stringResource(R.string.camera_flash_unavailable)
     "camera_capture_failed" -> stringResource(R.string.camera_capture_failed)
     else -> errorText(error.code)
 }

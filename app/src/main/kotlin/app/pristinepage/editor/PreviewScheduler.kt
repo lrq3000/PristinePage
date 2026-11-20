@@ -14,6 +14,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -30,7 +31,10 @@ class PreviewScheduler @JvmOverloads constructor(private val renderer: RenderCoo
     private var generation = 0L
     private var closed = false
 
-    @JvmOverloads fun schedule(request: RenderRequest, view: EditorView = EditorView.RESULT) {
+    @JvmOverloads fun schedule(request: RenderRequest, view: EditorView = EditorView.RESULT) =
+        schedule(request, view, interactive = false)
+
+    internal fun schedule(request: RenderRequest, view: EditorView, interactive: Boolean) {
         check(!closed) { "Preview session is closed" }
         // Never reuse a generation after Undo, retry or a page switch. Pixel identity alone does not distinguish an obsolete in-flight request from a newly selected identical recipe (ABA).
         require(request.generation > generation && request.recipeRevision > 0) { "A preview request needs a newer positive generation and retained revision" }
@@ -40,6 +44,7 @@ class PreviewScheduler @JvmOverloads constructor(private val renderer: RenderCoo
             var candidate: RenderResult? = null
             var display: RenderedPreviewBitmap? = null
             try {
+                if (interactive) delay(80)
                 candidate = renderer.render(request)
                 currentCoroutineContext().ensureActive()
                 if (!isCurrent(request)) return@launch

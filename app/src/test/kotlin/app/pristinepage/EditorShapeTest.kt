@@ -16,6 +16,34 @@ import org.junit.Test
 
 @OptIn(ExperimentalCoroutinesApi::class)
 class EditorShapeTest {
+    @Test fun draggingAnAnchorKeepsItsAdjacentBezierEdgesJoinedAndTheOtherKnotsIntact() = checkShape {
+        editor.selectBezier()
+        editor.insertBezier(ContourSide.TOP, 0, .35)
+        val corner = BezierControl(ContourSide.TOP, 0, BezierPart.START)
+        val drag = checkNotNull(editor.beginBezierDrag(corner))
+        val moved = PointPx(.08, .06)
+        editor.moveBezier(corner, moved, drag)
+        editor.endBezierDrag(drag)
+        val contour = (editor.state.value.draft!!.geometry as GeometryRecipe.Bezier).contour
+        assertEquals(moved, contour.quad.tl)
+        assertEquals(moved, contour.top.segments.first().start)
+        assertEquals(moved, contour.left.segments.first().start)
+        assertEquals(.35, contour.top.segments.first().to, 0.0)
+        assertTrue(contour.straight)
+        advanceUntilIdle()
+        assertEquals(RenderStatus.OK, preview().status)
+    }
+
+    @Test fun manualMidpointMovesDirectlyOnTheCanvasWithCancelableUndo() = checkShape {
+        editor.selectManualCurve()
+        val before = editor.state.value.draft
+        assertTrue(editor.beginFrameDrag(ShapePoint.TOP_MIDPOINT))
+        editor.dragFrameCorner("TOP_MIDPOINT", .5, .035)
+        assertEquals(PointPx(.5, .035), (editor.state.value.draft!!.geometry as GeometryRecipe.ManualCurve).topMidpoint)
+        editor.endFrameDrag(cancel = true)
+        assertEquals(before, editor.state.value.draft)
+    }
+
     @Test fun cubicGestureIsCancelableAndOneUndoRestoresTheWholeChain() = checkShape {
         editor.selectBezier()
         val before = editor.state.value.draft

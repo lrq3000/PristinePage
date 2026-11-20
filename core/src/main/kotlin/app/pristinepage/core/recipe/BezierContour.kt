@@ -63,6 +63,21 @@ enum class ContourSide { TOP, RIGHT, BOTTOM, LEFT }
         })
     }
 
+    internal fun moveEndpoints(start: PointPx, end: PointPx): BezierEdge {
+        val first = entries.first()
+        val last = entries.last()
+        if (start == first.start && end == last.end) return this
+        if (chordOnly) return line(start, end, entries.map { it.from } + 1.0)
+        fun move(p: PointPx, from: PointPx, to: PointPx) = PointPx(
+            (p.x + (to.x - from.x)).coerceIn(0.0, 1.0),
+            (p.y + (to.y - from.y)).coerceIn(0.0, 1.0),
+        )
+        val updated = entries.toMutableList()
+        updated[0] = first.copy(start = start, outgoing = move(first.outgoing, first.start, start))
+        updated[updated.lastIndex] = updated.last().copy(end = end, incoming = move(last.incoming, last.end, end))
+        return curved(updated)
+    }
+
     internal fun removeNode(index: Int): BezierEdge {
         require(index in 1 until entries.size)
         if (chordOnly) return line(entries.first().start, entries.last().end,
@@ -116,6 +131,11 @@ enum class ContourSide { TOP, RIGHT, BOTTOM, LEFT }
         replace(side, edge(side).moveHandle(segment, outgoing, point))
     fun moveNode(side: ContourSide, index: Int, point: PointPx) = replace(side, edge(side).moveNode(index, point))
     fun removeNode(side: ContourSide, index: Int) = replace(side, edge(side).removeNode(index))
+
+    /** A corner is shared by two chains. Update both before constructing the immutable contour. */
+    fun moveCorners(corners: QuadPx) = BezierContour(corners, top.moveEndpoints(corners.tl, corners.tr),
+        right.moveEndpoints(corners.tr, corners.br), bottom.moveEndpoints(corners.bl, corners.br),
+        left.moveEndpoints(corners.tl, corners.bl))
 
     companion object {
         fun straight(quad: QuadPx) = BezierContour(quad, BezierEdge.line(quad.tl, quad.tr), BezierEdge.line(quad.tr, quad.br),

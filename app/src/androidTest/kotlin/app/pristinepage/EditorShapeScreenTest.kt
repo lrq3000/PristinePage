@@ -59,6 +59,11 @@ class EditorShapeScreenTest {
         compose.onNodeWithTag("original-page-${second.pageId.value}").performClick()
         val host = compose.runOnUiThread { ViewModelProvider(compose.activity)[EditorViewModel::class.java] }
         compose.waitUntil(10_000) { host.session.value?.preview?.value?.display != null }
+        compose.onNodeWithTag("editor-viewport").performScrollTo().performTouchInput { swipeRight() }
+        compose.waitUntil(10_000) { host.session.value?.state?.value?.page?.pageId == pages[0].pageId }
+        compose.onNodeWithTag("carnet-next-page").performScrollTo().performClick()
+        compose.waitUntil(10_000) { host.session.value?.state?.value?.page?.pageId == second.pageId &&
+            host.session.value?.preview?.value?.display != null }
         val session = checkNotNull(host.session.value)
         val original = checkNotNull(session.state.value.draft)
         assertEquals(second.pageId, session.state.value.page!!.pageId)

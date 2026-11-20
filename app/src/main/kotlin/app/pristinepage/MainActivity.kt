@@ -56,8 +56,6 @@ import app.pristinepage.library.OriginalPagePreview
 import app.pristinepage.library.LibrarySession
 import app.pristinepage.library.ImportPhase
 import app.pristinepage.image.preview.OriginalPreviewBitmap
-import app.pristinepage.image.preview.OriginalPreviewBitmapLoader
-import app.pristinepage.image.preview.OriginalPreviewLoader
 import app.pristinepage.image.preview.RenderedPreviewBitmap
 import app.pristinepage.image.preview.RenderedPreviewBitmapLoader
 import kotlinx.coroutines.Job
@@ -128,9 +126,7 @@ class MainActivity : ComponentActivity() {
         binding.synchronize()
         observing = lifecycleScope.launch { repeatOnLifecycle(Lifecycle.State.STARTED) { retained.state.collect { binding.synchronize() } } }
         val loadOriginal: suspend (String) -> OriginalPreviewBitmap = { source ->
-            val graph = services.imports()
-            OriginalPreviewBitmapLoader(OriginalPreviewLoader(graph.store.committedSources, graph.decoder, graph.budget), graph.budget)
-                .load(source)
+            services.imports().originalPreview(source)
         }
         setContent { AppTheme {
             val libraryState = rememberSaveableStateHolder()
@@ -152,7 +148,8 @@ class MainActivity : ComponentActivity() {
                     acquisition.acknowledgeSave()
                 }
             }
-            if (acquiring.open) AtelierCaptureScreen(acquiring, acquisition, activityResultRegistry, settings.showCameraGrid, window, loadOriginal)
+            if (acquiring.open) AtelierCaptureScreen(acquiring, acquisition, activityResultRegistry, settings.showCameraGrid, window, loadOriginal,
+                loadQueueTile = { source -> services.imports().originalPreview(source, longEdge = 224) })
             else if (batch.album != null) BatchEditScreen(batch, batchOwner, services::imports)
             else if (host.identity == null && camera != null) key(camera.batchId) {
                 CaptureScreen(camera, { retained.accept(LibraryEvent.CancelImport) }, settings.showCameraGrid) { still ->
@@ -169,7 +166,8 @@ class MainActivity : ComponentActivity() {
                     }
                 }
                 AtelierLibraryScreen(retained, app.atelierPreferences, { services.imports().store.catalog.load(it) }, loadThumbnail,
-                    onBatch = batchOwner::open, batchUndo = batch.undo?.takeIf { batch.savedDocument == library.selectedId },
+                     onBatch = { batchOwner.open(it) }, onSelectPages = batchOwner::open,
+                     batchUndo = batch.undo?.takeIf { batch.savedDocument == library.selectedId },
                      undoBatch = batchOwner::undoSaved, closeBatchNotice = batchOwner::clearNotice,
                      batchBusy = batch.saving, batchError = batch.error?.takeIf { batch.savedDocument == library.selectedId },
                      thumbnailsCurrent = { album ->
@@ -183,13 +181,29 @@ class MainActivity : ComponentActivity() {
             else {
                 val selected = editing
                 val identity = host.identity
-                val fallback = library.document?.takeIf { it.document.documentId == identity?.documentId }
-                    ?.pages?.singleOrNull { it.pageId == identity?.pageId }
-                if (selected != null) PageEditorScreen(leaveAfterApply = true, loadOriginal = loadOriginal, pageNumber = fallback?.ordinal?.plus(1), originalOnLoadFailure = {
+                val album = library.document?.takeIf { it.document.documentId == identity?.documentId }
+                val orderedPages = album?.pages.orEmpty()
+                val index = orderedPages.indexOfFirst { it.pageId == identity?.pageId }
+                val fallback = orderedPages.getOrNull(index)
+                fun destination(offset: Int): (() -> Unit)? {
+                    val document = identity?.documentId ?: return null
+                    if (index < 0) return null
+                    val target = orderedPages.getOrNull(index + offset) ?: return null
+                    return {
+                        val current = editorOwner.session.value
+                        if (current === selected && current != null && !current.state.value.let { it.dirty || it.saving || it.confirmExit || it.exitReady }) {
+                            retained.accept(LibraryEvent.SelectPage(target.pageId))
+                            editorOwner.open(document.value, target.pageId.value)
+                        }
+                    }
+                }
+                if (selected != null) key(identity) { PageEditorScreen(leaveAfterApply = true, loadOriginal = loadOriginal,
+                    pageNumber = fallback?.ordinal?.plus(1), albumPageCount = orderedPages.size,
+                    previousPage = destination(-1), nextPage = destination(1), originalOnLoadFailure = {
                     if (fallback != null) key(fallback) {
                         OriginalPagePreview(fallback, loadOriginal)
                     }
-                }).Content(selected, ::leaveEditor)
+                }).Content(selected, ::leaveEditor) }
                 else {
                     BackHandler { leaveEditor() }
                     Column(Modifier.fillMaxSize().safeDrawingPadding().padding(24.dp)) {

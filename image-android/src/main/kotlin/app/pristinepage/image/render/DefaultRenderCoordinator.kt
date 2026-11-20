@@ -17,8 +17,7 @@ import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 
 /** Classical source-to-raster composition with explicit FAIL/KEEP_STAGE_INPUT semantics. One application-owned instance serializes processing on the existing image dispatcher. Caller retains a durable source owner; this queue is not a GC lease, generation publisher or durable accepted-degraded export record. */
-class DefaultRenderCoordinator @JvmOverloads constructor(private val decoder: SourceDecoder, private val geometry: GeometryEngine, private val appearance: AppearanceEngine, private val dispatcher: CoroutineDispatcher = PreviewProcessing.dispatcher) : RenderCoordinator {
-    private val queue = Mutex()
+class DefaultRenderCoordinator @JvmOverloads constructor(private val decoder: SourceDecoder, private val geometry: GeometryEngine, private val appearance: AppearanceEngine, private val dispatcher: CoroutineDispatcher = PreviewProcessing.dispatcher, private val queue: Mutex = Mutex()) : RenderCoordinator {
 
     override suspend fun render(request: RenderRequest): RenderResult = render(request, null)
 

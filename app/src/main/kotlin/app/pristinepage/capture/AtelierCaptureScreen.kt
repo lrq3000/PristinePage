@@ -12,6 +12,8 @@ import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.lazy.LazyRow
+import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
@@ -58,6 +60,7 @@ import kotlinx.coroutines.withTimeoutOrNull
     state: AtelierCaptureState, owner: AtelierCaptureViewModel, registry: ActivityResultRegistry, grid: Boolean,
     window: Window,
     loadOriginal: suspend (String) -> OriginalPreviewBitmap,
+    loadQueueTile: suspend (String) -> OriginalPreviewBitmap,
 ) {
     val draft = state.draft
     var confirmExit by rememberSaveable { mutableStateOf(false) }
@@ -121,7 +124,7 @@ import kotlinx.coroutines.withTimeoutOrNull
         Column(Modifier.fillMaxSize().safeDrawingPadding().padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
             Text(stringResource(R.string.atelier_review_import), style = MaterialTheme.typography.headlineSmall)
             Text(stringResource(R.string.atelier_import_count, draft.pages.size))
-            AtelierImportStrip(draft.pages, loadOriginal)
+            AtelierImportStrip(draft.pages, loadQueueTile)
             state.error?.let { Text(errorText(it), color = MaterialTheme.colorScheme.error) }
             AtelierImportFeedback(state.importIssues)
             if (state.busy) LinearProgressIndicator(Modifier.fillMaxWidth())
@@ -143,7 +146,7 @@ import kotlinx.coroutines.withTimeoutOrNull
         }
         CarnetViewfinderTheme {
             Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
-                AtelierViewfinder(state, owner, registry, grid, ::back, { review = true }, loadOriginal)
+                AtelierViewfinder(state, owner, registry, grid, ::back, { review = true }, loadQueueTile)
             }
         }
     }
@@ -336,9 +339,10 @@ import kotlinx.coroutines.withTimeoutOrNull
 }
 
 @Composable private fun AtelierImportStrip(pages: List<DocumentPage>, load: suspend (String) -> OriginalPreviewBitmap) {
-    Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).testTag("atelier-import-queue"),
+    // Only visible queue tiles retain a small display; originals still go through the verified full-source decoder.
+    LazyRow(Modifier.fillMaxWidth().testTag("atelier-import-queue"),
         horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-        for (page in pages) key(page.pageId) {
+        items(pages, key = { it.pageId.value }) { page ->
             var thumbnail by remember(page.sourceId) { mutableStateOf<OriginalPreviewBitmap?>(null) }
             var failed by remember(page.sourceId) { mutableStateOf(false) }
             LaunchedEffect(page.sourceId) {

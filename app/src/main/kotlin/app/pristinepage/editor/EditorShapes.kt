@@ -11,20 +11,37 @@ internal data class BezierControl(val side: ContourSide, val segment: Int, val p
     fun read(contour: BezierContour): PointPx? {
         val item = contour.edge(side).segments.getOrNull(segment) ?: return null
         return when (part) {
-            BezierPart.START -> item.start.takeIf { segment > 0 }
+            BezierPart.START -> item.start
             BezierPart.OUTGOING -> item.outgoing
             BezierPart.INCOMING -> item.incoming
-            BezierPart.END -> item.end.takeIf { segment < contour.edge(side).segments.lastIndex }
+            BezierPart.END -> item.end
         }
     }
 
     fun move(contour: BezierContour, point: PointPx): BezierContour = when (part) {
-        BezierPart.START -> contour.moveNode(side, segment, point)
+        BezierPart.START -> if (segment == 0) contour.moveCorners(startCorner.replaceIn(contour.quad, point))
+            else contour.moveNode(side, segment, point)
         BezierPart.OUTGOING -> contour.moveHandle(side, segment, true, point)
         BezierPart.INCOMING -> contour.moveHandle(side, segment, false, point)
-        BezierPart.END -> contour.moveNode(side, segment + 1, point)
+        BezierPart.END -> if (segment == contour.edge(side).segments.lastIndex) contour.moveCorners(endCorner.replaceIn(contour.quad, point))
+            else contour.moveNode(side, segment + 1, point)
     }
-    val nodeIndex get() = when (part) { BezierPart.START -> segment; BezierPart.END -> segment + 1; else -> null }
+    fun removableNode(contour: BezierContour): Int? = when (part) {
+        BezierPart.START -> segment
+        BezierPart.END -> segment + 1
+        else -> null
+    }?.takeIf { it in 1 until contour.edge(side).segments.size }
+
+    private val startCorner get() = when (side) {
+        ContourSide.TOP, ContourSide.LEFT -> ShapePoint.TOP_LEFT
+        ContourSide.RIGHT -> ShapePoint.TOP_RIGHT
+        ContourSide.BOTTOM -> ShapePoint.BOTTOM_LEFT
+    }
+    private val endCorner get() = when (side) {
+        ContourSide.TOP -> ShapePoint.TOP_RIGHT
+        ContourSide.RIGHT, ContourSide.BOTTOM -> ShapePoint.BOTTOM_RIGHT
+        ContourSide.LEFT -> ShapePoint.BOTTOM_LEFT
+    }
 }
 
 internal enum class ShapePoint {

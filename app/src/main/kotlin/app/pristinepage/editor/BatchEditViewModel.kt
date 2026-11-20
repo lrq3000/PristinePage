@@ -28,8 +28,9 @@ internal class BatchEditViewModel(private val openGraph: suspend () -> Applicati
         private set
     private var opening: Job? = null
 
-    fun open(album: DocumentOverview) {
+    fun open(album: DocumentOverview, firstSelected: PageId? = null) {
         if (mutable.value.album != null || mutable.value.saving) return
+        if (firstSelected != null && album.pages.none { it.pageId == firstSelected }) return
         mutable.value = BatchHost(album = album)
         opening = viewModelScope.launch {
             try {
@@ -42,7 +43,8 @@ internal class BatchEditViewModel(private val openGraph: suspend () -> Applicati
                     return@launch
                 }
                 val admission = ClassicalRecipeAdmission()
-                draft = BatchEditSession(pages, { _, recipe -> admission.check(recipe, false) }, graph.store.documents::applyBatchRecipes)
+                draft = BatchEditSession(pages, { _, recipe -> admission.check(recipe, false) }, graph.store.documents::applyBatchRecipes,
+                    setOfNotNull(firstSelected))
                 mutable.value = mutable.value.copy(pages = pages)
             } catch (canceled: CancellationException) { throw canceled }
             catch (failure: RepositoryFailure) { mutable.value = mutable.value.copy(error = failure.error.code) }

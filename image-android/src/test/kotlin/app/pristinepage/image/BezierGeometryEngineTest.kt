@@ -55,4 +55,32 @@ class BezierGeometryEngineTest {
         }
         assertEquals(0L, budget.usedBytes)
     }
+
+    @Test fun aModerateInwardKnotAtTheMiddleChangesRealPreviewPixels() {
+        val budget = ImageAllocationBudget(4_000_000)
+        val contour = straight.insert(ContourSide.TOP, 0, .5).moveNode(ContourSide.TOP, 1, PointPx(.5, .08))
+        val recipe = GeometryRecipe.Bezier(source, contour)
+        pixels().use { input ->
+            GeometryEngine(budget).render(input, source, recipe, OutputSpec(size, RenderPurpose.PREVIEW), null, null) {}.use {
+                // The exact moved knot is at x=60, y=7.2 in oriented-source centers.
+                assertEquals(7, it.image.getUnsigned(60, 0, 1))
+                assertEquals(0, it.image.getUnsigned(0, 0, 1))
+            }
+        }
+        assertEquals(0L, budget.usedBytes)
+    }
+
+    @Test fun opposingInwardKnotsThatReverseOrientationCannotPublishPixels() {
+        val budget = ImageAllocationBudget(4_000_000)
+        val folded = straight.insert(ContourSide.TOP, 0, .5).moveNode(ContourSide.TOP, 1, PointPx(.5, .75))
+            .insert(ContourSide.BOTTOM, 0, .5).moveNode(ContourSide.BOTTOM, 1, PointPx(.5, .25))
+        pixels().use { input ->
+            val failure = assertThrows(RepositoryFailure::class.java) {
+                GeometryEngine(budget).render(input, source, GeometryRecipe.Bezier(source, folded),
+                    OutputSpec(size, RenderPurpose.PREVIEW), null, null) {}.close()
+            }
+            assertEquals(OperationErrorCode.INVALID_MAP, failure.error.code)
+        }
+        assertEquals(0L, budget.usedBytes)
+    }
 }

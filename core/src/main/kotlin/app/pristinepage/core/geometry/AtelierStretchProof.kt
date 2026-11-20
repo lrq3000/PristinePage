@@ -108,17 +108,29 @@ internal object AtelierStretchProof {
                 component(p, start, end, t, sx, PointPx::x) to component(p, start, end, t, sy, PointPx::y)
             }
             amp = maxOf(amp, controls.maxOf { (x, y) -> upperNorm(x.magnitude, y.magnitude) })
-            for (i in 1..3) {
-                val x = (controls[i].first - controls[i - 1].first) * three / width
-                val y = (controls[i].second - controls[i - 1].second) * three / width
-                velocity = maxOf(velocity, upperNorm(x.magnitude, y.magnitude))
+            val derivative = (1..3).map { i ->
+                (controls[i].first - controls[i - 1].first) * three / width to
+                    (controls[i].second - controls[i - 1].second) * three / width
             }
+            velocity = maxOf(velocity, derivativeBound(derivative[0], derivative[1], derivative[2], 3))
         }
         // The exact evaluator model uses the stored binary64 endpoint weights as constants.
         val a = abs(weights.first)
         val b = abs(weights.second)
         val ratio = Range.point(maxOf(a, b)) / Range.point(minOf(a, b))
         return EdgeBound(amp, (Range.point(velocity) * ratio).hi)
+    }
+
+    /** An outward-rounded De Casteljau split tightens the quadratic derivative hull without relaxing the fold limit. */
+    private fun derivativeBound(a: Pair<Range, Range>, b: Pair<Range, Range>, c: Pair<Range, Range>, depth: Int): Double {
+        if (depth == 0) return listOf(a, b, c).maxOf { (x, y) -> upperNorm(x.magnitude, y.magnitude) }
+        val half = Range.point(.5)
+        fun middle(p: Pair<Range, Range>, q: Pair<Range, Range>) =
+            (p.first + q.first) * half to (p.second + q.second) * half
+        val ab = middle(a, b)
+        val bc = middle(b, c)
+        val center = middle(ab, bc)
+        return maxOf(derivativeBound(a, ab, center, depth - 1), derivativeBound(center, bc, c, depth - 1))
     }
 
     private fun component(p: PointPx, start: PointPx, end: PointPx, t: Range, size: Range, coordinate: (PointPx) -> Double): Range {
