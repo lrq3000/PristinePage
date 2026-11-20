@@ -3,6 +3,7 @@ package app.pristinepage.data.repository
 import android.net.Uri
 import app.pristinepage.core.pipeline.requireWellFormedUnicode
 import app.pristinepage.data.db.ImportSessionRow
+import app.pristinepage.data.db.AtelierDraftDao
 import app.pristinepage.data.db.PageRow
 import app.pristinepage.data.db.PristineDatabase
 import app.pristinepage.data.model.*
@@ -19,28 +20,34 @@ import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.withContext
 
 /** Reserves identities/order before external activity IO. A batch is not a Page and cannot expose an uncommitted source. Import sessions and catalog queries must share the injected metadata transaction. */
-class RoomImportSessions @JvmOverloads constructor(private val metadata: MetadataAccess, private val sessions: ImportSessionQueries, private val clock: () -> Long = System::currentTimeMillis, private val dispatcher: CoroutineDispatcher = Dispatchers.IO) : ImportSessionCommands, ImportItemBindings, ImportSelections, ImportSessionLifecycle {
+class RoomImportSessions @JvmOverloads constructor(private val metadata: MetadataAccess, private val sessions: ImportSessionQueries, private val clock: () -> Long = System::currentTimeMillis, private val dispatcher: CoroutineDispatcher = Dispatchers.IO, private val drafts: AtelierDraftDao? = null) : ImportSessionCommands, ImportItemBindings, ImportSelections, ImportSessionLifecycle {
     /** Native construction binds both DAOs to the same writer transaction; host tests inject only the unavailable Android database boundary. */
-    constructor(database: PristineDatabase) : this(RoomMetadataAccess(database), database.importSessions())
+    constructor(database: PristineDatabase) : this(RoomMetadataAccess(database), database.importSessions(), drafts = database.atelierDrafts())
 
     override suspend fun beginImport(documentId: DocumentId, expectedDocumentRevision: Long, anchorPageId: PageId?): ImportBatch = withContext(dispatcher) {
         guarded {
             coroutineContext.ensureActive()
             metadata.transaction {
-                if (expectedDocumentRevision < 1) reject(OperationErrorCode.INVALID_INPUT, "invalid_document_revision", documentId.value)
-                val pages = activePages(documentId.value)
-                val doc = checkNotNull(metadata.queries.document(documentId.value))
-                if (doc.documentRevision != expectedDocumentRevision) reject(OperationErrorCode.REVISION_CONFLICT, "document_revision_changed", documentId.value)
-                if (sessions.activeBatches(documentId.value).isNotEmpty()) reject(OperationErrorCode.REVISION_CONFLICT, "finish_import_before_new_batch", documentId.value)
-                if (anchorPageId != null && pages.none { it.pageId == anchorPageId.value }) reject(OperationErrorCode.INVALID_INPUT, "import_anchor_unavailable", anchorPageId.value)
-                if (pages.size >= 100) reject(OperationErrorCode.RESOURCE_LIMIT, "document_page_limit", documentId.value)
-                val id = ImportSessionId(UUID.randomUUID().toString()); val now = clock()
-                val expires = try { Math.addExact(now, 86_400_000L) } catch (_: ArithmeticException) { reject(OperationErrorCode.RESOURCE_LIMIT, "retention_clock_overflow", id.value) }
-                coroutineContext.ensureActive()
-                sessions.insertSession(ImportSessionRow(id.value, null, "BATCH", documentId.value, anchorPageId?.value, null, null, null, "WAITING_SELECTION", ImportMembership.hash(pages), null, now, expires, null))
-                ImportBatch(id, emptyList())
+                if (drafts?.savedDocumentIsHidden(documentId.value) == true) reject(OperationErrorCode.SOURCE_UNAVAILABLE, "document_unavailable", documentId.value)
+                beginLocked(documentId, expectedDocumentRevision, anchorPageId, coroutineContext)
             }
         }
+    }
+
+    /** Trusted draft owner invokes this inside its own transaction and records the exact batch ID before returning. */
+    internal fun beginLocked(documentId: DocumentId, expectedDocumentRevision: Long, anchorPageId: PageId?, context: CoroutineContext): ImportBatch {
+        if (expectedDocumentRevision < 1) reject(OperationErrorCode.INVALID_INPUT, "invalid_document_revision", documentId.value)
+        val pages = activePages(documentId.value)
+        val doc = checkNotNull(metadata.queries.document(documentId.value))
+        if (doc.documentRevision != expectedDocumentRevision) reject(OperationErrorCode.REVISION_CONFLICT, "document_revision_changed", documentId.value)
+        if (sessions.activeBatches(documentId.value).isNotEmpty()) reject(OperationErrorCode.REVISION_CONFLICT, "finish_import_before_new_batch", documentId.value)
+        if (anchorPageId != null && pages.none { it.pageId == anchorPageId.value }) reject(OperationErrorCode.INVALID_INPUT, "import_anchor_unavailable", anchorPageId.value)
+        if (pages.size >= 100) reject(OperationErrorCode.RESOURCE_LIMIT, "document_page_limit", documentId.value)
+        val id = ImportSessionId(UUID.randomUUID().toString()); val now = clock()
+        val expires = try { Math.addExact(now, 86_400_000L) } catch (_: ArithmeticException) { reject(OperationErrorCode.RESOURCE_LIMIT, "retention_clock_overflow", id.value) }
+        context.ensureActive()
+        sessions.insertSession(ImportSessionRow(id.value, null, "BATCH", documentId.value, anchorPageId?.value, null, null, null, "WAITING_SELECTION", ImportMembership.hash(pages), null, now, expires, null))
+        return ImportBatch(id, emptyList())
     }
 
     override suspend fun reserveImportItems(sessionId: ImportSessionId, count: Int): ImportBatch = withContext(dispatcher) {
@@ -55,6 +62,7 @@ class RoomImportSessions @JvmOverloads constructor(private val metadata: Metadat
     private fun reserve(sessionId: ImportSessionId, count: Int, context: CoroutineContext): ImportBatch {
                 val parent = sessions.session(sessionId.value) ?: reject(OperationErrorCode.SESSION_EXPIRED, "import_session_unavailable", sessionId.value)
                 if (parent.kind != "BATCH" || parent.parentSessionId != null || parent.state !in setOf("WAITING_SELECTION", "RESERVED") || parent.expiresAt <= clock()) reject(OperationErrorCode.SESSION_EXPIRED, "import_session_unavailable", sessionId.value)
+                if (drafts?.refusesDraftIngest(parent.documentId, sessionId.value) == true) reject(OperationErrorCode.SESSION_EXPIRED, "import_session_unavailable", sessionId.value)
                 val pages = activePages(parent.documentId)
                 if (ImportMembership.hash(pages) != parent.expectedMembershipToken) reject(OperationErrorCode.REVISION_CONFLICT, "import_membership_changed", sessionId.value)
                 val children = sessions.children(parent.sessionId)
@@ -64,6 +72,9 @@ class RoomImportSessions @JvmOverloads constructor(private val metadata: Metadat
                     return ImportBatch(sessionId, children.map { ImportSessionId(it.sessionId) })
                 }
                 if (count > 100 - pages.size) reject(OperationErrorCode.RESOURCE_LIMIT, "document_page_limit", sessionId.value)
+                if (drafts?.savedDocumentIsHidden(parent.documentId) == true && drafts.attemptedItems(parent.documentId) + count > RoomAtelierDrafts.MAX_ITEMS_PER_DRAFT) {
+                    reject(OperationErrorCode.RESOURCE_LIMIT, "document_page_limit", sessionId.value)
+                }
                 val now = clock()
                 val rows = List(count) { ordinal ->
                     ImportSessionRow(UUID.randomUUID().toString(), parent.sessionId, "ITEM", parent.documentId, parent.anchorPageId, ordinal, UUID.randomUUID().toString(), null, "RESERVED", parent.expectedMembershipToken, null, now, parent.expiresAt, null)
@@ -88,6 +99,7 @@ class RoomImportSessions @JvmOverloads constructor(private val metadata: Metadat
     private fun bind(sessionId: ImportSessionId, ordinal: Int, uriText: String, context: CoroutineContext): ImportSessionId {
                 val parent = sessions.session(sessionId.value) ?: reject(OperationErrorCode.SESSION_EXPIRED, "import_session_unavailable", sessionId.value)
                 if (parent.kind != "BATCH" || parent.parentSessionId != null || parent.state != "RESERVED" || parent.expiresAt <= clock()) reject(OperationErrorCode.SESSION_EXPIRED, "import_session_unavailable", sessionId.value)
+                if (drafts?.refusesDraftIngest(parent.documentId, sessionId.value) == true) reject(OperationErrorCode.SESSION_EXPIRED, "import_session_unavailable", sessionId.value)
                 if (ImportMembership.hash(activePages(parent.documentId)) != parent.expectedMembershipToken) reject(OperationErrorCode.REVISION_CONFLICT, "import_membership_changed", sessionId.value)
                 val child = sessions.children(parent.sessionId).singleOrNull { it.selectionOrdinal == ordinal } ?: reject(OperationErrorCode.INVALID_INPUT, "import_item_not_reserved", sessionId.value)
                 if (child.kind != "ITEM" || child.documentId != parent.documentId || child.plannedPageId == null || child.expiresAt <= clock()) reject(OperationErrorCode.INTEGRITY_FAILED, "invalid_import_reservation", child.sessionId)

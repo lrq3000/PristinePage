@@ -42,6 +42,7 @@ class EditorHostTest {
             fun show() = compose.runOnUiThread { compose.activity.setContent { MaterialTheme { (Class.forName("app.pristinepage.editor.PageEditorScreen").getConstructor().newInstance() as EditorContent).Content(session) {} } } }
             try {
                 show(); compose.waitUntil(10_000) { session.preview.value.display != null }
+                compose.onNodeWithTag("editor-tool-rotate").performClick()
                 compose.onNodeWithTag("editor-rotate").performScrollTo().performClick()
                 compose.waitUntil(10_000) { session.state.value.dirty && session.preview.value.display != null && !session.preview.value.processing }
                 // ActivityScenario's helper-Activity stop failed to cover this Activity on the retained API28 run. Move the actual task back instead, and prove real STOP before testing release; never synthesize Lifecycle events to make the owner assertions pass.

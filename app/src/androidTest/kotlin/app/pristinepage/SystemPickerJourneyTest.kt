@@ -75,20 +75,24 @@ class SystemPickerJourneyTest {
         assertNotNull("No installed picker resolves the app's own intent", expectedPackage)
         val session = compose.runOnUiThread { ViewModelProvider(compose.activity)[ImportLibraryViewModel::class.java].session }
         compose.waitUntil(10_000) { !session.state.value.loading }
-        compose.onNodeWithTag("create-document").assertIsEnabled().performClick()
+        compose.runOnUiThread { session.accept(app.pristinepage.library.LibraryEvent.NewDocument("Atelier picker cancellation fixture")) }
         compose.waitUntil(10_000) { !session.state.value.loading && session.state.value.document != null }
         val document = session.state.value.selectedId!!
         assertTrue(session.state.value.document!!.pages.isEmpty())
         val persistedBefore = context.contentResolver.persistedUriPermissions.map { it.uri.toString() }.toSet()
-        compose.onNodeWithTag("import-photos").assertIsEnabled().performClick()
+        compose.onNodeWithTag("atelier-add-pages").assertIsEnabled().performClick()
+        compose.onNodeWithTag("atelier-camera-import").assertIsEnabled().performClick()
+        compose.onNodeWithTag("atelier-import-gallery").assertIsEnabled().performClick()
         compose.waitUntil(15_000) { instrumentation.uiAutomation.rootInActiveWindow?.packageName?.toString() == expectedPackage }
-        assertEquals(ImportPhase.WAITING_PICKER, session.state.value.phase); assertNotNull(session.state.value.request)
+        val acquisition = compose.runOnUiThread { ViewModelProvider(compose.activity)[app.pristinepage.capture.AtelierCaptureViewModel::class.java] }
+        assertNotNull(acquisition.state.value.request)
         // Back is sent only after the exact resolved external picker owns the active window. No permission/system-settings dialog is acknowledged and no provider/file is selected.
         assertEquals(expectedPackage, instrumentation.uiAutomation.rootInActiveWindow?.packageName?.toString())
         assertTrue("The resolved picker refused the scoped accessibility Back action", instrumentation.uiAutomation.performGlobalAction(AccessibilityService.GLOBAL_ACTION_BACK))
-        compose.waitUntil(15_000) { session.state.value.request == null && session.state.value.phase == ImportPhase.CANCELED && !session.state.value.loading }
+        compose.waitUntil(15_000) { acquisition.state.value.request == null && acquisition.state.value.draft?.pending == null && !acquisition.state.value.busy }
         assertEquals(document, session.state.value.selectedId); assertTrue(session.state.value.document!!.pages.isEmpty())
-        compose.onNodeWithTag("import-photos").assertIsEnabled()
+        compose.onNodeWithTag("atelier-camera-import").assertIsEnabled()
+        compose.runOnUiThread { acquisition.leave(true) }
         assertEquals(persistedBefore, context.contentResolver.persistedUriPermissions.map { it.uri.toString() }.toSet())
     }
 

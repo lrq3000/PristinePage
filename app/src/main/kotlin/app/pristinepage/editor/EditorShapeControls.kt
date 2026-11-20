@@ -23,24 +23,40 @@ import kotlin.math.roundToInt
 
 /** Source-space controls leave the Result viewport and preview owner unchanged. */
 @Composable internal fun EditorShapeControls(geometry: GeometryRecipe, enabled: Boolean, session: EditorSession) {
+    var replace by remember(session) { mutableStateOf<(() -> Unit)?>(null) }
+    fun choose(action: () -> Unit) {
+        if (geometry is GeometryRecipe.Bezier) replace = action else action()
+    }
     Text(stringResource(R.string.editor_shape), style = MaterialTheme.typography.titleLarge)
     OutlinedButton(
-        onClick = session::resetShape,
+        onClick = { choose(session::resetShape) },
         enabled = enabled && geometry !is GeometryRecipe.None,
         modifier = shapeTarget("editor-shape-reset"),
     ) { Text(stringResource(R.string.editor_shape_reset)) }
     if (!EditorShapes.canAdjust(geometry)) return
 
     OutlinedButton(
-        onClick = session::selectPerspective,
+        onClick = { choose(session::selectPerspective) },
         enabled = enabled,
         modifier = shapeTarget("editor-shape-perspective").semantics { selected = geometry is GeometryRecipe.Perspective },
     ) { Text(stringResource(R.string.editor_shape_perspective)) }
     OutlinedButton(
-        onClick = session::selectManualCurve,
+        onClick = { choose(session::selectManualCurve) },
         enabled = enabled,
         modifier = shapeTarget("editor-shape-curve").semantics { selected = geometry is GeometryRecipe.ManualCurve },
     ) { Text(stringResource(R.string.editor_shape_curve)) }
+    OutlinedButton(
+        onClick = session::selectBezier,
+        enabled = enabled && geometry !is GeometryRecipe.Bezier,
+        modifier = shapeTarget("editor-shape-bezier").semantics { selected = geometry is GeometryRecipe.Bezier },
+    ) { Text(stringResource(R.string.atelier_bezier_mode)) }
+    replace?.let { action ->
+        AlertDialog(onDismissRequest = { replace = null },
+            title = { Text(stringResource(R.string.atelier_bezier_replace)) },
+            text = { Text(stringResource(R.string.atelier_bezier_replace_body)) },
+            confirmButton = { TextButton({ replace = null; action() }, enabled = enabled) { Text(stringResource(R.string.atelier_bezier_replace_confirm)) } },
+            dismissButton = { TextButton({ replace = null }) { Text(stringResource(R.string.cancel_import)) } })
+    }
     val points = EditorShapes.points(geometry)
     if (points.isEmpty()) return
 

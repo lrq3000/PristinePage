@@ -187,6 +187,7 @@ class RoomExportSnapshots private constructor(
     }
 
     private fun prepare(snapshotId: ExportSnapshotId, documentId: DocumentId, revision: Long, settings: ExportSettings): Prepared {
+        if (metadata.isHiddenAtelierDraft(documentId.value)) reject(OperationErrorCode.SOURCE_UNAVAILABLE, "document_unavailable", documentId.value)
         val q = metadata.queries
         val bounds = q as? EditablePageQueries ?: reject(OperationErrorCode.PROVIDER_UNAVAILABLE, "metadata_guards_unavailable", documentId.value)
         when (bounds.documentReadIsBounded(documentId.value)) {

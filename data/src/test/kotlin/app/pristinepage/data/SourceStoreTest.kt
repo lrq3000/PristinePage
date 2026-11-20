@@ -282,6 +282,29 @@ class SourceStoreTest {
         assertEquals(1, f.closed); assertTrue(f.db.catalog.pages.isEmpty())
     }
 
+    @Test fun repeatedInterruptedDraftCopiesStopBeforeOpeningTheProviderAndPreserveEveryAttempt() = runTest {
+        val f = Fixture(DirectorySync { directory ->
+            // Initial directory creation syncs parents before the payload exists. Fail only after retaining an actual payload.
+            if (File(directory, "original.part").isFile) throw IOException("synthetic disk interruption after copy")
+            true
+        }, enableRetry = true)
+        f.db.catalog.hiddenDraftDocuments.add(f.db.document.value)
+        repeat(8) { assertTrue(f.store.ingestBoundProvider(f.db.uri, f.db.child) is IngestResult.Pending) }
+        val files = f.db.files.toMap()
+        val jobs = f.db.jobs.toMap()
+        val item = f.db.sessions[f.db.child.value]
+        val refusal = f.store.ingestBoundProvider(f.db.uri, f.db.child)
+        assertEquals(OperationErrorCode.RESOURCE_LIMIT, (refusal as? IngestResult.Rejected)?.error?.code)
+        assertEquals(8, f.opened)
+        assertEquals(8, f.closed)
+        assertEquals(8, files.size)
+        assertEquals(files, f.db.files)
+        assertEquals(jobs, f.db.jobs)
+        assertEquals(item, f.db.sessions[f.db.child.value])
+        files.values.forEach { assertArrayEquals(f.bytes, File(f.root, checkNotNull(it.stagingPath)).readBytes()) }
+        assertTrue(f.db.catalog.pages.isEmpty())
+    }
+
     @Test fun unexpectedProviderOpenReadAndCloseFailuresReturnSafeResultsAndCloseOnce() = runTest {
         for (at in listOf("open", "read", "close")) {
             val f = Fixture()

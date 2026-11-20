@@ -6,17 +6,31 @@ import androidx.room.OnConflictStrategy
 import androidx.room.Query
 import androidx.room.Update
 import app.pristinepage.data.repository.CatalogQueries
+import app.pristinepage.data.repository.AlbumMetadataQueries
 import app.pristinepage.data.repository.EditablePageQueries
 
 // Room's version-1 TEXT primary key has this SQLite auto-index. Without the explicit access path SQLite prefers the lifecycle/updatedAt index and sorts every active document for each tiny page. A PK range scan preserves cursor order without a new schema/index; work can still include inactive gaps, not every distant active row.
 private const val ACTIVE_DOCUMENT_IDS_SQL = """SELECT CASE WHEN (typeof(documentId)='text' AND length(documentId)=36 AND length(CAST(documentId AS BLOB))=36) THEN documentId ELSE '' END
-    FROM Document INDEXED BY sqlite_autoindex_Document_1 WHERE documentId>=COALESCE(:after,'') AND (:after IS NULL OR documentId>:after) AND lifecycle='ACTIVE' ORDER BY documentId LIMIT :limit"""
+    FROM Document INDEXED BY sqlite_autoindex_Document_1 WHERE documentId>=COALESCE(:after,'') AND (:after IS NULL OR documentId>:after) AND lifecycle='ACTIVE' AND NOT $HIDDEN_ATELIER_DOCUMENT ORDER BY documentId LIMIT :limit"""
 
 /** Bound SQL only. Business commands run these synchronous metadata operations on IO inside Room's transaction, never across provider/decode/render work. */
-@Dao abstract class CatalogDao : CatalogQueries, EditablePageQueries {
+@Dao abstract class CatalogDao : CatalogQueries, EditablePageQueries, AlbumMetadataQueries {
     // Only bounded identities cross the first projection. A malformed row remains observable as a tiny invalid sentinel; filtering it out would falsely present an intact empty library.
     @Query(ACTIVE_DOCUMENT_IDS_SQL)
     abstract override fun activeDocumentIdsAfter(after: String?, limit: Int): List<String>
+    // SQL emits a tiny malformed sentinel instead of projecting or silently hiding unsafe metadata. The same app-side Unicode and identity validation applies after the chunk arrives.
+    @Query("""SELECT CASE WHEN
+        ((typeof(documentId)='text' AND length(documentId)=36 AND length(CAST(documentId AS BLOB))=36)
+        AND (typeof(title)='text' AND length(CAST(title AS BLOB)) BETWEEN 1 AND 640)
+        AND (typeof(documentRevision)='integer' AND documentRevision>=1 AND typeof(createdAt)='integer' AND typeof(updatedAt)='integer')
+        AND (deletedAt IS NULL)) THEN documentId ELSE '' END AS documentId,
+        CASE WHEN typeof(title)='text' AND length(CAST(title AS BLOB)) BETWEEN 1 AND 640 THEN title ELSE '' END AS title,
+        CAST(documentRevision AS INTEGER) AS documentRevision, 'ACTIVE' AS lifecycle,
+        CAST(createdAt AS INTEGER) AS createdAt, CAST(updatedAt AS INTEGER) AS updatedAt, NULL AS deletedAt
+        FROM Document INDEXED BY sqlite_autoindex_Document_1
+        WHERE documentId>=COALESCE(:after,'') AND (:after IS NULL OR documentId>:after) AND lifecycle='ACTIVE' AND NOT $HIDDEN_ATELIER_DOCUMENT
+        ORDER BY Document.documentId LIMIT :limit""")
+    abstract override fun activeAlbumRowsAfter(after: String?, limit: Int): List<DocumentRow>
     // Existing title writers accept bounded well-formed NULs. SQLite length(TEXT) stops there, possibly at zero; byte bounds remain mandatory and the reader checks the entire materialized UTF-16 value without rewriting it.
     @Query("""SELECT CASE WHEN
         ((typeof(documentId)='text' AND length(documentId)=36 AND length(CAST(documentId AS BLOB))=36) AND (typeof(title)='text' AND length(title)<=160 AND length(CAST(title AS BLOB)) BETWEEN 1 AND 640))

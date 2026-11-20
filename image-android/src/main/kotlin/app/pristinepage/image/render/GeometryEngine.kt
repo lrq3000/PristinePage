@@ -2,6 +2,7 @@ package app.pristinepage.image.render
 
 import app.pristinepage.core.geometry.BilinearSampler
 import app.pristinepage.core.geometry.Coordinates
+import app.pristinepage.core.geometry.CubicSamplingAxes
 import app.pristinepage.core.geometry.GeometrySizing
 import app.pristinepage.core.geometry.GeometryWorkLimitException
 import app.pristinepage.core.geometry.Homography
@@ -52,7 +53,7 @@ class GeometryEngine(private val budget: ImageAllocationBudget) {
         catch (_: IllegalStateException) { refuse(OperationErrorCode.INVALID_INPUT, "closed_geometry_input") }
         validateOutput(target, output.size, recipe !is GeometryRecipe.None)
         val q = recipe.outputQuarterTurns
-        val (base, identitySize, manualStraight, manualDirect, controls, exactPermutation, needsPerspectiveProof, charge) =
+        val (base, identitySize, manualStraight, manualDirect, controls, exactPermutation, needsPerspectiveProof, charge, cubicDirect) =
             plan(recipe, output.size, protection != null, coverage != null)
         val n = output.size.pixelCount
         val reservation = budget.reserve(charge)
@@ -76,6 +77,10 @@ class GeometryEngine(private val budget: ImageAllocationBudget) {
                 catch (_: GeometryWorkLimitException) { refuse(OperationErrorCode.RESOURCE_LIMIT, "manual_validation_work_limit") }
                 catch (failure: CancellationException) { throw failure }
             } else null
+            val cubicAxes = if (cubicDirect) try {
+                CubicSamplingAxes.prepare(recipe as GeometryRecipe.Bezier, base, checkpoint)
+            } catch (_: IllegalArgumentException) { refuse(OperationErrorCode.INVALID_MAP, "invalid_cubic_map") }
+            else null
             val map = if (needsPerspectiveProof) {
                 try {
                     val controls = checkNotNull(controls)
@@ -103,7 +108,9 @@ class GeometryEngine(private val budget: ImageAllocationBudget) {
                         else -> { bx = base.width - 1 - y; by = x }
                     }
                     val index = y * output.size.width + x
-                    val mapped = manualAxes?.map(bx, by) ?: map?.map(bx.toDouble(), by.toDouble())
+                    val mapped = try {
+                        cubicAxes?.map(bx, by) ?: manualAxes?.map(bx, by) ?: map?.map(bx.toDouble(), by.toDouble())
+                    } catch (_: InvalidInverseMapException) { refuse(OperationErrorCode.INVALID_MAP, "invalid_cubic_sample") }
                     val sx = mapped?.x ?: if (identitySize) bx.toDouble() else Coordinates.halfPixelSource(bx.toDouble(), source.width, base.width)
                     val sy = mapped?.y ?: if (identitySize) by.toDouble() else Coordinates.halfPixelSource(by.toDouble(), source.height, base.height)
                     for (c in 0..2) rgb[3 * index + c] = when {
@@ -119,8 +126,13 @@ class GeometryEngine(private val budget: ImageAllocationBudget) {
             if (mask != null) transformedProtection = ProtectionMask(output.size.width, output.size.height, mask)
             if (page != null) transformedCoverage = CoverageMask(output.size.width, output.size.height, page)
             checkpoint()
-            val stageId = if (recipe is GeometryRecipe.ManualCurve) "manual_ruled_v1" else if (recipe is GeometryRecipe.Perspective) "perspective_v1" else if (!identitySize) "source_resize_half_pixel_v1" else "geometry_none_v1"
-            val diagnostics = listOf("OUTPUT_QUARTER_TURNS_$q") + (if (validation != null || manualValidation != null) listOf("GEOMETRY_VISIBILITY_V1") else emptyList()) + (if (manualStraight) listOf("MANUAL_STRAIGHT_PERSPECTIVE") else emptyList()) + (if (manualValidation != null) listOf("MANUAL_COMPOSITE_V1") else emptyList())
+            val stageId = when (recipe) {
+                is GeometryRecipe.Bezier -> "atelier_bezier_v1"
+                is GeometryRecipe.ManualCurve -> "manual_ruled_v1"
+                is GeometryRecipe.Perspective -> "perspective_v1"
+                else -> if (!identitySize) "source_resize_half_pixel_v1" else "geometry_none_v1"
+            }
+            val diagnostics = listOf("OUTPUT_QUARTER_TURNS_$q") + (if (validation != null || manualValidation != null || cubicAxes != null) listOf("GEOMETRY_VISIBILITY_V1") else emptyList()) + (if (manualStraight) listOf("MANUAL_STRAIGHT_PERSPECTIVE") else emptyList()) + (if (manualValidation != null) listOf("MANUAL_COMPOSITE_V1") else emptyList())
             val stage = StageRecord(stageId, 1, null, if (exactPermutation) "EXACT_PERMUTATION" else "OK", sourceSize, output.size, diagnostics)
             return GeometryRaster(image, transformedProtection, transformedCoverage, stage, reservation, validation, manualValidation).also { transferred = true }
         } finally {
@@ -132,7 +144,7 @@ class GeometryEngine(private val budget: ImageAllocationBudget) {
 
     private data class Plan(
         val base: PixelSize, val identitySize: Boolean, val manualStraight: Boolean, val manualDirect: Boolean,
-        val controls: QuadPx?, val exactPermutation: Boolean, val needsPerspectiveProof: Boolean, val charge: Long,
+        val controls: QuadPx?, val exactPermutation: Boolean, val needsPerspectiveProof: Boolean, val charge: Long, val cubicDirect: Boolean,
     )
 
     companion object {
@@ -142,21 +154,23 @@ class GeometryEngine(private val budget: ImageAllocationBudget) {
         private fun plan(recipe: GeometryRecipe, size: PixelSize, protection: Boolean, coverage: Boolean): Plan {
             val base = Coordinates.rotatedSize(size, recipe.outputQuarterTurns)
             val identitySize = base == recipe.source.sourceSize
-            if (recipe !is GeometryRecipe.None && recipe !is GeometryRecipe.Perspective && recipe !is GeometryRecipe.ManualCurve) {
+            if (recipe is GeometryRecipe.RoughCropDewarp) {
                 refuse(OperationErrorCode.PROVIDER_UNAVAILABLE, "geometry_map_not_implemented")
             }
             // Compare SERIALIZED normalized chord midpoints exactly, as preparation does. A near-straight manual curve must not disappear under a source-resolution-dependent tolerance.
             val manualStraight = recipe is GeometryRecipe.ManualCurve && recipe.depth == 0.0 && recipe.topMidpoint == midpoint(recipe.quad.tl, recipe.quad.tr) && recipe.bottomMidpoint == midpoint(recipe.quad.bl, recipe.quad.br)
             val manualDirect = recipe is GeometryRecipe.ManualCurve && !manualStraight
-            val controls = when (recipe) { is GeometryRecipe.Perspective -> recipe.quad; is GeometryRecipe.ManualCurve -> recipe.quad; else -> null }
-            val exactPermutation = identitySize && (recipe is GeometryRecipe.None || ((recipe is GeometryRecipe.Perspective || manualStraight) && fullFrame(checkNotNull(controls))))
-            val needsPerspectiveProof = (recipe is GeometryRecipe.Perspective || manualStraight) && !exactPermutation
+            val cubicDirect = recipe is GeometryRecipe.Bezier && !recipe.contour.straight
+            val controls = when (recipe) { is GeometryRecipe.Perspective -> recipe.quad; is GeometryRecipe.ManualCurve -> recipe.quad; is GeometryRecipe.Bezier -> recipe.contour.quad; else -> null }
+            val projective = recipe is GeometryRecipe.Perspective || manualStraight || (recipe is GeometryRecipe.Bezier && !cubicDirect)
+            val exactPermutation = identitySize && (recipe is GeometryRecipe.None || (projective && fullFrame(checkNotNull(controls))))
+            val needsPerspectiveProof = projective && !exactPermutation
             val n = size.pixelCount
             if (n > Int.MAX_VALUE / 3L || size.width > Int.MAX_VALUE / 3) refuse(OperationErrorCode.RESOURCE_LIMIT, "geometry_output_extent")
             // Scratch plus immutable constructor copies: RGB6N, each float mask8N, and fixed metadata/object headroom. The caller continues charging the full source and source masks independently.
-            val proofScratch = if (manualDirect) ManualCurve.workspaceBytes() + ManualMapValidator.workspaceBytes() + ManualSamplingAxes.workspaceBytes(base) else if (needsPerspectiveProof) InverseMapValidator.perspectiveWorkspaceBytes() else 0L
+            val proofScratch = if (cubicDirect) CubicSamplingAxes.workspaceBytes(base) else if (manualDirect) ManualCurve.workspaceBytes() + ManualMapValidator.workspaceBytes() + ManualSamplingAxes.workspaceBytes(base) else if (needsPerspectiveProof) InverseMapValidator.perspectiveWorkspaceBytes() else 0L
             val charge = 65536L + 6L * n + (if (protection) 8L * n else 0L) + (if (coverage) 8L * n else 0L) + proofScratch
-            return Plan(base, identitySize, manualStraight, manualDirect, controls, exactPermutation, needsPerspectiveProof, charge)
+            return Plan(base, identitySize, manualStraight, manualDirect, controls, exactPermutation, needsPerspectiveProof, charge, cubicDirect)
         }
 
         private fun fullFrame(quad: QuadPx): Boolean = quad == QuadPx(PointPx(0.0, 0.0), PointPx(1.0, 0.0), PointPx(1.0, 1.0), PointPx(0.0, 1.0))

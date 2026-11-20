@@ -1,0 +1,7 @@
+# Public clone Git identity guard
+
+The public-development clone uses a repository-local GitHub noreply identity and `push.default=nothing` so publication requires an explicit ref. Its `pre-push` hook is installed in the **shared Git metadata directory** for all linked worktrees. The source for that hook is [`public-pre-push`](public-pre-push); it must have LF line endings and must be executable on Unix. Inspect `core.hooksPath` before installing it and do not replace an unrelated hook. A fresh clone does not install hooks automatically.
+
+The hook rejects publication of locally archived refs, tags and deletions, and checks raw author and committer email of every commit not already reachable through the two pinned public anchors. It does not print disallowed addresses. Both pinned anchors are already on GitHub. This local defense cannot replace reviewing the diff and ancestry before each publication, and cannot enforce policy in another clone or on a server. Do not use `--no-verify` to bypass it; if the public identity legitimately changes, explicitly review and update the allowlist first.
+
+From the public clone, `python -B validation/git/verify_public_identity.py --shell "<Git for Windows>/bin/bash.exe"` verifies the installed shared hook, identity of every non-archival local branch, and expected refusals against the retained original. On Unix omit `--shell`. This command uses no remote mutation.

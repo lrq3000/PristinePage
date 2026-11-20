@@ -40,17 +40,20 @@ class LibraryEditorJourneyTest {
         // Fixture seeding addresses a document by opaque ID. From its real default overview onward all navigation/actions below use the actual MainActivity UI, never setContent or an injected graph.
         compose.runOnUiThread { library.accept(LibraryEvent.Open(doc)) }
         compose.waitUntil(10_000) { library.state.value.document?.pages?.size == 2 && !library.state.value.loading }
-        compose.onNodeWithTag("original-page-${second.pageId.value}").performScrollTo().performClick()
-        compose.onNodeWithTag("edit-selected-page").performScrollTo().performClick()
+        compose.onNodeWithTag("original-page-${second.pageId.value}").performClick()
         val host = compose.runOnUiThread { ViewModelProvider(compose.activity)[EditorViewModel::class.java] }
         compose.waitUntil(10_000) { host.session.value?.preview?.value?.display != null }
-        val session = checkNotNull(host.session.value)
-        assertEquals(second.pageId,session.state.value.page!!.pageId)
+        assertEquals(second.pageId,host.session.value!!.state.value.page!!.pageId)
+        compose.onNodeWithTag("editor-tool-rotate").performClick()
         compose.onNodeWithTag("editor-rotate").performScrollTo().performClick()
-        compose.onNodeWithTag("editor-apply").performScrollTo().performClick()
-        compose.waitUntil(10_000) { session.state.value.page?.recipeRevision == 2L && !session.state.value.saving && !session.state.value.dirty }
+        compose.onNodeWithTag("editor-apply").performClick()
+        compose.waitUntil(10_000) { host.session.value == null && !library.state.value.loading }
+        compose.onNodeWithTag("original-page-${second.pageId.value}").assertIsSelected().performClick()
+        compose.waitUntil(10_000) { host.session.value?.state?.value?.page?.recipeRevision == 2L }
+        val session = checkNotNull(host.session.value)
         val accepted = checkNotNull(session.state.value.draft)
         val paper = accepted.copy(appearance = AppearanceRecipe.PaperGainV1())
+        compose.onNodeWithTag("editor-tool-looks").performClick()
         compose.onNodeWithTag("editor-looks-row").performScrollTo().assertIsDisplayed()
         compose.onNodeWithTag("editor-look-binary").performScrollTo().assertIsDisplayed()
         compose.onNodeWithTag("editor-look-paper").performScrollTo().performClick().assertIsSelected()
@@ -65,12 +68,12 @@ class LibraryEditorJourneyTest {
         compose.activityRule.scenario.recreate(); compose.waitForIdle()
         val retained = compose.runOnUiThread { ViewModelProvider(compose.activity)[EditorViewModel::class.java] }
         assertSame(host,retained); assertSame(session,retained.session.value); assertTrue(session.state.value.dirty)
-        compose.onNodeWithTag("editor-back").performScrollTo().performClick()
+        compose.onNodeWithTag("editor-back").performClick()
         compose.onNodeWithTag("editor-discard-exit").performClick()
         compose.waitUntil(10_000) { retained.session.value == null && !library.state.value.loading }
-        try { compose.onNodeWithTag("original-page-${second.pageId.value}").performScrollTo().assertIsSelected() }
+        try { compose.onNodeWithTag("original-page-${second.pageId.value}").assertIsSelected() }
         catch (error: AssertionError) { throw AssertionError("Library editor selection context is absent",error) }
-        compose.onNodeWithTag("edit-selected-page").performScrollTo().performClick()
+        compose.onNodeWithTag("original-page-${second.pageId.value}").performClick()
         compose.waitUntil(10_000) { retained.session.value?.state?.value?.page != null }
         val reopened = checkNotNull(retained.session.value)
         assertEquals(second.pageId,reopened.state.value.page!!.pageId); assertFalse(reopened.state.value.dirty)
@@ -78,7 +81,7 @@ class LibraryEditorJourneyTest {
         assertEquals(1L,graph.store.editablePages.load(doc,pages[0].pageId).recipeRevision)
         assertEquals(2L,graph.store.editablePages.load(doc,second.pageId).recipeRevision)
         assertArrayEquals(png,graph.store.committedSources.load(second.sourceId).file.readBytes())
-        compose.onNodeWithTag("editor-back").performScrollTo().performClick()
+        compose.onNodeWithTag("editor-back").performClick()
         compose.waitUntil(10_000) { retained.session.value == null }
         assertArrayEquals(png,file.readBytes())
     }

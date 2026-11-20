@@ -78,6 +78,7 @@ class DefaultRenderCoordinator @JvmOverloads constructor(private val decoder: So
                         is GeometryRecipe.None -> "geometry_none_v1"
                         is GeometryRecipe.Perspective -> "perspective_v1"
                         is GeometryRecipe.ManualCurve -> "manual_ruled_v1"
+                        is GeometryRecipe.Bezier -> "atelier_bezier_v1"
                         is GeometryRecipe.RoughCropDewarp -> "rough_crop_dewarp_v1"
                     }
                     inputSize = info.normalizedSize; outputSize = request.output.size

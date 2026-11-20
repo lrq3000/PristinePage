@@ -8,6 +8,13 @@ import app.pristinepage.data.model.*
 interface MetadataAccess {
     val queries: CatalogQueries
     fun <T> transaction(action: () -> T): T
+    /** Schema-less adapters have no staging documents; the Room adapter checks this inside the same transaction as the ordinary write. */
+    fun isHiddenAtelierDraft(documentId: String): Boolean = false
+    fun retainedAtelierCopyAttempts(documentId: String): Long = 0
+    /** Resolve only a current editing generation; use in the same transaction as page authorization. */
+    fun atelierEditingDocument(draftId: String, generation: Long): String? = null
+    /** The publication DAO must participate in this owner's writer transaction. */
+    fun ownsAtelierPublication(drafts: AtelierDraftDao): Boolean = false
 }
 
 interface CatalogQueries {

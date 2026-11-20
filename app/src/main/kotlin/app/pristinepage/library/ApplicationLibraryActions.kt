@@ -11,11 +11,14 @@ import app.pristinepage.capture.PhotoSelection
 import app.pristinepage.data.model.*
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import java.util.Locale
 
 /** A cold adapter to the one Application graph, not another store or acquisition path. Temporary references return to the existing router/controller; no grant, new journal, recovery engine or source normalization is duplicated here. */
-class ApplicationLibraryActions(private val context: Context? = null, private val open: suspend () -> ApplicationImports) : LibraryActions {
+class ApplicationLibraryActions(private val context: Context? = null, private val open: suspend () -> ApplicationImports) : LibraryActions, OrderedLibraryActions {
     override suspend fun startup() = open().startupRecovery
     override suspend fun list(after: DocumentId?, limit: Int) = open().store.catalog.list(after, limit)
+    override suspend fun listAlbums(order: AlbumOrder, locale: Locale, after: AlbumPosition?, limit: Int) = open().store.albums.listAlbums(order, locale, after, limit)
+    override suspend fun rename(document: DocumentId, revision: Long, title: String) = open().store.documents.renameDocument(document, revision, title)
     override suspend fun load(id: DocumentId) = open().store.catalog.load(id)
     override suspend fun activeImport(id: DocumentId) = open().store.catalog.activeImport(id)
     override suspend fun create(title: String) = open().store.documents.createDocument(title)

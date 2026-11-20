@@ -55,13 +55,12 @@ class P06ImportJourneyTest {
             checkpoint("source-media-read-not-granted")
             val library = compose.runOnUiThread { ViewModelProvider(compose.activity)[ImportLibraryViewModel::class.java].session }
             compose.waitUntil(10_000) { !library.state.value.loading }
-            compose.onNodeWithTag("create-document").assertIsEnabled().performClick()
-            compose.waitUntil(10_000) { !library.state.value.loading && library.state.value.document?.pages?.isEmpty() == true }
-            val document = checkNotNull(library.state.value.selectedId)
-            report.put("documentId",document.value)
-            compose.onNodeWithTag("import-photos").assertIsEnabled().performClick()
+            compose.onNodeWithTag("atelier-new").assertIsEnabled().performClick()
+            compose.onNodeWithTag("atelier-camera-import").assertIsEnabled().performClick()
+            compose.onNodeWithTag("atelier-import-gallery").assertIsEnabled().performClick()
+            val acquisition = compose.runOnUiThread { ViewModelProvider(compose.activity)[app.pristinepage.capture.AtelierCaptureViewModel::class.java] }
             compose.waitUntil(15_000) { automation.rootInActiveWindow?.packageName?.toString() == picker }
-            assertEquals(ImportPhase.WAITING_PICKER,library.state.value.phase)
+            assertNotNull(acquisition.state.value.request)
             clickText("Albums",picker)
             compose.waitUntil(10_000) { nodes(root(picker)).any { it.text?.toString() == album } }
             clickText(album,picker)
@@ -83,13 +82,11 @@ class P06ImportJourneyTest {
             val add = nodes(selection).filter { it.text?.toString()?.matches(Regex("Ajouter\\s*\\(2\\)")) == true }
             assertEquals("Unmatched Add-two confirmation; do not guess another action",1,add.size)
             assertTrue(actionable(add.single()).performAction(AccessibilityNodeInfo.ACTION_CLICK))
-            compose.waitUntil(20_000) { library.state.value.request == null && !library.state.value.loading && library.state.value.document?.pages?.size == 2 }
-            assertEquals(ImportPhase.COMPLETE,library.state.value.phase)
-            val pages = checkNotNull(library.state.value.document).pages
-            val results = library.state.value.results.map { it as IngestResult.Committed }
-            assertEquals(pages.map { it.pageId },results.map { it.pageId })
+            compose.waitUntil(20_000) { acquisition.state.value.request == null && !acquisition.state.value.busy && acquisition.state.value.draft?.pages?.size == 2 }
+            assertNull(library.state.value.selectedId)
+            val staged = checkNotNull(acquisition.state.value.draft).pages
             val graph = (context.applicationContext as PristinePageApplication).services.imports()
-            val sources = pages.map { graph.store.committedSources.load(it.sourceId) }
+            val sources = staged.map { graph.store.committedSources.load(it.sourceId) }
             assertEquals(expectedHashes,sources.map { hash(it.file.readBytes()) }.toSet())
             sources.forEach { assertEquals(746L,it.byteCount); assertEquals(PixelSize(256,192),it.inspection.normalizedSize); assertEquals(hash(it.file.readBytes()),it.sourceByteHash) }
             checkpoint("two-private-normalized-sources-committed")
@@ -109,24 +106,35 @@ class P06ImportJourneyTest {
             assertEquals(expectedHashes,grantHashes)
             report.put("actualReadOnlyGrantHashes",JSONArray(grantHashes.toList()))
             checkpoint("effective-canonical-fixture-read-only-access-authenticated")
-            compose.onNodeWithTag("original-page-${pages[1].pageId.value}").performScrollTo().performClick()
-            compose.onNodeWithTag("edit-selected-page").performScrollTo().performClick()
+            compose.onNodeWithTag("atelier-review-import").assertIsEnabled().performClick()
+            compose.onNodeWithTag("atelier-finish-import").assertIsEnabled().performClick()
+            compose.waitUntil(15_000) { acquisition.state.value.editor?.state?.value?.loading == false }
+            compose.onNodeWithTag("atelier-wizard-skip-frame").assertIsEnabled().performClick()
+            compose.onNodeWithTag("atelier-wizard-confirm-skip").performClick()
+            compose.waitUntil(10_000) { acquisition.state.value.draft?.step == 1 && acquisition.state.value.editor?.state?.value?.loading == false }
+            compose.onNodeWithTag("atelier-wizard-next").assertIsEnabled().performClick()
+            compose.waitUntil(10_000) { acquisition.state.value.draft?.step == 2 && acquisition.state.value.editor?.state?.value?.loading == false }
+            compose.onNodeWithTag("atelier-wizard-next").assertIsEnabled().performClick()
+            compose.waitUntil(25_000) { !acquisition.state.value.open && !library.state.value.loading && library.state.value.document?.pages?.size == 2 }
+            val document = checkNotNull(library.state.value.selectedId)
+            report.put("documentId",document.value)
+            val pages = checkNotNull(library.state.value.document).pages
+            assertEquals(staged.map { it.pageId }, pages.map { it.pageId })
+            compose.onNodeWithTag("original-page-${pages[1].pageId.value}").performClick()
             val editor = compose.runOnUiThread { ViewModelProvider(compose.activity)[EditorViewModel::class.java] }
             compose.waitUntil(10_000) { editor.session.value?.preview?.value?.display != null }
+            compose.onNodeWithTag("editor-tool-rotate").performClick()
             compose.onNodeWithTag("editor-rotate").performScrollTo().performClick()
-            compose.onNodeWithTag("editor-apply").performScrollTo().performClick()
-            compose.waitUntil(10_000) { editor.session.value?.state?.value?.page?.recipeRevision == 2L && editor.session.value?.state?.value?.dirty == false }
-            compose.onNodeWithTag("editor-back").performScrollTo().performClick()
+            compose.onNodeWithTag("editor-apply").performClick()
             compose.waitUntil(10_000) { editor.session.value == null && !library.state.value.loading }
-            compose.onNodeWithTag("original-page-${pages[1].pageId.value}").performScrollTo().assertIsSelected()
-            compose.onNodeWithTag("edit-selected-page").performScrollTo().performClick()
+            compose.onNodeWithTag("original-page-${pages[1].pageId.value}").assertIsSelected().performClick()
             compose.waitUntil(10_000) { editor.session.value?.preview?.value?.display != null }
             assertEquals(pages[1].pageId,editor.session.value!!.state.value.page!!.pageId)
             assertEquals(1,editor.session.value!!.state.value.draft!!.geometry.outputQuarterTurns)
             assertEquals(1L,graph.store.editablePages.load(document,pages[0].pageId).recipeRevision)
             assertEquals(2L,graph.store.editablePages.load(document,pages[1].pageId).recipeRevision)
             assertEquals(expectedHashes,pages.map { hash(graph.store.committedSources.load(it.sourceId).file.readBytes()) }.toSet())
-            compose.onNodeWithTag("editor-back").performScrollTo().performClick()
+            compose.onNodeWithTag("editor-back").performClick()
             compose.waitUntil(10_000) { editor.session.value == null }
             report.put("completed",true).put("pageIds",JSONArray(pages.map { it.pageId.value })).put("orderedPrivateSourceHashes",JSONArray(sources.map { it.sourceByteHash }))
             checkpoint("real-picker-private-import-apply-reopen-passed")

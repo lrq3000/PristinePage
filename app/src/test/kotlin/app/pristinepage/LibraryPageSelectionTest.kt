@@ -11,6 +11,52 @@ import org.junit.Test
 /** Real retained library reducer; only metadata IO is controlled. Selection is an opaque page identity validated against the open document, never an index, provider or bitmap. */
 @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
 class LibraryPageSelectionTest {
+    @Test fun obsoleteResultCannotResurrectAClosedAlbum() = runTest {
+        val f = Fixture()
+        val session = ImportLibrarySession(f, LibraryIdentity(f.doc), this)
+        advanceUntilIdle()
+        f.gate = CompletableDeferred()
+        session.accept(LibraryEvent.Refresh)
+        runCurrent()
+        session.accept(LibraryEvent.CloseAlbum)
+        advanceUntilIdle()
+        f.gate!!.complete(Unit)
+        advanceUntilIdle()
+        assertNull(session.state.value.selectedId)
+        assertNull(session.state.value.document)
+        assertNull(session.identity().selectedPage)
+        assertEquals(listOf(f.doc, f.other), session.state.value.documents.map { it.documentId })
+    }
+
+    @Test fun unchangedTitleAndStaleLocalRevisionDoNotWrite() = runTest {
+        val f = Fixture()
+        val session = ImportLibrarySession(f, LibraryIdentity(f.doc), this)
+        advanceUntilIdle()
+        session.accept(LibraryEvent.RenameAlbum(f.doc, 1, " Synthetic selection "))
+        assertTrue(session.state.value.renameResult is DocumentMutationResult.Applied)
+        session.accept(LibraryEvent.ClearRenameResult)
+        session.accept(LibraryEvent.RenameAlbum(f.doc, 2, "Changed"))
+        advanceUntilIdle()
+        assertEquals(DocumentMutationResult.Conflict(1), session.state.value.renameResult)
+        assertEquals(0, f.renameWrites)
+    }
+
+    @Test fun renameConflictRefreshesTheOpenAlbumEvenWhenHomeCannotLoad() = runTest {
+        val f = Fixture()
+        val session = ImportLibrarySession(f, LibraryIdentity(f.doc), this)
+        advanceUntilIdle()
+        f.catalogUnavailable = true
+        f.afterRename = {
+            f.revision = 2
+            DocumentMutationResult.Conflict(2)
+        }
+        session.accept(LibraryEvent.RenameAlbum(f.doc, 1, "New title"))
+        advanceUntilIdle()
+        assertEquals(DocumentMutationResult.Conflict(2), session.state.value.renameResult)
+        assertEquals(2L, session.state.value.document?.document?.documentRevision)
+        assertEquals(1, f.renameWrites)
+    }
+
     @Test fun selectionSurvivesRefreshAndIdentityCaptureWithoutOpeningAnImport() = runTest {
         val f = Fixture(); val session = ImportLibrarySession(f,LibraryIdentity(f.doc),this); advanceUntilIdle()
         choose(session,f.second); session.accept(LibraryEvent.Refresh); advanceUntilIdle()
@@ -56,9 +102,20 @@ class LibraryPageSelectionTest {
         var pages = listOf(DocumentPage(first,source,1,0),DocumentPage(second,source,1,1))
         var gate: CompletableDeferred<Unit>? = null
         override suspend fun startup() = RecoveryReport(0,0,0,0,0,emptyList())
-        override suspend fun list(after: DocumentId?, limit: Int) = listOf(summary(doc),summary(other))
+        var catalogUnavailable = false
+        var revision = 1L
+        var renameWrites = 0
+        var afterRename: () -> DocumentMutationResult = { error("Unexpected rename write") }
+        override suspend fun rename(document: DocumentId, revision: Long, title: String): DocumentMutationResult {
+            renameWrites++
+            return afterRename()
+        }
+        override suspend fun list(after: DocumentId?, limit: Int): List<DocumentSummary> {
+            check(!catalogUnavailable)
+            return listOf(summary(doc), summary(other))
+        }
         override suspend fun load(id: DocumentId): DocumentOverview { val snapshot = DocumentOverview(summary(id),if (id == doc) pages.toList() else emptyList()); gate?.await(); return snapshot }
-        private fun summary(id: DocumentId) = DocumentSummary(id,"Synthetic selection",1,if (id == doc) pages.size else 0,false)
+        private fun summary(id: DocumentId) = DocumentSummary(id,"Synthetic selection",revision,if (id == doc) pages.size else 0,false)
         override suspend fun activeImport(id: DocumentId): ImportSessionId? = null
         override suspend fun create(title: String): DocumentId = error("Selection does not create documents")
         override suspend fun begin(document: DocumentSummary): PhotoImportRequest = error("Selection does not reserve imports")

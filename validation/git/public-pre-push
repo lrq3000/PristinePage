@@ -1,0 +1,45 @@
+#!/bin/sh
+# Install in the public clone's shared Git hooks directory, not on historical branches.
+set -eu
+export GIT_NO_REPLACE_OBJECTS=1
+
+public_main=40ad8fbbc4322118919a8d9430a673ebb12e2a8e
+public_design=2909e007c68580591bd03916e95cb45d1ff37ef9
+public_email=1118942+lrq3000@users.noreply.github.com
+
+deny() {
+    printf '%s\n' "Push blocked by the public-history guard: $1" >&2
+    exit 1
+}
+
+[ "$(git rev-parse --is-shallow-repository)" = false ] || deny "incomplete history"
+if [ -n "$(git config --get-all push.pushOption || :)" ]; then
+    deny "repository push options are not permitted"
+fi
+
+while read -r local_ref oid remote_ref remote_oid; do
+    case "$local_ref" in
+        '(delete)'|refs/heads/archive/*) deny "ref deletion or local archive" ;;
+    esac
+    case "$remote_ref" in
+        refs/heads/*) ;;
+        *) deny "only branch updates are supported" ;;
+    esac
+
+    # Do not trust remote-tracking refs or exclude remote_oid: only the two
+    # exact, previously verified public trees are grandfathered. Never log a private email.
+    identities=$(git log --format='author:%ae%ncommitter:%ce' "$oid" "^$public_main" "^$public_design" --) ||
+        deny "commit ancestry could not be inspected"
+    if [ -n "$identities" ]; then
+        # Prefixes distinguish a blank address from the absence of outbound commits.
+        # An exact shell match avoids making an external matcher's errors look like success.
+        while IFS= read -r identity; do
+            case "$identity" in
+                "author:$public_email"|"committer:$public_email") ;;
+                *) deny "a commit uses a non-approved author or committer identity" ;;
+            esac
+        done <<EOF
+$identities
+EOF
+    fi
+done

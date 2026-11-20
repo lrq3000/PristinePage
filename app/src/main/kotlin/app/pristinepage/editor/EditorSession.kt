@@ -1,6 +1,7 @@
 package app.pristinepage.editor
 
 import app.pristinepage.core.geometry.GeometrySizing
+import app.pristinepage.core.geometry.QuadValidation
 import app.pristinepage.core.pipeline.*
 import app.pristinepage.core.recipe.GeometryRecipe
 import app.pristinepage.core.recipe.RecipeCodec
@@ -23,6 +24,8 @@ class EditorSession @JvmOverloads constructor(documentId: String, pageId: String
     private var loading: Job? = null
     private var saving: Job? = null
     private var shapeDrag: ShapeDrag? = null
+    private var frameDrag: ShapePoint? = null
+    private var bezierDrag: BezierDrag? = null
     private var generation = 0L
     private var active = true
     private var closed = false
@@ -55,6 +58,8 @@ class EditorSession @JvmOverloads constructor(documentId: String, pageId: String
     fun edit(recipe: Recipe) {
         val edits = editable() ?: return
         endShapeDrag()
+        endFrameDrag()
+        endBezierDrag()
         replaceDraft(edits, recipe)
     }
 
@@ -72,21 +77,127 @@ class EditorSession @JvmOverloads constructor(documentId: String, pageId: String
         val view = EditorViews.parse(id)
         if (current.value.view == view) return
         endShapeDrag()
+        endFrameDrag()
+        endBezierDrag()
         current.value = current.value.copy(view = view)
         renderDraft()
     }
 
-    fun rotateClockwise() { editable()?.current?.let { edit(it.copy(geometry = it.geometry.withOutputQuarterTurns((it.geometry.outputQuarterTurns + 1) % 4))) } }
+    fun rotateClockwise() = rotate(1)
+    fun rotateCounterclockwise() = rotate(-1)
+    private fun rotate(quarters: Int) {
+        val draft = editable()?.current ?: return
+        edit(draft.copy(geometry = draft.geometry.withOutputQuarterTurns(Math.floorMod(draft.geometry.outputQuarterTurns + quarters, 4))))
+    }
     fun chooseLook(id: String) { editable()?.current?.let { edit(EditorLooks.select(it, id)) } }
     internal fun resetShape() = editShape(EditorShapes::reset)
     internal fun selectPerspective() = editShape(EditorShapes::perspective)
     internal fun selectManualCurve() = editShape(EditorShapes::manualCurve)
+    internal fun selectBezier() = editShape(EditorShapes::bezier)
+    internal class BezierDrag(val control: BezierControl)
+    internal fun beginBezierDrag(control: BezierControl): BezierDrag? {
+        val edits = editable() ?: return null
+        val contour = (edits.current.geometry as? GeometryRecipe.Bezier)?.contour ?: return null
+        if (!active || current.value.confirmExit || control.read(contour) == null) return null
+        endShapeDrag()
+        endFrameDrag()
+        endBezierDrag()
+        edits.beginGesture()
+        return BezierDrag(control).also { bezierDrag = it }
+    }
+
+    internal fun endBezierDrag(drag: BezierDrag? = bezierDrag, cancel: Boolean = false) {
+        if (drag == null || drag !== bezierDrag) return
+        bezierDrag = null
+        val edits = checkNotNull(history)
+        if (!cancel) edits.endGesture()
+        else if (edits.cancelGesture()) { updateDraft(); renderDraft() }
+    }
+
+    internal fun moveBezier(control: BezierControl, point: PointPx, drag: BezierDrag? = null) {
+        if (drag != null && (drag !== bezierDrag || control != drag.control)) return
+        if (drag == null) endBezierDrag()
+        changeBezier { if (control.read(it) != null) control.move(it, point) else it }
+    }
+
+    internal fun insertBezier(side: app.pristinepage.core.recipe.ContourSide, segment: Int) {
+        endBezierDrag()
+        changeBezier { it.insert(side, segment, .5) }
+    }
+
+    internal fun removeBezier(side: app.pristinepage.core.recipe.ContourSide, index: Int) {
+        endBezierDrag()
+        changeBezier { it.removeNode(side, index) }
+    }
+
+    private fun changeBezier(change: (app.pristinepage.core.recipe.BezierContour) -> app.pristinepage.core.recipe.BezierContour) {
+        val edits = editable() ?: return
+        if (!active || current.value.confirmExit) return
+        val draft = edits.current
+        val geometry = draft.geometry as? GeometryRecipe.Bezier ?: return
+        val next = try { change(geometry.contour) } catch (_: IllegalArgumentException) { return }
+        catch (_: IndexOutOfBoundsException) { return }
+        replaceDraft(edits, draft.copy(geometry = geometry.copy(contour = next)))
+    }
     internal class ShapeDrag(val label: ShapePoint, val horizontal: Boolean)
+
+    fun dragFrameCorner(id: String, x: Double, y: Double) {
+        val point = ShapePoint.entries.firstOrNull { it.name == id && it.ordinal < 4 } ?: return
+        if (frameDrag != null && frameDrag != point) return
+        if (!active || current.value.confirmExit || !x.isFinite() || !y.isFinite() || x !in 0.0..1.0 || y !in 0.0..1.0) return
+        val edits = editable() ?: return
+        val draft = edits.current
+        val geometry = draft.geometry as? GeometryRecipe.Perspective ?: return
+        val candidate = geometry.copy(quad = point.replaceIn(geometry.quad, PointPx(x, y)))
+        if (!validFrame(candidate)) return
+        endShapeDrag()
+        replaceDraft(edits, draft.copy(geometry = candidate))
+    }
+
+    internal fun beginFrameDrag(point: ShapePoint): Boolean {
+        val edits = editable() ?: return false
+        if (!active || current.value.confirmExit || point.ordinal >= 4 || edits.current.geometry !is GeometryRecipe.Perspective) return false
+        endShapeDrag()
+        endFrameDrag()
+        endBezierDrag()
+        edits.beginGesture()
+        frameDrag = point
+        return true
+    }
+
+    internal fun endFrameDrag(cancel: Boolean = false) {
+        if (frameDrag == null) return
+        frameDrag = null
+        val edits = checkNotNull(history)
+        if (!cancel) edits.endGesture()
+        else if (edits.cancelGesture()) { updateDraft(); renderDraft() }
+    }
+
+    internal fun useDetectedFrame(expected: GeometryRecipe, quad: QuadPx): Boolean {
+        val edits = editable() ?: return false
+        val geometry = edits.current.geometry as? GeometryRecipe.Perspective ?: return false
+        if (!active || current.value.confirmExit || geometry != expected || frameDrag != null || shapeDrag != null) return false
+        val candidate = geometry.copy(quad = quad)
+        if (!validFrame(candidate)) return false
+        edit(edits.current.copy(geometry = candidate))
+        return true
+    }
+
+    private fun validFrame(geometry: GeometryRecipe.Perspective): Boolean {
+        val size = geometry.source.sourceSize
+        fun expand(p: PointPx) = PointPx(p.x * (size.width - 1), p.y * (size.height - 1))
+        val q = geometry.quad
+        return try {
+            QuadValidation.validate(QuadPx(expand(q.tl), expand(q.tr), expand(q.br), expand(q.bl)), size)
+            true
+        } catch (_: IllegalArgumentException) { false }
+    }
 
     internal fun beginShapeDrag(label: ShapePoint, horizontal: Boolean): ShapeDrag? {
         val edits = editable() ?: return null
         if (!active || current.value.confirmExit || label !in EditorShapes.points(edits.current.geometry)) return null
         endShapeDrag()
+        endFrameDrag()
         edits.beginGesture()
         return ShapeDrag(label, horizontal).also { shapeDrag = it }
     }
@@ -115,9 +226,9 @@ class EditorSession @JvmOverloads constructor(documentId: String, pageId: String
         edit(draft.copy(geometry = change(draft.geometry)))
     }
 
-    fun undo() { val edits = editable() ?: return; endShapeDrag(); if (!edits.canUndo) return; edits.undo(); updateDraft(); renderDraft() }
-    fun redo() { val edits = editable() ?: return; endShapeDrag(); if (!edits.canRedo) return; edits.redo(); updateDraft(); renderDraft() }
-    fun discard() { val edits = editable() ?: return; endShapeDrag(); edits.discard(); updateDraft(); renderDraft() }
+    fun undo() { val edits = editable() ?: return; endShapeDrag(); endFrameDrag(); endBezierDrag(); if (!edits.canUndo) return; edits.undo(); updateDraft(); renderDraft() }
+    fun redo() { val edits = editable() ?: return; endShapeDrag(); endFrameDrag(); endBezierDrag(); if (!edits.canRedo) return; edits.redo(); updateDraft(); renderDraft() }
+    fun discard() { val edits = editable() ?: return; endShapeDrag(); endFrameDrag(); endBezierDrag(); edits.discard(); updateDraft(); renderDraft() }
 
     private fun updateDraft() {
         val edits = checkNotNull(history)
@@ -145,17 +256,32 @@ class EditorSession @JvmOverloads constructor(documentId: String, pageId: String
     fun setActive(value: Boolean) {
         if (closed || active == value) return
         active = value
-        if (active) renderDraft() else { endShapeDrag(); scheduler.clear() }
+        if (active) renderDraft() else { endShapeDrag(); endFrameDrag(cancel = true); endBezierDrag(cancel = true); scheduler.clear() }
     }
 
     fun apply() = save(andBack = false)
     fun applyAndBack() = save(andBack = true)
+
+    /** A wizard move can consume only the exact draft accepted by the ordinary save path, never a pending or failed write. */
+    internal suspend fun checkpointForNavigation(): Boolean {
+        val edits = editable() ?: return false
+        if (!edits.dirty) return true
+        val expected = edits.current
+        if (current.value.shapeBlocksApply(preview.value)) return false
+        save(andBack = false)
+        saving?.join()
+        val state = current.value
+        return !closed && !state.saving && !state.dirty && state.error == null && state.page?.recipe == expected
+    }
+
     private fun save(andBack: Boolean) {
         val edits = editable() ?: return
         if (!edits.dirty) { if (andBack) exit(); return }
         // Both Apply paths pass this guard before enqueueing the repository CAS, not just when the buttons recompose.
         if (current.value.shapeBlocksApply(preview.value)) return
         endShapeDrag()
+        endFrameDrag()
+        endBezierDrag()
         val page = checkNotNull(current.value.page)
         val draft = edits.current
         current.value = current.value.copy(saving = true, error = null, confirmExit = false)
@@ -187,16 +313,20 @@ class EditorSession @JvmOverloads constructor(documentId: String, pageId: String
     fun requestBack() {
         if (closed || current.value.saving) return
         endShapeDrag()
+        endFrameDrag(cancel = true)
+        endBezierDrag(cancel = true)
         if (current.value.dirty) current.value = current.value.copy(confirmExit = true) else exit()
     }
     fun keepEditing() { if (!closed) current.value = current.value.copy(confirmExit = false) }
     fun discardAndBack() { val edits = editable() ?: return; edits.discard(); updateDraft(); exit() }
-    private fun exit() { endShapeDrag(); current.value = current.value.copy(exitReady = true, confirmExit = false); close() }
+    private fun exit() { endShapeDrag(); endFrameDrag(cancel = true); endBezierDrag(cancel = true); current.value = current.value.copy(exitReady = true, confirmExit = false); close() }
 
     override fun close() {
         if (closed) return
         closed = true
         endShapeDrag()
+        endFrameDrag(cancel = true)
+        endBezierDrag(cancel = true)
         loading?.cancel(); saving?.cancel()
         scheduler.close()
     }

@@ -21,6 +21,14 @@ import org.junit.Test
 
 @OptIn(ExperimentalCoroutinesApi::class)
 class EditorLookCarouselTest {
+    @Test fun discreteLookNavigationReachesBothEndsWithoutWrapping() {
+        assertNull(adjacentLook(EditorLookCard.NONE, -1))
+        assertEquals(EditorLookCard.PAPER, adjacentLook(EditorLookCard.NONE, 1))
+        assertEquals(EditorLookCard.GRAY, adjacentLook(EditorLookCard.BINARY, -1))
+        assertNull(adjacentLook(EditorLookCard.BINARY, 1))
+        assertEquals(EditorLookCard.NONE, adjacentLook(null, 1))
+    }
+
     @Test fun precomputedCardsMatchProductionRenderingOfTheSameSamplePage() {
         val app = Path.of(System.getProperty("pristinepage.policyResourceDir")).resolve("../../../..").normalize()
         val candidates = Files.createDirectories(app.resolve("build/looks-sample-candidates"))

@@ -6,6 +6,7 @@ import app.pristinepage.data.model.*
 import app.pristinepage.data.repository.*
 import java.io.IOException
 import java.lang.reflect.InvocationTargetException
+import java.util.Locale
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -16,6 +17,65 @@ import org.junit.Test
 
 /** Reuses real command-created metadata/recipes/source ownership, replacing only Room and its scalar projections. Actual DAO/SQLite guards and reopen are separate consuming tests; no filesystem or source decoder participates in metadata discovery. */
 class DocumentCatalogTest {
+    @Test fun albumDatesAreStoredValuesNotPresentationDefaults() = runBlocking {
+        val f = Fixture()
+        f.memory.documents[f.first.value] = f.memory.documents.getValue(f.first.value).copy(createdAt = 10, updatedAt = 26)
+        val summary = f.catalog().load(f.first).document
+        assertEquals(10L, summary.createdAt)
+        assertEquals(26L, summary.updatedAt)
+    }
+
+    @Test fun albumOrderIsGlobalAcrossPagesAndKeepsAscendingIdTies() = runBlocking {
+        val f = Fixture()
+        f.memory.documents.clear()
+        f.memory.pages.clear()
+        val ids = (0..61).map { DocumentId("aaaaaaaa-aaaa-4aaa-8aaa-%012d".format(Locale.ROOT, it)) }
+        ids.forEachIndexed { index, id ->
+            val title = when (index) { 0 -> "École"; 1 -> "école"; 2 -> "Zoo"; else -> "Arbre" }
+            f.memory.documents[id.value] = DocumentRow(id.value, title, 1, "ACTIVE", (61 - index).toLong(), index.toLong(), null)
+        }
+        val catalog = f.catalog() as AlbumCatalog
+        val expected = mapOf(
+            AlbumOrder.CREATED to ids,
+            AlbumOrder.MODIFIED to ids.reversed(),
+            AlbumOrder.TITLE_AZ to (ids.drop(3) + ids.take(3)),
+            AlbumOrder.TITLE_ZA to (listOf(ids[2], ids[0], ids[1]) + ids.drop(3)),
+        )
+        for ((order, orderedIds) in expected) {
+            for (pageSize in listOf(7, 50)) {
+                val result = mutableListOf<DocumentId>()
+                var cursor: AlbumPosition? = null
+                do {
+                    val page = catalog.listAlbums(order, Locale.FRENCH, cursor, pageSize)
+                    result += page.albums.map { it.documentId }
+                    cursor = page.next
+                    assertTrue("Catalog cursor did not advance", result.size <= ids.size && (cursor == null || page.albums.isNotEmpty()))
+                } while (cursor != null)
+                assertEquals(order.name, orderedIds, result)
+            }
+        }
+    }
+
+    @Test fun albumOrderRetainsReadBoundsAndRejectsWrongLimits() = runBlocking<Unit> {
+        val f = Fixture()
+        val catalog = f.catalog() as AlbumCatalog
+        rejected(OperationErrorCode.INVALID_INPUT) { catalog.listAlbums(AlbumOrder.TITLE_AZ, Locale.FRENCH, null, 51) }
+        assertEquals(0, f.idReads)
+        f.documentBound = false
+        rejected(OperationErrorCode.INTEGRITY_FAILED) { catalog.listAlbums(AlbumOrder.CREATED, Locale.FRENCH, null, 2) }
+        assertEquals(0, f.documentReads)
+    }
+
+    @Test fun malformedPageCanFailOverviewWithoutHidingTheAlbumCard() = runBlocking<Unit> {
+        val f = Fixture()
+        f.pagesBound = false
+        val catalog = f.catalog()
+        assertEquals(listOf(f.first, f.second, f.third), (catalog as AlbumCatalog)
+            .listAlbums(AlbumOrder.CREATED, Locale.FRENCH, null, 10).albums.map { it.documentId })
+        rejected(OperationErrorCode.INTEGRITY_FAILED) { catalog.load(f.first) }
+        assertEquals(0, f.pageReads)
+    }
+
     @Test fun paginatedSummariesAreIndependentOwnedSnapshots() = runBlocking {
         val f = Fixture(); val catalog = f.catalog()
         val first = catalog.list(null, 2)
@@ -150,6 +210,16 @@ class DocumentCatalogTest {
         rejected(OperationErrorCode.SOURCE_UNAVAILABLE) { activeImport(catalog, f.second) }
     }
 
+    @Test fun hiddenPromotionDoesNotConsumeThePageLimitOrBecomeReadableById() = runBlocking {
+        val f = Fixture()
+        f.memory.hiddenDraftDocuments.add(f.first.value)
+        val catalog = f.catalog()
+        assertEquals(listOf(f.second, f.third), catalog.list(null, 2).map { it.documentId })
+        assertEquals(listOf(f.second, f.third), (catalog as AlbumCatalog).listAlbums(AlbumOrder.CREATED, Locale.ENGLISH, null, 2).albums.map { it.documentId })
+        rejected(OperationErrorCode.SOURCE_UNAVAILABLE) { catalog.load(f.first) }
+        Unit
+    }
+
     private class Fixture {
         val initial = RepositoryFixture(2)
         val memory = initial.metadata
@@ -202,6 +272,7 @@ class DocumentCatalogTest {
         private val metadata = object : MetadataAccess {
             override val queries: CatalogQueries get() = this@Fixture.queries
             override fun <T> transaction(action: () -> T): T = memory.transaction(action)
+            override fun isHiddenAtelierDraft(documentId: String): Boolean = memory.isHiddenAtelierDraft(documentId)
         }
         fun catalog(): DocumentCatalog {
             val type = try { Class.forName("app.pristinepage.data.repository.RoomDocumentCatalog") }

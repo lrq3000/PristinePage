@@ -4,6 +4,7 @@ import app.pristinepage.capture.PhotoImportRequest
 import app.pristinepage.capture.PhotoImportKind
 import app.pristinepage.data.model.*
 import kotlinx.coroutines.flow.StateFlow
+import java.util.Locale
 
 /** Immediate foreground commands against the existing Application-owned store. These ports carry no Activity, live bitmap, private path or persistable-grant promise. Real adapter delegates to the already tested repositories/controller. */
 interface LibraryActions {
@@ -15,6 +16,13 @@ interface LibraryActions {
     suspend fun begin(document: DocumentSummary): PhotoImportRequest
     suspend fun deliver(request: PhotoImportRequest, selection: LibraryPhotoResult): List<IngestResult>
     suspend fun cancel(request: PhotoImportRequest)
+    suspend fun rename(document: DocumentId, revision: Long, title: String): DocumentMutationResult =
+        DocumentMutationResult.Rejected(OperationError(OperationErrorCode.PROVIDER_UNAVAILABLE, false, "rename_unavailable", document.value))
+}
+
+/** Opt-in so older/synthetic consumers of the plain ID-ordered catalog keep their own cursor contract. */
+internal interface OrderedLibraryActions {
+    suspend fun listAlbums(order: AlbumOrder, locale: Locale, after: AlbumPosition?, limit: Int): AlbumPage
 }
 
 /** Only opaque identity may be placed in app saved state. A restored batch is not permission to relaunch a picker, reopen a URI, or infer a successful import. */
@@ -43,14 +51,22 @@ data class LibraryState(
     val recovery: RecoveryReport? = null,
     val error: OperationError? = null,
     val selectedPage: PageId? = null,
+    val albumOrder: AlbumOrder = AlbumOrder.MODIFIED,
+    val renaming: Boolean = false,
+    val renameResult: DocumentMutationResult? = null,
 )
 
 sealed interface LibraryEvent {
     data class Open(val id: DocumentId) : LibraryEvent
     data class SelectPage(val id: PageId) : LibraryEvent
+    data object CloseAlbum : LibraryEvent
+    data class SetAlbumSort(val order: AlbumOrder, val locale: Locale) : LibraryEvent
+    data class RenameAlbum(val documentId: DocumentId, val expectedDocumentRevision: Long, val title: String) : LibraryEvent
+    data object ClearRenameResult : LibraryEvent
     data class NewDocument @JvmOverloads constructor(val title: String, val importAfterCreate: Boolean = false, val kind: PhotoImportKind = PhotoImportKind.GALLERY) : LibraryEvent
     data object More : LibraryEvent
     data object Refresh : LibraryEvent
+    data object RefreshAlbum : LibraryEvent
     data object BeginImport : LibraryEvent
     data object BeginFiles : LibraryEvent
     data object BeginCapture : LibraryEvent

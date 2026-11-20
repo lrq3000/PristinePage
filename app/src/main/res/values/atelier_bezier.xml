@@ -1,0 +1,25 @@
+<resources>
+    <string name="atelier_bezier_mode">Bézier</string>
+    <string name="atelier_bezier_controls">Edit the cubic frame</string>
+    <string name="atelier_bezier_segment">Segment %1$d of %2$d</string>
+    <string name="atelier_bezier_previous">Previous segment</string>
+    <string name="atelier_bezier_next">Next segment</string>
+    <string name="atelier_bezier_start_node">Start point</string>
+    <string name="atelier_bezier_end_node">End point</string>
+    <string name="atelier_bezier_start_handle">Start handle</string>
+    <string name="atelier_bezier_end_handle">End handle</string>
+    <string name="atelier_bezier_side_top">Top edge</string>
+    <string name="atelier_bezier_side_right">Right edge</string>
+    <string name="atelier_bezier_side_bottom">Bottom edge</string>
+    <string name="atelier_bezier_side_left">Left edge</string>
+    <string name="atelier_bezier_position">Position: %1$.1f%% from the left, %2$.1f%% from the top</string>
+    <string name="atelier_bezier_left">Move left</string>
+    <string name="atelier_bezier_right">Move right</string>
+    <string name="atelier_bezier_up">Move up</string>
+    <string name="atelier_bezier_down">Move down</string>
+    <string name="atelier_bezier_insert">Add point</string>
+    <string name="atelier_bezier_remove">Remove point</string>
+    <string name="atelier_bezier_replace">Replace the cubic frame?</string>
+    <string name="atelier_bezier_replace_body">This removes its points and handles. Undo restores the entire frame.</string>
+    <string name="atelier_bezier_replace_confirm">Replace frame</string>
+</resources>
