@@ -46,11 +46,16 @@ class LibraryEditorJourneyTest {
         assertEquals(second.pageId,host.session.value!!.state.value.page!!.pageId)
         compose.onNodeWithTag("editor-tool-rotate").performClick()
         compose.onNodeWithTag("editor-rotate").performScrollTo().performClick()
-        compose.onNodeWithTag("editor-apply").performClick()
-        compose.waitUntil(10_000) { host.session.value == null && !library.state.value.loading }
-        compose.onNodeWithTag("original-page-${second.pageId.value}").assertIsSelected().performClick()
-        compose.waitUntil(10_000) { host.session.value?.state?.value?.page?.recipeRevision == 2L }
         val session = checkNotNull(host.session.value)
+        compose.onNodeWithTag("editor-apply").performClick()
+        compose.waitUntil(10_000) { session.state.value.page?.recipeRevision == 2L && !session.state.value.dirty }
+        assertSame(session, host.session.value)
+        compose.onNodeWithTag("editor-rotate").assertDoesNotExist()
+        compose.onNodeWithTag("editor-tool-rotate").assertIsNotSelected()
+        compose.onNodeWithTag("editor-tool-rotate").performClick()
+        compose.onNodeWithTag("editor-apply").assertIsEnabled().performClick()
+        compose.onNodeWithTag("editor-rotate").assertDoesNotExist()
+        assertEquals(2L, graph.store.editablePages.load(doc, second.pageId).recipeRevision)
         val accepted = checkNotNull(session.state.value.draft)
         val paper = accepted.copy(appearance = AppearanceRecipe.PaperGainV1())
         compose.onNodeWithTag("editor-tool-looks").performClick()

@@ -41,7 +41,6 @@ import app.pristinepage.library.errorText
 
 /** A view of one retained session, not a second processing/store owner. The viewport is finite even inside a scroll container and never derives an unbounded height from a narrow source aspect. */
 class PageEditorScreen(
-    private val leaveAfterApply: Boolean = false,
     private val originalOnLoadFailure: (@Composable () -> Unit)? = null,
     private val loadOriginal: (suspend (String) -> OriginalPreviewBitmap)? = null,
     private val guidedStep: Int? = null,
@@ -55,6 +54,7 @@ class PageEditorScreen(
         val state by session.state.collectAsStateWithLifecycle()
         val preview by session.preview.collectAsStateWithLifecycle()
         var chosenPanel by rememberSaveable { mutableStateOf("") }
+        var applyRevision by rememberSaveable { mutableStateOf<Long?>(null) }
         val panel = when (guidedStep) { 0 -> "shape"; 1 -> "rotate"; 2 -> "looks"; else -> chosenPanel }
         var information by rememberSaveable { mutableStateOf(false) }
         val lifecycle = LocalLifecycleOwner.current.lifecycle
@@ -67,6 +67,15 @@ class PageEditorScreen(
             onDispose { lifecycle.removeObserver(observer); session.setActive(false) }
         }
         LaunchedEffect(session, state.exitReady) { if (state.exitReady) exit() }
+        LaunchedEffect(session, applyRevision, state.page?.recipeRevision, state.error, state.saving, state.dirty) {
+            val submitted = applyRevision ?: return@LaunchedEffect
+            if (state.saving) return@LaunchedEffect
+            if (state.error != null) applyRevision = null
+            else if (!state.dirty && (state.page?.recipeRevision ?: 0L) > submitted) {
+                chosenPanel = ""
+                applyRevision = null
+            }
+        }
         BackHandler(enabled = guidedStep == null && !state.exitReady) { session.requestBack() }
         val editable = state.page != null && !state.loading && !state.saving && !state.exitReady && !guidedBusy
         var seedAttempted by rememberSaveable(state.page?.pageId?.value) { mutableStateOf(false) }
@@ -84,24 +93,8 @@ class PageEditorScreen(
             EditorView.GEOMETRY_INPUT -> R.string.editor_view_input
             EditorView.ORIGINAL -> R.string.editor_view_original
         }
-        Column(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background).safeDrawingPadding()) {
-            Row(Modifier.fillMaxWidth().padding(horizontal = 10.dp), verticalAlignment = Alignment.CenterVertically) {
-                if (guidedStep == null) TextButton(onClick = session::requestBack, enabled = !state.saving,
-                    modifier = Modifier.heightIn(min = 48.dp).testTag("editor-back")) { Text(stringResource(R.string.atelier_back_to_album)) }
-                Text(stringResource(R.string.editor_heading), Modifier.weight(1f), style = MaterialTheme.typography.titleMedium)
-                Button(onClick = { if (leaveAfterApply) session.applyAndBack() else session.apply() },
-                    enabled = editable && (!shapeBlocksApply && (state.dirty || leaveAfterApply)),
-                    modifier = Modifier.heightIn(min = 48.dp).testTag("editor-apply")) { Text(stringResource(R.string.editor_apply)) }
-            }
-            Column(Modifier.weight(1f).fillMaxWidth().verticalScroll(rememberScrollState()).padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            if (state.loading) CircularProgressIndicator()
-            state.error?.let {
-                Text(errorText(it.code), color = MaterialTheme.colorScheme.error)
-                if (state.page == null) Button(onClick = session::retryLoad, modifier = control("editor-retry-load")) { Text(stringResource(R.string.editor_retry_load)) }
-            }
-            // Loading the original is independent of recipe decoding. Unsupported recipes must not make an authentic page unreadable.
-            if (state.page == null && state.error != null) originalOnLoadFailure?.invoke()
-            val selectedLook = state.draft?.matchingLook()
+        val selectedLook = state.draft?.matchingLook()
+        val displayPreview: @Composable (Modifier) -> Unit = { height ->
             val requestedLabel = if (state.view == EditorView.RESULT && selectedLook != null) {
                 stringResource(R.string.editor_requested_look, stringResource(selectedLook.label))
             } else {
@@ -117,8 +110,7 @@ class PageEditorScreen(
                     }
                 }) { change, delta -> change.consume(); distance += delta }
             } else Modifier
-            Box(Modifier.fillMaxWidth().heightIn(min = 220.dp, max = 440.dp)
-                .height((androidx.compose.ui.platform.LocalConfiguration.current.screenHeightDp * .51f).dp)
+            Box(Modifier.fillMaxWidth().then(height)
                 .clip(RoundedCornerShape(AtelierStyle.surfaceRadius)).background(AtelierStyle.canvas)
                 .then(galleryGesture).testTag("editor-viewport"),
                 contentAlignment = Alignment.Center) {
@@ -160,6 +152,50 @@ class PageEditorScreen(
                         }
                     }
                 }
+            }
+        }
+        val history: @Composable () -> Unit = {
+            if (state.page != null && (panel == "shape" || state.canUndo || state.canRedo || state.dirty)) {
+                Row(Modifier.fillMaxWidth().testTag("editor-history"),
+                    horizontalArrangement = Arrangement.Center, verticalAlignment = Alignment.CenterVertically) {
+                    HistoryButton("editor-undo", R.drawable.ic_carnet_undo, R.string.editor_undo, editable && state.canUndo, session::undo)
+                    HistoryButton("editor-redo", R.drawable.ic_carnet_redo, R.string.editor_redo, editable && state.canRedo, session::redo)
+                    HistoryButton("editor-discard", R.drawable.ic_carnet_discard, R.string.editor_discard, editable && state.dirty, session::discard)
+                }
+            }
+        }
+        Column(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background).safeDrawingPadding()) {
+            Row(Modifier.fillMaxWidth().padding(horizontal = 10.dp), verticalAlignment = Alignment.CenterVertically) {
+                if (guidedStep == null) TextButton(onClick = session::requestBack, enabled = !state.saving,
+                    modifier = Modifier.heightIn(min = 48.dp).testTag("editor-back")) { Text(stringResource(R.string.atelier_back_to_album)) }
+                Text(stringResource(R.string.editor_heading), Modifier.weight(1f), style = MaterialTheme.typography.titleMedium)
+                Button(onClick = {
+                    if (state.dirty) {
+                        if (guidedStep == null) applyRevision = state.page?.recipeRevision
+                        session.apply()
+                    } else chosenPanel = ""
+                }, enabled = editable && !shapeBlocksApply && (state.dirty || (guidedStep == null && panel.isNotEmpty())),
+                    modifier = Modifier.heightIn(min = 48.dp).testTag("editor-apply")) { Text(stringResource(R.string.editor_apply)) }
+            }
+            val screenHeight = androidx.compose.ui.platform.LocalConfiguration.current.screenHeightDp
+            if (panel == "shape") {
+                // Pin the result and its history row, leaving the source canvas and advanced controls independently scrollable.
+                Column(Modifier.fillMaxWidth().padding(horizontal = 12.dp)) {
+                    displayPreview(Modifier.height((screenHeight * .25f).coerceIn(88f, 220f).dp))
+                    history()
+                }
+            }
+            Column(Modifier.weight(1f).fillMaxWidth().verticalScroll(rememberScrollState()).padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            if (state.loading) CircularProgressIndicator()
+            state.error?.let {
+                Text(errorText(it.code), color = MaterialTheme.colorScheme.error)
+                if (state.page == null) Button(onClick = session::retryLoad, modifier = control("editor-retry-load")) { Text(stringResource(R.string.editor_retry_load)) }
+            }
+            // Loading the original is independent of recipe decoding. Unsupported recipes must not make an authentic page unreadable.
+            if (state.page == null && state.error != null) originalOnLoadFailure?.invoke()
+            if (panel != "shape") {
+                displayPreview(Modifier.height((screenHeight * .51f).coerceIn(220f, 440f).dp))
+                history()
             }
             if (panel == "shape") state.draft?.let {
                 if (seedFeedback) Text(stringResource(R.string.atelier_frame_no_edges))
@@ -240,13 +276,6 @@ class PageEditorScreen(
                     }
                 }
             }
-            if (state.canUndo || state.canRedo || state.dirty) {
-                Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                    TextButton(onClick = session::undo, enabled = editable && state.canUndo, modifier = Modifier.heightIn(min = 48.dp).testTag("editor-undo")) { Text(stringResource(R.string.editor_undo)) }
-                    TextButton(onClick = session::redo, enabled = editable && state.canRedo, modifier = Modifier.heightIn(min = 48.dp).testTag("editor-redo")) { Text(stringResource(R.string.editor_redo)) }
-                    TextButton(onClick = session::discard, enabled = editable && state.dirty, modifier = Modifier.heightIn(min = 48.dp).testTag("editor-discard")) { Text(stringResource(R.string.editor_discard)) }
-                }
-            }
             }
             if (guidedStep == null) {
             HorizontalDivider(color = AtelierStyle.divider)
@@ -306,6 +335,12 @@ class PageEditorScreen(
     }
 
     private fun control(tag: String) = Modifier.fillMaxWidth().heightIn(min = 48.dp).testTag(tag)
+}
+
+@Composable private fun HistoryButton(tag: String, icon: Int, label: Int, enabled: Boolean, action: () -> Unit) {
+    IconButton(onClick = action, enabled = enabled, modifier = Modifier.size(48.dp).testTag(tag)) {
+        Icon(painterResource(icon), stringResource(label))
+    }
 }
 
 private fun executedLabel(id: String): Int? = when (id) {

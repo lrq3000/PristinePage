@@ -126,6 +126,9 @@ class P06ImportJourneyTest {
             compose.onNodeWithTag("editor-tool-rotate").performClick()
             compose.onNodeWithTag("editor-rotate").performScrollTo().performClick()
             compose.onNodeWithTag("editor-apply").performClick()
+            compose.waitUntil(10_000) { editor.session.value?.state?.value?.page?.recipeRevision == 2L }
+            compose.onNodeWithTag("editor-tool-rotate").assertIsNotSelected()
+            compose.onNodeWithTag("editor-back").performClick()
             compose.waitUntil(10_000) { editor.session.value == null && !library.state.value.loading }
             compose.onNodeWithTag("original-page-${pages[1].pageId.value}").assertIsSelected().performClick()
             compose.waitUntil(10_000) { editor.session.value?.preview?.value?.display != null }

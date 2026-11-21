@@ -57,6 +57,12 @@ Runtime reentry requires exact current-artifact and named-instance approval and 
 
 T-11 follow-up `CARNET-PDF-01` starts from the earlier corrective APK source checkpoint, using the frozen-page renderer, named artifact and publication boundaries already described above. [PDF backend assessment and evidence](../export/carnet-pdf-backend-evaluation.md) tracks the native writer's preparation, independent review and remaining measurement gate. This does not change the delivered APK, the accepted plan or the product PDF gate.
 
+## Follow-up from the operator's APK test — CARNET-CROP-FEEDBACK-02
+
+Keep the existing crop magnifier, including its automatic top-left/top-right placement, unchanged. The operator requested pinned icon-only Undo, Redo and Discard directly under the result while editing the crop, and a successful header Apply on a saved page to close only the active tool, not return to the album. This supersedes the old reopened-page header Apply exit described in Atelier; explicit Back (including its dirty confirmation) and new-album wizard behavior retain their distinct semantics. The editor still uses the same revision-checked save; no-op Apply collapses an open tool without writing. A save failure leaves it open.
+
+The same feedback requests left/right Manual curve midpoints and reports a Bézier refusal not tied to supplied contour coordinates. These remain separate geometry work from this UI increment. A strict offline `:app:testDebugUnitTest :app:compileDebugAndroidTestKotlin :app:lintDebug` completed in 1m20s, with 159 app JVM cases and lint 0 errors, 21 warnings and 1 hint. Updated native witnesses cover history visibility during scrolling, staying on the same page after Apply, a clean no-write tool collapse, and explicit Back/reopen. They were compiled only; no APK, emulator or phone operation followed.
+
 ## Independent review dispositions
 
 The original source review identified two consequential defects and one future export naming issue. It found no defect in the outward-rounded subdivision, mutex cancellation ownership, gallery dirty-state guard or initial batch-selection scope. The original review did not run Android or test the modified source itself.

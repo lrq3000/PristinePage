@@ -206,7 +206,7 @@ class MainActivity : ComponentActivity() {
                         }
                     }
                 }
-                if (selected != null) key(identity) { PageEditorScreen(leaveAfterApply = true, loadOriginal = loadOriginal,
+                if (selected != null) key(identity) { PageEditorScreen(loadOriginal = loadOriginal,
                     pageNumber = fallback?.ordinal?.plus(1), albumPageCount = orderedPages.size,
                     previousPage = destination(-1), nextPage = destination(1), originalOnLoadFailure = {
                     if (fallback != null) key(fallback) {

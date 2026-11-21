@@ -81,6 +81,13 @@ class EditorShapeScreenTest {
 
         val stable = session.state.value.draft
         val canvas = compose.onNodeWithTag("atelier-frame-canvas").performScrollTo()
+        val history = compose.onNodeWithTag("editor-history")
+        history.assertIsDisplayed()
+        compose.onNodeWithTag("editor-undo").assertContentDescriptionEquals("Undo draft change")
+        compose.onNodeWithTag("editor-redo").assertContentDescriptionEquals("Redo draft change")
+        compose.onNodeWithTag("editor-discard").assertContentDescriptionEquals("Discard draft")
+        assertTrue(history.getUnclippedBoundsInRoot().bottom <= canvas.getUnclippedBoundsInRoot().top)
+        val historyBounds = history.getUnclippedBoundsInRoot()
         val bounds = canvas.getUnclippedBoundsInRoot()
         try {
             canvas.performTouchInput {
@@ -102,6 +109,9 @@ class EditorShapeScreenTest {
         assertEquals(stable, session.state.value.draft)
 
         val beforeDrag = session.state.value.draft
+        compose.onNodeWithTag("editor-shape-x").performScrollTo()
+        history.assertIsDisplayed()
+        assertEquals(historyBounds, history.getUnclippedBoundsInRoot())
         compose.onNodeWithTag("editor-shape-x").performScrollTo().performTouchInput {
             fun point(fraction: Float) = Offset(width * fraction, center.y)
             down(point(.2f))
@@ -205,6 +215,10 @@ class EditorShapeScreenTest {
         val cubic = checkNotNull(reopened.state.value.draft)
         assertEquals(.05, (cubic.geometry as GeometryRecipe.Bezier).contour.edge(ContourSide.TOP).segments.first().outgoing.y, 1e-12)
         compose.onNodeWithTag("editor-apply").assertIsEnabled().performClick()
+        compose.waitUntil(10_000) { reopened.state.value.page?.recipeRevision == 3L && !reopened.state.value.dirty }
+        assertSame(reopened, host.session.value)
+        compose.onNodeWithTag("atelier-frame-canvas").assertDoesNotExist()
+        compose.onNodeWithTag("editor-back").performClick()
         compose.waitUntil(10_000) { host.session.value == null && !library.state.value.loading }
         compose.onNodeWithTag("original-page-${second.pageId.value}").performClick()
         compose.waitUntil(10_000) { host.session.value?.state?.value?.page?.recipeRevision == 3L }
@@ -215,7 +229,11 @@ class EditorShapeScreenTest {
         assertArrayEquals(png, graph.store.committedSources.load(second.sourceId).file.readBytes())
     }
 
-    private fun click(tag: String) { compose.onNodeWithTag(tag).performScrollTo().performClick() }
+    private fun click(tag: String) {
+        val node = compose.onNodeWithTag(tag)
+        if (tag !in setOf("editor-undo", "editor-redo", "editor-discard", "editor-back")) node.performScrollTo()
+        node.performClick()
+    }
 
     private fun selectPoint(label: String) {
         click("editor-shape-point")
@@ -271,7 +289,7 @@ class EditorShapeScreenTest {
 
     private fun assertRefused(session: EditorSession, failure: RenderStatus) {
         compose.waitUntil(10_000) { session.preview.value.failure == failure && session.preview.value.previous }
-        compose.onNodeWithTag("editor-previous").performScrollTo().assertIsDisplayed()
+        compose.onNodeWithTag("editor-previous").assertIsDisplayed()
         compose.onNodeWithTag("editor-apply").assertIsNotEnabled()
         click("editor-back")
         compose.onNodeWithTag("editor-apply-exit").assertIsNotEnabled()
