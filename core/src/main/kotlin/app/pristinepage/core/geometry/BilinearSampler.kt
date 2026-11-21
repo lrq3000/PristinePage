@@ -25,16 +25,19 @@ object BilinearSampler {
         constantBorder(size.width, size.height, x, y, 0.0) { _, _ -> 1.0 }
 
     /** x/y are already half-pixel-resize source coordinates, not destination indices. Clamp each neighbor rather than importing geometry's white border. */
-    @JvmStatic fun resizedRgb(source: RgbImage, x: Double, y: Double, channel: Int): Int {
+    @JvmStatic fun resizedRgb(source: RgbImage, x: Double, y: Double, channel: Int): Int =
+        Numeric.roundByte(resizedRgbSample(source, x, y, channel))
+
+    // Detector tensors keep the fractional sample until normalization; classical RGB8 still rounds exactly as before.
+    internal fun resizedRgbSample(source: RgbImage, x: Double, y: Double, channel: Int): Double {
         require(channel in 0..2) { "RGB channel must be in0..2" }
         requireFinite(x, y)
         // Beyond this interval both neighbors clamp to the same edge; bounding before floor also handles finite coordinates too large for an integer.
         val boundedX = x.coerceIn(-1.0, source.width.toDouble())
         val boundedY = y.coerceIn(-1.0, source.height.toDouble())
-        val value = interpolate(boundedX, boundedY) { ix, iy ->
+        return interpolate(boundedX, boundedY) { ix, iy ->
             source.getUnsigned(ix.coerceIn(0L, source.width.toLong() - 1).toInt(), iy.coerceIn(0L, source.height.toLong() - 1).toInt(), channel).toDouble()
         }
-        return Numeric.roundByte(value)
     }
 
     private fun requireFinite(x: Double, y: Double) { require(x.isFinite() && y.isFinite()) { "Sampling coordinates must be finite" } }
