@@ -1,0 +1,32 @@
+<resources>
+    <string name="album_export_title">Export album</string>
+    <string name="album_export_selected">Export selected</string>
+    <string name="album_export_count">Pages to export: %1$d</string>
+    <string name="album_export_jpeg">JPEG image</string>
+    <string name="album_export_zip">Image ZIP</string>
+    <string name="album_export_pdf">PDF</string>
+    <string name="album_export_generate">Create export</string>
+    <string name="album_export_save_as">Save as</string>
+    <string name="album_export_share">Share</string>
+    <string name="album_export_stop_sharing">Stop sharing</string>
+    <string name="album_export_resolution">Image size</string>
+    <string name="album_size_normal">Standard</string>
+    <string name="album_size_compact">Compact</string>
+    <string name="album_size_small">Small</string>
+    <string name="album_export_quality">JPEG quality</string>
+    <string name="album_quality_maximum">Maximum</string>
+    <string name="album_quality_balanced">Balanced</string>
+    <string name="album_quality_smaller_file">Smaller file</string>
+    <string name="album_export_verify_failed">The export could not be verified. No file is ready to save or share.</string>
+    <string name="album_export_page_size">Page %1$d: %2$d × %3$d px</string>
+    <string name="album_pdf_capacity">PDF export is unavailable in this build because the PDF writer’s memory limits have not been verified.</string>
+    <string name="album_export_verified">The export is ready. Save it to Files or choose an app to share it with.</string>
+    <string name="album_export_saved">The destination copy was saved and verified.</string>
+    <string name="album_export_saved_unchecked">The destination acknowledged the write. Its copy could not be read back.</string>
+    <string name="album_export_needs_verification">The destination acknowledged the write, but verification failed. Your verified private export is still available.</string>
+    <string name="album_export_partial">The destination may contain an incomplete file. Your complete private export is still available.</string>
+    <string name="album_export_chooser_failed">No app could open the requested action.</string>
+    <string name="album_export_stopped">New reads from this share are blocked. Copies already made by the recipient cannot be recalled.</string>
+    <string name="album_export_share_retention">This link is readable for up to 24 hours. The receiving app controls what it does with a copy.</string>
+    <string name="album_export_batch_unsaved">Use Done to save your changes before exporting edited pages.</string>
+</resources>

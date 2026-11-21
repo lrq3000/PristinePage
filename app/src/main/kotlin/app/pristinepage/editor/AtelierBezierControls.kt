@@ -3,7 +3,6 @@ package app.pristinepage.editor
 import androidx.compose.foundation.layout.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
-import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
@@ -15,29 +14,26 @@ import app.pristinepage.core.recipe.GeometryRecipe
 
 @OptIn(ExperimentalLayoutApi::class)
 @Composable internal fun AtelierBezierControls(geometry: GeometryRecipe.Bezier, enabled: Boolean,
-    session: EditorSession, canvas: @Composable (BezierControl) -> Unit) {
+    session: EditorSession, selection: BezierControl?, select: (BezierControl) -> Unit) {
     val contour = geometry.contour
-    var side by rememberSaveable { mutableStateOf(ContourSide.TOP) }
-    var segment by rememberSaveable { mutableIntStateOf(0) }
-    var part by rememberSaveable { mutableStateOf(BezierPart.OUTGOING) }
+    val side = selection?.side ?: ContourSide.TOP
     val edge = contour.edge(side)
-    val index = segment.coerceIn(edge.segments.indices)
+    val index = (selection?.segment ?: 0).coerceIn(edge.segments.indices)
     val parts = BezierPart.entries.filter { BezierControl(side, index, it).read(contour) != null }
-    val control = BezierControl(side, index, part.takeIf { it in parts } ?: BezierPart.OUTGOING)
+    val control = BezierControl(side, index, selection?.part?.takeIf { it in parts } ?: BezierPart.OUTGOING)
     val selected = checkNotNull(control.read(contour))
-    canvas(control)
     Text(stringResource(R.string.atelier_bezier_controls), style = MaterialTheme.typography.titleMedium)
     FlowRow(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-        for (option in ContourSide.entries) FilterChip(side == option, { side = option; segment = 0 },
+        for (option in ContourSide.entries) FilterChip(side == option, { select(control.copy(side = option, segment = 0)) },
             { Text(stringResource(option.label())) }, enabled = enabled, modifier = Modifier.heightIn(min = 48.dp))
     }
     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-        TextButton({ segment = index - 1 }, enabled = enabled && index > 0) { Text(stringResource(R.string.atelier_bezier_previous)) }
-        TextButton({ segment = index + 1 }, enabled = enabled && index < edge.segments.lastIndex) { Text(stringResource(R.string.atelier_bezier_next)) }
+        TextButton({ select(control.copy(segment = index - 1)) }, enabled = enabled && index > 0) { Text(stringResource(R.string.atelier_bezier_previous)) }
+        TextButton({ select(control.copy(segment = index + 1)) }, enabled = enabled && index < edge.segments.lastIndex) { Text(stringResource(R.string.atelier_bezier_next)) }
     }
     Text(stringResource(R.string.atelier_bezier_segment, index + 1, edge.segments.size))
     FlowRow(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-        for (option in parts) FilterChip(control.part == option, { part = option },
+        for (option in parts) FilterChip(control.part == option, { select(control.copy(part = option)) },
             { Text(stringResource(option.label())) }, enabled = enabled, modifier = Modifier.heightIn(min = 48.dp))
     }
     Text(stringResource(R.string.atelier_bezier_position, selected.x * 100, selected.y * 100))
@@ -53,15 +49,15 @@ import app.pristinepage.core.recipe.GeometryRecipe
         TextButton({ nudge(0, 1) }, enabled = enabled, modifier = Modifier.testTag("atelier-bezier-down")) { Text(stringResource(R.string.atelier_bezier_down)) }
     }
     val piece = edge.segments[index]
-    val node = control.nodeIndex
+    val node = control.removableNode(contour)
     FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
         OutlinedButton({
             session.insertBezier(side, index)
-            part = BezierPart.END
+            select(control.copy(part = BezierPart.END))
         }, enabled = enabled && edge.segments.size < 8 && piece.to - piece.from >= 2e-5,
             modifier = Modifier.testTag("atelier-bezier-insert")) { Text(stringResource(R.string.atelier_bezier_insert)) }
         OutlinedButton({
-            if (node != null) { session.removeBezier(side, node); segment = node - 1; part = BezierPart.OUTGOING }
+            if (node != null) { session.removeBezier(side, node); select(control.copy(segment = node - 1, part = BezierPart.OUTGOING)) }
         }, enabled = enabled && node != null, modifier = Modifier.testTag("atelier-bezier-remove")) {
             Text(stringResource(R.string.atelier_bezier_remove))
         }

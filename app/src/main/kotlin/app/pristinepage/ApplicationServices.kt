@@ -5,6 +5,7 @@ import android.content.Context
 import android.net.Uri
 import app.pristinepage.capture.PhotoImportController
 import app.pristinepage.data.model.RecoveryReport
+import app.pristinepage.data.files.SourceInspector
 import app.pristinepage.data.repository.PrivateImportStore
 import app.pristinepage.data.repository.SourceInput
 import app.pristinepage.data.repository.ImportInitializationCleanup
@@ -16,6 +17,9 @@ import app.pristinepage.image.render.DefaultRenderCoordinator
 import app.pristinepage.image.render.GeometryEngine
 import app.pristinepage.image.render.AppearanceEngine
 import app.pristinepage.image.render.ClassicalRecipeAdmission
+import app.pristinepage.image.preview.OriginalPreviewBitmap
+import app.pristinepage.image.preview.OriginalPreviewBitmapLoader
+import app.pristinepage.image.preview.OriginalPreviewLoader
 import java.io.FileNotFoundException
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
@@ -42,11 +46,15 @@ class ApplicationServices(context: Context, private val budget: ImageAllocationB
     suspend fun imports(): ApplicationImports = initialization.withLock {
         initialized ?: run {
             val normalizer = AndroidSourceInspector(budget)
-            val store = PrivateImportStore.open(context, provider, normalizer, ClassicalRecipeAdmission())
+            val decodeQueue = Mutex()
+            // Scope the queue to normalization, not a provider read or the surrounding ingest transaction.
+            val ingress = SourceInspector { file, hash -> decodeQueue.withLock { normalizer.inspect(file, hash) } }
+            val store = PrivateImportStore.open(context, provider, ingress, ClassicalRecipeAdmission())
             try {
                 val report = store.documents.reconcile()
                 currentCoroutineContext().ensureActive()
-                ApplicationImports(store, PhotoImportController(store.selections, store.sources), SourceDecoder(store.committedSources, normalizer), budget, report).also { initialized = it }
+                ApplicationImports(store, PhotoImportController(store.selections, store.sources), SourceDecoder(store.committedSources, normalizer), budget, report, decodeQueue)
+                    .also { initialized = it }
             } catch (failure: Throwable) {
                 ImportInitializationCleanup.close(store)
                 throw failure
@@ -56,7 +64,12 @@ class ApplicationServices(context: Context, private val budget: ImageAllocationB
 }
 
 /** One identity/lifetime for foreground import and later source consumption. Reports describe implemented recovery domains only; a blocked report is not successful provider resumption or all-domain integrity proof. */
-class ApplicationImports internal constructor(val store: PrivateImportStore, val photoImports: PhotoImportController, val decoder: SourceDecoder, val budget: ImageAllocationBudget, val startupRecovery: RecoveryReport) {
+class ApplicationImports internal constructor(val store: PrivateImportStore, val photoImports: PhotoImportController, val decoder: SourceDecoder, val budget: ImageAllocationBudget, val startupRecovery: RecoveryReport, private val decodeQueue: Mutex = Mutex()) {
+    private val originals = OriginalPreviewBitmapLoader(OriginalPreviewLoader(store.committedSources, decoder, budget), budget)
     /** One queue per initialized Application graph, sharing the SAME decoded/intermediate/retained-output allowance. A val, not a factory/getter: Activity/editor consumers must not create independent processing slots or budgets. Construction opens no files and starts no work. */
-    val renderer: RenderCoordinator = DefaultRenderCoordinator(decoder, GeometryEngine(budget), AppearanceEngine(budget))
+    val renderer: RenderCoordinator = DefaultRenderCoordinator(decoder, GeometryEngine(budget), AppearanceEngine(budget), queue = decodeQueue)
+
+    /** Source overlays and recipe results can be requested together, but cannot both hold a full-source decode. */
+    internal suspend fun originalPreview(sourceId: String, longEdge: Int = 1024): OriginalPreviewBitmap =
+        decodeQueue.withLock { originals.load(sourceId, longEdge) }
 }

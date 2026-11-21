@@ -18,6 +18,7 @@ object ExportSettingsCodec {
     private const val MAX_BYTES = 524288
     private const val MAX_TEXT_BYTES = 512
     private val tag = "pristinepage-export-settings-v1\u0000".toByteArray(Charsets.UTF_8)
+    private val namedTag = "pristinepage-export-settings-v2\u0000".toByteArray(Charsets.UTF_8)
 
     fun encode(settings: ExportSettings): ByteArray {
         val bytes = ByteArrayOutputStream()
@@ -28,7 +29,7 @@ object ExportSettingsCodec {
                 val owned = ByteArray(encoded.remaining()); encoded.get(owned)
                 output.writeInt(owned.size); output.write(owned)
             }
-            output.write(tag); text(settings.format.name); output.writeInt(settings.pages.size)
+            output.write(if (settings.albumScope == null) tag else namedTag); text(settings.format.name); output.writeInt(settings.pages.size)
             for (page in settings.pages) {
                 text(page.pageId.value)
                 output.writeInt(page.requestedOutput.size.width); output.writeInt(page.requestedOutput.size.height)
@@ -53,6 +54,10 @@ object ExportSettingsCodec {
                 text(execution.pageId.value); output.writeLong(execution.recipeRevision); text(execution.executionHash); text(execution.renderId.value)
                 output.writeInt(execution.actualSize.width); output.writeInt(execution.actualSize.height); text(execution.rasterPixelHash)
             }
+            settings.albumScope?.let { album ->
+                text(album.title)
+                album.positions.forEach(output::writeInt)
+            }
         }
         require(bytes.size() <= MAX_BYTES)
         return bytes.toByteArray()
@@ -62,7 +67,9 @@ object ExportSettingsCodec {
         require(bytes.isNotEmpty() && bytes.size <= MAX_BYTES)
         try {
             DataInputStream(ByteArrayInputStream(bytes)).use { input ->
-                val header = ByteArray(tag.size); input.readFully(header); require(header.contentEquals(tag))
+                val header = ByteArray(tag.size); input.readFully(header)
+                val named = header.contentEquals(namedTag)
+                require(named || header.contentEquals(tag))
                 val reader = Reader(input)
                 val format = reader.enum<ExportFormat>()
                 val pages = List(reader.count(1)) {
@@ -76,8 +83,9 @@ object ExportSettingsCodec {
                 val accepted = List(reader.count(0)) {
                     AcceptedExecution(PageId(reader.text()), input.readLong(), reader.text(), RenderId(reader.text()), PixelSize(input.readInt(), input.readInt()), reader.text())
                 }
+                val album = if (named) AlbumExportScope(reader.text(), List(pages.size) { input.readInt() }) else null
                 require(input.available() == 0)
-                return ExportSettings(format, pages, pdf, jpeg, accepted)
+                return ExportSettings(format, pages, pdf, jpeg, accepted, album)
             }
         } catch (failure: Exception) { throw IllegalArgumentException("Unsupported or invalid export settings", failure) }
     }

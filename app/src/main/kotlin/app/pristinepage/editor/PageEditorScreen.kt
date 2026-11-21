@@ -3,6 +3,7 @@ package app.pristinepage.editor
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
+import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
@@ -15,11 +16,14 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.LiveRegionMode
 import androidx.compose.ui.semantics.clearAndSetSemantics
+import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.liveRegion
 import androidx.compose.ui.semantics.selected
 import androidx.compose.ui.semantics.semantics
@@ -37,17 +41,20 @@ import app.pristinepage.library.errorText
 
 /** A view of one retained session, not a second processing/store owner. The viewport is finite even inside a scroll container and never derives an unbounded height from a narrow source aspect. */
 class PageEditorScreen(
-    private val leaveAfterApply: Boolean = false,
     private val originalOnLoadFailure: (@Composable () -> Unit)? = null,
     private val loadOriginal: (suspend (String) -> OriginalPreviewBitmap)? = null,
     private val guidedStep: Int? = null,
     private val guidedBusy: Boolean = false,
     private val pageNumber: Int? = null,
+    private val albumPageCount: Int? = null,
+    private val previousPage: (() -> Unit)? = null,
+    private val nextPage: (() -> Unit)? = null,
 ) : EditorContent {
     @Composable override fun Content(session: EditorSession, onExit: () -> Unit) {
         val state by session.state.collectAsStateWithLifecycle()
         val preview by session.preview.collectAsStateWithLifecycle()
         var chosenPanel by rememberSaveable { mutableStateOf("") }
+        var applyRevision by rememberSaveable { mutableStateOf<Long?>(null) }
         val panel = when (guidedStep) { 0 -> "shape"; 1 -> "rotate"; 2 -> "looks"; else -> chosenPanel }
         var information by rememberSaveable { mutableStateOf(false) }
         val lifecycle = LocalLifecycleOwner.current.lifecycle
@@ -60,28 +67,24 @@ class PageEditorScreen(
             onDispose { lifecycle.removeObserver(observer); session.setActive(false) }
         }
         LaunchedEffect(session, state.exitReady) { if (state.exitReady) exit() }
+        LaunchedEffect(session, applyRevision, state.page?.recipeRevision, state.error, state.saving, state.dirty) {
+            val submitted = applyRevision ?: return@LaunchedEffect
+            if (state.saving) return@LaunchedEffect
+            if (state.error != null) applyRevision = null
+            else if (!state.dirty && (state.page?.recipeRevision ?: 0L) > submitted) {
+                chosenPanel = ""
+                applyRevision = null
+            }
+        }
         BackHandler(enabled = guidedStep == null && !state.exitReady) { session.requestBack() }
         val editable = state.page != null && !state.loading && !state.saving && !state.exitReady && !guidedBusy
-        var seedAttempted by rememberSaveable { mutableStateOf(false) }
-        var seedFeedback by rememberSaveable { mutableStateOf(false) }
-        val guidePage = state.page
-        LaunchedEffect(session, guidedStep, guidePage?.pageId) {
-            val current = guidePage ?: return@LaunchedEffect
-            val loader = loadOriginal ?: return@LaunchedEffect
-            if (guidedStep != 0 || seedAttempted || current.recipeRevision != 1L || current.recipe.geometry !is GeometryRecipe.None) return@LaunchedEffect
-            val expectedGeometry = current.recipe.geometry
-            try {
-                val quad = loader(current.sourceId.value).use { detectAtelierFrame(it.bitmap) }
-                if (session.state.value.draft?.geometry != expectedGeometry) return@LaunchedEffect
-                if (quad != null) {
-                    session.selectPerspective()
-                    val frame = session.state.value.draft?.geometry
-                    if (frame != null && !session.useDetectedFrame(frame, quad)) { session.discard(); seedFeedback = true }
-                } else seedFeedback = true
-                seedAttempted = true
-            } catch (canceled: kotlinx.coroutines.CancellationException) { throw canceled }
-            catch (_: Exception) { seedAttempted = true; seedFeedback = true }
-        }
+        var seedAttempted by rememberSaveable(state.page?.pageId?.value) { mutableStateOf(false) }
+        var seedFeedback by rememberSaveable(state.page?.pageId?.value) { mutableStateOf(false) }
+        var bezierSelection by remember(session) { mutableStateOf<BezierControl?>(null) }
+        var placeBezierPoint by remember(session, panel, state.draft?.geometry is GeometryRecipe.Bezier) { mutableStateOf(false) }
+        val mayBrowse = editable && !state.dirty && !state.confirmExit && panel.isEmpty() && !information
+        val swipePrevious by rememberUpdatedState(previousPage)
+        val swipeNext by rememberUpdatedState(nextPage)
         val shapeBlocksApply = state.shapeBlocksApply(preview)
         val expected = state.draft?.let { EditorViews.recipe(it,state.view) }
         val showingCurrent = !preview.previous && preview.view == state.view && preview.display?.request == preview.request && preview.display?.request?.recipe == expected
@@ -90,14 +93,100 @@ class PageEditorScreen(
             EditorView.GEOMETRY_INPUT -> R.string.editor_view_input
             EditorView.ORIGINAL -> R.string.editor_view_original
         }
-        Column(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background).safeDrawingPadding()) {
+        val selectedLook = state.draft?.matchingLook()
+        val displayPreview: @Composable (Modifier) -> Unit = { height ->
+            val requestedLabel = if (state.view == EditorView.RESULT && selectedLook != null) {
+                stringResource(R.string.editor_requested_look, stringResource(selectedLook.label))
+            } else {
+                stringResource(R.string.editor_requested_view, stringResource(viewLabel))
+            }
+            Text(requestedLabel)
+            val galleryGesture = if (mayBrowse && (previousPage != null || nextPage != null)) Modifier.pointerInput(session) {
+                var distance = 0f
+                detectHorizontalDragGestures(onDragStart = { distance = 0f }, onDragEnd = {
+                    if (!session.state.value.dirty && !session.state.value.saving) {
+                        if (distance >= 56.dp.toPx()) swipePrevious?.invoke()
+                        if (distance <= -56.dp.toPx()) swipeNext?.invoke()
+                    }
+                }) { change, delta -> change.consume(); distance += delta }
+            } else Modifier
+            Box(Modifier.fillMaxWidth().then(height)
+                .clip(RoundedCornerShape(AtelierStyle.surfaceRadius)).background(AtelierStyle.canvas)
+                .then(galleryGesture).testTag("editor-viewport"),
+                contentAlignment = Alignment.Center) {
+                preview.display?.let { display ->
+                    val description = if (!showingCurrent) R.string.editor_previous_description else when (state.view) {
+                        EditorView.RESULT -> R.string.editor_preview_description
+                        EditorView.GEOMETRY_INPUT -> R.string.editor_input_description
+                        EditorView.ORIGINAL -> R.string.editor_original_description
+                    }
+                    Image(display.bitmap.asImageBitmap(), stringResource(description), modifier = Modifier.fillMaxSize().padding(6.dp).testTag("editor-preview"), contentScale = ContentScale.Fit)
+                }
+                if (preview.processing) {
+                    Box(Modifier.matchParentSize().background(androidx.compose.ui.graphics.Color.Black.copy(alpha = .34f)))
+                    CircularProgressIndicator(Modifier.testTag("editor-processing"))
+                }
+                if (preview.display != null && !showingCurrent) Surface(Modifier.align(Alignment.TopStart).padding(8.dp),
+                    shape = MaterialTheme.shapes.small) {
+                    Text(stringResource(R.string.editor_previous), Modifier.padding(6.dp).testTag("editor-previous"))
+                }
+                if (shapeBlocksApply && preview.failure == null) Surface(Modifier.align(Alignment.BottomStart).padding(8.dp),
+                    shape = MaterialTheme.shapes.small) {
+                    Box(Modifier.padding(6.dp)) { ShapeSaveNotice(state, preview) }
+                }
+                preview.failure?.let { status ->
+                    Surface(Modifier.align(Alignment.BottomCenter).fillMaxWidth(), color = MaterialTheme.colorScheme.errorContainer) {
+                        Column(Modifier.padding(horizontal = 8.dp)) {
+                            Text(stringResource(when (status) {
+                                RenderStatus.RESOURCE_LIMIT -> R.string.error_resource_limit
+                                RenderStatus.STORAGE_FAILED -> R.string.error_storage_failed
+                                RenderStatus.UNAVAILABLE -> R.string.error_provider_unavailable
+                                RenderStatus.INVALID_INPUT -> if (preview.request == null) R.string.editor_shape_invalid_input else R.string.error_invalid_input
+                                RenderStatus.INVALID_MAP -> R.string.editor_shape_invalid_map
+                                RenderStatus.CANCELED -> R.string.error_canceled
+                                else -> R.string.error_processing
+                            }), modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite }, color = MaterialTheme.colorScheme.onErrorContainer)
+                            TextButton(onClick = session::retryPreview, enabled = editable, modifier = control("editor-retry-preview")) {
+                                Text(stringResource(R.string.editor_retry_preview))
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        val history: @Composable () -> Unit = {
+            if (state.page != null && (panel == "shape" || state.canUndo || state.canRedo || state.dirty)) {
+                Row(Modifier.fillMaxWidth().testTag("editor-history"),
+                    horizontalArrangement = Arrangement.Center, verticalAlignment = Alignment.CenterVertically) {
+                    HistoryButton("editor-undo", R.drawable.ic_carnet_undo, R.string.editor_undo, editable && state.canUndo, session::undo)
+                    HistoryButton("editor-redo", R.drawable.ic_carnet_redo, R.string.editor_redo, editable && state.canRedo, session::redo)
+                    HistoryButton("editor-discard", R.drawable.ic_carnet_discard, R.string.editor_discard, editable && state.dirty, session::discard)
+                }
+            }
+        }
+        BoxWithConstraints(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background).safeDrawingPadding()) {
+        val pinCropHistory = panel == "shape" && maxHeight >= 440.dp
+        val cropPreview = (maxHeight * .25f).coerceIn(88.dp, 220.dp)
+        Column(Modifier.fillMaxSize()) {
             Row(Modifier.fillMaxWidth().padding(horizontal = 10.dp), verticalAlignment = Alignment.CenterVertically) {
                 if (guidedStep == null) TextButton(onClick = session::requestBack, enabled = !state.saving,
                     modifier = Modifier.heightIn(min = 48.dp).testTag("editor-back")) { Text(stringResource(R.string.atelier_back_to_album)) }
                 Text(stringResource(R.string.editor_heading), Modifier.weight(1f), style = MaterialTheme.typography.titleMedium)
-                Button(onClick = { if (leaveAfterApply) session.applyAndBack() else session.apply() },
-                    enabled = editable && (!shapeBlocksApply && (state.dirty || leaveAfterApply)),
+                Button(onClick = {
+                    if (state.dirty) {
+                        if (guidedStep == null) applyRevision = state.page?.recipeRevision
+                        session.apply()
+                    } else chosenPanel = ""
+                }, enabled = editable && !shapeBlocksApply && (state.dirty || (guidedStep == null && panel.isNotEmpty())),
                     modifier = Modifier.heightIn(min = 48.dp).testTag("editor-apply")) { Text(stringResource(R.string.editor_apply)) }
+            }
+            val screenHeight = androidx.compose.ui.platform.LocalConfiguration.current.screenHeightDp
+            if (pinCropHistory) {
+                // Pin the result and its history row, leaving the source canvas and advanced controls independently scrollable.
+                Column(Modifier.fillMaxWidth().padding(horizontal = 12.dp)) {
+                    displayPreview(Modifier.height(cropPreview))
+                    history()
+                }
             }
             Column(Modifier.weight(1f).fillMaxWidth().verticalScroll(rememberScrollState()).padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             if (state.loading) CircularProgressIndicator()
@@ -107,59 +196,65 @@ class PageEditorScreen(
             }
             // Loading the original is independent of recipe decoding. Unsupported recipes must not make an authentic page unreadable.
             if (state.page == null && state.error != null) originalOnLoadFailure?.invoke()
-            if (state.dirty) Text(stringResource(R.string.editor_unsaved), modifier = Modifier.testTag("editor-unsaved"))
-            if (state.saving) Text(stringResource(R.string.editor_saving))
-            val selectedLook = state.draft?.matchingLook()
-            val requestedLabel = if (state.view == EditorView.RESULT && selectedLook != null) {
-                stringResource(R.string.editor_requested_look, stringResource(selectedLook.label))
-            } else {
-                stringResource(R.string.editor_requested_view, stringResource(viewLabel))
-            }
-            Text(requestedLabel)
-            if (preview.display != null && !showingCurrent) Text(stringResource(R.string.editor_previous), modifier = Modifier.testTag("editor-previous"))
-            Box(Modifier.fillMaxWidth().heightIn(min = 220.dp, max = 440.dp)
-                .height((androidx.compose.ui.platform.LocalConfiguration.current.screenHeightDp * .51f).dp)
-                .clip(RoundedCornerShape(AtelierStyle.surfaceRadius)).background(AtelierStyle.canvas),
-                contentAlignment = Alignment.Center) {
-                preview.display?.let { display ->
-                val description = if (!showingCurrent) R.string.editor_previous_description else when (state.view) {
-                    EditorView.RESULT -> R.string.editor_preview_description
-                    EditorView.GEOMETRY_INPUT -> R.string.editor_input_description
-                    EditorView.ORIGINAL -> R.string.editor_original_description
-                }
-                    Image(display.bitmap.asImageBitmap(), stringResource(description), modifier = Modifier.fillMaxSize().padding(6.dp).testTag("editor-preview"), contentScale = ContentScale.Fit)
-                }
-            }
-            if (preview.processing) CircularProgressIndicator(Modifier.testTag("editor-processing"))
-            preview.failure?.let { status ->
-                Text(stringResource(when (status) {
-                    RenderStatus.RESOURCE_LIMIT -> R.string.error_resource_limit
-                    RenderStatus.STORAGE_FAILED -> R.string.error_storage_failed
-                    RenderStatus.UNAVAILABLE -> R.string.error_provider_unavailable
-                    RenderStatus.INVALID_INPUT -> if (preview.request == null) R.string.editor_shape_invalid_input else R.string.error_invalid_input
-                    RenderStatus.INVALID_MAP -> R.string.editor_shape_invalid_map
-                    RenderStatus.CANCELED -> R.string.error_canceled
-                    else -> R.string.error_processing
-                }), modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite }, color = MaterialTheme.colorScheme.error)
-                Button(onClick = session::retryPreview, enabled = editable, modifier = control("editor-retry-preview")) { Text(stringResource(R.string.editor_retry_preview)) }
+            if (!pinCropHistory) {
+                val height = if (panel == "shape") cropPreview else (screenHeight * .51f).coerceIn(220f, 440f).dp
+                displayPreview(Modifier.height(height))
+                history()
             }
             if (panel == "shape") state.draft?.let {
                 if (seedFeedback) Text(stringResource(R.string.atelier_frame_no_edges))
                 val page = state.page
-                when (val frame = it.geometry) {
-                    is GeometryRecipe.Perspective -> if (page != null && loadOriginal != null) {
-                        AtelierFrameCanvas(page.sourceId.value, frame, editable, loadOriginal, session)
+                val frame = it.geometry
+                val seed = guidedStep == 0 && !seedAttempted && page?.recipeRevision == 1L && frame is GeometryRecipe.None
+                if (page != null && loadOriginal != null &&
+                    (frame is GeometryRecipe.Perspective || frame is GeometryRecipe.ManualCurve || frame is GeometryRecipe.ManualCurveFourSides ||
+                        frame is GeometryRecipe.Bezier || seed)) {
+                    AtelierFrameCanvas(page.sourceId.value, frame, editable, loadOriginal, session, bezierSelection,
+                        onSelectBezier = { bezierSelection = it },
+                        placeBezierPoint = placeBezierPoint,
+                        onPointPlaced = { placeBezierPoint = false },
+                        onSourceReady = if (!seed) null else { bitmap ->
+                            try {
+                                val quad = detectAtelierFrame(bitmap)
+                                if (session.state.value.draft?.geometry == frame) seedFeedback = quad == null || !session.useDetectedFrame(frame, quad)
+                                seedAttempted = true
+                            } catch (canceled: kotlinx.coroutines.CancellationException) { throw canceled }
+                            catch (_: Exception) { seedAttempted = true; seedFeedback = true }
+                        })
+                    if (frame is GeometryRecipe.Bezier) {
+                        Text(stringResource(R.string.carnet_bezier_touch_help))
+                        FilterChip(
+                            selected = placeBezierPoint, onClick = { placeBezierPoint = !placeBezierPoint }, enabled = editable,
+                            label = { Text(stringResource(if (placeBezierPoint) R.string.carnet_bezier_choose_spot else R.string.carnet_bezier_place_point)) },
+                            modifier = Modifier.heightIn(min = 48.dp).testTag("carnet-bezier-place"),
+                        )
+                        AtelierBezierControls(frame, editable, session, bezierSelection) { bezierSelection = it }
                     }
-                    is GeometryRecipe.Bezier -> if (page != null && loadOriginal != null) {
-                        AtelierBezierControls(frame, editable, session) { control ->
-                            AtelierFrameCanvas(page.sourceId.value, frame, editable, loadOriginal, session, control)
+                    if (frame is GeometryRecipe.ManualCurve || frame is GeometryRecipe.ManualCurveFourSides) {
+                        Text(stringResource(R.string.carnet_manual_touch_help))
+                        if (frame is GeometryRecipe.ManualCurve && frame.depth == 0.0 &&
+                            frame != GeometryRecipe.ManualCurve(frame.source, frame.quad, targetRule = frame.targetRule, outputQuarterTurns = frame.outputQuarterTurns)) {
+                            Text(stringResource(R.string.carnet_manual_side_upgrade), style = MaterialTheme.typography.bodySmall)
                         }
                     }
-                    else -> Unit
                 }
-                EditorShapeControls(it.geometry, editable, session)
+                EditorShapeControls(frame, editable, session)
             }
-            if (shapeBlocksApply) ShapeSaveNotice(state, preview)
+            if (state.dirty) Text(stringResource(R.string.editor_unsaved), modifier = Modifier.testTag("editor-unsaved"))
+            if (state.saving) Text(stringResource(R.string.editor_saving))
+            if (panel.isEmpty() && pageNumber != null && albumPageCount != null && albumPageCount > 1) {
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+                    IconButton(onClick = { previousPage?.invoke() }, enabled = mayBrowse && previousPage != null,
+                        modifier = Modifier.size(48.dp).testTag("carnet-previous-page")) {
+                        Icon(painterResource(R.drawable.ic_atelier_back), stringResource(R.string.carnet_previous_page))
+                    }
+                    Text(stringResource(R.string.carnet_album_position, pageNumber, albumPageCount))
+                    IconButton(onClick = { nextPage?.invoke() }, enabled = mayBrowse && nextPage != null,
+                        modifier = Modifier.size(48.dp).testTag("carnet-next-page")) {
+                        Icon(painterResource(R.drawable.ic_atelier_next), stringResource(R.string.carnet_next_page))
+                    }
+                }
+            }
             if (panel == "looks") {
                 Text(stringResource(R.string.editor_looks_sample_notice), style = MaterialTheme.typography.bodySmall)
                 EditorLookCarousel(selectedLook, editable, session::chooseLook)
@@ -175,21 +270,19 @@ class PageEditorScreen(
                 Text(stringResource(R.string.editor_preset_notice), style = MaterialTheme.typography.bodySmall)
             }
             if (panel == "rotate") {
-                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceEvenly) {
-                    TextButton(onClick = session::rotateCounterclockwise, enabled = editable, modifier = Modifier.heightIn(min = 48.dp).testTag("editor-rotate-left")) {
-                        Text(stringResource(R.string.atelier_left))
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceEvenly, verticalAlignment = Alignment.CenterVertically) {
+                    OutlinedIconButton(onClick = session::rotateCounterclockwise, enabled = editable, modifier = Modifier.size(48.dp).testTag("editor-rotate-left")) {
+                        Icon(painterResource(R.drawable.ic_carnet_rotate_left), stringResource(R.string.atelier_left))
                     }
-                    TextButton(onClick = session::rotateClockwise, enabled = editable, modifier = Modifier.heightIn(min = 48.dp).testTag("editor-rotate")) {
-                        Text(stringResource(R.string.atelier_right))
+                    state.draft?.let {
+                        val degrees = it.geometry.outputQuarterTurns * 90
+                        val description = stringResource(R.string.editor_turns, degrees)
+                        Text(stringResource(R.string.carnet_rotation_angle, degrees), style = MaterialTheme.typography.titleMedium,
+                            modifier = Modifier.clearAndSetSemantics { contentDescription = description })
                     }
-                }
-                state.draft?.let { Text(stringResource(R.string.editor_turns, it.geometry.outputQuarterTurns * 90)) }
-            }
-            if (state.canUndo || state.canRedo || state.dirty) {
-                Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                    TextButton(onClick = session::undo, enabled = editable && state.canUndo, modifier = Modifier.heightIn(min = 48.dp).testTag("editor-undo")) { Text(stringResource(R.string.editor_undo)) }
-                    TextButton(onClick = session::redo, enabled = editable && state.canRedo, modifier = Modifier.heightIn(min = 48.dp).testTag("editor-redo")) { Text(stringResource(R.string.editor_redo)) }
-                    TextButton(onClick = session::discard, enabled = editable && state.dirty, modifier = Modifier.heightIn(min = 48.dp).testTag("editor-discard")) { Text(stringResource(R.string.editor_discard)) }
+                    OutlinedIconButton(onClick = session::rotateClockwise, enabled = editable, modifier = Modifier.size(48.dp).testTag("editor-rotate")) {
+                        Icon(painterResource(R.drawable.ic_carnet_rotate_right), stringResource(R.string.atelier_right))
+                    }
                 }
             }
             }
@@ -210,6 +303,7 @@ class PageEditorScreen(
             }
             }
         }
+        }
         if (information) AlertDialog(onDismissRequest = { information = false },
             title = { Text(stringResource(R.string.atelier_info)) },
             text = {
@@ -225,7 +319,10 @@ class PageEditorScreen(
                             preview.preview?.let { render ->
                                 val size = render.request.output.size
                                 Text(stringResource(R.string.atelier_info_preview_size, size.width, size.height))
-                                render.stages.mapNotNull { stage -> executedLabel(stage.stageId) }.distinct().forEach { label ->
+                                 render.stages.mapNotNull { stage ->
+                                     if ("MANUAL_STRAIGHT_PERSPECTIVE" in stage.warningCodes) R.string.carnet_manual_straight_execution
+                                     else executedLabel(stage.stageId)
+                                 }.distinct().forEach { label ->
                                     Text(stringResource(R.string.atelier_info_executed, stringResource(label)))
                                 }
                             }
@@ -253,9 +350,16 @@ class PageEditorScreen(
     private fun control(tag: String) = Modifier.fillMaxWidth().heightIn(min = 48.dp).testTag(tag)
 }
 
+@Composable private fun HistoryButton(tag: String, icon: Int, label: Int, enabled: Boolean, action: () -> Unit) {
+    IconButton(onClick = action, enabled = enabled, modifier = Modifier.size(48.dp).testTag(tag)) {
+        Icon(painterResource(icon), stringResource(label))
+    }
+}
+
 private fun executedLabel(id: String): Int? = when (id) {
     "perspective_v1" -> R.string.atelier_wizard_frame
-    "manual_ruled_v1" -> R.string.editor_shape_curve
+    "manual_ruled_v1" -> R.string.carnet_manual_legacy_execution
+    "manual_four_sides_v1" -> R.string.carnet_manual_four_sides_execution
     "atelier_bezier_v1" -> R.string.atelier_bezier_mode
     "paper_gain_v1" -> R.string.editor_look_paper
     "natural_l_v1" -> R.string.editor_look_natural

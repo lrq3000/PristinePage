@@ -59,8 +59,9 @@ import app.pristinepage.data.repository.RenderIntentQueries
     @Insert(onConflict = OnConflictStrategy.ABORT) abstract override fun insertExportPage(row: ExportPageRow)
 
     // A canonical ASCII JobId matched by the binary primary key already bounds jobId. Check other projected TEXT in bytes (SQLite length(TEXT) stops at NUL), and check the raw ordinal without narrowing it. Wire grammar and binding are verified separately.
-    @Query("""SELECT CASE WHEN (typeof(input)='blob' AND length(input) BETWEEN 184 AND 4144)
-        AND (typeof(kind)='text' AND length(CAST(kind AS BLOB))=15 AND length(kind)=15)
+    @Query("""SELECT CASE WHEN (typeof(input)='blob' AND typeof(kind)='text')
+        AND ((length(CAST(kind AS BLOB))=15 AND length(kind)=15 AND length(input) BETWEEN 184 AND 4144)
+            OR (kind='ALBUM_ARTIFACT' AND length(input)=133))
         AND (typeof(idempotenceKey)='text' AND length(CAST(idempotenceKey AS BLOB))=55 AND length(idempotenceKey)=55)
         AND (typeof(canonicalInputSha256)='text' AND length(CAST(canonicalInputSha256 AS BLOB))=64 AND length(canonicalInputSha256)=64)
         AND (typeof(snapshotId)='text' AND length(CAST(snapshotId AS BLOB))=36 AND length(snapshotId)=36)
@@ -72,7 +73,7 @@ import app.pristinepage.data.repository.RenderIntentQueries
     internal abstract fun assemblyJobIdentity(jobId: String): AssemblyJobIdentityRow?
 
     // Call only after the separate assemblyJobReadIsBounded statement admits this exact row in the same transaction. A scalar result does not bound the BLOB comparison.
-    @Query("""SELECT CASE WHEN (kind='EXPORT_ASSEMBLY' AND snapshotId=:snapshotId AND pageOrdinal IS NULL)
+    @Query("""SELECT CASE WHEN (kind IN ('EXPORT_ASSEMBLY','ALBUM_ARTIFACT') AND snapshotId=:snapshotId AND pageOrdinal IS NULL)
         AND (idempotenceKey=:key AND canonicalInputSha256=:digest AND typeof(input)='blob' AND input=:input)
         THEN 1 ELSE 0 END FROM Job WHERE jobId=:jobId""")
     internal abstract fun freshAssemblyInputMatches(jobId: String, snapshotId: String, key: String, digest: String, input: ByteArray): Boolean?
@@ -86,7 +87,7 @@ import app.pristinepage.data.repository.RenderIntentQueries
 
     // The caller has already rechecked the retained frozen input and bounded the full Job row in this same transaction.
     @Query("""UPDATE Job SET state='ADMITTED', updatedAt=:updatedAt WHERE jobId=:jobId
-        AND (kind='EXPORT_ASSEMBLY' AND snapshotId=:snapshotId AND pageOrdinal IS NULL)
+        AND (kind IN ('EXPORT_ASSEMBLY','ALBUM_ARTIFACT') AND snapshotId=:snapshotId AND pageOrdinal IS NULL)
         AND (idempotenceKey=:key AND canonicalInputSha256=:digest AND typeof(input)='blob' AND input=:input)
         AND (state='PENDING' AND typeof(attempt)='integer' AND attempt=0 AND typeof(leaseGeneration)='integer' AND leaseGeneration=0)
         AND (leaseOwner IS NULL AND leaseUntil IS NULL AND checkpoint IS NULL AND errorCode IS NULL)
@@ -398,6 +399,65 @@ import app.pristinepage.data.repository.RenderIntentQueries
         FROM ExportArtifact WHERE snapshotId=:snapshotId ORDER BY ordinal
         LIMIT CASE WHEN :limit BETWEEN 1 AND 101 THEN :limit ELSE 0 END""")
     internal abstract fun exportArtifactIdsForSnapshot(snapshotId: String, limit: Int): List<String>
+
+    @Insert(onConflict = OnConflictStrategy.ABORT)
+    internal abstract fun insertNamedAlbumArtifact(row: ExportArtifactRow)
+
+    @Query("""SELECT EXISTS(SELECT 1 FROM ExportArtifact WHERE artifactId=:id AND snapshotId=:snapshot AND ordinal=0
+        AND state='READY' AND verification='NAMED_ALBUM_READBACK_V1' AND relativePath=:path AND mime=:mime
+        AND typeof(byteCount)='integer' AND byteCount=:size AND byteSha256=:hash AND pageCount=:pages
+        AND EXISTS(SELECT 1 FROM ExportSnapshot WHERE snapshotId=:snapshot AND state='PRIVATE_READY'
+            AND typeof(retainedUntil)='integer' AND retainedUntil>:now))""")
+    internal abstract fun namedAlbumArtifactMatches(id: String, snapshot: String, path: String, mime: String, size: Long, hash: String, pages: Int, now: Long): Boolean
+
+    @Query("""UPDATE FileTransaction SET state=:next, updatedAt=:audit, sealSha256=:seal,
+        expectedByteSha256=:hash, expectedByteCount=:size
+        WHERE transactionId=:id AND kind='EXPORT' AND ownerId=:owner AND attempt=1 AND state=:previous
+        AND stagingPath=:stage AND finalPath=:final AND payload=:payload AND errorCode IS NULL
+        AND sealSha256 IS :previousSeal AND expectedByteSha256 IS :previousHash AND expectedByteCount IS :previousSize""")
+    internal abstract fun advanceNamedAlbumArtifact(id: String, owner: String, stage: String, final: String, payload: ByteArray,
+        previous: String, next: String, audit: Long, previousSeal: String?, previousHash: String?, previousSize: Long?,
+        seal: String?, hash: String?, size: Long?): Int
+
+    @Query("""SELECT EXISTS(SELECT 1 FROM FileTransaction WHERE transactionId=:id AND kind='EXPORT' AND ownerId=:owner
+        AND attempt=1 AND state='COMMITTED' AND stagingPath=:stage AND finalPath=:final AND payload=:payload
+        AND sealSha256=:seal AND expectedByteSha256=:hash AND expectedByteCount=:size AND errorCode IS NULL)""")
+    internal abstract fun namedAlbumJournalMatches(id: String, owner: String, stage: String, final: String, payload: ByteArray,
+        seal: String, hash: String, size: Long): Boolean
+
+    @Query("""UPDATE FileTransaction SET state='FAILED', errorCode=:error, updatedAt=:now
+        WHERE transactionId=:id AND kind='EXPORT' AND ownerId=:owner AND attempt=1 AND errorCode IS NULL
+        AND state IN ('INTENT','COPYING','SEALED','MOVED') AND stagingPath=:stage AND finalPath=:final AND payload=:payload""")
+    internal abstract fun failNamedAlbumIntent(id: String, owner: String, stage: String, final: String, payload: ByteArray,
+        now: Long, error: String): Int
+
+    @Query("""UPDATE ExportSnapshot SET state=:next WHERE snapshotId=:id AND snapshotSha256=:hash AND state='FROZEN'""")
+    internal abstract fun failNamedAlbumSnapshot(id: String, hash: String, next: String): Int
+
+    @Insert(onConflict = OnConflictStrategy.ABORT)
+    internal abstract fun insertNamedPublication(row: PublicationRow)
+
+    @Query("""UPDATE Publication SET targetUri=:uri, targetCreatedByAttempt=CASE WHEN :uri IS NULL THEN 0 ELSE 1 END,
+        state=:next, updatedAt=:now, sentByteCount=:sent, readbackSha256=:readback, errorCode=:error
+        WHERE publicationId=:id AND artifactId=:artifact AND state=:previous
+        AND expectedSha256=:digest AND expectedByteCount=:extent AND consentId=:id
+        AND ((:previous='WAITING_DESTINATION' AND targetUri IS NULL AND targetCreatedByAttempt=0)
+            OR (:previous='WRITING' AND targetUri=:uri AND targetCreatedByAttempt=1))""")
+    internal abstract fun updateNamedPublication(id: String, artifact: String, previous: String, next: String,
+        uri: String?, sent: Long, readback: String?, error: String?, digest: String, extent: Long, now: Long): Int
+
+    @Insert(onConflict = OnConflictStrategy.ABORT)
+    internal abstract fun insertNamedShareLease(row: ShareLeaseRow)
+
+    @Query("UPDATE ShareLease SET state='REVOKED' WHERE shareId=:id AND artifactId=:artifact AND state='ACTIVE'")
+    internal abstract fun revokeNamedShareLease(id: String, artifact: String): Int
+
+    @Query("""SELECT EXISTS(SELECT 1 FROM ShareLease AS l JOIN ExportArtifact AS a ON a.artifactId=l.artifactId
+        JOIN ExportSnapshot AS s ON s.snapshotId=a.snapshotId WHERE l.shareId=:id AND l.relativePath=:path
+        AND l.state='ACTIVE' AND l.createdAt<=:now AND l.expiresAt>:now AND l.explicitPackages IS NULL
+        AND a.state='READY' AND a.verification='NAMED_ALBUM_READBACK_V1' AND a.byteCount=:size AND a.byteCount>0
+        AND s.state='PRIVATE_READY' AND s.retainedUntil>:now)""")
+    internal abstract fun namedShareCanOpen(id: String, path: String, size: Long, now: Long): Boolean
 
     // Only on a create-path exact-key miss. Scan the existing (kind, ownerId) index range; never extract a malformed key or its payload.
     @Query("""SELECT EXISTS(SELECT 1 FROM FileTransaction WHERE kind='RENDER' AND ownerId=:jobId

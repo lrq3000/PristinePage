@@ -44,6 +44,29 @@ class ExportSettingsCodecTest {
         }
     }
 
+    @Test fun aNamedImageZipRetainsThePositionsAndEveryNamingInputAffectsTheHash() {
+        val jpeg = JpegSettings(92, "android_bitmap", 1, JpegChromaPolicy.PLATFORM_VERIFIED, JpegSampling.YUV420)
+        fun request(title: String, positions: List<Int>) = ExportSettings(ExportFormat.IMAGE_ZIP,
+            listOf(PageOutputSettings(b, output), PageOutputSettings(a, other)), null, jpeg, emptyList(),
+            AlbumExportScope(title, positions))
+        val request = request("Réunion", listOf(2, 5))
+        // Independently packed as big-endian fields with Python struct, including the UTF-8 title and its byte count.
+        val v2 = "7072697374696e65706167652d6578706f72742d73657474696e67732d76320000000009494d4147455f5a4950000000020000002431383061616233392d343033362d343937392d393232652d65393161316465643330633400000003000000020000000300000002000000044641494c0000002439623538643234392d303634312d346362372d626265372d66663830353039386232316200000002000000030000000200000003000000044641494c00010000005c0000000e616e64726f69645f6269746d61700000000100000011504c4154464f524d5f564552494649454400000006595556343230000000000000000852c3a9756e696f6e0000000200000005"
+        assertArrayEquals(v2.chunked(2).map { it.toInt(16).toByte() }.toByteArray(), encode(request))
+        assertEquals("e19d440ff2fd18062cc79dde00fbed91ef30fa254517b5f665c5ed4049058cb5", hash(request))
+        val saved = decode(encode(request))
+        assertEquals(ExportFormat.IMAGE_ZIP, saved.format)
+        assertEquals("Réunion", saved.albumScope?.title)
+        assertEquals(listOf(2, 5), saved.albumScope?.positions)
+        assertNotEquals(hash(request), hash(request("Other", listOf(2, 5))))
+        assertNotEquals(hash(request), hash(request("Réunion", listOf(2, 6))))
+        assertThrows(IllegalArgumentException::class.java) { request("Réunion", listOf(5, 2)) }
+        assertThrows(IllegalArgumentException::class.java) { request(" Réunion ", listOf(2, 5)) }
+        assertThrows(IllegalArgumentException::class.java) {
+            ExportSettings(ExportFormat.PNG, png.pages, null, null, emptyList(), AlbumExportScope("Réunion", listOf(2)))
+        }
+    }
+
     @Test fun acceptanceLookupOrderIsNotSemanticButPageOrderAlwaysIs() {
         val pages = listOf(PageOutputSettings(a, other, FallbackPolicy.KEEP_STAGE_INPUT, output), PageOutputSettings(b, other, FallbackPolicy.KEEP_STAGE_INPUT, output))
         val approvals = listOf(accepted(a, firstRender), accepted(b, secondRender))

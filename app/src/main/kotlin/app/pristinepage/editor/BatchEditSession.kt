@@ -30,13 +30,15 @@ internal sealed interface BatchEditOutcome {
 /** Main-confined draft owner. Each history entry captures exact affected IDs; changing the selection never mutates those commands. */
 internal class BatchEditSession(pages: List<EditablePage>,
     private val admit: (PageId, Recipe) -> OperationError?,
-    private val save: suspend (DocumentId, Long, List<BatchRecipeChange>) -> DocumentMutationResult) {
+    private val save: suspend (DocumentId, Long, List<BatchRecipeChange>) -> DocumentMutationResult,
+    initialSelection: Set<PageId> = emptySet(),
+) {
     private data class Change(val before: Map<PageId, Recipe>, val after: Map<PageId, Recipe>)
     private val entries = pages.toList()
     private val document = entries.first().documentId
     private val revision = entries.first().documentRevision
     private val accepted = entries.associate { it.pageId to it.recipe }
-    private val selected = LinkedHashSet<PageId>()
+    private val selected = LinkedHashSet(initialSelection)
     private val history = ArrayDeque<Change>()
     private val future = ArrayDeque<Change>()
     private val current = LinkedHashMap(accepted)
@@ -55,6 +57,7 @@ internal class BatchEditSession(pages: List<EditablePage>,
     init {
         require(entries.size in 1..100 && accepted.size == entries.size)
         require(entries.all { it.documentId == document && it.documentRevision == revision && RecipeCodec.hash(it.recipe) == it.recipeHash })
+        require(selected.all { it in accepted })
     }
 
     fun toggle(page: PageId) {

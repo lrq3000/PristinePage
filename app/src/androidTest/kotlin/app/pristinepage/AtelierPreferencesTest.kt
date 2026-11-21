@@ -7,6 +7,7 @@ import app.pristinepage.data.model.AlbumOrder
 import app.pristinepage.design.AtelierPreferences
 import app.pristinepage.design.AtelierSettings
 import app.pristinepage.design.HomeThumbnailLayout
+import app.pristinepage.library.AlbumTitleTemplate
 import java.util.UUID
 import org.junit.Assert.assertEquals
 import org.junit.Test
@@ -14,6 +15,18 @@ import org.junit.runner.RunWith
 
 @RunWith(AndroidJUnit4::class)
 class AtelierPreferencesTest {
+    @Test fun aNewPreferenceOwnerReadsTheLastSavedNameTemplate() {
+        val context = InstrumentationRegistry.getInstrumentation().targetContext
+        val name = "test-atelier-${UUID.randomUUID()}"
+        try {
+            val pattern = "Receipts_%date_%time"
+            AtelierPreferences(context, name).setAlbumTitleTemplate(checkNotNull(AlbumTitleTemplate.parse(pattern)))
+            assertEquals(pattern, AtelierPreferences(context, name).settings.value.albumTitleTemplate.pattern)
+        } finally {
+            context.deleteSharedPreferences(name)
+        }
+    }
+
     @Test fun ANewOwnerReadsTheSameSettingsAndIgnoresAnInvalidTypeIndependently() {
         val context = InstrumentationRegistry.getInstrumentation().targetContext
         val name = "test-atelier-${UUID.randomUUID()}"

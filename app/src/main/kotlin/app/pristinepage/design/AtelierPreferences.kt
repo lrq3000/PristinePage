@@ -2,6 +2,7 @@ package app.pristinepage.design
 
 import android.content.Context
 import app.pristinepage.data.model.AlbumOrder
+import app.pristinepage.library.AlbumTitleTemplate
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
 
@@ -19,6 +20,7 @@ internal data class AtelierSettings(
     val showCreationInNameSort: Boolean = false,
     val showCameraGrid: Boolean = true,
     val homeThumbnailLayout: HomeThumbnailLayout = HomeThumbnailLayout.STACK,
+    val albumTitleTemplate: AlbumTitleTemplate = AlbumTitleTemplate.DEFAULT,
 ) {
     companion object {
         @JvmStatic fun fromStored(values: Map<String, *>): AtelierSettings = AtelierSettings(
@@ -26,6 +28,7 @@ internal data class AtelierSettings(
             values["created"] as? Boolean ?: false,
             values["grid"] as? Boolean ?: true,
             HomeThumbnailLayout.entries.firstOrNull { it.name == values["homeThumbnailLayout"] } ?: HomeThumbnailLayout.STACK,
+            (values["albumTitleTemplate"] as? String)?.let(AlbumTitleTemplate::parse) ?: AlbumTitleTemplate.DEFAULT,
         )
     }
 }
@@ -54,5 +57,10 @@ internal class AtelierPreferences(context: Context, name: String = "pristinepage
     fun setHomeThumbnailLayout(layout: HomeThumbnailLayout) {
         storage.edit().putString("homeThumbnailLayout", layout.name).apply()
         current.value = current.value.copy(homeThumbnailLayout = layout)
+    }
+
+    fun setAlbumTitleTemplate(template: AlbumTitleTemplate) {
+        storage.edit().putString("albumTitleTemplate", template.pattern).apply()
+        current.value = current.value.copy(albumTitleTemplate = template)
     }
 }

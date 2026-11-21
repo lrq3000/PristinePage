@@ -26,7 +26,7 @@ U-04/FR-17 now mandates [cumulative album batch editing](BATCH_EDITING.md), expl
 | T-08 | Provider registry, exact public adapters and gating | T-06,T-07 | Not started | Unclaimed; U-01 mandates multiple working neural geometry/appearance methods at completion; exact provider/asset/runtime plan remains separately gated. |
 | T-09 | Editor carousel, comparisons, recipe history and cancellation | T-03,T-06,T-07 | In progress — basic consuming editor | Same active classical-slice T04 continuation O, not a second task claim. [Receipt](../../validation/editor/t09-consuming-editor-receipt.md) records862JVM/combined40+1API28passes and original NEEDSFIXES0C1I2M with parent O-I1 RED→GREEN. Basic Looks/rotation/UndoRedo/Apply/draftBack/retained-host work; default navigation/restore, Shape/Detail/comparison/carousel/Info/accessibility and U04 cumulative batch remain open. |
 | T-10 | Local library and multi-page editing | T-03,T-09 | Not started | Unclaimed; U-04 adds album overview selection/Select all/clear, previews and integrated batch-save/reopen/Undo/accessibility journey. |
-| T-11 | Snapshot PDF/image export and safe sharing | T-07,T-10 | Not started | Unclaimed. |
+| T-11 | Snapshot PDF/image export and safe sharing | T-07,T-10 | In progress — Carnet JPEG/ZIP follow-up | `CARNET-JPEG-02`, following the four-sided Manual curve increment. Uses the already implemented frozen-page and named artifact path. Scope: named JPEG/ZIP writer, app export dialog/state and English resources, focused tests and linked evidence/contract only. [Attempt and verification](../../validation/export/carnet-jpeg-platform-profile.md). PDF capacity and Android runtime acceptance remain open. |
 | T-12 | Device/offline/fidelity/accessibility/privacy/release gates | T-05,T-08,T-09,T-10,T-11 | Not started | Unclaimed; no application validation run. |
 
 ### Atelier redesign continuation — T-10 / ATELIER-CONTRACT-01
@@ -46,6 +46,16 @@ Input `ceb7e57`; after the T-05 feedback milestone, resume the accepted [Home pl
 ### Carnet continuation — T-10 / CARNET-PRESENTATION-01
 
 Input `3b2f6f1` on `feat/carnet-redesign`: [approved Carnet design](../design/carnet/README.md) and [presentation plan](../superpowers/plans/2026-11-20-carnet-presentation.md). Scope is presentation and the Home thumbnail preference: Compose theme, library/camera chrome, settings, English resources, focused tests and evidence. Preserve renderer, data layer, schema and previously gated acceptance.
+
+### Carnet corrective continuation — T-09 / CARNET-CAPTURE-CROP-01
+
+Public input `b60f5b9`, isolated Carnet corrective worktree. Uses the existing T-04/T-05 capture, T-06 map, and T-10 ordered catalog prerequisites. Scope is app camera/editor/navigation and host witnesses, tightly coupled decode budgeting/contour shape proof, and the [corrective checkpoint](../../validation/ui/carnet-camera-crop-checkpoint.md). No change to published `main`, persistent schema, input bytes, accepted plan or device authorization.
+
+The operator added ordered gallery swipe, configurable new-album names (`pristinepage_%date_%time` by default), long-press page selection, and JPEG/ZIP/PDF export of an album or an explicit subset. The same checkpoint records T-11 prerequisites and the required immutable naming rule (`%album_%position.jpg`, `%album.zip`, `%album.pdf`), with original album position, not output index. The tested app-side review metadata does not construct an export or authorize its publication. Scope does not activate a second writer or bypass `PRIVATE_READY`.
+
+### Carnet release boundary — T-11 / CARNET-SHARE-LEASE-01
+
+Input is the audited public copy of the 16 Carnet corrective commits, through the JPEG/ZIP follow-up. Scope: guard provider display-name and size metadata by the same durable lease as file reads, verify the provider boundary, and retain live-share, Save as and frozen-name semantics. Post-revocation readability of already opened descriptors, external copies, and native acceptance are separate. The [operational plan](OPERATIONAL_PLAN.md) governs integration, public branches and the v0.3.0 bump.
 
 ### Atelier geometry continuation — T-06 / ATELIER-CUBIC-02
 

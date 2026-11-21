@@ -4,6 +4,7 @@ import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
@@ -60,13 +61,15 @@ import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.launch
 
-@OptIn(ExperimentalMaterial3Api::class)
+@OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
 @Composable internal fun AtelierLibraryScreen(
     session: LibrarySession,
     preferences: AtelierPreferences,
     loadOverview: suspend (DocumentId) -> DocumentOverview,
     loadThumbnail: suspend (DocumentSummary, DocumentPage) -> RenderedPreviewBitmap,
     onBatch: (DocumentOverview) -> Unit = {},
+    onSelectPages: (DocumentOverview, PageId) -> Unit = { album, _ -> onBatch(album) },
+    onExport: (DocumentOverview) -> Unit = {},
     batchUndo: UndoId? = null,
     undoBatch: () -> Unit = {},
     closeBatchNotice: () -> Unit = {},
@@ -83,15 +86,15 @@ import kotlinx.coroutines.launch
         session.accept(LibraryEvent.SetAlbumSort(preferencesState.order, locale))
     }
     var sheet by rememberSaveable { mutableStateOf<String?>(null) }
+    fun nextTitle() = defaultAlbumTitle(template = preferencesState.albumTitleTemplate)
     val home = state.selectedId == null
     val overview = state.document
     val canAcquire = !state.loading && !state.preparingImport && state.request == null && !state.renaming
     val canClose = state.request == null && !state.preparingImport && !state.renaming
-    val title = stringResource(R.string.atelier_default_title, date(Date(), includeTime = false))
     fun acquire(kind: PhotoImportKind) {
         sheet = null
         if (home) {
-            session.accept(LibraryEvent.NewDocument(title, importAfterCreate = true, kind = kind))
+            session.accept(LibraryEvent.NewDocument(nextTitle(), importAfterCreate = true, kind = kind))
         } else session.accept(when (kind) {
             PhotoImportKind.CAMERA -> LibraryEvent.BeginCapture
             PhotoImportKind.GALLERY -> LibraryEvent.BeginImport
@@ -149,7 +152,7 @@ import kotlinx.coroutines.launch
             HorizontalDivider(color = AtelierStyle.divider)
             Row(Modifier.fillMaxWidth().heightIn(min = 76.dp).padding(horizontal = 12.dp), verticalAlignment = Alignment.CenterVertically) {
                 Text(stringResource(R.string.atelier_albums), Modifier.weight(1f), style = MaterialTheme.typography.labelMedium)
-                FilledIconButton(onClick = { if (openAtelier == null) sheet = "sources" else openAtelier(title, null) }, enabled = canAcquire,
+                 FilledIconButton(onClick = { if (openAtelier == null) sheet = "sources" else openAtelier(nextTitle(), null) }, enabled = canAcquire,
                      modifier = Modifier.size(58.dp).testTag("atelier-new"), shape = CircleShape) {
                     Icon(painterResource(R.drawable.ic_atelier_plus), stringResource(R.string.atelier_new), Modifier.size(29.dp))
                 }
@@ -183,7 +186,9 @@ import kotlinx.coroutines.launch
                         Surface(
                             modifier = Modifier.fillMaxWidth().testTag("original-page-${page.pageId.value}")
                                 .semantics { selected = state.selectedPage == page.pageId }
-                                .clickable(enabled = canAcquire && overview != null, role = Role.Button) {
+                                .combinedClickable(enabled = canAcquire && overview != null, role = Role.Button,
+                                    onLongClickLabel = stringResource(R.string.carnet_select_page),
+                                    onLongClick = { overview?.let { onSelectPages(it, page.pageId) } }) {
                                     overview?.let {
                                         session.accept(LibraryEvent.SelectPage(page.pageId))
                                         onEdit(it.document.documentId, page.pageId)
@@ -204,13 +209,19 @@ import kotlinx.coroutines.launch
             }
             HorizontalDivider(color = AtelierStyle.divider)
             Column(Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp)) {
-                if (overview != null && overview.pages.isNotEmpty()) TextButton(
-                    onClick = { onBatch(overview) }, enabled = canAcquire,
-                    modifier = Modifier.heightIn(min = AtelierStyle.touchTarget).testTag("atelier-batch-select"),
-                ) { Text(stringResource(R.string.atelier_batch_select)) }
+                if (overview != null && overview.pages.isNotEmpty()) FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    TextButton(onClick = { onBatch(overview) }, enabled = canAcquire,
+                        modifier = Modifier.heightIn(min = AtelierStyle.touchTarget).testTag("atelier-batch-select")) {
+                        Text(stringResource(R.string.atelier_batch_select))
+                    }
+                    OutlinedButton(onClick = { onExport(overview) }, enabled = canAcquire,
+                        modifier = Modifier.heightIn(min = AtelierStyle.touchTarget).testTag("album-export-all")) {
+                        Text(stringResource(R.string.album_export_title))
+                    }
+                }
                 Button(onClick = {
                     val album = overview?.document
-                    if (openAtelier != null && album != null) openAtelier(title, album) else sheet = "sources"
+                     if (openAtelier != null && album != null) openAtelier(album.title, album) else sheet = "sources"
                 }, enabled = canAcquire, modifier = Modifier.fillMaxWidth()
                     .heightIn(min = AtelierStyle.touchTarget).testTag("atelier-add-pages")) {
                     Text(stringResource(R.string.atelier_add_pages))
@@ -221,6 +232,10 @@ import kotlinx.coroutines.launch
     val stopSheet = { sheet = null }
     when (sheet) {
         "settings" -> AtelierSheet(R.string.atelier_settings, stopSheet) {
+            OutlinedButton(onClick = { sheet = "title-template" },
+                modifier = Modifier.fillMaxWidth().heightIn(min = AtelierStyle.touchTarget).testTag("carnet-title-template")) {
+                Text(stringResource(R.string.carnet_title_template))
+            }
             Text(stringResource(R.string.carnet_home_thumbnails), Modifier.semantics { heading() }, style = MaterialTheme.typography.titleMedium)
             Column(Modifier.selectableGroup()) {
                 HomeThumbnailLayout.entries.forEach { layout ->
@@ -243,6 +258,22 @@ import kotlinx.coroutines.launch
             SwitchRow(R.string.atelier_created, preferencesState.showCreationInNameSort, "atelier-date-setting", preferences::setShowCreationInNameSort)
             Text(stringResource(R.string.atelier_date_setting_note), style = MaterialTheme.typography.bodySmall)
         }
+        "title-template" -> AtelierSheet(R.string.carnet_title_template, { sheet = "settings" }) {
+            var pattern by rememberSaveable { mutableStateOf(preferencesState.albumTitleTemplate.pattern) }
+            val parsed = remember(pattern) { AlbumTitleTemplate.parse(pattern) }
+            OutlinedTextField(value = pattern, onValueChange = { value -> if (value.length <= 160) pattern = value },
+                modifier = Modifier.fillMaxWidth().testTag("carnet-title-template-field"),
+                singleLine = true, isError = parsed == null, label = { Text(stringResource(R.string.carnet_title_pattern)) })
+            Text(stringResource(R.string.carnet_title_template_help), style = MaterialTheme.typography.bodySmall)
+            if (parsed == null) Text(stringResource(R.string.carnet_title_template_invalid), color = MaterialTheme.colorScheme.error)
+            else Text(stringResource(R.string.carnet_title_template_preview, defaultAlbumTitle(template = parsed)))
+            TextButton(onClick = { pattern = AlbumTitleTemplate.DEFAULT.pattern },
+                modifier = Modifier.heightIn(min = AtelierStyle.touchTarget)) { Text(stringResource(R.string.carnet_title_template_reset)) }
+            Button(onClick = { parsed?.let(preferences::setAlbumTitleTemplate); sheet = "settings" }, enabled = parsed != null,
+                modifier = Modifier.fillMaxWidth().heightIn(min = AtelierStyle.touchTarget).testTag("carnet-title-template-save")) {
+                Text(stringResource(R.string.carnet_title_template_save))
+            }
+        }
         "sort" -> AtelierSheet(R.string.atelier_sort, stopSheet) {
             AlbumOrder.entries.forEach { order ->
                 val selected = preferencesState.order == order
@@ -260,7 +291,7 @@ import kotlinx.coroutines.launch
             AcquisitionAction(R.string.import_files, "import-files", canAcquire) { acquire(PhotoImportKind.FILES) }
             if (home) AcquisitionAction(R.string.new_document, "create-document", canAcquire) {
                 stopSheet()
-                session.accept(LibraryEvent.NewDocument(title))
+                session.accept(LibraryEvent.NewDocument(nextTitle()))
             }
         }
         "rename" -> overview?.document?.let { album ->
@@ -507,6 +538,4 @@ private fun AlbumOrder.label() = when (this) {
 }
 
 // Keep the user’s local time zone, but do not mix non-English month names into app-owned text.
-private fun date(value: Date, includeTime: Boolean = true): String =
-    (if (includeTime) DateFormat.getDateTimeInstance(DateFormat.MEDIUM, DateFormat.SHORT, Locale.ENGLISH)
-    else DateFormat.getDateInstance(DateFormat.MEDIUM, Locale.ENGLISH)).format(value)
+private fun date(value: Date): String = DateFormat.getDateTimeInstance(DateFormat.MEDIUM, DateFormat.SHORT, Locale.ENGLISH).format(value)

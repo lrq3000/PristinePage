@@ -39,16 +39,17 @@ internal class RoomExportAssemblyReads(
     suspend fun load(jobId: JobId, snapshot: ExportSnapshot): List<JobId> =
         read(snapshot, jobId).second
 
-    suspend fun loadForSnapshot(snapshot: ExportSnapshot): Pair<JobId, List<JobId>> =
-        read(snapshot, requestedJobId = null)
+    suspend fun loadForSnapshot(snapshot: ExportSnapshot, namedAlbum: Boolean = false): Pair<JobId, List<JobId>> =
+        read(snapshot, requestedJobId = null, namedAlbum)
 
-    private suspend fun read(snapshot: ExportSnapshot, requestedJobId: JobId?): Pair<JobId, List<JobId>> = withContext(dispatcher) {
+    private suspend fun read(snapshot: ExportSnapshot, requestedJobId: JobId?, namedAlbum: Boolean = false): Pair<JobId, List<JobId>> = withContext(dispatcher) {
         coroutineContext.ensureActive()
         var affectedId = requestedJobId?.value ?: snapshot.snapshotId.value
         val (jobId, projection) = try {
             metadata.transaction {
                 val jobId = requestedJobId ?: run {
-                    val matchedId = jobIdByKey(ExportAssemblyInput.key(snapshot.snapshotId))
+                    val key = if (namedAlbum) NamedAlbumJobInput.key(snapshot.snapshotId) else ExportAssemblyInput.key(snapshot.snapshotId)
+                    val matchedId = jobIdByKey(key)
                     coroutineContext.ensureActive()
                     if (matchedId == null) unavailable(affectedId)
                     try {
@@ -79,7 +80,10 @@ internal class RoomExportAssemblyReads(
         }
         // Hash/parse only after releasing Room's transaction on the bounded, materialized projection.
         coroutineContext.ensureActive()
-        val references = ExportAssemblyInput.verifyProjection(jobId, snapshot, projection)
+        val references = if (namedAlbum) {
+            NamedAlbumJobInput.verify(jobId, snapshot, projection)
+            emptyList()
+        } else ExportAssemblyInput.verifyProjection(jobId, snapshot, projection)
         coroutineContext.ensureActive()
         jobId to references
     }

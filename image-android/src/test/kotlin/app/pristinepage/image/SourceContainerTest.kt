@@ -3,7 +3,9 @@ package app.pristinepage.image
 import app.pristinepage.core.pipeline.PixelSize
 import app.pristinepage.image.decode.SourceContainer
 import app.pristinepage.data.model.OperationErrorCode
+import app.pristinepage.data.model.JpegSampling
 import app.pristinepage.data.model.RepositoryFailure
+import app.pristinepage.image.export.PlatformJpegStream
 import java.io.ByteArrayOutputStream
 import java.io.DataOutputStream
 import java.io.File
@@ -13,6 +15,7 @@ import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.security.MessageDigest
 import java.util.zip.CRC32
+import kotlin.math.roundToInt
 import org.junit.Assert.*
 import org.junit.Test
 
@@ -38,9 +41,115 @@ class SourceContainerTest {
     }
     private fun png(w: Int = 3, h: Int = 2, extra: ByteArray = byteArrayOf(), depth: Int = 8, color: Int = 2): ByteArray = byteArrayOf(-119, 80, 78, 71, 13, 10, 26, 10) + chunk("IHDR", be(w, h) + byteArrayOf(depth.toByte(), color.toByte(), 0, 0, 0)) + extra + chunk("IDAT", byteArrayOf(0)) + chunk("IEND", byteArrayOf())
     private fun segment(marker: Int, data: ByteArray): ByteArray { val n = data.size + 2; return byteArrayOf(-1, marker.toByte(), (n ushr 8).toByte(), n.toByte()) + data }
-    private fun jpeg(components: Int = 3, extra: ByteArray = byteArrayOf()): ByteArray {
-        val sof = byteArrayOf(8, 0, 2, 0, 3, components.toByte()) + ByteArray(components * 3) { if (it % 3 == 0) (it / 3 + 1).toByte() else 0x11 }
+    private fun jpeg(components: Int = 3, extra: ByteArray = byteArrayOf(), ySampling: Int = 0x11): ByteArray {
+        val sof = byteArrayOf(8, 0, 2, 0, 3, components.toByte()) + ByteArray(components * 3) {
+            if (it % 3 == 0) (it / 3 + 1).toByte() else if (it == 1) ySampling.toByte() else 0x11
+        }
         return byteArrayOf(-1, -40) + extra + segment(0xc0, sof) + segment(0xda, byteArrayOf(1, 1, 0, 0, 63, 0)) + byteArrayOf(1, 2, 3, -1, 0, 4, -1, -39)
+    }
+
+    @Test fun exportJpegAcceptsDeclaredSamplingButRejectsCommentsAndWrongGeometry() {
+        val root = File("build/test-source-containers").apply { mkdirs() }
+        val file = Files.createTempFile(root.toPath(), "export-jpeg-", ".jpg").toFile()
+        fun verify(sampling: JpegSampling, size: PixelSize = PixelSize(3, 2)) =
+            SourceContainer.verifyExportJpeg(file, size, sampling) {}
+        file.writeBytes(jpeg(ySampling = 0x22))
+        verify(JpegSampling.YUV420)
+        assertThrows(RepositoryFailure::class.java) { verify(JpegSampling.YUV444) }
+        assertThrows(RepositoryFailure::class.java) { verify(JpegSampling.YUV420, PixelSize(2, 3)) }
+        file.writeBytes(jpeg(extra = segment(0xfe, "Private label".encodeToByteArray()), ySampling = 0x22))
+        assertThrows(RepositoryFailure::class.java) { verify(JpegSampling.YUV420) }
+        file.writeBytes(jpeg(extra = segment(0xe0, "JFIF\u0000".encodeToByteArray() + byteArrayOf(1, 1, 0, 0, 1, 0, 1, 0, 0)), ySampling = 0x22))
+        verify(JpegSampling.YUV420)
+        file.writeBytes(jpeg(extra = segment(0xe0, "JFIF\u0000".encodeToByteArray() + byteArrayOf(1, 1, 0, 0, 1, 0, 1, 1, 1)), ySampling = 0x22))
+        assertThrows(RepositoryFailure::class.java) { verify(JpegSampling.YUV420) }
+    }
+
+    @Test fun platformSrgbIccIsRemovedBeforeStrictExportReadbackWithoutChangingCompressedBytes() {
+        val jfif = segment(0xe0, "JFIF\u0000".encodeToByteArray() + byteArrayOf(1, 1, 0, 0, 1, 0, 1, 0, 0))
+        val icc = iccSegment(matrixSrgbProfile())
+        val original = jpeg(extra = jfif + icc, ySampling = 0x22)
+        val expected = jpeg(extra = jfif, ySampling = 0x22)
+        val root = File("build/test-source-containers").apply { mkdirs() }
+        val file = Files.createTempFile(root.toPath(), "platform-jpeg-", ".jpg").toFile()
+        file.writeBytes(original)
+        assertEquals(OperationErrorCode.UNSUPPORTED_FORMAT, assertThrows(RepositoryFailure::class.java) {
+            SourceContainer.verifyExportJpeg(file, PixelSize(3, 2), JpegSampling.YUV420) {}
+        }.error.code)
+        for (chunk in listOf(1, 3, 8, original.size)) {
+            val output = ByteArrayOutputStream()
+            val stream = PlatformJpegStream(output)
+            for (offset in original.indices step chunk) stream.write(original, offset, minOf(chunk, original.size - offset))
+            stream.finish()
+            assertArrayEquals(expected, output.toByteArray())
+            file.writeBytes(output.toByteArray())
+            SourceContainer.verifyExportJpeg(file, PixelSize(3, 2), JpegSampling.YUV420) {}
+        }
+        assertThrows(RepositoryFailure::class.java) {
+            PlatformJpegStream(ByteArrayOutputStream()).also { it.write(original.copyOfRange(0, 30)); it.finish() }
+        }
+        val foreign = jpeg(extra = jfif + segment(0xe2, "MPF\u0000".encodeToByteArray()), ySampling = 0x22)
+        assertThrows(RepositoryFailure::class.java) {
+            PlatformJpegStream(ByteArrayOutputStream()).also { it.write(foreign); it.finish() }
+        }
+    }
+
+    @Test fun encoderIccSignatureAloneCannotDiscardDifferentColorOrMalformedProfiles() {
+        val valid = matrixSrgbProfile()
+        val wrongMatrix = matrixSrgbProfile(redX = .51)
+        val wrongCurve = matrixSrgbProfile(gamma = 2.2)
+        val unsupported = matrixSrgbProfile(lastTag = "A2B0")
+        val badOffset = valid.copyOf().also { ByteBuffer.wrap(it).putInt(136, Int.MAX_VALUE) }
+        for (extra in listOf(iccSegment(byteArrayOf(1, 2, 3)), iccSegment(wrongMatrix), iccSegment(wrongCurve),
+            iccSegment(unsupported), iccSegment(badOffset), iccSegment(valid, 2), iccSegment(valid) + iccSegment(valid))) {
+            val failure = assertThrows(RepositoryFailure::class.java) {
+                PlatformJpegStream(ByteArrayOutputStream()).also { it.write(jpeg(extra = extra)); it.finish() }
+            }
+            assertEquals(OperationErrorCode.INTEGRITY_FAILED, failure.error.code)
+        }
+    }
+
+    @Test fun noIccPassesThroughIncludingLegalFillAndNonZeroOffsets() {
+        val plain = jpeg(ySampling = 0x22)
+        val filled = plain.copyOfRange(0, 2) + byteArrayOf(-1, -1) + plain.copyOfRange(2, plain.size)
+        val output = ByteArrayOutputStream()
+        val stream = PlatformJpegStream(output)
+        val padded = byteArrayOf(0, 0) + filled + byteArrayOf(0)
+        stream.write(padded, 2, filled.size)
+        stream.finish()
+        assertArrayEquals(filled, output.toByteArray())
+    }
+
+    private fun iccSegment(data: ByteArray, total: Byte = 1) =
+        segment(0xe2, "ICC_PROFILE\u0000".encodeToByteArray() + byteArrayOf(1, total) + data)
+
+    /** Independently framed ICC v4 matrix/shaper; no Java/Android profile parser generates the oracle. */
+    private fun matrixSrgbProfile(redX: Double = .4360747, gamma: Double = 2.4, lastTag: String = "wtpt"): ByteArray {
+        fun fixed(x: Double) = (x * 65_536).roundToInt()
+        fun xyz(x: Double, y: Double, z: Double) = "XYZ ".encodeToByteArray() + be(0, fixed(x), fixed(y), fixed(z))
+        val curve = "para".encodeToByteArray() + be(0, 0x40000, fixed(gamma), fixed(1 / 1.055), fixed(.055 / 1.055),
+            fixed(1 / 12.92), fixed(.04045), 0, 0)
+        val entries = listOf(
+            "rXYZ" to xyz(redX, .2225045, .0139322), "gXYZ" to xyz(.3850649, .7168786, .0971045),
+            "bXYZ" to xyz(.1430804, .0606169, .7141733), "rTRC" to curve, "gTRC" to curve, "bTRC" to curve,
+            lastTag to xyz(.9642, 1.0, .8249),
+        )
+        val start = 132 + entries.size * 12
+        val buffer = ByteBuffer.allocate(start + entries.sumOf { it.second.size })
+        val bytes = buffer.array()
+        buffer.putInt(0, bytes.size).putInt(8, 0x04300000).putInt(68, fixed(.9642)).putInt(72, fixed(1.0)).putInt(76, fixed(.8249))
+        "mntrRGB XYZ ".encodeToByteArray().copyInto(bytes, 12)
+        "acsp".encodeToByteArray().copyInto(bytes, 36)
+        buffer.putInt(128, entries.size)
+        var offset = start
+        for ((i, pair) in entries.withIndex()) {
+            val row = 132 + 12 * i
+            pair.first.encodeToByteArray().copyInto(bytes, row)
+            buffer.putInt(row + 4, offset).putInt(row + 8, pair.second.size)
+            pair.second.copyInto(bytes, offset)
+            offset += pair.second.size
+        }
+        return bytes
     }
     private fun webp(extra: ByteArray = byteArrayOf()): ByteArray {
         val data = byteArrayOf(0x2f, 2, 0x40, 0, 0) // VP8L signature,width3,height2; entropy intentionally absent.

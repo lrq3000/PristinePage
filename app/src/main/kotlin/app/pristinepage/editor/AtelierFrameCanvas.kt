@@ -2,15 +2,21 @@ package app.pristinepage.editor
 
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.Image
+import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.awaitTouchSlopOrCancellation
 import androidx.compose.foundation.gestures.drag
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Button
 import androidx.compose.material3.Text
 import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.graphics.Color
@@ -22,6 +28,10 @@ import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.unit.IntOffset
+import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.compose.LocalLifecycleOwner
@@ -31,6 +41,9 @@ import app.pristinepage.core.geometry.AtelierEdgeDetector
 import app.pristinepage.core.pipeline.PointPx
 import app.pristinepage.core.recipe.GeometryRecipe
 import app.pristinepage.core.recipe.ContourSide
+import app.pristinepage.core.recipe.BezierContour
+import app.pristinepage.core.recipe.BezierSegment
+import app.pristinepage.design.AtelierStyle
 import app.pristinepage.image.preview.OriginalPreviewBitmap
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
@@ -49,6 +62,10 @@ import kotlin.math.roundToInt
     loadOriginal: suspend (String) -> OriginalPreviewBitmap,
     session: EditorSession,
     cubicControl: BezierControl? = null,
+    onSelectBezier: (BezierControl) -> Unit = {},
+    placeBezierPoint: Boolean = false,
+    onPointPlaced: () -> Unit = {},
+    onSourceReady: (suspend (android.graphics.Bitmap) -> Unit)? = null,
 ) {
     val lifecycle = LocalLifecycleOwner.current.lifecycle
     val load by rememberUpdatedState(loadOriginal)
@@ -58,6 +75,7 @@ import kotlin.math.roundToInt
     var finding by remember(sourceId) { mutableStateOf(false) }
     var feedback by remember(sourceId) { mutableStateOf<Int?>(null) }
     val scope = rememberCoroutineScope()
+    var magnify by remember(sourceId) { mutableStateOf<PointPx?>(null) }
     LaunchedEffect(sourceId, lifecycle, attempt) {
         lifecycle.repeatOnLifecycle(Lifecycle.State.STARTED) {
             var resource: OriginalPreviewBitmap? = null
@@ -74,20 +92,30 @@ import kotlin.math.roundToInt
         }
     }
     val image = original
+    val sourceReady by rememberUpdatedState(onSourceReady)
+    LaunchedEffect(session, image) { image?.let { sourceReady?.invoke(it.bitmap) } }
     if (image == null) {
-        if (failed) {
-            Text(stringResource(R.string.atelier_thumbnail_failed))
-            Button(onClick = { attempt++ }) { Text(stringResource(R.string.editor_retry_preview)) }
-        } else Text(stringResource(R.string.atelier_frame_loading))
+        Box(Modifier.fillMaxWidth().height(260.dp).background(AtelierStyle.canvas).testTag("atelier-frame-canvas"),
+            contentAlignment = Alignment.Center) {
+            if (failed) Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                Text(stringResource(R.string.atelier_thumbnail_failed))
+                Button(onClick = { attempt++ }) { Text(stringResource(R.string.editor_retry_preview)) }
+            } else Text(stringResource(R.string.atelier_frame_loading))
+        }
         return
     }
     val current by rememberUpdatedState(geometry)
     val chosen by rememberUpdatedState(cubicControl)
+    val select by rememberUpdatedState(onSelectBezier)
+    val placing by rememberUpdatedState(placeBezierPoint)
+    val placed by rememberUpdatedState(onPointPlaced)
     val w = image.output.size.width
     val h = image.output.size.height
     val points = EditorShapes.points(geometry)
-    Box(Modifier.fillMaxWidth().height(260.dp).testTag("atelier-frame-canvas")) {
-        Image(image.bitmap.asImageBitmap(), stringResource(R.string.editor_original_description), Modifier.fillMaxSize(), contentScale = ContentScale.Fit)
+    val bitmap = remember(image) { image.bitmap.asImageBitmap() }
+    Box(Modifier.fillMaxWidth().height(260.dp).clip(RoundedCornerShape(AtelierStyle.surfaceRadius))
+        .background(AtelierStyle.canvas).testTag("atelier-frame-canvas")) {
+        Image(bitmap, stringResource(R.string.editor_original_description), Modifier.fillMaxSize(), contentScale = ContentScale.Fit)
         Canvas(Modifier.fillMaxSize().pointerInput(w, h, enabled, session) {
             if (!enabled) return@pointerInput
             val imageRect = fitted(size.width.toFloat(), size.height.toFloat(), w, h)
@@ -95,7 +123,7 @@ import kotlin.math.roundToInt
             awaitEachGesture {
                 val down = awaitFirstDown(requireUnconsumed = false)
                 val cubic = current as? GeometryRecipe.Bezier
-                val control = chosen
+                val control = cubic?.let { nearestBezierControl(it.contour, down.position, imageRect, radius, chosen) }
                 val handle = if (cubic != null && control != null) control.read(cubic.contour) else null
                 val nearest = EditorShapes.points(current).minByOrNull { (_, p) ->
                     (project(p, imageRect) - down.position).getDistance()
@@ -108,30 +136,66 @@ import kotlin.math.roundToInt
                     ?: return@awaitEachGesture
                 val cubicDrag = if (control != null && handle != null) session.beginBezierDrag(control) else null
                 if (handle != null && cubicDrag == null) return@awaitEachGesture
-                if (cubicDrag == null && (nearest == null || !session.beginFrameDrag(nearest.key))) return@awaitEachGesture
+                val frameDrag = if (cubicDrag == null) nearest?.let { session.beginFrameDrag(it.key) } ?: return@awaitEachGesture else null
+                if (control != null) select(control)
                 fun move(position: Offset) {
                     val target = position + anchorOffset
                     val x = ((target.x - imageRect.left) / imageRect.width).toDouble().coerceIn(0.0, 1.0)
                     val y = ((target.y - imageRect.top) / imageRect.height).toDouble().coerceIn(0.0, 1.0)
+                    magnify = PointPx(x, y)
                     if (cubicDrag != null) session.moveBezier(cubicDrag.control, PointPx(x, y), cubicDrag)
-                    else session.dragFrameCorner(checkNotNull(nearest).key.name, x, y)
+                    else session.moveFrameDrag(checkNotNull(frameDrag), if (position == down.position) anchor else PointPx(x, y))
                 }
                 var ended = false
                 try {
                     move(first.position)
                     ended = drag(first.id) { change -> move(change.position); change.consume() }
                 } finally {
+                    magnify = null
                     if (cubicDrag != null) session.endBezierDrag(cubicDrag, cancel = !ended)
-                    else session.endFrameDrag(cancel = !ended)
+                    else session.endFrameDrag(frameDrag, cancel = !ended)
                 }
             }
+        }.pointerInput(w, h, enabled, session) {
+            if (!enabled) return@pointerInput
+            fun insertAt(position: Offset) {
+                val cubic = current as? GeometryRecipe.Bezier ?: return
+                val rect = fitted(size.width.toFloat(), size.height.toFloat(), w, h)
+                nearestInsertion(cubic.contour, position, rect, 22.dp.toPx(), 8.dp.toPx())?.let { hit ->
+                    session.insertBezier(hit.control.side, hit.control.segment, hit.t)
+                    select(hit.control)
+                    placed()
+                }
+            }
+            detectTapGestures(onDoubleTap = ::insertAt, onTap = { position ->
+                if (placing) {
+                    insertAt(position)
+                    return@detectTapGestures
+                }
+                val cubic = current as? GeometryRecipe.Bezier ?: return@detectTapGestures
+                val rect = fitted(size.width.toFloat(), size.height.toFloat(), w, h)
+                nearestBezierControl(cubic.contour, position, rect, 26.dp.toPx(), chosen)?.let(select)
+            })
         }) {
             val rect = fitted(size.width, size.height, w, h)
             val cubic = (geometry as? GeometryRecipe.Bezier)?.contour
-            val anchors = (cubic?.quad?.points() ?: points.values).map { project(it, rect) }
+            val anchors = (cubic?.quad?.points() ?: points.values.take(4)).map { project(it, rect) }
+            if (anchors.isEmpty()) return@Canvas
             val contour = Path().apply {
                 moveTo(anchors.first().x, anchors.first().y)
-                if (cubic == null) anchors.drop(1).forEach { lineTo(it.x, it.y) }
+                if (geometry is GeometryRecipe.ManualCurve || geometry is GeometryRecipe.ManualCurveFourSides) {
+                    val edges = listOf(ShapePoint.TOP_MIDPOINT, ShapePoint.RIGHT_MIDPOINT, ShapePoint.BOTTOM_MIDPOINT, ShapePoint.LEFT_MIDPOINT)
+                    for ((i, handle) in edges.withIndex()) {
+                        val a = anchors[i]
+                        val b = anchors[(i + 1) % anchors.size]
+                        val middle = points[handle]
+                        if (middle == null) lineTo(b.x, b.y)
+                        else {
+                            val p = project(middle, rect) * 2f - (a + b) * .5f
+                            quadraticTo(p.x, p.y, b.x, b.y)
+                        }
+                    }
+                } else if (cubic == null) anchors.drop(1).forEach { lineTo(it.x, it.y) }
                 else for (side in ContourSide.entries) {
                     val edge = cubic.edge(side)
                     val reverse = side == ContourSide.BOTTOM || side == ContourSide.LEFT
@@ -154,18 +218,52 @@ import kotlin.math.roundToInt
                 drawCircle(Color(0xFF152E28), 8.dp.toPx(), anchor)
                 drawCircle(Color(0xFFF6FFF1), 6.dp.toPx(), anchor)
             }
-            if (cubic != null && cubicControl != null) {
-                val piece = cubic.edge(cubicControl.side).segments.getOrNull(cubicControl.segment)
-                if (piece != null) {
+            if (geometry is GeometryRecipe.ManualCurve || geometry is GeometryRecipe.ManualCurveFourSides) {
+                points.values.drop(4).forEach { p ->
+                    drawCircle(Color(0xFF152E28), 8.dp.toPx(), project(p, rect))
+                    drawCircle(Color(0xFFB9FFD2), 6.dp.toPx(), project(p, rect))
+                }
+            }
+            if (cubic != null) {
+                for (side in ContourSide.entries) cubic.edge(side).segments.forEachIndexed { index, piece ->
                     val a = project(piece.start, rect)
                     val b = project(piece.end, rect)
                     val out = project(piece.outgoing, rect)
                     val inside = project(piece.incoming, rect)
-                    drawLine(Color(0xFFB9FFD2), a, out, 2.dp.toPx())
-                    drawLine(Color(0xFFB9FFD2), b, inside, 2.dp.toPx())
-                    listOf(a, b, out, inside).forEach { drawCircle(Color(0xFFF6FFF1), 4.dp.toPx(), it) }
-                    cubicControl.read(cubic)?.let { drawCircle(Color(0xFFB9FFD2), 10.dp.toPx(), project(it, rect), style = Stroke(2.dp.toPx())) }
+                    drawLine(Color(0xFFB9FFD2), a, out, 1.dp.toPx())
+                    drawLine(Color(0xFFB9FFD2), b, inside, 1.dp.toPx())
+                    listOf(out, inside).forEach {
+                        drawCircle(Color(0xFF152E28), 6.dp.toPx(), it)
+                        drawCircle(Color(0xFFB9FFD2), 4.dp.toPx(), it)
+                    }
+                    if (index > 0) {
+                        drawCircle(Color(0xFF152E28), 8.dp.toPx(), a)
+                        drawCircle(Color(0xFFF6FFF1), 6.dp.toPx(), a)
+                    }
                 }
+                cubicControl?.read(cubic)?.let { drawCircle(Color(0xFFB9FFD2), 10.dp.toPx(), project(it, rect), style = Stroke(2.dp.toPx())) }
+            }
+        }
+        magnify?.let { target ->
+            val label = stringResource(R.string.carnet_adjusting_point)
+            Canvas(Modifier.align(if (target.x > .5) Alignment.TopStart else Alignment.TopEnd).padding(6.dp).size(98.dp)
+                .clip(RoundedCornerShape(10.dp)).border(2.dp, Color.White, RoundedCornerShape(10.dp))
+                .background(Color(0xFF152E28)).testTag("carnet-crop-magnifier")
+                .semantics { contentDescription = label }) {
+                // Keep the selected point at the crosshair even at image edges; the outside remains padding.
+                val span = (minOf(w, h) / 7).coerceAtLeast(1)
+                val x = (target.x * (w - 1)).roundToInt()
+                val y = (target.y * (h - 1)).roundToInt()
+                val x0 = (x - span / 2).coerceAtLeast(0)
+                val y0 = (y - span / 2).coerceAtLeast(0)
+                val x1 = (x - span / 2 + span).coerceAtMost(w)
+                val y1 = (y - span / 2 + span).coerceAtMost(h)
+                val scale = size.width / span
+                drawImage(bitmap, IntOffset(x0, y0), IntSize(x1 - x0, y1 - y0),
+                    IntOffset((center.x + (x0 - x) * scale).roundToInt(), (center.y + (y0 - y) * scale).roundToInt()),
+                    IntSize(((x1 - x0) * scale).roundToInt().coerceAtLeast(1), ((y1 - y0) * scale).roundToInt().coerceAtLeast(1)))
+                drawCircle(Color.White, 8.dp.toPx(), center, style = Stroke(1.5.dp.toPx()))
+                drawCircle(Color(0xFF152E28), 10.dp.toPx(), center, style = Stroke(1.5.dp.toPx()))
             }
         }
     }
@@ -191,6 +289,50 @@ import kotlin.math.roundToInt
         Text(stringResource(if (finding) R.string.atelier_finding_edges else R.string.atelier_find_edges))
     }
     feedback?.let { Text(stringResource(it)) }
+}
+
+private fun nearestBezierControl(contour: BezierContour, touch: Offset, rect: Rect, radius: Float,
+    selected: BezierControl?): BezierControl? {
+    val controls = ContourSide.entries.flatMap { side ->
+        contour.edge(side).segments.indices.flatMap { index -> BezierPart.entries.map { BezierControl(side, index, it) } }
+    }
+    return (listOfNotNull(selected) + controls).mapNotNull { control ->
+        control.read(contour)?.let { control to (project(it, rect) - touch).getDistance() }
+    }.minByOrNull { it.second }?.takeIf { it.second <= radius }?.first
+}
+
+internal data class EdgeHit(val control: BezierControl, val t: Double)
+
+/** Bounded nearest-site search on the actual drawn cubic, not the chord between endpoints. */
+internal fun nearestInsertion(contour: BezierContour, touch: Offset, rect: Rect, radius: Float, nodeRadius: Float): EdgeHit? {
+    // Double taps reserve actual node positions, not floating handles that can lie on the insertion edge.
+    if (ContourSide.entries.any { side ->
+        val segments = contour.edge(side).segments
+        segments.any { (project(it.start, rect) - touch).getDistance() <= nodeRadius } ||
+            (project(segments.last().end, rect) - touch).getDistance() <= nodeRadius
+    }) return null
+    fun position(piece: BezierSegment, t: Double): Offset {
+        val s = 1 - t
+        val c = doubleArrayOf(s * s * s, 3 * s * s * t, 3 * s * t * t, t * t * t)
+        val p = listOf(piece.start, piece.outgoing, piece.incoming, piece.end)
+        return project(PointPx(p.indices.sumOf { c[it] * p[it].x }, p.indices.sumOf { c[it] * p[it].y }), rect)
+    }
+    var hit: EdgeHit? = null
+    var best = radius
+    for (side in ContourSide.entries) {
+        val edge = contour.edge(side)
+        if (edge.segments.size >= 8) continue
+        for ((index, piece) in edge.segments.withIndex()) {
+            val limit = maxOf(.02, 1.1e-5 / (piece.to - piece.from))
+            if (limit >= .5) continue
+            for (sample in 0..48) {
+                val t = limit + (1 - 2 * limit) * sample / 48
+                val distance = (position(piece, t) - touch).getDistance()
+                if (distance < best) { best = distance; hit = EdgeHit(BezierControl(side, index, BezierPart.END), t) }
+            }
+        }
+    }
+    return hit
 }
 
 internal suspend fun detectAtelierFrame(bitmap: android.graphics.Bitmap): app.pristinepage.core.pipeline.QuadPx? = withContext(Dispatchers.Default) {

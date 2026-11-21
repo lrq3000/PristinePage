@@ -15,6 +15,14 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class BatchEditSessionTest {
+    @Test fun initialLongPressedPageIsTheOnlyPageChangedByTheFirstCommand() = runTest {
+        val f = Fixture()
+        val session = f.session(initialSelection = setOf(f.ids[1]))
+        session.rotateClockwise()
+        assertTrue(session.done() is BatchEditOutcome.Saved)
+        assertEquals(listOf(f.ids[1]), f.saved.map { it.pageId })
+    }
+
     @Test fun selectionDoesNotRestartPreviewsButUndoGetsAFreshEditedPageGeneration() = runTest {
         val f = Fixture()
         val session = f.session()
@@ -146,13 +154,13 @@ class BatchEditSessionTest {
         var saves = 0
         var saved = emptyList<BatchRecipeChange>()
 
-        fun session(admit: (PageId, Recipe) -> OperationError? = { _, _ -> null },
+        fun session(admit: (PageId, Recipe) -> OperationError? = { _, _ -> null }, initialSelection: Set<PageId> = emptySet(),
             save: suspend (DocumentId, Long, List<BatchRecipeChange>) -> DocumentMutationResult = { target, revision, changes ->
                 assertEquals(document, target)
                 assertEquals(7, revision)
                 saves++
                 saved = changes
                 DocumentMutationResult.Applied(8, changes.map { it.pageId }, UndoId(UUID.randomUUID().toString()))
-            }): BatchEditSession = BatchEditSession(pages, admit, save)
+            }): BatchEditSession = BatchEditSession(pages, admit, save, initialSelection)
     }
 }

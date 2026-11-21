@@ -42,8 +42,21 @@ internal object AtelierStretchProof {
         val cu = Range.point(maxOf(top.speed, bottom.speed)) + Range.point(left.amplitude) + Range.point(right.amplitude)
         val cv = Range.point(maxOf(left.speed, right.speed)) + Range.point(top.amplitude) + Range.point(bottom.amplitude)
         val correction = Range.point(upperNorm(cu.hi, cv.hi))
-        if (correction.hi >= (chord * Range.point(.5)).lo) invalid("Cubic deformation can approach a fold")
-        val sigma = baseSigma - correction
+        val sigma = if (correction.hi < (chord * Range.point(.5)).lo) baseSigma - correction
+        else {
+            // A large shear is not necessarily a fold. Prove strong monotonicity of the exact map by bounding the symmetric part of its Jacobian everywhere, including either side of each knot.
+            val xx = xu + top.dx.hull(bottom.dx) + right.x - left.x
+            val yx = yu + top.dy.hull(bottom.dy) + right.y - left.y
+            val xy = xv + left.dx.hull(right.dx) + bottom.x - top.x
+            val yy = yv + left.dy.hull(right.dy) + bottom.y - top.y
+            val off = Range.point(((xy + yx) * Range.point(.5)).magnitude)
+            val aMin = Range.point(xx.lo)
+            val bMin = Range.point(yy.lo)
+            val minimumDet = aMin * bMin - off * off
+            if (xx.lo <= 0.0 || yy.lo <= 0.0 || minimumDet.lo <= 0.0) invalid("Cubic deformation can approach a fold")
+            // The matrix with the lower diagonal entries and worst off-diagonal magnitude bounds the quadratic form (using absolute input components). Its smaller eigenvalue is at least det/trace.
+            minimumDet / (aMin + bMin)
+        }
         val maximumNorm = Range.point(norm) + correction
         val minimumJ = Range.point(sigma.lo) * Range.point(sigma.lo)
         // Every Jacobian, including the median, is at most M²/2. This stricter global check avoids treating a sample as a proof.
@@ -88,16 +101,20 @@ internal object AtelierStretchProof {
         }
     }
 
-    private data class EdgeBound(val amplitude: Double, val speed: Double)
+    private data class EdgeBound(val amplitude: Double, val speed: Double, val x: Range, val y: Range, val dx: Range, val dy: Range)
 
     private fun bound(edge: ContourEdge, weights: Pair<Double, Double>, source: PixelSize): EdgeBound {
-        if (edge.chordOnly) return EdgeBound(0.0, 0.0)
+        if (edge.chordOnly) return EdgeBound(0.0, 0.0, zero, zero, zero, zero)
         val start = edge.at(0.0)
         val end = edge.at(1.0)
         val sx = Range.point((source.width - 1).toDouble())
         val sy = Range.point((source.height - 1).toDouble())
         var amp = 0.0
         var velocity = 0.0
+        var x = zero
+        var y = zero
+        var dx = zero
+        var dy = zero
         for ((t0, t1, cubic) in edge.segments) {
             val low = Range.point(t0)
             val high = Range.point(t1)
@@ -108,17 +125,32 @@ internal object AtelierStretchProof {
                 component(p, start, end, t, sx, PointPx::x) to component(p, start, end, t, sy, PointPx::y)
             }
             amp = maxOf(amp, controls.maxOf { (x, y) -> upperNorm(x.magnitude, y.magnitude) })
-            for (i in 1..3) {
-                val x = (controls[i].first - controls[i - 1].first) * three / width
-                val y = (controls[i].second - controls[i - 1].second) * three / width
-                velocity = maxOf(velocity, upperNorm(x.magnitude, y.magnitude))
+            val derivative = (1..3).map { i ->
+                (controls[i].first - controls[i - 1].first) * three / width to
+                    (controls[i].second - controls[i - 1].second) * three / width
             }
+            for ((cx, cy) in controls) { x = x.hull(cx); y = y.hull(cy) }
+            for ((cx, cy) in derivative) { dx = dx.hull(cx); dy = dy.hull(cy) }
+            velocity = maxOf(velocity, derivativeBound(derivative[0], derivative[1], derivative[2], 3))
         }
         // The exact evaluator model uses the stored binary64 endpoint weights as constants.
         val a = abs(weights.first)
         val b = abs(weights.second)
         val ratio = Range.point(maxOf(a, b)) / Range.point(minOf(a, b))
-        return EdgeBound(amp, (Range.point(velocity) * ratio).hi)
+        val reparameterization = Range((one / ratio).lo, ratio.hi)
+        return EdgeBound(amp, (Range.point(velocity) * ratio).hi, x, y, dx * reparameterization, dy * reparameterization)
+    }
+
+    /** An outward-rounded De Casteljau split tightens the quadratic derivative hull without relaxing the fold limit. */
+    private fun derivativeBound(a: Pair<Range, Range>, b: Pair<Range, Range>, c: Pair<Range, Range>, depth: Int): Double {
+        if (depth == 0) return listOf(a, b, c).maxOf { (x, y) -> upperNorm(x.magnitude, y.magnitude) }
+        val half = Range.point(.5)
+        fun middle(p: Pair<Range, Range>, q: Pair<Range, Range>) =
+            (p.first + q.first) * half to (p.second + q.second) * half
+        val ab = middle(a, b)
+        val bc = middle(b, c)
+        val center = middle(ab, bc)
+        return maxOf(derivativeBound(a, ab, center, depth - 1), derivativeBound(center, bc, c, depth - 1))
     }
 
     private fun component(p: PointPx, start: PointPx, end: PointPx, t: Range, size: Range, coordinate: (PointPx) -> Double): Range {
@@ -141,6 +173,7 @@ internal object AtelierStretchProof {
     private data class Range(val lo: Double, val hi: Double) {
         init { if (!lo.isFinite() || !hi.isFinite() || lo > hi) invalid("Uncertain cubic interval") }
         val magnitude get() = maxOf(abs(lo), abs(hi))
+        fun hull(r: Range) = Range(minOf(lo, r.lo), maxOf(hi, r.hi))
         operator fun plus(r: Range) = Range(Math.nextDown(lo + r.lo), Math.nextUp(hi + r.hi))
         operator fun minus(r: Range) = Range(Math.nextDown(lo - r.hi), Math.nextUp(hi - r.lo))
         operator fun times(r: Range): Range {

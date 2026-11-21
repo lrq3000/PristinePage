@@ -18,6 +18,7 @@ object GeometrySizing {
         is GeometryRecipe.None -> recipe.source.sourceSize
         is GeometryRecipe.Perspective -> fit(naturalTarget(recipe.quad, recipe.source.sourceSize), recipe.targetRule)
         is GeometryRecipe.ManualCurve -> fit(naturalTarget(recipe.quad, recipe.source.sourceSize), recipe.targetRule)
+        is GeometryRecipe.ManualCurveFourSides -> fit(naturalTarget(recipe.quad, recipe.source.sourceSize), recipe.targetRule)
         is GeometryRecipe.Bezier -> fit(naturalTarget(recipe.contour.quad, recipe.source.sourceSize), recipe.targetRule)
         is GeometryRecipe.RoughCropDewarp -> fit(PixelSize(recipe.crop.width, recipe.crop.height), recipe.targetRule)
     }

@@ -1,4 +1,6 @@
 <resources>
+    <string name="carnet_bezier_place_point">Place a point</string>
+    <string name="carnet_bezier_choose_spot">Tap near an edge</string>
     <string name="app_name">PristinePage</string>
     <string name="bootstrap_subtitle">Offline document and photo scanning</string>
     <string name="bootstrap_notice">Development bootstrap. Import, camera, editing and export are not available in this milestone.</string>
@@ -81,7 +83,7 @@
     <string name="editor_look_gray">Grayscale</string>
     <string name="editor_look_binary">Black &amp; white</string>
     <string name="editor_preset_notice">No enhancement turns off all image adjustments except the frame and rotation. Black &amp; white also turns off sharpening. Your original photo is unchanged.</string>
-    <string name="editor_shape">Frame</string>
+    <string name="editor_shape">Crop tool</string>
     <string name="editor_shape_reset">Use whole image</string>
     <string name="editor_shape_perspective">Perspective</string>
     <string name="editor_shape_curve">Manual curve</string>
@@ -93,6 +95,8 @@
     <string name="editor_shape_bottom_left">Bottom left corner</string>
     <string name="editor_shape_top_midpoint">Top curve midpoint</string>
     <string name="editor_shape_bottom_midpoint">Bottom curve midpoint</string>
+    <string name="editor_shape_left_midpoint">Left curve midpoint</string>
+    <string name="editor_shape_right_midpoint">Right curve midpoint</string>
     <string name="editor_shape_x">%1$s, horizontal position</string>
     <string name="editor_shape_y">%1$s, vertical position</string>
     <string name="editor_shape_coordinate">%1$s: %2$d%%</string>
@@ -115,7 +119,25 @@
     <string name="atelier_album">Album</string>
     <string name="atelier_albums">Albums</string>
     <string name="atelier_new">New scan</string>
-    <string name="atelier_default_title">Scan %1$s</string>
+    <string name="carnet_previous_page">Previous page</string>
+    <string name="carnet_next_page">Next page</string>
+    <string name="carnet_album_position">Page %1$d of %2$d</string>
+    <string name="carnet_bezier_touch_help">Drag a point or handle. Double-tap near an edge to add a point.</string>
+    <string name="carnet_manual_touch_help">Drag a corner or an edge midpoint to reshape the page.</string>
+    <string name="carnet_manual_side_upgrade">Moving a side handle switches this saved curve to four-sided correction. Undo restores the previous curve.</string>
+    <string name="carnet_manual_legacy_execution">Manual curve (top and bottom)</string>
+    <string name="carnet_manual_four_sides_execution">Manual curve (four sides)</string>
+    <string name="carnet_manual_straight_execution">Perspective (straight manual curve)</string>
+    <string name="carnet_adjusting_point">Magnified view of the point being moved</string>
+    <string name="carnet_title_template">Default album name</string>
+    <string name="carnet_title_pattern">Name template</string>
+    <string name="carnet_title_template_help" formatted="false">Use %date for YYYY-MM-DD, %time for HH-mm-ss, and %% for a percent sign. Only new albums use this template.</string>
+    <string name="carnet_title_template_invalid">Enter a valid template that produces a name of at most 160 characters.</string>
+    <string name="carnet_title_template_preview">Example: %1$s</string>
+    <string name="carnet_title_template_reset">Use default template</string>
+    <string name="carnet_title_template_save">Save template</string>
+    <string name="carnet_select_page">Start selection with this page</string>
+    <string name="camera_flash_unavailable">The camera light did not turn on. Turn flash off and try again, or import a photo.</string>
     <string name="atelier_settings">Settings</string>
     <string name="carnet_home_thumbnails">Home thumbnails</string>
     <string name="carnet_stack">Stack</string>
@@ -147,8 +169,9 @@
     <string name="atelier_close">Close</string>
     <string name="atelier_back_to_album">Back</string>
     <string name="atelier_rotation">Rotation</string>
-    <string name="atelier_left">90° left</string>
-    <string name="atelier_right">90° right</string>
+    <string name="atelier_left">Rotate 90° left</string>
+    <string name="atelier_right">Rotate 90° right</string>
+    <string name="carnet_rotation_angle">%1$d°</string>
     <string name="atelier_original">Original</string>
     <string name="atelier_info">Page info</string>
     <string name="atelier_look_previous">Previous correction</string>
