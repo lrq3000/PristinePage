@@ -1,4 +1,8 @@
 <resources>
+    <string name="home_search_scans">Search scans</string>
+    <string name="home_search_available_fields">Album titles and dates</string>
+    <string name="home_search_clear">Clear</string>
+    <string name="home_search_no_matches">No albums match this search.</string>
     <string name="carnet_bezier_place_point">Place a point</string>
     <string name="carnet_bezier_choose_spot">Tap near an edge</string>
     <string name="app_name">PristinePage</string>

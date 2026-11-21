@@ -3,6 +3,8 @@ package app.pristinepage.library
 import app.pristinepage.capture.PhotoImportRequest
 import app.pristinepage.capture.PhotoImportKind
 import app.pristinepage.data.model.*
+import app.pristinepage.data.repository.AlbumSearchQuery
+import java.time.ZoneId
 import java.util.Collections
 import java.util.Locale
 import kotlinx.coroutines.CancellationException
@@ -10,6 +12,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.cancelAndJoin
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -19,7 +22,7 @@ import kotlinx.coroutines.sync.withLock
 
 /** Main-confined state owned by a lifecycle-retained scope, not by one Activity registration. IO is delegated to the existing Application graph; only opaque IDs are restorable. No selected provider reference enters StateFlow, a saved identity or an error. */
 class ImportLibrarySession(private val actions: LibraryActions, restored: LibraryIdentity, private val scope: CoroutineScope) : LibrarySession {
-    private val current = MutableStateFlow(LibraryState(selectedId = restored.selected, selectedPage = restored.selectedPage, request = restored.pending?.let { PhotoImportRequest(it.value, restored.kind) }, phase = restored.pending?.let { ImportPhase.INTERRUPTED }))
+    private val current = MutableStateFlow(LibraryState(selectedId = restored.selected, selectedPage = restored.selectedPage, request = restored.pending?.let { PhotoImportRequest(it.value, restored.kind) }, phase = restored.pending?.let { ImportPhase.INTERRUPTED }, canSearchAlbums = actions is SearchableLibraryActions))
     override val state: StateFlow<LibraryState> = current.asStateFlow()
     private val initialization = Mutex()
     private var started = false
@@ -29,6 +32,7 @@ class ImportLibrarySession(private val actions: LibraryActions, restored: Librar
     private var metadataRead: Job? = null
     private var albumLocale = Locale.getDefault()
     private var albumCursor: AlbumPosition? = null
+    private var searchZone = ZoneId.systemDefault()
 
     init { refresh(true) }
 
@@ -65,6 +69,16 @@ class ImportLibrarySession(private val actions: LibraryActions, restored: Librar
                 albumLocale = event.locale
                 current.value = current.value.copy(albumOrder = event.order, documents = emptyList(), hasMore = false)
                 refresh(true)
+            }
+            is LibraryEvent.SetAlbumSearch -> {
+                val value = current.value
+                if (value.selectedId != null || !value.canSearchAlbums) return
+                val text = event.text.take(AlbumSearchQuery.MAX_LENGTH)
+                if (text == value.albumSearch && searchZone == event.zone) return
+                searchZone = event.zone
+                albumCursor = null
+                current.value = value.copy(albumSearch = text, documents = emptyList(), hasMore = false, error = null)
+                refresh(true, debounceSearch = text.isNotBlank())
             }
             is LibraryEvent.RenameAlbum -> rename(event)
             LibraryEvent.ClearRenameResult -> if (!current.value.renaming) current.value = current.value.copy(renameResult = null)
@@ -187,22 +201,27 @@ class ImportLibrarySession(private val actions: LibraryActions, restored: Librar
         }
     }
 
-    private fun refresh(reset: Boolean, includeList: Boolean = true): Job {
+    private fun refresh(reset: Boolean, includeList: Boolean = true, debounceSearch: Boolean = false): Job {
         val token = ++metadataGeneration
         metadataRead?.cancel()
         val selected = current.value.selectedId
         val nav = navigation
         current.value = current.value.copy(loading = true)
         return run(onFailure = { error -> if (token == metadataGeneration && nav == navigation) failed(error) }) {
+            if (debounceSearch) delay(220)
             if (includeList) reload(reset, token)
             loadSelected(selected, nav, token)
         }.also { metadataRead = it }
     }
 
     private suspend fun reload(reset: Boolean, token: Long) {
+        val value = current.value
+        val search = (actions as? SearchableLibraryActions)?.takeIf { value.albumSearch.isNotBlank() }
         val ordered = actions as? OrderedLibraryActions
-        if (ordered != null) {
-            val page = ordered.listAlbums(current.value.albumOrder, albumLocale, if (reset) null else albumCursor, 50)
+        if (search != null || ordered != null) {
+            val cursor = if (reset) null else albumCursor
+            val page = if (search != null) search.searchAlbums(AlbumSearchQuery(value.albumSearch, searchZone), value.albumOrder, albumLocale, cursor, 50)
+            else checkNotNull(ordered).listAlbums(value.albumOrder, albumLocale, cursor, 50)
             if (token == metadataGeneration) {
                 albumCursor = page.next
                 // A remote/concurrent writer may move an album across cursors. Avoid duplicate lazy keys even before the next explicit refresh.

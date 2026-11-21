@@ -22,6 +22,10 @@ interface AlbumCatalog {
     suspend fun listAlbums(order: AlbumOrder, locale: Locale, after: AlbumPosition?, limit: Int): AlbumPage
 }
 
+interface SearchableAlbumCatalog : AlbumCatalog {
+    suspend fun searchAlbums(query: AlbumSearchQuery, order: AlbumOrder, locale: Locale, after: AlbumPosition?, limit: Int): AlbumPage
+}
+
 /** A production Room projection validates raw storage before any unbounded string can cross the database boundary. */
 interface AlbumMetadataQueries {
     fun activeAlbumRowsAfter(after: String?, limit: Int): List<DocumentRow>

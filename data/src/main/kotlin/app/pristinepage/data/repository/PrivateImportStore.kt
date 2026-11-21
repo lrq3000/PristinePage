@@ -38,6 +38,7 @@ class PrivateImportStore private constructor(
 ) : AutoCloseable {
     val catalog: DocumentCatalog get() = documentCatalog
     val albums: AlbumCatalog get() = documentCatalog
+    val albumSearch: SearchableAlbumCatalog get() = documentCatalog
     private val exportLifetime = OrdinaryExportLifetime(database::close)
 
     override fun close() = exportLifetime.close()

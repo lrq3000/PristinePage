@@ -6,6 +6,8 @@ import app.pristinepage.data.model.*
 import app.pristinepage.data.repository.*
 import java.io.IOException
 import java.lang.reflect.InvocationTargetException
+import java.time.Instant
+import java.time.ZoneId
 import java.util.Locale
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
@@ -17,6 +19,68 @@ import org.junit.Test
 
 /** Reuses real command-created metadata/recipes/source ownership, replacing only Room and its scalar projections. Actual DAO/SQLite guards and reopen are separate consuming tests; no filesystem or source decoder participates in metadata discovery. */
 class DocumentCatalogTest {
+    @Test fun albumSearchUsesAllPagesAndRequiresEveryTermAcrossTitleAndDates() = runBlocking {
+        val f = Fixture()
+        f.memory.documents.clear()
+        f.memory.pages.clear()
+        val ids = (0..62).map { DocumentId("aaaaaaaa-aaaa-4aaa-8aaa-%012d".format(Locale.ROOT, it)) }
+        val creation = Instant.parse("2026-11-18T23:30:00Z").toEpochMilli()
+        val modified = Instant.parse("2026-11-20T19:42:00Z").toEpochMilli()
+        ids.forEachIndexed { index, id ->
+            val title = if (index in 60..61) "École receipt" else if (index == 62) "École invoice" else "Receipt"
+            f.memory.documents[id.value] = DocumentRow(id.value, title, 1, "ACTIVE", creation, modified + index, null)
+        }
+        val catalog = f.catalog() as SearchableAlbumCatalog
+        val query = AlbumSearchQuery("ecole receipt 2026-11-19 nov 20", ZoneId.of("Europe/Paris"))
+        val first = catalog.searchAlbums(query, AlbumOrder.MODIFIED, Locale.ENGLISH, null, 1)
+        assertEquals(listOf(ids[61]), first.albums.map { it.documentId })
+        assertNotNull(first.next)
+        val next = catalog.searchAlbums(query, AlbumOrder.MODIFIED, Locale.ENGLISH, first.next, 1)
+        assertEquals(listOf(ids[60]), next.albums.map { it.documentId })
+        assertNull(next.next)
+    }
+
+    @Test fun displayedEnglishDateMatchesAndMonthDayDoesNotMatchYearDigits() = runBlocking {
+        val f = Fixture()
+        val second = Instant.parse("2026-11-02T19:30:00Z").toEpochMilli()
+        val nineteenth = Instant.parse("2026-11-19T19:30:00Z").toEpochMilli()
+        for ((id, timestamp) in listOf(f.first to second, f.second to nineteenth)) {
+            f.memory.documents[id.value] = f.memory.documents.getValue(id.value).copy(createdAt = timestamp, updatedAt = timestamp)
+        }
+        val catalog = f.catalog() as SearchableAlbumCatalog
+        suspend fun matching(text: String) = catalog.searchAlbums(AlbumSearchQuery(text, ZoneId.of("UTC")), AlbumOrder.MODIFIED, Locale.ENGLISH, null, 10)
+            .albums.map { it.documentId }
+        assertEquals(listOf(f.second), matching("Nov 19, 2026"))
+        assertEquals(listOf(f.first), matching("Nov 2"))
+        assertEquals(listOf(f.first), matching("Nov 2, 2026 7:30 PM"))
+    }
+
+    @Test fun matchingHiddenAndTombstonedAlbumsAreNotSearchResults() = runBlocking {
+        val f = Fixture()
+        f.memory.documents.replaceAll { _, row -> row.copy(title = "Receipt") }
+        f.memory.hiddenDraftDocuments.add(f.first.value)
+        f.memory.documents[f.second.value] = f.memory.documents.getValue(f.second.value).copy(lifecycle = "TOMBSTONED", deletedAt = 1)
+        val catalog = f.catalog() as SearchableAlbumCatalog
+        val result = catalog.searchAlbums(AlbumSearchQuery("receipt", ZoneId.of("UTC")), AlbumOrder.MODIFIED, Locale.ENGLISH, null, 1)
+        assertEquals(listOf(f.third), result.albums.map { it.documentId })
+        assertNull(result.next)
+    }
+
+    @Test fun completeDateTimeMustMatchOneTimestamp() = runBlocking {
+        val f = Fixture()
+        f.memory.documents[f.first.value] = f.memory.documents.getValue(f.first.value).copy(
+            createdAt = Instant.parse("2026-11-02T09:00:00Z").toEpochMilli(),
+            updatedAt = Instant.parse("2026-11-03T19:30:00Z").toEpochMilli(),
+        )
+        val catalog = f.catalog() as SearchableAlbumCatalog
+        suspend fun matching(text: String) = catalog.searchAlbums(AlbumSearchQuery(text, ZoneId.of("UTC")), AlbumOrder.MODIFIED, Locale.ENGLISH, null, 10)
+            .albums.map { it.documentId }
+        assertEquals(listOf(f.first), matching("Nov 3, 2026 7:30 PM"))
+        assertEquals(listOf(f.first), matching("2026-11-03 19:30"))
+        assertTrue(matching("Nov 2, 2026 7:30 PM").isEmpty())
+        assertTrue(matching("2026-11-02 19:30").isEmpty())
+    }
+
     @Test fun albumDatesAreStoredValuesNotPresentationDefaults() = runBlocking {
         val f = Fixture()
         f.memory.documents[f.first.value] = f.memory.documents.getValue(f.first.value).copy(createdAt = 10, updatedAt = 26)

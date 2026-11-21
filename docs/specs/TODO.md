@@ -65,6 +65,12 @@ Input `5c184dc`, isolated `feat/downloadable-models`; first increment is a priva
 
 Registry tests first failed to compile because the registry was absent. After correcting a test-only call unavailable at the Android compilation surface, strict offline `:image-android:testDebugUnitTest :app:testDebugUnitTest` passed 242 image and 176 app cases, including all three registry checks. Neither verified bytes nor a catalog entry makes a provider runnable; reported RAM remains unknown. The runtime and all app-facing model actions remain gated.
 
+### Background OCR and search — U-06 / OCR-FOUNDATION-01
+
+Coordinator, input `f56acb5`, isolated `feat/ocr-background-search`. Reuse the existing catalog, image owner and pinned scheduler. First claim: pure OCR engine and attempt contracts under `core/.../ocr/` with host tests; actual Home title/date search in the catalog, library session/UI, English resources and focused tests. The [OCR contract](OCR_SEARCH.md) supplements rather than replaces the accepted plan. No new dependency, model acquisition, data migration, Android execution or publication in this increment. Full-text indexing, persisted work, per-page status/details and real engine acceptance stay open.
+
+[Foundation evidence](../../validation/providers/ocr-foundation-receipt.md): independent review and coordinator RED→GREEN for stale claims, date/time matching and query redaction. Strict offline 1,232 JVM cases and 15 existing catalog SQLite cases passed; zero lint errors/21 warnings and Android test compilation only. No schema, dependency or accepted plan change. Next: isolated guarded OCR-result/index storage and populated additive-migration checks, then durable scheduling and a real engine under separate acquisition/device gates.
+
 ### Carnet release boundary — T-11 / CARNET-SHARE-LEASE-01
 
 Input is the audited public copy of the 16 Carnet corrective commits, through the JPEG/ZIP follow-up. Scope: guard provider display-name and size metadata by the same durable lease as file reads, verify the provider boundary, and retain live-share, Save as and frozen-name semantics. Post-revocation readability of already opened descriptors, external copies, and native acceptance are separate. The [operational plan](OPERATIONAL_PLAN.md) governs integration, public branches and the v0.3.0 bump.

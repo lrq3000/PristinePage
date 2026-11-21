@@ -19,6 +19,7 @@ import androidx.compose.foundation.selection.selectableGroup
 import androidx.compose.foundation.selection.toggleable
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -39,6 +40,7 @@ import androidx.compose.ui.semantics.isTraversalGroup
 import androidx.compose.ui.semantics.selected
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.unit.dp
 import androidx.core.os.ConfigurationCompat
 import androidx.lifecycle.Lifecycle
@@ -48,12 +50,12 @@ import androidx.lifecycle.repeatOnLifecycle
 import app.pristinepage.R
 import app.pristinepage.capture.PhotoImportKind
 import app.pristinepage.data.model.*
+import app.pristinepage.data.repository.AlbumSearchQuery
 import app.pristinepage.design.AtelierPreferences
 import app.pristinepage.design.AtelierStyle
 import app.pristinepage.design.HomeThumbnailLayout
 import app.pristinepage.image.preview.RenderedPreviewBitmap
-import java.text.DateFormat
-import java.util.Date
+import java.time.ZoneId
 import java.util.Locale
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.awaitCancellation
@@ -128,6 +130,21 @@ import kotlinx.coroutines.launch
 
         if (state.loading) LinearProgressIndicator(Modifier.fillMaxWidth())
         if (home) {
+            val searching = state.albumSearch.isNotBlank()
+            if (state.canSearchAlbums) OutlinedTextField(
+                value = state.albumSearch,
+                onValueChange = { session.accept(LibraryEvent.SetAlbumSearch(it, ZoneId.systemDefault())) },
+                label = { Text(stringResource(R.string.home_search_scans)) },
+                supportingText = { Text(stringResource(R.string.home_search_available_fields)) },
+                singleLine = true,
+                keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
+                trailingIcon = if (state.albumSearch.isEmpty()) null else {{
+                    TextButton(onClick = { session.accept(LibraryEvent.SetAlbumSearch("", ZoneId.systemDefault())) }) {
+                        Text(stringResource(R.string.home_search_clear))
+                    }
+                }},
+                modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp).testTag("home-album-search"),
+            )
             val creation = when (preferencesState.order) {
                 AlbumOrder.CREATED -> true
                 AlbumOrder.MODIFIED -> false
@@ -139,7 +156,7 @@ import kotlinx.coroutines.launch
                     color = MaterialTheme.colorScheme.onSurfaceVariant) }
                 item { LibraryFeedback(state, session) }
                 if (state.documents.isEmpty() && !state.loading && state.error == null) {
-                    item { Text(stringResource(R.string.atelier_empty), Modifier.padding(vertical = 12.dp)) }
+                    item { Text(stringResource(if (searching) R.string.home_search_no_matches else R.string.atelier_empty), Modifier.padding(vertical = 12.dp)) }
                 }
                 items(state.documents, key = { it.documentId.value }) { album ->
                     AlbumCard(album, creation, preferencesState.homeThumbnailLayout, loadOverview, loadThumbnail,
@@ -178,7 +195,7 @@ import kotlinx.coroutines.launch
                                  TextButton(onClick = closeBatchNotice) { Text(stringResource(R.string.atelier_batch_dismiss)) }
                              }
                             Text(stringResource(R.string.atelier_all_pages), style = MaterialTheme.typography.titleMedium)
-                            overview?.document?.updatedAt?.let { Text(stringResource(R.string.atelier_modified_date, date(Date(it)))) }
+                            overview?.document?.updatedAt?.let { Text(stringResource(R.string.atelier_modified_date, date(it))) }
                             if (overview?.pages?.isEmpty() == true) Text(stringResource(R.string.no_saved_pages))
                         }
                     }
@@ -397,7 +414,7 @@ import kotlinx.coroutines.launch
         Text(stringResource(R.string.saved_page_count, album.pageCount), style = MaterialTheme.typography.bodySmall)
         val timestamp = if (creation) album.createdAt else album.updatedAt
         if (timestamp != null) {
-            Text(stringResource(if (creation) R.string.atelier_created_date else R.string.atelier_modified_date, date(Date(timestamp))),
+            Text(stringResource(if (creation) R.string.atelier_created_date else R.string.atelier_modified_date, date(timestamp)),
                 style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
     }
@@ -538,4 +555,4 @@ private fun AlbumOrder.label() = when (this) {
 }
 
 // Keep the user’s local time zone, but do not mix non-English month names into app-owned text.
-private fun date(value: Date): String = DateFormat.getDateTimeInstance(DateFormat.MEDIUM, DateFormat.SHORT, Locale.ENGLISH).format(value)
+private fun date(epoch: Long): String = AlbumSearchQuery.displayDate(epoch, ZoneId.systemDefault())

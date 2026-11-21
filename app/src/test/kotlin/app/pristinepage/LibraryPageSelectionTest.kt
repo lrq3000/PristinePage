@@ -2,7 +2,13 @@ package app.pristinepage
 
 import app.pristinepage.capture.PhotoImportRequest
 import app.pristinepage.data.model.*
+import app.pristinepage.data.repository.AlbumSearchQuery
 import app.pristinepage.library.*
+import java.time.ZoneOffset
+import java.util.Locale
+import kotlin.coroutines.Continuation
+import kotlin.coroutines.resume
+import kotlin.coroutines.suspendCoroutine
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.test.*
 import org.junit.Assert.*
@@ -11,6 +17,57 @@ import org.junit.Test
 /** Real retained library reducer; only metadata IO is controlled. Selection is an opaque page identity validated against the open document, never an index, provider or bitmap. */
 @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
 class LibraryPageSelectionTest {
+    @Test fun homeSearchReplacesResultsAndClearRestoresTheLibrary() = runTest {
+        val f = Fixture()
+        val session = ImportLibrarySession(f, LibraryIdentity(), this)
+        advanceUntilIdle()
+        session.accept(LibraryEvent.SetAlbumSearch("receipt", ZoneOffset.UTC))
+        assertTrue(session.state.value.documents.isEmpty())
+        advanceUntilIdle()
+        assertEquals(listOf(f.other), session.state.value.documents.map { it.documentId })
+        session.accept(LibraryEvent.SetAlbumSearch("", ZoneOffset.UTC))
+        advanceUntilIdle()
+        assertEquals(listOf(f.doc, f.other), session.state.value.documents.map { it.documentId })
+    }
+
+    @Test fun searchQueryIsNotPrintedOrRestored() = runTest {
+        val f = Fixture()
+        val session = ImportLibrarySession(f, LibraryIdentity(), this)
+        session.accept(LibraryEvent.SetAlbumSearch("receipt", ZoneOffset.UTC))
+        advanceUntilIdle()
+        assertEquals("receipt", session.state.value.albumSearch)
+        assertFalse(session.state.value.toString().contains("receipt"))
+        val reopened = ImportLibrarySession(f, session.identity(), this)
+        advanceUntilIdle()
+        assertEquals("", reopened.state.value.albumSearch)
+    }
+
+    @Test fun changingSearchDropsTheCursorAndRejectsALateOldPage() = runTest {
+        val f = Fixture()
+        val cursor = AlbumPosition(f.doc, "Synthetic selection", 0, 0)
+        lateinit var oldPage: Continuation<AlbumPage>
+        f.find = { query, after ->
+            when {
+                query.text == "receipt" && after == null -> f.page(f.doc, cursor)
+                query.text == "receipt" && after == cursor -> suspendCoroutine { oldPage = it }
+                query.text == "invoice" && after == null -> f.page(f.other)
+                else -> error("Unexpected search term or cursor")
+            }
+        }
+        val session = ImportLibrarySession(f, LibraryIdentity(), this)
+        session.accept(LibraryEvent.SetAlbumSearch("receipt", ZoneOffset.UTC))
+        advanceUntilIdle()
+        assertTrue(session.state.value.hasMore)
+        session.accept(LibraryEvent.More)
+        runCurrent()
+        session.accept(LibraryEvent.SetAlbumSearch("invoice", ZoneOffset.UTC))
+        advanceUntilIdle()
+        oldPage.resume(f.page(f.doc, cursor))
+        advanceUntilIdle()
+        assertEquals(listOf(f.other), session.state.value.documents.map { it.documentId })
+        assertFalse(session.state.value.hasMore)
+    }
+
     @Test fun obsoleteResultCannotResurrectAClosedAlbum() = runTest {
         val f = Fixture()
         val session = ImportLibrarySession(f, LibraryIdentity(f.doc), this)
@@ -95,7 +152,7 @@ class LibraryPageSelectionTest {
     private fun selected(value: LibraryState) = value.selectedPage
     private fun selected(value: LibraryIdentity) = value.selectedPage
 
-    private class Fixture : LibraryActions {
+    private class Fixture : LibraryActions, SearchableLibraryActions {
         val doc = DocumentId("00000000-0000-0000-0000-000000000001"); val other = DocumentId("00000000-0000-0000-0000-000000000002")
         val first = PageId("00000000-0000-0000-0000-000000000003"); val second = PageId("00000000-0000-0000-0000-000000000004"); val foreign = PageId("00000000-0000-0000-0000-000000000005")
         private val source = SourceId("00000000-0000-0000-0000-000000000006")
@@ -106,6 +163,7 @@ class LibraryPageSelectionTest {
         var revision = 1L
         var renameWrites = 0
         var afterRename: () -> DocumentMutationResult = { error("Unexpected rename write") }
+        var find: (suspend (AlbumSearchQuery, AlbumPosition?) -> AlbumPage)? = null
         override suspend fun rename(document: DocumentId, revision: Long, title: String): DocumentMutationResult {
             renameWrites++
             return afterRename()
@@ -114,6 +172,13 @@ class LibraryPageSelectionTest {
             check(!catalogUnavailable)
             return listOf(summary(doc), summary(other))
         }
+        override suspend fun searchAlbums(query: AlbumSearchQuery, order: AlbumOrder, locale: Locale, after: AlbumPosition?, limit: Int): AlbumPage {
+            find?.let { return it(query, after) }
+            assertEquals("receipt", query.text)
+            assertEquals(null, after)
+            return page(other)
+        }
+        fun page(id: DocumentId, next: AlbumPosition? = null) = AlbumPage(listOf(summary(id)), next)
         override suspend fun load(id: DocumentId): DocumentOverview { val snapshot = DocumentOverview(summary(id),if (id == doc) pages.toList() else emptyList()); gate?.await(); return snapshot }
         private fun summary(id: DocumentId) = DocumentSummary(id,"Synthetic selection",revision,if (id == doc) pages.size else 0,false)
         override suspend fun activeImport(id: DocumentId): ImportSessionId? = null
