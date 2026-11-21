@@ -95,6 +95,8 @@
     <string name="editor_shape_bottom_left">Bottom left corner</string>
     <string name="editor_shape_top_midpoint">Top curve midpoint</string>
     <string name="editor_shape_bottom_midpoint">Bottom curve midpoint</string>
+    <string name="editor_shape_left_midpoint">Left curve midpoint</string>
+    <string name="editor_shape_right_midpoint">Right curve midpoint</string>
     <string name="editor_shape_x">%1$s, horizontal position</string>
     <string name="editor_shape_y">%1$s, vertical position</string>
     <string name="editor_shape_coordinate">%1$s: %2$d%%</string>
@@ -121,7 +123,11 @@
     <string name="carnet_next_page">Next page</string>
     <string name="carnet_album_position">Page %1$d of %2$d</string>
     <string name="carnet_bezier_touch_help">Drag a point or handle. Double-tap near an edge to add a point.</string>
-    <string name="carnet_manual_touch_help">Drag a corner or the midpoint on the top or bottom edge to reshape the page.</string>
+    <string name="carnet_manual_touch_help">Drag a corner or an edge midpoint to reshape the page.</string>
+    <string name="carnet_manual_side_upgrade">Moving a side handle switches this saved curve to four-sided correction. Undo restores the previous curve.</string>
+    <string name="carnet_manual_legacy_execution">Manual curve (top and bottom)</string>
+    <string name="carnet_manual_four_sides_execution">Manual curve (four sides)</string>
+    <string name="carnet_manual_straight_execution">Perspective (straight manual curve)</string>
     <string name="carnet_adjusting_point">Magnified view of the point being moved</string>
     <string name="carnet_title_template">Default album name</string>
     <string name="carnet_title_pattern">Name template</string>

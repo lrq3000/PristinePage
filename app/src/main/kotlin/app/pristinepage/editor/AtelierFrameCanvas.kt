@@ -136,7 +136,7 @@ import kotlin.math.roundToInt
                     ?: return@awaitEachGesture
                 val cubicDrag = if (control != null && handle != null) session.beginBezierDrag(control) else null
                 if (handle != null && cubicDrag == null) return@awaitEachGesture
-                if (cubicDrag == null && (nearest == null || !session.beginFrameDrag(nearest.key))) return@awaitEachGesture
+                val frameDrag = if (cubicDrag == null) nearest?.let { session.beginFrameDrag(it.key) } ?: return@awaitEachGesture else null
                 if (control != null) select(control)
                 fun move(position: Offset) {
                     val target = position + anchorOffset
@@ -144,7 +144,7 @@ import kotlin.math.roundToInt
                     val y = ((target.y - imageRect.top) / imageRect.height).toDouble().coerceIn(0.0, 1.0)
                     magnify = PointPx(x, y)
                     if (cubicDrag != null) session.moveBezier(cubicDrag.control, PointPx(x, y), cubicDrag)
-                    else session.dragFrameCorner(checkNotNull(nearest).key.name, x, y)
+                    else session.moveFrameDrag(checkNotNull(frameDrag), if (position == down.position) anchor else PointPx(x, y))
                 }
                 var ended = false
                 try {
@@ -153,7 +153,7 @@ import kotlin.math.roundToInt
                 } finally {
                     magnify = null
                     if (cubicDrag != null) session.endBezierDrag(cubicDrag, cancel = !ended)
-                    else session.endFrameDrag(cancel = !ended)
+                    else session.endFrameDrag(frameDrag, cancel = !ended)
                 }
             }
         }.pointerInput(w, h, enabled, session) {
@@ -183,14 +183,18 @@ import kotlin.math.roundToInt
             if (anchors.isEmpty()) return@Canvas
             val contour = Path().apply {
                 moveTo(anchors.first().x, anchors.first().y)
-                if (geometry is GeometryRecipe.ManualCurve) {
-                    fun quadratic(a: Offset, midpoint: PointPx, b: Offset) {
-                        val p = project(midpoint, rect) * 2f - (a + b) * .5f
-                        quadraticTo(p.x, p.y, b.x, b.y)
+                if (geometry is GeometryRecipe.ManualCurve || geometry is GeometryRecipe.ManualCurveFourSides) {
+                    val edges = listOf(ShapePoint.TOP_MIDPOINT, ShapePoint.RIGHT_MIDPOINT, ShapePoint.BOTTOM_MIDPOINT, ShapePoint.LEFT_MIDPOINT)
+                    for ((i, handle) in edges.withIndex()) {
+                        val a = anchors[i]
+                        val b = anchors[(i + 1) % anchors.size]
+                        val middle = points[handle]
+                        if (middle == null) lineTo(b.x, b.y)
+                        else {
+                            val p = project(middle, rect) * 2f - (a + b) * .5f
+                            quadraticTo(p.x, p.y, b.x, b.y)
+                        }
                     }
-                    quadratic(anchors[0], geometry.topMidpoint, anchors[1])
-                    lineTo(anchors[2].x, anchors[2].y)
-                    quadratic(anchors[2], geometry.bottomMidpoint, anchors[3])
                 } else if (cubic == null) anchors.drop(1).forEach { lineTo(it.x, it.y) }
                 else for (side in ContourSide.entries) {
                     val edge = cubic.edge(side)
@@ -214,8 +218,8 @@ import kotlin.math.roundToInt
                 drawCircle(Color(0xFF152E28), 8.dp.toPx(), anchor)
                 drawCircle(Color(0xFFF6FFF1), 6.dp.toPx(), anchor)
             }
-            if (geometry is GeometryRecipe.ManualCurve) {
-                listOf(geometry.topMidpoint, geometry.bottomMidpoint).forEach { p ->
+            if (geometry is GeometryRecipe.ManualCurve || geometry is GeometryRecipe.ManualCurveFourSides) {
+                points.values.drop(4).forEach { p ->
                     drawCircle(Color(0xFF152E28), 8.dp.toPx(), project(p, rect))
                     drawCircle(Color(0xFFB9FFD2), 6.dp.toPx(), project(p, rect))
                 }

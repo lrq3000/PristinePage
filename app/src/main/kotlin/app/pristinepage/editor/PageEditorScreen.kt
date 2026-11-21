@@ -164,7 +164,10 @@ class PageEditorScreen(
                 }
             }
         }
-        Column(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background).safeDrawingPadding()) {
+        BoxWithConstraints(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background).safeDrawingPadding()) {
+        val pinCropHistory = panel == "shape" && maxHeight >= 440.dp
+        val cropPreview = (maxHeight * .25f).coerceIn(88.dp, 220.dp)
+        Column(Modifier.fillMaxSize()) {
             Row(Modifier.fillMaxWidth().padding(horizontal = 10.dp), verticalAlignment = Alignment.CenterVertically) {
                 if (guidedStep == null) TextButton(onClick = session::requestBack, enabled = !state.saving,
                     modifier = Modifier.heightIn(min = 48.dp).testTag("editor-back")) { Text(stringResource(R.string.atelier_back_to_album)) }
@@ -178,10 +181,10 @@ class PageEditorScreen(
                     modifier = Modifier.heightIn(min = 48.dp).testTag("editor-apply")) { Text(stringResource(R.string.editor_apply)) }
             }
             val screenHeight = androidx.compose.ui.platform.LocalConfiguration.current.screenHeightDp
-            if (panel == "shape") {
+            if (pinCropHistory) {
                 // Pin the result and its history row, leaving the source canvas and advanced controls independently scrollable.
                 Column(Modifier.fillMaxWidth().padding(horizontal = 12.dp)) {
-                    displayPreview(Modifier.height((screenHeight * .25f).coerceIn(88f, 220f).dp))
+                    displayPreview(Modifier.height(cropPreview))
                     history()
                 }
             }
@@ -193,8 +196,9 @@ class PageEditorScreen(
             }
             // Loading the original is independent of recipe decoding. Unsupported recipes must not make an authentic page unreadable.
             if (state.page == null && state.error != null) originalOnLoadFailure?.invoke()
-            if (panel != "shape") {
-                displayPreview(Modifier.height((screenHeight * .51f).coerceIn(220f, 440f).dp))
+            if (!pinCropHistory) {
+                val height = if (panel == "shape") cropPreview else (screenHeight * .51f).coerceIn(220f, 440f).dp
+                displayPreview(Modifier.height(height))
                 history()
             }
             if (panel == "shape") state.draft?.let {
@@ -203,7 +207,8 @@ class PageEditorScreen(
                 val frame = it.geometry
                 val seed = guidedStep == 0 && !seedAttempted && page?.recipeRevision == 1L && frame is GeometryRecipe.None
                 if (page != null && loadOriginal != null &&
-                    (frame is GeometryRecipe.Perspective || frame is GeometryRecipe.ManualCurve || frame is GeometryRecipe.Bezier || seed)) {
+                    (frame is GeometryRecipe.Perspective || frame is GeometryRecipe.ManualCurve || frame is GeometryRecipe.ManualCurveFourSides ||
+                        frame is GeometryRecipe.Bezier || seed)) {
                     AtelierFrameCanvas(page.sourceId.value, frame, editable, loadOriginal, session, bezierSelection,
                         onSelectBezier = { bezierSelection = it },
                         placeBezierPoint = placeBezierPoint,
@@ -225,8 +230,12 @@ class PageEditorScreen(
                         )
                         AtelierBezierControls(frame, editable, session, bezierSelection) { bezierSelection = it }
                     }
-                    if (frame is GeometryRecipe.ManualCurve) {
+                    if (frame is GeometryRecipe.ManualCurve || frame is GeometryRecipe.ManualCurveFourSides) {
                         Text(stringResource(R.string.carnet_manual_touch_help))
+                        if (frame is GeometryRecipe.ManualCurve && frame.depth == 0.0 &&
+                            frame != GeometryRecipe.ManualCurve(frame.source, frame.quad, targetRule = frame.targetRule, outputQuarterTurns = frame.outputQuarterTurns)) {
+                            Text(stringResource(R.string.carnet_manual_side_upgrade), style = MaterialTheme.typography.bodySmall)
+                        }
                     }
                 }
                 EditorShapeControls(frame, editable, session)
@@ -294,6 +303,7 @@ class PageEditorScreen(
             }
             }
         }
+        }
         if (information) AlertDialog(onDismissRequest = { information = false },
             title = { Text(stringResource(R.string.atelier_info)) },
             text = {
@@ -309,7 +319,10 @@ class PageEditorScreen(
                             preview.preview?.let { render ->
                                 val size = render.request.output.size
                                 Text(stringResource(R.string.atelier_info_preview_size, size.width, size.height))
-                                render.stages.mapNotNull { stage -> executedLabel(stage.stageId) }.distinct().forEach { label ->
+                                 render.stages.mapNotNull { stage ->
+                                     if ("MANUAL_STRAIGHT_PERSPECTIVE" in stage.warningCodes) R.string.carnet_manual_straight_execution
+                                     else executedLabel(stage.stageId)
+                                 }.distinct().forEach { label ->
                                     Text(stringResource(R.string.atelier_info_executed, stringResource(label)))
                                 }
                             }
@@ -345,7 +358,8 @@ class PageEditorScreen(
 
 private fun executedLabel(id: String): Int? = when (id) {
     "perspective_v1" -> R.string.atelier_wizard_frame
-    "manual_ruled_v1" -> R.string.editor_shape_curve
+    "manual_ruled_v1" -> R.string.carnet_manual_legacy_execution
+    "manual_four_sides_v1" -> R.string.carnet_manual_four_sides_execution
     "atelier_bezier_v1" -> R.string.atelier_bezier_mode
     "paper_gain_v1" -> R.string.editor_look_paper
     "natural_l_v1" -> R.string.editor_look_natural

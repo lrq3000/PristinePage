@@ -227,6 +227,29 @@ class EditorShapeScreenTest {
         assertEquals(cubic, afterReopen.state.value.draft)
         assertEquals(curvedValue, displayedSample(afterReopen, 80, 50))
         assertArrayEquals(png, graph.store.committedSources.load(second.sourceId).file.readBytes())
+        compose.onNodeWithTag("editor-tool-shape").performClick()
+        click("editor-shape-curve")
+        compose.onNodeWithText(context.getString(R.string.atelier_bezier_replace_confirm)).performClick()
+        waitForResult(afterReopen, "manual_ruled_v1")
+        val beforeSide = displayedSample(afterReopen, 40, 0)
+        selectPoint("LEFT_MIDPOINT")
+        coordinate("x", .08f)
+        selectPoint("RIGHT_MIDPOINT")
+        coordinate("x", .9f)
+        waitForResult(afterReopen, "manual_four_sides_v1")
+        assertEquals(beforeSide + 8, displayedSample(afterReopen, 40, 0))
+        val fourSides = checkNotNull(afterReopen.state.value.draft)
+        compose.onNodeWithTag("editor-apply").assertIsEnabled().performClick()
+        compose.waitUntil(10_000) { afterReopen.state.value.page?.recipeRevision == 4L && !afterReopen.state.value.dirty }
+        compose.onNodeWithTag("editor-back").performClick()
+        compose.waitUntil(10_000) { host.session.value == null && !library.state.value.loading }
+        compose.onNodeWithTag("original-page-${second.pageId.value}").performClick()
+        compose.waitUntil(10_000) { host.session.value?.state?.value?.page?.recipeRevision == 4L }
+        val reopenedSides = checkNotNull(host.session.value)
+        waitForResult(reopenedSides, "manual_four_sides_v1")
+        assertEquals(fourSides, reopenedSides.state.value.draft)
+        assertEquals(beforeSide + 8, displayedSample(reopenedSides, 40, 0))
+        assertArrayEquals(png, graph.store.committedSources.load(second.sourceId).file.readBytes())
     }
 
     private fun click(tag: String) {

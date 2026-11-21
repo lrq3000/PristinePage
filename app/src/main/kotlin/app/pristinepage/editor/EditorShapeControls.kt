@@ -43,7 +43,7 @@ import kotlin.math.roundToInt
     OutlinedButton(
         onClick = { choose(session::selectManualCurve) },
         enabled = enabled,
-        modifier = shapeTarget("editor-shape-curve").semantics { selected = geometry is GeometryRecipe.ManualCurve },
+        modifier = shapeTarget("editor-shape-curve").semantics { selected = geometry is GeometryRecipe.ManualCurve || geometry is GeometryRecipe.ManualCurveFourSides },
     ) { Text(stringResource(R.string.editor_shape_curve)) }
     OutlinedButton(
         onClick = session::selectBezier,
@@ -188,4 +188,6 @@ private fun ShapePoint.label() = when (this) {
     ShapePoint.BOTTOM_LEFT -> R.string.editor_shape_bottom_left
     ShapePoint.TOP_MIDPOINT -> R.string.editor_shape_top_midpoint
     ShapePoint.BOTTOM_MIDPOINT -> R.string.editor_shape_bottom_midpoint
+    ShapePoint.LEFT_MIDPOINT -> R.string.editor_shape_left_midpoint
+    ShapePoint.RIGHT_MIDPOINT -> R.string.editor_shape_right_midpoint
 }

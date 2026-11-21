@@ -78,7 +78,11 @@ class GeometryEngine(private val budget: ImageAllocationBudget) {
                 catch (failure: CancellationException) { throw failure }
             } else null
             val cubicAxes = if (cubicDirect) try {
-                CubicSamplingAxes.prepare(recipe as GeometryRecipe.Bezier, base, checkpoint)
+                when (recipe) {
+                    is GeometryRecipe.Bezier -> CubicSamplingAxes.prepare(recipe, base, checkpoint)
+                    is GeometryRecipe.ManualCurveFourSides -> CubicSamplingAxes.prepare(recipe, base, checkpoint)
+                    else -> error("Invalid cubic dispatch")
+                }
             } catch (_: IllegalArgumentException) { refuse(OperationErrorCode.INVALID_MAP, "invalid_cubic_map") }
             else null
             val map = if (needsPerspectiveProof) {
@@ -129,6 +133,7 @@ class GeometryEngine(private val budget: ImageAllocationBudget) {
             val stageId = when (recipe) {
                 is GeometryRecipe.Bezier -> "atelier_bezier_v1"
                 is GeometryRecipe.ManualCurve -> "manual_ruled_v1"
+                is GeometryRecipe.ManualCurveFourSides -> "manual_four_sides_v1"
                 is GeometryRecipe.Perspective -> "perspective_v1"
                 else -> if (!identitySize) "source_resize_half_pixel_v1" else "geometry_none_v1"
             }
@@ -158,10 +163,18 @@ class GeometryEngine(private val budget: ImageAllocationBudget) {
                 refuse(OperationErrorCode.PROVIDER_UNAVAILABLE, "geometry_map_not_implemented")
             }
             // Compare SERIALIZED normalized chord midpoints exactly, as preparation does. A near-straight manual curve must not disappear under a source-resolution-dependent tolerance.
-            val manualStraight = recipe is GeometryRecipe.ManualCurve && recipe.depth == 0.0 && recipe.topMidpoint == midpoint(recipe.quad.tl, recipe.quad.tr) && recipe.bottomMidpoint == midpoint(recipe.quad.bl, recipe.quad.br)
-            val manualDirect = recipe is GeometryRecipe.ManualCurve && !manualStraight
-            val cubicDirect = recipe is GeometryRecipe.Bezier && !recipe.contour.straight
-            val controls = when (recipe) { is GeometryRecipe.Perspective -> recipe.quad; is GeometryRecipe.ManualCurve -> recipe.quad; is GeometryRecipe.Bezier -> recipe.contour.quad; else -> null }
+            val legacyManualStraight = recipe is GeometryRecipe.ManualCurve && recipe.depth == 0.0 && recipe.topMidpoint == midpoint(recipe.quad.tl, recipe.quad.tr) && recipe.bottomMidpoint == midpoint(recipe.quad.bl, recipe.quad.br)
+            val manualStraight = legacyManualStraight || (recipe is GeometryRecipe.ManualCurveFourSides && recipe.straight)
+            val manualDirect = recipe is GeometryRecipe.ManualCurve && !legacyManualStraight
+            val cubicDirect = (recipe is GeometryRecipe.Bezier && !recipe.contour.straight) ||
+                (recipe is GeometryRecipe.ManualCurveFourSides && !recipe.straight)
+            val controls = when (recipe) {
+                is GeometryRecipe.Perspective -> recipe.quad
+                is GeometryRecipe.ManualCurve -> recipe.quad
+                is GeometryRecipe.ManualCurveFourSides -> recipe.quad
+                is GeometryRecipe.Bezier -> recipe.contour.quad
+                else -> null
+            }
             val projective = recipe is GeometryRecipe.Perspective || manualStraight || (recipe is GeometryRecipe.Bezier && !cubicDirect)
             val exactPermutation = identitySize && (recipe is GeometryRecipe.None || (projective && fullFrame(checkNotNull(controls))))
             val needsPerspectiveProof = projective && !exactPermutation

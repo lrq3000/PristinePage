@@ -45,14 +45,14 @@ internal data class BezierControl(val side: ContourSide, val segment: Int, val p
 }
 
 internal enum class ShapePoint {
-    TOP_LEFT, TOP_RIGHT, BOTTOM_RIGHT, BOTTOM_LEFT, TOP_MIDPOINT, BOTTOM_MIDPOINT;
+    TOP_LEFT, TOP_RIGHT, BOTTOM_RIGHT, BOTTOM_LEFT, TOP_MIDPOINT, BOTTOM_MIDPOINT, LEFT_MIDPOINT, RIGHT_MIDPOINT;
 
     fun replaceIn(quad: QuadPx, point: PointPx): QuadPx = when (this) {
         TOP_LEFT -> quad.copy(tl = point)
         TOP_RIGHT -> quad.copy(tr = point)
         BOTTOM_RIGHT -> quad.copy(br = point)
         BOTTOM_LEFT -> quad.copy(bl = point)
-        TOP_MIDPOINT, BOTTOM_MIDPOINT -> quad
+        TOP_MIDPOINT, BOTTOM_MIDPOINT, LEFT_MIDPOINT, RIGHT_MIDPOINT -> quad
     }
 }
 
@@ -70,6 +70,7 @@ internal object EditorShapes {
             geometry.source, wholeImage, outputQuarterTurns = geometry.outputQuarterTurns,
         ) else geometry
         is GeometryRecipe.ManualCurve -> geometry.cornersOnly()
+        is GeometryRecipe.ManualCurveFourSides -> GeometryRecipe.Perspective(geometry.source, geometry.quad, geometry.targetRule, outputQuarterTurns = geometry.outputQuarterTurns)
         is GeometryRecipe.Bezier -> GeometryRecipe.Perspective(geometry.source, geometry.contour.quad, geometry.targetRule, outputQuarterTurns = geometry.outputQuarterTurns)
         else -> geometry
     }
@@ -96,10 +97,19 @@ internal object EditorShapes {
         ShapePoint.TOP_LEFT to tl, ShapePoint.TOP_RIGHT to tr, ShapePoint.BOTTOM_RIGHT to br, ShapePoint.BOTTOM_LEFT to bl,
     )
 
+    private fun midpoint(a: PointPx, b: PointPx) = PointPx((a.x + b.x) / 2, (a.y + b.y) / 2)
+
     fun points(geometry: GeometryRecipe): Map<ShapePoint, PointPx> = when (geometry) {
         is GeometryRecipe.Perspective -> geometry.quad.labeledCorners()
         is GeometryRecipe.ManualCurve -> geometry.quad.labeledCorners() + mapOf(
             ShapePoint.TOP_MIDPOINT to geometry.topMidpoint, ShapePoint.BOTTOM_MIDPOINT to geometry.bottomMidpoint,
+        ) + (if (geometry.depth == 0.0) mapOf(
+            ShapePoint.LEFT_MIDPOINT to midpoint(geometry.quad.tl, geometry.quad.bl),
+            ShapePoint.RIGHT_MIDPOINT to midpoint(geometry.quad.tr, geometry.quad.br),
+        ) else emptyMap())
+        is GeometryRecipe.ManualCurveFourSides -> geometry.quad.labeledCorners() + mapOf(
+            ShapePoint.TOP_MIDPOINT to geometry.topMidpoint, ShapePoint.BOTTOM_MIDPOINT to geometry.bottomMidpoint,
+            ShapePoint.LEFT_MIDPOINT to geometry.leftMidpoint, ShapePoint.RIGHT_MIDPOINT to geometry.rightMidpoint,
         )
         else -> emptyMap()
     }
@@ -109,6 +119,16 @@ internal object EditorShapes {
         is GeometryRecipe.ManualCurve -> when (label) {
             ShapePoint.TOP_MIDPOINT -> geometry.copy(topMidpoint = point)
             ShapePoint.BOTTOM_MIDPOINT -> geometry.copy(bottomMidpoint = point)
+            ShapePoint.LEFT_MIDPOINT, ShapePoint.RIGHT_MIDPOINT -> {
+                if (geometry.depth != 0.0 || points(geometry)[label] == point) geometry
+                else {
+                    // Moving a side is the explicit edit that changes the recipe variant. Merely opening a saved legacy curve does not change its mapping or bytes.
+                    val four = GeometryRecipe.ManualCurveFourSides(geometry.source, geometry.quad,
+                        topMidpoint = geometry.topMidpoint, bottomMidpoint = geometry.bottomMidpoint,
+                        targetRule = geometry.targetRule, outputQuarterTurns = geometry.outputQuarterTurns)
+                    setPoint(four, label, point)
+                }
+            }
             else -> {
                 val corners = geometry.cornersOnly()
                 val straight = straightCurve(corners)
@@ -119,6 +139,23 @@ internal object EditorShapes {
                     bottomMidpoint = if (geometry.bottomMidpoint == straight.bottomMidpoint) moved.bottomMidpoint else geometry.bottomMidpoint,
                     depth = geometry.depth,
                 )
+            }
+        }
+        is GeometryRecipe.ManualCurveFourSides -> when (label) {
+            ShapePoint.TOP_MIDPOINT -> geometry.copy(topMidpoint = point)
+            ShapePoint.BOTTOM_MIDPOINT -> geometry.copy(bottomMidpoint = point)
+            ShapePoint.LEFT_MIDPOINT -> geometry.copy(leftMidpoint = point)
+            ShapePoint.RIGHT_MIDPOINT -> geometry.copy(rightMidpoint = point)
+            else -> {
+                val q = geometry.quad
+                val moved = label.replaceIn(q, point)
+                fun keepExplicit(current: PointPx, a: PointPx, b: PointPx, c: PointPx, d: PointPx) =
+                    if (current == midpoint(a, b)) midpoint(c, d) else current
+                geometry.copy(quad = moved,
+                    topMidpoint = keepExplicit(geometry.topMidpoint, q.tl, q.tr, moved.tl, moved.tr),
+                    rightMidpoint = keepExplicit(geometry.rightMidpoint, q.tr, q.br, moved.tr, moved.br),
+                    bottomMidpoint = keepExplicit(geometry.bottomMidpoint, q.bl, q.br, moved.bl, moved.br),
+                    leftMidpoint = keepExplicit(geometry.leftMidpoint, q.tl, q.bl, moved.tl, moved.bl))
             }
         }
         else -> geometry

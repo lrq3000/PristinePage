@@ -53,6 +53,22 @@ private fun geometryValid(source: SourceBinding, schema: Int, turns: Int, quad: 
         }
         override val mode: GeometryMode get() = GeometryMode.MANUAL_CURVE
     }
+    /** Four on-curve midpoints use the projective contour sampler, not the legacy top/bottom ruled surface. */
+    @Serializable @SerialName("manual_four_sides_v1") data class ManualCurveFourSides(
+        override val source: SourceBinding, val quad: QuadPx,
+        val topMidpoint: PointPx = midpoint(quad.tl, quad.tr), val rightMidpoint: PointPx = midpoint(quad.tr, quad.br),
+        val bottomMidpoint: PointPx = midpoint(quad.bl, quad.br), val leftMidpoint: PointPx = midpoint(quad.tl, quad.bl),
+        val targetRule: TargetRule = TargetRule.EdgeExtents, override val schemaVersion: Int = 1, override val outputQuarterTurns: Int = 0,
+    ) : GeometryRecipe() {
+        init {
+            geometryValid(source, schemaVersion, outputQuarterTurns, quad)
+            require(listOf(topMidpoint, rightMidpoint, bottomMidpoint, leftMidpoint).all { it.x in 0.0..1.0 && it.y in 0.0..1.0 })
+            require(targetRule != TargetRule.CropAspect)
+        }
+        val straight: Boolean get() = topMidpoint == midpoint(quad.tl, quad.tr) && rightMidpoint == midpoint(quad.tr, quad.br) &&
+            bottomMidpoint == midpoint(quad.bl, quad.br) && leftMidpoint == midpoint(quad.tl, quad.bl)
+        override val mode: GeometryMode get() = GeometryMode.MANUAL_CURVE
+    }
     @Serializable @SerialName("rough_crop_dewarp_v1") data class RoughCropDewarp(override val source: SourceBinding, val crop: RectPx, val provider: ProviderReference, val geometryOnly: Boolean = true, val targetRule: TargetRule = TargetRule.CropAspect, override val schemaVersion: Int = 1, override val outputQuarterTurns: Int = 0) : GeometryRecipe() {
         init {
             geometryValid(source, schemaVersion, outputQuarterTurns)
@@ -71,6 +87,7 @@ private fun geometryValid(source: SourceBinding, schema: Int, turns: Int, quad: 
         is None -> copy(outputQuarterTurns = turns)
         is Perspective -> copy(outputQuarterTurns = turns)
         is ManualCurve -> copy(outputQuarterTurns = turns)
+        is ManualCurveFourSides -> copy(outputQuarterTurns = turns)
         is RoughCropDewarp -> copy(outputQuarterTurns = turns)
         is Bezier -> copy(outputQuarterTurns = turns)
     }

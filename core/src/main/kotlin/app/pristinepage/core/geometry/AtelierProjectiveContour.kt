@@ -170,6 +170,28 @@ class CubicSamplingAxes internal constructor(private val base: Homography, priva
     companion object {
         fun workspaceBytes(base: PixelSize): Long = 512L * 1024 + 32L * (base.width.toLong() + base.height)
 
+        fun prepare(recipe: GeometryRecipe.ManualCurveFourSides, base: PixelSize, checkpoint: () -> Unit): CubicSamplingAxes {
+            require(!recipe.straight)
+            val size = recipe.source.sourceSize
+            fun pixel(p: PointPx) = PointPx(p.x * (size.width - 1), p.y * (size.height - 1))
+            fun edge(a: PointPx, m: PointPx, b: PointPx): ContourEdge {
+                val start = pixel(a)
+                val end = pixel(b)
+                if (m == PointPx((a.x + b.x) / 2, (a.y + b.y) / 2)) return ContourEdge.line(start, end)
+                // Degree-elevate the quadratic through m at t=1/2. Both cubic controls depart from their chord sites by 4/3 of the midpoint displacement.
+                val middle = pixel(m)
+                val dx = (middle.x - (start.x + end.x) / 2) * (4.0 / 3)
+                val dy = (middle.y - (start.y + end.y) / 2) * (4.0 / 3)
+                fun tangent(t: Double) = blend(start, end, t).let { PointPx(it.x + dx, it.y + dy) }
+                return ContourEdge.authored(listOf(ContourSegment(0.0, 1.0, AtelierCubic(start, tangent(1.0 / 3), tangent(2.0 / 3), end))), false)
+            }
+            val q = recipe.quad
+            val contour = AtelierContour(QuadPx(pixel(q.tl), pixel(q.tr), pixel(q.br), pixel(q.bl)),
+                edge(q.tl, recipe.topMidpoint, q.tr), edge(q.tr, recipe.rightMidpoint, q.br),
+                edge(q.bl, recipe.bottomMidpoint, q.br), edge(q.tl, recipe.leftMidpoint, q.bl))
+            return AtelierProjectiveContour.prepare(contour, size, base, checkpoint).axes(checkpoint)
+        }
+
         fun prepare(recipe: GeometryRecipe.Bezier, base: PixelSize, checkpoint: () -> Unit): CubicSamplingAxes {
             require(!recipe.contour.straight)
             val size = recipe.source.sourceSize

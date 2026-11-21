@@ -24,7 +24,7 @@ class EditorSession @JvmOverloads constructor(documentId: String, pageId: String
     private var loading: Job? = null
     private var saving: Job? = null
     private var shapeDrag: ShapeDrag? = null
-    private var frameDrag: ShapePoint? = null
+    private var frameDrag: FrameDrag? = null
     private var bezierDrag: BezierDrag? = null
     private var generation = 0L
     private var active = true
@@ -140,36 +140,35 @@ class EditorSession @JvmOverloads constructor(documentId: String, pageId: String
         if (next.quad != geometry.contour.quad && !validFrame(EditorShapes.perspective(geometry.copy(contour = next)) as GeometryRecipe.Perspective)) return
         replaceDraft(edits, draft.copy(geometry = geometry.copy(contour = next)))
     }
-    internal class ShapeDrag(val label: ShapePoint, val horizontal: Boolean)
+    internal class ShapeDrag(val label: ShapePoint, val horizontal: Boolean, val start: GeometryRecipe)
 
-    fun dragFrameCorner(id: String, x: Double, y: Double) {
-        val point = ShapePoint.entries.firstOrNull { it.name == id } ?: return
-        if (frameDrag != null && frameDrag != point) return
-        if (!active || current.value.confirmExit || !x.isFinite() || !y.isFinite() || x !in 0.0..1.0 || y !in 0.0..1.0) return
+    internal class FrameDrag(val point: ShapePoint, val start: GeometryRecipe, val startPoint: PointPx)
+
+    internal fun moveFrameDrag(drag: FrameDrag, position: PointPx) {
+        if (drag !== frameDrag || !active || current.value.confirmExit || position.x !in 0.0..1.0 || position.y !in 0.0..1.0) return
         val edits = editable() ?: return
         val draft = edits.current
-        val geometry = draft.geometry
-        if (point !in EditorShapes.points(geometry)) return
-        val candidate = EditorShapes.setPoint(geometry, point, PointPx(x, y))
+        // Derive each pointer sample from the captured shape; returning to the starting point restores its exact recipe variant.
+        val candidate = if (position == drag.startPoint) drag.start else EditorShapes.setPoint(drag.start, drag.point, position)
         val frame = EditorShapes.perspective(candidate) as? GeometryRecipe.Perspective ?: return
         if (!validFrame(frame)) return
-        endShapeDrag()
         replaceDraft(edits, draft.copy(geometry = candidate))
     }
 
-    internal fun beginFrameDrag(point: ShapePoint): Boolean {
-        val edits = editable() ?: return false
-        if (!active || current.value.confirmExit || point !in EditorShapes.points(edits.current.geometry)) return false
+    internal fun beginFrameDrag(point: ShapePoint): FrameDrag? {
+        val edits = editable() ?: return null
+        if (!active || current.value.confirmExit) return null
         endShapeDrag()
         endFrameDrag()
         endBezierDrag()
+        val geometry = edits.current.geometry
+        val start = EditorShapes.points(geometry)[point] ?: return null
         edits.beginGesture()
-        frameDrag = point
-        return true
+        return FrameDrag(point, geometry, start).also { frameDrag = it }
     }
 
-    internal fun endFrameDrag(cancel: Boolean = false) {
-        if (frameDrag == null) return
+    internal fun endFrameDrag(drag: FrameDrag? = frameDrag, cancel: Boolean = false) {
+        if (drag == null || drag !== frameDrag) return
         frameDrag = null
         val edits = checkNotNull(history)
         if (!cancel) edits.endGesture()
@@ -204,7 +203,7 @@ class EditorSession @JvmOverloads constructor(documentId: String, pageId: String
         endShapeDrag()
         endFrameDrag()
         edits.beginGesture()
-        return ShapeDrag(label, horizontal).also { shapeDrag = it }
+        return ShapeDrag(label, horizontal, edits.current.geometry).also { shapeDrag = it }
     }
 
     internal fun endShapeDrag(drag: ShapeDrag? = shapeDrag) {
@@ -221,9 +220,10 @@ class EditorSession @JvmOverloads constructor(documentId: String, pageId: String
         else if (drag !== shapeDrag || drag.label != label || drag.horizontal != horizontal) return
         // Read the other axis from the current draft rather than a potentially not-yet-recomposed slider lambda.
         val draft = edits.current
-        val point = EditorShapes.points(draft.geometry)[label] ?: return
+        val geometry = drag?.start ?: draft.geometry
+        val point = EditorShapes.points(geometry)[label] ?: return
         val moved = if (horizontal) point.copy(x = value) else point.copy(y = value)
-        replaceDraft(edits, draft.copy(geometry = EditorShapes.setPoint(draft.geometry, label, moved)))
+        replaceDraft(edits, draft.copy(geometry = EditorShapes.setPoint(geometry, label, moved)))
     }
 
     private fun editShape(change: (GeometryRecipe) -> GeometryRecipe) {
