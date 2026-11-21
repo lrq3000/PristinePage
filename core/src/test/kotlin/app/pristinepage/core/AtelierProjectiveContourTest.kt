@@ -60,6 +60,19 @@ class AtelierProjectiveContourTest {
         assertNear(map.map(.5, .5), preview.map(.5, .5), 1e-9)
     }
 
+    @Test fun fullFrameVerticalBowWithPositiveThicknessKeepsTheExactRequestedCurve() {
+        val size = PixelSize(121, 101)
+        val frame = QuadPx(p(0, 0), p(120, 0), p(120, 100), p(0, 100))
+        // This map leaves x unchanged and interpolates each column from the cubic to y=100; its determinant is strictly positive.
+        val curve = AtelierContour.straight(frame)
+            .moveHandle(ContourSide.TOP, 0, true, p(40, 24))
+            .moveHandle(ContourSide.TOP, 0, false, p(80, 24))
+        val map = AtelierProjectiveContour.prepare(curve, size, size)
+        assertNear(p(60, 18), map.map(.5, 0.0), 1e-9)
+        assertNear(p(60, 59), map.map(.5, .5), 1e-9)
+        assertNear(p(60, 100), map.map(.5, 1.0), 1e-9)
+    }
+
     @Test fun fullFrameOutwardBowStillRefusesInsteadOfClampingTheMap() {
         val size = PixelSize(121, 91)
         val frame = QuadPx(p(0, 0), p(120, 0), p(120, 90), p(0, 90))

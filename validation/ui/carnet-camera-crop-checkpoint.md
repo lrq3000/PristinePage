@@ -63,6 +63,12 @@ Keep the existing crop magnifier, including its automatic top-left/top-right pla
 
 The same feedback requests left/right Manual curve midpoints and reports a Bézier refusal not tied to supplied contour coordinates. These remain separate geometry work from this UI increment. A strict offline `:app:testDebugUnitTest :app:compileDebugAndroidTestKotlin :app:lintDebug` completed in 1m20s, with 159 app JVM cases and lint 0 errors, 21 warnings and 1 hint. Updated native witnesses cover history visibility during scrolling, staying on the same page after Apply, a clean no-write tool collapse, and explicit Back/reopen. They were compiled only; no APK, emulator or phone operation followed.
 
+### Bézier proof follow-up
+
+On a synthetic 121×101 full-frame page, top handles `(40,24)` and `(80,24)` give a triangular Jacobian: x stays fixed, and y interpolates from the top curve to the lower edge with positive thickness. The earlier global correction-norm gate nevertheless raised `Cubic deformation can approach a fold`. The same map can now be admitted by an outward-rounded bound on the positive symmetric part of its Jacobian across the entire parameter square, covering either one-sided derivative at each knot. This proves strong monotonicity and injectivity; the existing stretch, extent, lattice and per-raster support checks still apply. Previously admitted maps use the original first branch and pixel evaluator. No silent flattening, fallback, source clipping or lower-resolution substitution is introduced. Exact synthetic edge/interior witnesses now pass; this does not identify the specific condition from the operator's photo.
+
+Strict offline targeted tests ran 9 core and 4 geometry-engine JVM tests successfully after an initial 1/9 actual test failure. Independent proof review found no blocking issue; skew positive coverage through a knot, outward extent coverage through the added proof branch, and a machine-readable admission revision remain open. The proof change is identified separately from `atelier_bezier_v1` by this source revision; it changes admission, not the pixels of previously admitted maps.
+
 ## Independent review dispositions
 
 The original source review identified two consequential defects and one future export naming issue. It found no defect in the outward-rounded subdivision, mutex cancellation ownership, gallery dirty-state guard or initial batch-selection scope. The original review did not run Android or test the modified source itself.
