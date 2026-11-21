@@ -26,7 +26,8 @@ class EditorLookCarouselTest {
         assertEquals(EditorLookCard.PAPER, adjacentLook(EditorLookCard.NONE, 1))
         assertEquals(EditorLookCard.GRAY, adjacentLook(EditorLookCard.BINARY, -1))
         assertEquals(EditorLookCard.DOCUMENT_COLOR, adjacentLook(EditorLookCard.BINARY, 1))
-        assertNull(adjacentLook(EditorLookCard.DOCUMENT_COLOR, 1))
+        assertEquals("paper-shadow", adjacentLook(EditorLookCard.DOCUMENT_COLOR, 1)?.id)
+        assertNull(adjacentLook(adjacentLook(EditorLookCard.DOCUMENT_COLOR, 1), 1))
         assertEquals(EditorLookCard.NONE, adjacentLook(null, 1))
     }
 
@@ -39,6 +40,19 @@ class EditorLookCarouselTest {
         val reopened = RecipeCodec.decode(RecipeCodec.encode(saved))
         assertEquals(EditorLookCard.DOCUMENT_COLOR, reopened.matchingLook())
         assertEquals(saved, EditorLooks.select(reopened, "document-color"))
+    }
+
+    @Test fun shadowLookRestoresItsOwnStrengthAndDoesNotChangeGeometryOrFinishing() {
+        val saved = Recipe(
+            geometry = GeometryRecipe.None(SourceBinding("b".repeat(64), PixelSize(192, 112), "test-srgb-v1"), outputQuarterTurns = 3),
+            appearance = AppearanceRecipe.PaperShadowV1(.65),
+            detail = DetailRecipe.LumaDetail7V1(),
+        )
+        val reopened = RecipeCodec.decode(RecipeCodec.encode(saved))
+        assertEquals(saved, EditorLooks.select(reopened, "paper-shadow"))
+        assertEquals("paper-shadow", reopened.matchingLook()?.id)
+        assertEquals(saved.copy(appearance = AppearanceRecipe.PaperShadowV1()),
+            EditorLooks.select(saved.copy(appearance = AppearanceRecipe.NoneV1, binary = BinaryRecipe.GrayscaleV1), "paper-shadow"))
     }
 
     @Test fun precomputedCardsMatchProductionRenderingOfTheSameSamplePage() {
@@ -56,8 +70,9 @@ class EditorLookCarouselTest {
                 Triple("binary", R.string.editor_look_binary, R.drawable.editor_look_sample_binary),
                 Triple("document-color", R.string.editor_look_document_color, null),
             ),
-            EditorLookCard.entries.map { Triple(it.id, it.label, it.sample) },
+            EditorLookCard.entries.filterNot { it.id == "paper-shadow" }.map { Triple(it.id, it.label, it.sample) },
         )
+        assertNull("The shadow card must not use another method's precomputed image", EditorLookCard.entries.single { it.id == "paper-shadow" }.sample)
         val samples = DocumentFixtures.generate("F03-smooth").use { fixture ->
             val image = fixture.corrupted
             val base = Recipe(geometry = GeometryRecipe.None(binding(image)))

@@ -99,6 +99,29 @@ class AppearanceEngineTest {
         assertEquals(0L, budget.usedBytes)
     }
 
+    @Test fun aReopenedShadowRecipeRunsOneStageAndBlendsItsCandidateExactlyOnce() {
+        val budget = ImageAllocationBudget(2_000_000)
+        val request = recipe(192, 112, AppearanceRecipe.PaperShadowV1(.5))
+        val restored = RecipeCodec.decode(RecipeCodec.encode(request))
+        assertEquals(request, restored)
+        val bytes = ByteArray(192 * 112 * 3) { if (it / 3 % 192 < 81) 144.toByte() else 216.toByte() }
+        val mask = FloatArray(192 * 112).apply { this[1] = .5f; this[2] = 1f }
+        RgbImage(192, 112, 576, bytes).use { input ->
+            ProtectionMask(192, 112, mask).use { protection ->
+                render(engine(budget), input, restored, protection).use { output ->
+                    assertEquals("paper_shadow_v1", stages(output).single().stageId)
+                    val result = image(output)
+                    assertEquals(180, result.getUnsigned(0, 0, 0))
+                    assertEquals(162, result.getUnsigned(1, 0, 0))
+                    assertEquals(144, result.getUnsigned(2, 0, 0))
+                    assertEquals(216, result.getUnsigned(81, 0, 0))
+                }
+            }
+            assertArrayEquals(bytes, input.toPackedByteArray())
+        }
+        assertEquals(0L, budget.usedBytes)
+    }
+
     @Test fun paperBeforeBilateralIsObservableInPixelsNotOnlyStageLabels() {
         val budget = ImageAllocationBudget(2_000_000); val engine = engine(budget)
         neutrals(0, 10, 0).use { input ->

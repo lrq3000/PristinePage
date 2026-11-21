@@ -218,11 +218,12 @@ private fun BatchLook.label(): Int = when (this) {
     BatchLook.GRAY -> R.string.atelier_batch_gray
     BatchLook.BINARY -> R.string.atelier_batch_binary
     BatchLook.DOCUMENT_COLOR -> R.string.editor_look_document_color
+    BatchLook.PAPER_SHADOW -> R.string.editor_look_paper_shadow
 }
 
 private fun BatchLook.effects(): Int = when (this) {
     BatchLook.NONE -> R.string.atelier_batch_none_effect
-    BatchLook.PAPER, BatchLook.NATURAL, BatchLook.DOCUMENT_COLOR -> R.string.atelier_batch_color_effect
+    BatchLook.PAPER, BatchLook.NATURAL, BatchLook.DOCUMENT_COLOR, BatchLook.PAPER_SHADOW -> R.string.atelier_batch_color_effect
     BatchLook.GRAY -> R.string.atelier_batch_gray_effect
     BatchLook.BINARY -> R.string.atelier_batch_binary_effect
 }

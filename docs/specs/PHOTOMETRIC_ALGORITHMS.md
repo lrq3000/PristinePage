@@ -42,6 +42,7 @@ AppearanceRecipe =
   PaperGainV1(target=245, maxGain=3.0, strength=1.0)
   NaturalLV1(amplitudeL255=45.0, lightnessBlend=0.30, strength=1.0)
   DocumentColorV1(strength=1.0)
+  PaperShadowV1(strength=1.0)
   LocalMaxGainV1(radiusPx=15, target=245, maxGain=3.0, strength=1.0)
   ProviderAppearanceV1(providerId, contractVersion, assetSha256,
                        variantId, profileSha256, strength=1.0)
@@ -192,6 +193,10 @@ Min/max normalization can let one extreme feature govern the whole field. The fl
 ### 4.5 Optional `document_color_v1`
 
 The independently versioned [Document color](../../validation/appearance/atelier-document-color.md) method uses the shared bright-paper estimator and a local chroma/luminance affinity to apply paper illumination and cast correction conservatively. This is an opt-in third color method alongside Paper white and Natural lightness, not a change to their arithmetic or a claim of compatibility with a proprietary filter. The linked contract defines threshold values, the exact one-blend policy and the remaining evidence gates.
+
+### 4.6 Optional `paper_shadow_v1`
+
+[Paper shadow](../../validation/appearance/atelier-paper-shadow.md) is a separate opt-in edge-aligned correction for one well-supported, nearly uniform, axis-aligned illumination step on light paper. It derives paired local RGB references, preserves the lit region exactly, and uses a guarded additive correction on the shaded region. It does not whiten the lit paper or run before or after another appearance recipe. The linked contract specifies support, refusal, composition and validation limits.
 
 ## 5. Optional `local_max_gain_v1` baseline
 

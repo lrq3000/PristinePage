@@ -368,6 +368,7 @@ private fun executedLabel(id: String): Int? = when (id) {
     "paper_gain_v1" -> R.string.editor_look_paper
     "natural_l_v1" -> R.string.editor_look_natural
     "document_color_v1" -> R.string.editor_look_document_color
+    "paper_shadow_v1" -> R.string.editor_look_paper_shadow
     "grayscale_v1" -> R.string.editor_look_gray
     "sauvola_v1" -> R.string.editor_look_binary
     else -> null

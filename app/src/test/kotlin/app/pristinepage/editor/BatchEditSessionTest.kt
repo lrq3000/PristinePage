@@ -121,6 +121,24 @@ class BatchEditSessionTest {
         assertEquals(second.copy(appearance = AppearanceRecipe.DocumentColorV1(), binary = null), session.recipes.getValue(f.ids[1]))
     }
 
+    @Test fun shadowLookAndStrengthSaveOnlyTheEditedPageEvenAfterItIsDeselected() = runTest {
+        val f = Fixture()
+        val session = f.session()
+        val page = f.ids[1]
+        session.toggle(page)
+        session.rotateClockwise()
+        val geometry = session.recipes.getValue(page).geometry
+        assertNull(session.chooseLook(BatchLook.entries.single { it.recipeId == "paper-shadow" }))
+        assertNull(session.setAppearanceStrength(60))
+        session.clearSelection()
+        assertTrue(session.done() is BatchEditOutcome.Saved)
+        val saved = f.saved.single()
+        assertEquals(page, saved.pageId)
+        assertEquals(geometry, saved.recipe.geometry)
+        assertEquals(AppearanceRecipe.PaperShadowV1(.6), saved.recipe.appearance)
+        assertEquals(f.original, session.recipes.getValue(f.ids.first()))
+    }
+
     @Test fun undoRedoTargetsTheOriginalSelectionAndFourTurnsAreNoOp() = runTest {
         val f = Fixture()
         val session = f.session()

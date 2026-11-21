@@ -7,7 +7,7 @@ import app.pristinepage.data.model.*
 import kotlinx.coroutines.CancellationException
 
 internal enum class BatchLook(val recipeId: String) {
-    NONE("none"), PAPER("paper"), NATURAL("natural"), GRAY("gray"), BINARY("binary"), DOCUMENT_COLOR("document-color")
+    NONE("none"), PAPER("paper"), NATURAL("natural"), GRAY("gray"), BINARY("binary"), DOCUMENT_COLOR("document-color"), PAPER_SHADOW("paper-shadow")
 }
 
 internal data class BatchEditRejection(val page: PageId, val error: OperationError)
@@ -103,6 +103,7 @@ internal class BatchEditSession(pages: List<EditablePage>,
                 is AppearanceRecipe.PaperGainV1 -> appearance.copy(strength = strength)
                 is AppearanceRecipe.NaturalLV1 -> appearance.copy(strength = strength)
                 is AppearanceRecipe.DocumentColorV1 -> appearance.copy(strength = strength)
+                is AppearanceRecipe.PaperShadowV1 -> appearance.copy(strength = strength)
                 else -> error("Strength command was not preflighted")
             }
             recipe.copy(appearance = next)
@@ -181,5 +182,6 @@ internal fun AppearanceRecipe.classicalStrength(): Double? = when (this) {
     is AppearanceRecipe.PaperGainV1 -> strength
     is AppearanceRecipe.NaturalLV1 -> strength
     is AppearanceRecipe.DocumentColorV1 -> strength
+    is AppearanceRecipe.PaperShadowV1 -> strength
     else -> null
 }
