@@ -57,6 +57,10 @@ The operator added ordered gallery swipe, configurable new-album names (`pristin
 
 Input is the audited public copy of the 16 Carnet corrective commits, through the JPEG/ZIP follow-up. Scope: guard provider display-name and size metadata by the same durable lease as file reads, verify the provider boundary, and retain live-share, Save as and frozen-name semantics. Post-revocation readability of already opened descriptors, external copies, and native acceptance are separate. The [operational plan](OPERATIONAL_PLAN.md) governs integration, public branches and the v0.3.0 bump.
 
+### Core scan journey — T-06 / CARNET-AUTO-GEO-01
+
+From sanitized `main` `b60f5b9` on `feat/classical-auto-geometry`: improve detection immediately after capture/import, reusing the real perspective path, then add the selected classical [Document color](../../validation/appearance/atelier-document-color.md) follow-up under T-07. Scope and evidence for the primary geometry increment are in the [regional detector receipt](../../validation/geometry/atelier-regional-edge-detection.md). Prioritize fewer manual adjustments without clipping visible content; measure accepted crop rate and time against the old detector, then qualify automatic curvature and compare other appearance candidates against representative pages. No change to the accepted plan, production dependencies, schema, release or native acceptance.
+
 ### Atelier geometry continuation — T-06 / ATELIER-CUBIC-02
 
 Input `1abe2fb`; independent read-only review covers the projective map, actual edge reparameterization, corner residuals, topology, stretch and support. The outward proof, distinct `atelier_bezier_v1` recipe, real paired raster and Atelier controls are locally implemented and have host tests. A second review identified exact-chord restoration, signed-zero and rounded subdivision limits; the updated [ATELIER_BEZIER](ATELIER_BEZIER.md) records the semantics. The legacy codec remains unchanged. Android saving/reopening, accessible interaction and broader geometry/fidelity checks remain open; no midpoint algorithm substitutes for Bézier.

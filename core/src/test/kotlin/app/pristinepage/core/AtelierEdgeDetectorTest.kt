@@ -23,4 +23,82 @@ class AtelierEdgeDetectorTest {
         assertNull(AtelierEdgeDetector.detect(120, 100) { x, _ -> if (x < 50) 40 else 210 })
     }
 
+    @Test fun diffuseLowContrastPaperHasAUsableQuadrilateral() {
+        verifyLowContrast(inverted = false)
+        verifyLowContrast(inverted = true)
+    }
+
+    @Test fun straightBackgroundRulesDoNotReplaceThePaperOutline() {
+        val result = AtelierEdgeDetector.detect(160, 120) { x, y ->
+            when {
+                x in 29..129 && y in 21..98 -> 162
+                x in 7..9 || x in 149..151 || y in 6..8 || y in 109..111 -> 40
+                else -> 141
+            }
+        } ?: error("Expected the coherent paper outline, not the background rules")
+        assertEquals(28.5 / 159, result.tl.x, .02)
+        assertEquals(20.5 / 119, result.tl.y, .02)
+        assertEquals(129.5 / 159, result.br.x, .02)
+        assertEquals(98.5 / 119, result.br.y, .02)
+    }
+
+    @Test fun diffuseShadingAndClippedSheetDoNotInventMissingEdges() {
+        assertNull(AtelierEdgeDetector.detect(160, 120) { x, y -> 90 + x / 2 + y / 3 })
+        assertNull(AtelierEdgeDetector.detect(160, 120) { x, y ->
+            if (x <= 130 && y in 21..98) 158 else 136
+        })
+    }
+
+    @Test fun pairedInteriorRulesDoNotBecomeTheMissingEdgeOfAClippedSheet() {
+        for ((ruleEnd, secondRule) in listOf(21 to 24..25, 22 to 24..25, 23 to 25..26)) {
+            assertNull("Paper beyond the rules is not outside the sheet", AtelierEdgeDetector.detect(160, 120) { x, y ->
+                if (x <= 130 && y in 21..98) {
+                    if (x in 20..ruleEnd || x in secondRule) 24 else 162
+                } else 141
+            })
+        }
+    }
+
+    @Test fun fullyVisibleHighContrastPageCanBeCloseToTheFrame() {
+        val q = checkNotNull(AtelierEdgeDetector.detect(160, 120) { x, y ->
+            if (x in 4..155 && y in 21..98) 220 else 40
+        })
+        assertEquals(3.5 / 159, q.tl.x, .01)
+        assertEquals(155.5 / 159, q.br.x, .01)
+    }
+
+    @Test fun isolatedStraightRuleCannotSuppressAWeakerPageEdge() {
+        for (ruleEnd in 16..17) {
+            val q = checkNotNull(AtelierEdgeDetector.detect(160, 120) { x, y ->
+                if (x in 29..129 && y in 36..84) 162 else if (x in 14..ruleEnd) 40 else 141
+            })
+            assertEquals(28.5 / 159, q.tl.x, .02)
+            assertEquals(35.5 / 119, q.tl.y, .02)
+        }
+    }
+
+    @Test fun detectionCanBeCancelledAfterItSamplesThePreview() {
+        val cancellation = java.util.concurrent.CancellationException()
+        var checks = 0
+        val thrown = assertThrows(java.util.concurrent.CancellationException::class.java) {
+            AtelierEdgeDetector.detect(160, 120, { if (++checks == 121) throw cancellation }) { _, _ -> 120 }
+        }
+        assertSame(cancellation, thrown)
+    }
+
+    private fun verifyLowContrast(inverted: Boolean) {
+        val result = AtelierEdgeDetector.detect(160, 120) { x, y ->
+            val left = 20.0 + y / 10.0
+            val right = 144.0 - y / 10.0
+            val distance = minOf(x - left, right - x, y - 21.0, 97.0 - y)
+            val contrast = ((distance + 2) / 4).coerceIn(0.0, 1.0)
+            val value = 122 + x / 15 + (24 * contrast).toInt()
+            if (inverted) 255 - value else value
+        } ?: error("Expected a coherent low-contrast sheet, inverted=$inverted")
+        assertEquals(22.1 / 159, result.tl.x, .02)
+        assertEquals(141.9 / 159, result.tr.x, .02)
+        assertEquals(29.7 / 159, result.bl.x, .02)
+        assertEquals(21.0 / 119, result.tl.y, .02)
+        assertEquals(97.0 / 119, result.br.y, .02)
+    }
 }

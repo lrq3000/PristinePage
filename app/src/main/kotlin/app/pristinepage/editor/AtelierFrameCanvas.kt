@@ -341,7 +341,8 @@ internal suspend fun detectAtelierFrame(bitmap: android.graphics.Bitmap): app.pr
     val dw = minOf(w, (w * scale).roundToInt())
     val dh = minOf(h, (h * scale).roundToInt())
     if (dw < 2 || dh < 2) return@withContext null
-    AtelierEdgeDetector.detect(dw, dh) { x, y ->
+    val jobContext = coroutineContext
+    AtelierEdgeDetector.detect(dw, dh, { jobContext.ensureActive() }) { x, y ->
         val rgb = bitmap.getPixel((x.toDouble() * (w - 1) / (dw - 1)).roundToInt(),
             (y.toDouble() * (h - 1) / (dh - 1)).roundToInt())
         (77 * (rgb shr 16 and 255) + 150 * (rgb shr 8 and 255) + 29 * (rgb and 255) + 128) shr 8
