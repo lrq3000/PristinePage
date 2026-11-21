@@ -55,6 +55,8 @@ Runtime reentry requires exact current-artifact and named-instance approval and 
 | Export naming, exact selected scope and read-only share | `ExportSnapshotTest`, `ExportSettingsCodecTest`, `AlbumArchiveTest` and host SQLite verify identity/order and bounds. `AlbumExportJourneyTest` compiles real long-press, sparse ZIP and real provider lease/revocation checks without an external recipient. | Run the synthetic Android witness, then verify the separately consented Save as result and an authorized read-only recipient. |
 | Single- and multi-page PDF | Gated platform writer plus a mixed-aspect pixel/readback and peak-memory test candidate. | Run the backend measurements, admit only the supported profile, then verify PDF generation and both page scopes. |
 
+T-11 follow-up `CARNET-PDF-01` starts from the earlier corrective APK source checkpoint, using the frozen-page renderer, named artifact and publication boundaries already described above. [PDF backend assessment and evidence](../export/carnet-pdf-backend-evaluation.md) tracks the native writer's preparation, independent review and remaining measurement gate. This does not change the delivered APK, the accepted plan or the product PDF gate.
+
 ## Independent review dispositions
 
 The original source review identified two consequential defects and one future export naming issue. It found no defect in the outward-rounded subdivision, mutex cancellation ownership, gallery dirty-state guard or initial batch-selection scope. The original review did not run Android or test the modified source itself.

@@ -14,7 +14,6 @@ import app.pristinepage.data.model.*
 import app.pristinepage.data.repository.NamedAlbumExports
 import app.pristinepage.image.decode.ImageAllocationBudget
 import java.io.File
-import java.io.OutputStream
 import kotlin.math.floor
 
 /** PdfDocument retains completed page recordings. A configured scratch estimate is not a measured writer envelope. */
@@ -36,71 +35,92 @@ internal class AlbumPdf(private val budget: ImageAllocationBudget) {
     /** Internal candidate for collecting isolated codec/measurement evidence; it does not issue a frozen export or ready token. */
     internal suspend fun buildCandidate(sizes: List<PixelSize>, checkpoint: () -> Unit,
         bitmap: suspend (Int) -> Bitmap): NamedAlbumExports.PreparedArtifact {
-        val hold = budget.reserve(charge(sizes))
+        val cost = cost(sizes)
         val bitmaps = ArrayList<Bitmap>(sizes.size)
-        var opened: PdfDocument? = null
+        val evidence = ArrayList<PageSample>(sizes.size)
+        val evidenceHold = budget.reserve(cost.readback)
         try {
-            val points = sizes.map(::points)
-            val doc = PdfDocument().also { opened = it }
-            val paint = Paint(Paint.FILTER_BITMAP_FLAG)
-            for (index in sizes.indices) {
-                checkpoint()
-                val raster = bitmap(index).also(bitmaps::add)
-                require(raster.width == sizes[index].width && raster.height == sizes[index].height)
-                val size = points[index]
-                val page = doc.startPage(PdfDocument.PageInfo.Builder(size.width, size.height, index + 1).create())
+            val writerHold = budget.reserve(cost.writer)
+            var opened: PdfDocument? = null
+            fun releaseWriter() {
                 try {
-                    page.canvas.drawColor(Color.WHITE)
-                    page.canvas.drawBitmap(raster, null, placement(size, raster), paint)
-                } finally { doc.finishPage(page) }
+                    opened?.close()
+                    // A failed close does not prove the native recordings released their references.
+                    bitmaps.forEach(Bitmap::recycle)
+                } finally {
+                    opened = null
+                    bitmaps.clear()
+                    writerHold.close()
+                }
             }
-            return object : NamedAlbumExports.PreparedArtifact {
-                override fun write(sink: OutputStream, checkpoint: () -> Unit) {
+            try {
+                val points = sizes.map(::points)
+                val doc = PdfDocument().also { opened = it }
+                val paint = Paint(Paint.FILTER_BITMAP_FLAG)
+                for (index in sizes.indices) {
                     checkpoint()
-                    doc.writeTo(sink)
-                    checkpoint()
+                    val raster = bitmap(index).also(bitmaps::add)
+                    require(raster.width == sizes[index].width && raster.height == sizes[index].height)
+                    val size = points[index]
+                    val rect = placement(size, raster)
+                    evidence += sampleSource(size, raster, rect, paint)
+                    val page = doc.startPage(PdfDocument.PageInfo.Builder(size.width, size.height, index + 1).create())
+                    try {
+                        page.canvas.drawColor(Color.WHITE)
+                        page.canvas.drawBitmap(raster, null, rect, paint)
+                    } finally { doc.finishPage(page) }
                 }
-                override fun verify(closed: File, checkpoint: () -> Unit) =
-                    verifyPdf(closed, points, bitmaps, checkpoint)
-
-                override fun close() {
-                    try { doc.close() } finally { try { bitmaps.forEach(Bitmap::recycle) } finally { hold.close() } }
-                }
+                return PlatformPdfArtifact(
+                    writer = AutoCloseable(::releaseWriter), evidence = AutoCloseable { evidence.clear(); evidenceHold.close() },
+                    write = { sink, _ -> doc.writeTo(sink) },
+                    readback = { closed, active -> verifyPdf(closed, evidence, active) },
+                )
+            } catch (failure: Throwable) {
+                AutoCloseable(::releaseWriter).use { throw failure }
             }
         } catch (failure: Throwable) {
-            try { opened?.close() } finally { try { bitmaps.forEach(Bitmap::recycle) } finally { hold.close() } }
+            evidenceHold.close()
             throw failure
         }
     }
 
-    private fun verifyPdf(file: File, points: List<PixelSize>, originals: List<Bitmap>, checkpoint: () -> Unit) {
+    private data class PageSample(val points: PixelSize, val size: PixelSize, val expected: IntArray) {
+        fun transform() = Matrix().apply { setScale(size.width.toFloat() / points.width, size.height.toFloat() / points.height) }
+    }
+
+    private fun sampleSource(points: PixelSize, raster: Bitmap, rect: RectF, paint: Paint): PageSample {
+        val size = sampledSize(points)
+        val w = size.width
+        val h = size.height
+        val expected = IntArray(w * h)
+        val sample = PageSample(points, size, expected)
+        val bitmap = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
+        try {
+            bitmap.eraseColor(Color.WHITE)
+            Canvas(bitmap).apply { concat(sample.transform()); drawBitmap(raster, null, rect, paint) }
+            bitmap.getPixels(expected, 0, w, 0, 0, w, h)
+        } finally { bitmap.recycle() }
+        return sample
+    }
+
+    private fun verifyPdf(file: File, samples: List<PageSample>, checkpoint: () -> Unit) {
         val descriptor = ParcelFileDescriptor.open(file, ParcelFileDescriptor.MODE_READ_ONLY)
         val reader = try { PdfRenderer(descriptor) } catch (failure: Throwable) { descriptor.close(); throw failure }
         reader.use {
-            require(it.pageCount == points.size && file.length() > 0)
-            for ((index, size) in points.withIndex()) {
+            require(it.pageCount == samples.size && file.length() > 0)
+            for ((index, evidence) in samples.withIndex()) {
                 checkpoint()
                 it.openPage(index).use { page ->
-                    require(page.width == size.width && page.height == size.height)
-                    val sampleSize = sampledSize(size)
-                    val w = sampleSize.width
-                    val h = sampleSize.height
-                    val transform = Matrix().apply { setScale(w.toFloat() / size.width, h.toFloat() / size.height) }
-                    val sample = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
+                    require(page.width == evidence.points.width && page.height == evidence.points.height)
+                    val w = evidence.size.width
+                    val h = evidence.size.height
                     val actual = IntArray(w * h)
-                    val expected = IntArray(w * h)
+                    val sample = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
                     try {
-                        page.render(sample, null, transform, PdfRenderer.Page.RENDER_MODE_FOR_DISPLAY)
+                        page.render(sample, null, evidence.transform(), PdfRenderer.Page.RENDER_MODE_FOR_DISPLAY)
                         sample.getPixels(actual, 0, w, 0, 0, w, h)
                         checkpoint()
-                        // Render the matching retained input independently of the PDF container and decoder, with identical physical placement.
-                        sample.eraseColor(Color.WHITE)
-                        val canvas = Canvas(sample)
-                        canvas.concat(transform)
-                        val original = originals[index]
-                        canvas.drawBitmap(original, null, placement(size, original), Paint(Paint.FILTER_BITMAP_FLAG))
-                        sample.getPixels(expected, 0, w, 0, 0, w, h)
-                        if (!PdfPageEvidence.matches(expected, actual)) refuse(OperationErrorCode.INTEGRITY_FAILED, "export_pdf_page_pixels")
+                        if (!PdfPageEvidence.matches(evidence.expected, actual)) refuse(OperationErrorCode.INTEGRITY_FAILED, "export_pdf_page_pixels")
                     } finally { sample.recycle() }
                 }
             }
@@ -125,13 +145,18 @@ internal class AlbumPdf(private val budget: ImageAllocationBudget) {
     companion object {
         val DEFAULT = PdfSettings(PdfPageRule.IMAGE_ASPECT, 144.0, PdfMarginRule.NONE, 0.0, "android_pdfdocument", 1, 1)
 
-        internal fun charge(sizes: List<PixelSize>): Long {
+        internal fun charge(sizes: List<PixelSize>): Long = cost(sizes).let { it.writer + it.readback }
+
+        private data class Cost(val writer: Long, val readback: Long)
+
+        private fun cost(sizes: List<PixelSize>): Cost {
             if (sizes.size !in 1..12 || sizes.any { maxOf(it.width, it.height) > 1440 }) {
                 refuse(OperationErrorCode.RESOURCE_LIMIT, "export_pdf_envelope")
             }
             val pixels = sizes.sumOf { it.width.toLong() * it.height }
             if (pixels > 2_097_152L) refuse(OperationErrorCode.RESOURCE_LIMIT, "export_pdf_envelope")
-            return 16L * pixels + 4L * 1024 * 1024
+            // Charge writer/recordings until native close, plus samples and a conservative current-page readback allowance. Neither coefficient is a measured device bound.
+            return Cost(16L * pixels + 4L * 1024 * 1024, 8L * sizes.maxOf { it.pixelCount } + 4L * 1024 * 1024)
         }
 
         private fun points(size: PixelSize) = PixelSize(floor(size.width / 2.0 + .5).toInt(), floor(size.height / 2.0 + .5).toInt())
