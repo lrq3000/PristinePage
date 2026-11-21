@@ -52,6 +52,76 @@ class AppearanceEngineTest {
         }
     }
 
+    @Test fun frozenDocumentColorRecipeExecutesItsOwnBudgetedStageAndBlendsOnce() {
+        val budget = ImageAllocationBudget(2_000_000)
+        val requested = recipe(4, 1, AppearanceRecipe.DocumentColorV1(strength = .5))
+        val bytes = RecipeCodec.encode(requested)
+        val restored = RecipeCodec.decode(bytes)
+        assertEquals(requested, restored)
+        neutrals(200, 200, 200, 50).use { input ->
+            render(engine(budget), input, restored).use { output ->
+                expectNeutrals(output, 219, 219, 219, 50)
+                assertEquals("document_color_v1", stages(output).single().stageId)
+                assertTrue(budget.usedBytes > 0)
+            }
+        }
+        assertEquals(0L, budget.usedBytes)
+    }
+
+    @Test fun documentColorComposesPartialProtectionAfterItsCandidate() {
+        val budget = ImageAllocationBudget(2_000_000)
+        neutrals(200, 200, 200, 200).use { input ->
+            ProtectionMask(4, 1, floatArrayOf(0f, .5f, 1f, 0f)).use { protection ->
+                val request = recipe(4, 1, AppearanceRecipe.DocumentColorV1(.5))
+                render(engine(budget), input, request, protection).use { result ->
+                    // Candidate is 238; weight is 1/2, 1/4, or zero, not two independent blends.
+                    expectNeutrals(result, 219, 210, 200, 219)
+                }
+                assertEquals(.5f, protection.sample(1, 0), 0f)
+            }
+        }
+        assertEquals(0L, budget.usedBytes)
+    }
+
+    @Test fun documentColorRefusesAnInsufficientAllowanceBeforeDoingStageWork() {
+        // Four pixels, one grid cell: metadata 65536 + RGB scratch 24 + grid 80 + row 48 + fixed 8192.
+        val budget = ImageAllocationBudget(73_879)
+        val request = recipe(4, 1, AppearanceRecipe.DocumentColorV1())
+        neutrals(200, 200, 200, 50).use { input ->
+            var checks = 0
+            val failure = assertThrows(RepositoryFailure::class.java) {
+                render(engine(budget), input, request, checkpoint = { checks++ }).close()
+            }
+            assertEquals(OperationErrorCode.RESOURCE_LIMIT, failure.error.code)
+            assertEquals(1, checks)
+            assertEquals(200, input.getUnsigned(0, 0, 0))
+        }
+        assertEquals(0L, budget.usedBytes)
+    }
+
+    @Test fun aReopenedShadowRecipeRunsOneStageAndBlendsItsCandidateExactlyOnce() {
+        val budget = ImageAllocationBudget(2_000_000)
+        val request = recipe(192, 112, AppearanceRecipe.PaperShadowV1(.5))
+        val restored = RecipeCodec.decode(RecipeCodec.encode(request))
+        assertEquals(request, restored)
+        val bytes = ByteArray(192 * 112 * 3) { if (it / 3 % 192 < 81) 144.toByte() else 216.toByte() }
+        val mask = FloatArray(192 * 112).apply { this[1] = .5f; this[2] = 1f }
+        RgbImage(192, 112, 576, bytes).use { input ->
+            ProtectionMask(192, 112, mask).use { protection ->
+                render(engine(budget), input, restored, protection).use { output ->
+                    assertEquals("paper_shadow_v1", stages(output).single().stageId)
+                    val result = image(output)
+                    assertEquals(180, result.getUnsigned(0, 0, 0))
+                    assertEquals(162, result.getUnsigned(1, 0, 0))
+                    assertEquals(144, result.getUnsigned(2, 0, 0))
+                    assertEquals(216, result.getUnsigned(81, 0, 0))
+                }
+            }
+            assertArrayEquals(bytes, input.toPackedByteArray())
+        }
+        assertEquals(0L, budget.usedBytes)
+    }
+
     @Test fun paperBeforeBilateralIsObservableInPixelsNotOnlyStageLabels() {
         val budget = ImageAllocationBudget(2_000_000); val engine = engine(budget)
         neutrals(0, 10, 0).use { input ->
@@ -137,13 +207,15 @@ class AppearanceEngineTest {
     @Test fun cancellationDuringWorkAndAtTheFinalBoundaryReleasesEveryOutputPermit() {
         val budget = ImageAllocationBudget(2_000_000); val engine = engine(budget)
         neutrals(100, 100, 200, 200).use { input ->
-            val request = recipe(4, 1, AppearanceRecipe.NaturalLV1(), DenoiseRecipe.BilateralLumaV1())
-            var total = 0
-            render(engine, input, request, checkpoint = { total++ }).close()
-            for (stop in listOf(5, total)) {
-                var current = 0
-                assertThrows(CancellationException::class.java) { render(engine, input, request, checkpoint = { if (++current == stop) throw CancellationException("ordered appearance") }).close() }
-                assertEquals(0L, budget.usedBytes); assertEquals(200, input.getUnsigned(3, 0, 0))
+            for (appearance in listOf(AppearanceRecipe.NaturalLV1(), AppearanceRecipe.DocumentColorV1())) {
+                val request = recipe(4, 1, appearance, DenoiseRecipe.BilateralLumaV1())
+                var total = 0
+                render(engine, input, request, checkpoint = { total++ }).close()
+                for (stop in listOf(5, total)) {
+                    var current = 0
+                    assertThrows(CancellationException::class.java) { render(engine, input, request, checkpoint = { if (++current == stop) throw CancellationException("ordered appearance") }).close() }
+                    assertEquals(0L, budget.usedBytes); assertEquals(200, input.getUnsigned(3, 0, 0))
+                }
             }
         }
     }

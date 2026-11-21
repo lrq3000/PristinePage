@@ -33,7 +33,7 @@ class EditorViewModel(private val openGraph: suspend () -> ApplicationImports) :
                 val graph = openGraph()
                 currentCoroutineContext().ensureActive()
                 if (generation != attempt) return@launch
-                val editor = EditorSession(documentId, pageId, ApplicationEditorActions { graph }, graph.renderer, viewModelScope, RenderedPreviewBitmapLoader(graph.budget))
+                val editor = EditorSession(documentId, pageId, ApplicationEditorActions { graph }, graph.renderer, viewModelScope, RenderedPreviewBitmapLoader(graph.budget), graph.budget)
                 // Construction can begin guarded metadata loading, but rendering belongs to a STARTED composition, not an invisible retained ViewModel.
                 editor.setActive(false)
                 current.value = editor

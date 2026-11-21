@@ -22,18 +22,7 @@ object PaperGain {
         val side = cellSide(input.width, input.height)
         val gw = ceilDiv(input.width, side)
         val gh = ceilDiv(input.height, side)
-        val grid = gw * gh
-        val paper = FloatArray(3 * grid)
-        val luma = IntArray(grid)
-        val flat = BooleanArray(grid)
-        collect(input, side, gw, gh, paper, luma, flat, checkpoint)
-        val typical = typical(luma)
-        val valid = BooleanArray(grid) { accepted(luma[it], flat[it], typical) }
-        fill(paper, valid, gw, gh, typical, checkpoint)
-
-        val scratch = FloatArray(paper.size)
-        smooth(paper, scratch, gw, gh, checkpoint)
-        smooth(scratch, paper, gw, gh, checkpoint)
+        val paper = estimatePaper(input, side, gw, gh, checkpoint).samples
         for (y in 0 until gh) {
             checkpoint()
             for (x in 0 until gw) for (channel in 0..2) {
@@ -61,6 +50,30 @@ object PaperGain {
         }
         checkpoint()
         return AppearanceBuffers.output(input, output, checkpoint)
+    }
+
+    internal class PaperField(val samples: FloatArray, val typical: Int, private val width: Int, private val height: Int, private val side: Int) {
+        fun sample(x: Int, y: Int, channel: Int): Float = sampleGain(samples, width, height, side, x, y, channel)
+    }
+
+    internal fun estimatePaper(input: RgbImage, checkpoint: () -> Unit): PaperField {
+        val side = cellSide(input.width, input.height)
+        return estimatePaper(input, side, ceilDiv(input.width, side), ceilDiv(input.height, side), checkpoint)
+    }
+
+    private fun estimatePaper(input: RgbImage, side: Int, gw: Int, gh: Int, checkpoint: () -> Unit): PaperField {
+        val grid = gw * gh
+        val paper = FloatArray(3 * grid)
+        val luma = IntArray(grid)
+        val flat = BooleanArray(grid)
+        collect(input, side, gw, gh, paper, luma, flat, checkpoint)
+        val typical = typical(luma)
+        val valid = BooleanArray(grid) { accepted(luma[it], flat[it], typical) }
+        fill(paper, valid, gw, gh, typical, checkpoint)
+        val scratch = FloatArray(paper.size)
+        smooth(paper, scratch, gw, gh, checkpoint)
+        smooth(scratch, paper, gw, gh, checkpoint)
+        return PaperField(paper, typical, gw, gh, side)
     }
 
     private fun cellSide(width: Int, height: Int): Int = maxOf(16, ((maxOf(width, height).toLong() + 39) / 40).toInt())

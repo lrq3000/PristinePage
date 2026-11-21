@@ -12,7 +12,7 @@ deny() {
     exit 1
 }
 
-[ "$(git rev-parse --is-shallow-repository)" = false ] || deny "incomplete history"
+[ "$(git rev-parse --is-shallow-repository 2>/dev/null)" = false ] || deny "incomplete history"
 if [ -n "$(git config --get-all push.pushOption || :)" ]; then
     deny "repository push options are not permitted"
 fi
@@ -28,7 +28,7 @@ while read -r local_ref oid remote_ref remote_oid; do
 
     # Do not trust remote-tracking refs or exclude remote_oid: only the two
     # exact, previously verified public trees are grandfathered. Never log a private email.
-    identities=$(git log --format='author:%ae%ncommitter:%ce' "$oid" "^$public_main" "^$public_design" --) ||
+    identities=$(git log --format='author:%ae%ncommitter:%ce' "$oid" "^$public_main" "^$public_design" -- 2>/dev/null) ||
         deny "commit ancestry could not be inspected"
     if [ -n "$identities" ]; then
         # Prefixes distinguish a blank address from the absence of outbound commits.
@@ -42,4 +42,16 @@ while read -r local_ref oid remote_ref remote_oid; do
 $identities
 EOF
     fi
+
+    # Use only the reviewed helper installed alongside this hook, not a script
+    # in the branch being checked. Missing tooling must not allow a push.
+    case "${OS:-}" in
+        Windows_NT) python=python ;;
+        *) python=python3 ;;
+    esac
+    command -v "$python" >/dev/null 2>&1 || deny "Python is required for the outbound content check"
+    hook_path=$(printf '%s' "$0" | tr '\\' '/')
+    checker=${hook_path%/*}/check_public_history.py
+    [ -f "$checker" ] || deny "the installed outbound content checker is missing"
+    "$python" -X utf8 -B "$checker" "$oid" || exit 1
 done

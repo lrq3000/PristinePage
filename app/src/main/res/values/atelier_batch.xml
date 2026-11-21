@@ -10,7 +10,7 @@
     <string name="atelier_batch_strength_mixed">Strength: Mixed</string>
     <string name="atelier_batch_strength_value">Strength: %1$d%%</string>
     <string name="atelier_batch_change_strength">Change strength</string>
-    <string name="atelier_batch_strength_incompatible">To change strength, select pages that all use White paper or all use Natural light.</string>
+    <string name="atelier_batch_strength_incompatible">To change strength, select pages that all use the same method: White paper, Natural light, or Document color.</string>
     <string name="atelier_batch_undo">Undo</string>
     <string name="atelier_batch_redo">Redo</string>
     <string name="atelier_batch_done">Done</string>

@@ -47,32 +47,30 @@ def check_blank_email(shell, hook, author, committer):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--shell", default="sh", help="Use Git for Windows' bin/bash.exe on Windows.")
+    parser.add_argument("--candidate", default="refs/heads/main", help="Exact local candidate to inspect; defaults to main.")
     args = parser.parse_args()
     source = Path(__file__).with_name("public-pre-push")
     hook = Path(git("rev-parse", "--path-format=absolute", "--git-path", "hooks/pre-push"))
     config_keys = git("config", "--name-only", "--list").lower().splitlines()
     if source.read_bytes() != hook.read_bytes() or "core.hookspath" in config_keys:
         raise AssertionError("Installed guard does not match the reviewed default hook")
+    helper = "check_public_history.py"
+    if source.with_name(helper).read_bytes() != hook.with_name(helper).read_bytes():
+        raise AssertionError("Installed content checker does not match the reviewed source")
     if git("config", "--local", "--get", "user.email") != APPROVED_EMAIL:
         raise AssertionError("Wrong local commit identity")
     if git("config", "--local", "--get", "push.default") != "nothing":
         raise AssertionError("Pushes must name an explicit ref")
 
-    for branch in git("for-each-ref", "--format=%(refname)", "refs/heads").splitlines():
-        if not branch.startswith("refs/heads/archive/"):
-            emails = git("log", "--format=%ae%n%ce", branch, f"^{PUBLIC_MAIN}", f"^{PUBLIC_DESIGN}", "--")
-            if any(email != APPROVED_EMAIL for email in emails.splitlines()):
-                raise AssertionError(f"Unexpected new Git identity on {branch}")
-            check_response(args.shell, hook, branch, git("rev-parse", branch), branch)
-            print(f"{branch}: active history passes")
+    candidate = git("rev-parse", "--verify", f"{args.candidate}^{{commit}}")
+    check_response(args.shell, hook, candidate, candidate, "refs/heads/main")
+    print("Selected main candidate: installed identity and content checks pass")
 
-    archive = "refs/heads/archive/feat/atelier-contract-local-original"
-    original = git("rev-parse", archive)
-    check_response(args.shell, hook, archive, original, "refs/heads/never-publish", "local archive")
-    check_response(args.shell, hook, original, original, "refs/heads/never-publish", "non-approved author or committer")
+    check_response(args.shell, hook, "refs/heads/archive/synthetic", PUBLIC_MAIN, "refs/heads/never-publish", "local archive")
     check_response(args.shell, hook, "refs/heads/main", PUBLIC_MAIN, "refs/tags/never-publish", "only branch updates")
     check_response(args.shell, hook, "(delete)", "0" * 40, "refs/heads/main", "ref deletion")
-    for author, committer in (("", ""), ("", APPROVED_EMAIL), (APPROVED_EMAIL, "")):
+    unapproved = "synthetic@" + "example.invalid"
+    for author, committer in (("", ""), ("", APPROVED_EMAIL), (APPROVED_EMAIL, ""), (unapproved, APPROVED_EMAIL)):
         check_blank_email(args.shell, hook, author, committer)
     check_response(args.shell, hook, PUBLIC_MAIN, "x", "refs/heads/never-publish", "could not be inspected")
     print("Local archive, raw unsanitized history, blank identity, invalid ancestry, tag and deletion refusals verified.")

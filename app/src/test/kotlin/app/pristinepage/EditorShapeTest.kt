@@ -10,6 +10,7 @@ import app.pristinepage.image.render.AppearanceEngine
 import app.pristinepage.image.render.GeometryEngine
 import java.security.MessageDigest
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.test.*
 import org.junit.Assert.*
 import org.junit.Test
@@ -42,6 +43,99 @@ class EditorShapeTest {
         assertEquals(PointPx(.5, .035), (editor.state.value.draft!!.geometry as GeometryRecipe.ManualCurve).topMidpoint)
         editor.endFrameDrag(drag, cancel = true)
         assertEquals(before, editor.state.value.draft)
+    }
+
+    @Test fun aCurrentCurveProposalRendersAsOneUndoableEditWithoutSaving() = checkShape {
+        val frame = perspective.copy(quad = QuadPx(PointPx(.15, .15), PointPx(.85, .15), PointPx(.85, .85), PointPx(.15, .85)))
+        val input = base.copy(geometry = frame)
+        editor.edit(input)
+        advanceUntilIdle()
+        val expected = checkNotNull(editor.preview.value.request)
+        val curve = GeometryRecipe.ManualCurveFourSides(frame.source, frame.quad,
+            topMidpoint = PointPx(.5, .18), bottomMidpoint = PointPx(.5, .88), outputQuarterTurns = frame.outputQuarterTurns)
+        assertTrue(editor.useDetectedCurve(checkNotNull(editor.beginCurveAnalysis(expected)), curve))
+        advanceUntilIdle()
+        assertEquals(input.copy(geometry = curve), preview().request.recipe)
+        assertEquals(RenderStatus.OK, preview().status)
+        assertTrue(saves.isEmpty())
+        editor.undo()
+        advanceUntilIdle()
+        assertEquals(input, preview().request.recipe)
+    }
+
+    @Test fun aSameFrameAfterUndoOrDuringAnActiveDragDoesNotAuthorizeALateProposal() = checkShape {
+        editor.edit(base.copy(geometry = perspective))
+        advanceUntilIdle()
+        val expected = checkNotNull(editor.preview.value.request)
+        val candidate = GeometryRecipe.ManualCurveFourSides(perspective.source, perspective.quad,
+            topMidpoint = PointPx(.5, .02), outputQuarterTurns = perspective.outputQuarterTurns)
+        val analyzing = checkNotNull(editor.beginCurveAnalysis(expected))
+        val drag = checkNotNull(editor.beginFrameDrag(ShapePoint.TOP_LEFT))
+        assertFalse(editor.useDetectedCurve(analyzing, candidate))
+        editor.endFrameDrag(drag)
+        editor.rotateClockwise()
+        editor.undo()
+        assertEquals(expected.recipe, editor.state.value.draft)
+        assertFalse(editor.useDetectedCurve(analyzing, candidate))
+        assertEquals(expected.recipe, editor.state.value.draft)
+        assertTrue(saves.isEmpty())
+    }
+
+    @Test fun navigationOrAnUnmovedGestureSupersedesAProposalEvenWithTheSamePreview() = checkShape {
+        editor.edit(base.copy(geometry = perspective))
+        advanceUntilIdle()
+        assertTrue(editor.checkpointForNavigation())
+        advanceUntilIdle()
+        val expected = checkNotNull(editor.preview.value.request)
+        val candidate = GeometryRecipe.ManualCurveFourSides(perspective.source, perspective.quad,
+            topMidpoint = PointPx(.5, .02), outputQuarterTurns = perspective.outputQuarterTurns)
+        val gestureJob = Job()
+        val gestureAnalysis = checkNotNull(editor.beginCurveAnalysis(expected, gestureJob))
+        val drag = checkNotNull(editor.beginFrameDrag(ShapePoint.TOP_LEFT))
+        editor.endFrameDrag(drag)
+        assertEquals(expected, editor.preview.value.request)
+        assertTrue(gestureJob.isCancelled)
+        assertFalse(editor.useDetectedCurve(gestureAnalysis, candidate))
+        val navigationJob = Job()
+        val navigationAnalysis = checkNotNull(editor.beginCurveAnalysis(expected, navigationJob))
+        assertTrue(editor.checkpointForNavigation())
+        assertEquals(expected, editor.preview.value.request)
+        assertTrue(navigationJob.isCancelled)
+        assertFalse(editor.useDetectedCurve(navigationAnalysis, candidate))
+        assertEquals(expected.recipe, editor.state.value.draft)
+    }
+
+    @Test fun pausingFencesTheAnalysisAndItsSeparatePermitRemainsOwnedUntilItUnwinds() = checkShape {
+        editor.edit(base.copy(geometry = perspective))
+        advanceUntilIdle()
+        val request = checkNotNull(editor.preview.value.request)
+        val job = Job()
+        val analysis = checkNotNull(editor.beginCurveAnalysis(request, job))
+        editor.reserveCurveAnalysis(4096).use {
+            editor.setActive(false)
+            assertTrue(job.isCancelled)
+            assertTrue(budget.usedBytes > 4096)
+            assertFalse(editor.useDetectedCurve(analysis, GeometryRecipe.ManualCurveFourSides(binding, full,
+                topMidpoint = PointPx(.5, .02), outputQuarterTurns = perspective.outputQuarterTurns)))
+        }
+        budget.reserve(budget.capacityBytes).use {
+            val refused = assertThrows(RepositoryFailure::class.java) { editor.reserveCurveAnalysis(4096) }
+            assertEquals(OperationErrorCode.RESOURCE_LIMIT, refused.error.code)
+        }
+    }
+
+    @Test fun aQueuedCurveClickCannotRegisterWhileWizardNavigationOwnsTheEditor() = checkShape {
+        editor.edit(base.copy(geometry = perspective))
+        advanceUntilIdle()
+        assertTrue(editor.checkpointForNavigation())
+        advanceUntilIdle()
+        val expected = checkNotNull(editor.preview.value.request)
+        editor.setCurveTransition(true)
+        assertTrue(editor.checkpointForNavigation())
+        assertEquals(expected, editor.preview.value.request)
+        assertNull(editor.beginCurveAnalysis(expected))
+        editor.setCurveTransition(false)
+        assertNotNull(editor.beginCurveAnalysis(expected))
     }
 
     @Test fun manualSideMidpointsChangeTheRenderedLeftAndRightEdgesAndSurviveRecipeReopening() = checkShape {
@@ -424,7 +518,7 @@ class EditorShapeTest {
         val budget = ImageAllocationBudget(32L * 1024 * 1024)
         val saves = mutableListOf<Recipe>()
         var staleNext = false
-        val editor = EditorSession(document.value, page.value, this, this, scope)
+        val editor = EditorSession(document.value, page.value, this, this, scope, imageBudget = budget)
 
         fun advanceUntilIdle() = scope.advanceUntilIdle()
         fun preview() = checkNotNull(editor.preview.value.preview)

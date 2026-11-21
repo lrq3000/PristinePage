@@ -10,6 +10,8 @@ object EditorLooks {
         "none" -> recipe.copy(appearance = AppearanceRecipe.NoneV1, denoise = null, detail = null, binary = null)
         "paper" -> recipe.copy(appearance = AppearanceRecipe.PaperGainV1(), binary = null)
         "natural" -> recipe.copy(appearance = AppearanceRecipe.NaturalLV1(), binary = null)
+        "document-color" -> recipe.copy(appearance = recipe.appearance as? AppearanceRecipe.DocumentColorV1 ?: AppearanceRecipe.DocumentColorV1(), binary = null)
+        "paper-shadow" -> recipe.copy(appearance = recipe.appearance as? AppearanceRecipe.PaperShadowV1 ?: AppearanceRecipe.PaperShadowV1(), binary = null)
         "gray" -> recipe.copy(appearance = AppearanceRecipe.NoneV1, binary = BinaryRecipe.GrayscaleV1)
         "binary" -> recipe.copy(appearance = AppearanceRecipe.NoneV1, detail = null, binary = BinaryRecipe.SauvolaV1())
         else -> throw IllegalArgumentException("Unknown editor Look")

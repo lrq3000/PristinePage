@@ -1,5 +1,7 @@
 package app.pristinepage.image
 
+import app.pristinepage.core.geometry.AtelierEdgeDetector
+import app.pristinepage.core.geometry.GeometrySizing
 import app.pristinepage.core.image.CoverageMask
 import app.pristinepage.core.image.ProtectionMask
 import app.pristinepage.core.image.RgbImage
@@ -31,6 +33,27 @@ class PerspectiveGeometryEngineTest {
     }
     private fun pixel(image: RgbImage, x: Int, y: Int, red: Int, green: Int) {
         assertEquals(red, image.getUnsigned(x, y, 0)); assertEquals(green, image.getUnsigned(x, y, 1)); assertEquals(0, image.getUnsigned(x, y, 2))
+    }
+
+    @Test fun detectedLowContrastSheetRunsThroughTheRealPerspectiveRendererAndKeepsInk() {
+        fun luminance(x: Int, y: Int): Int = when {
+            x in 64..96 && y in 56..64 -> 50
+            x in 24..135 && y in 20..99 -> 160
+            else -> 139
+        }
+        val proposed = checkNotNull(AtelierEdgeDetector.detect(160, 120, luminance = ::luminance))
+        val perspective = GeometryRecipe.Perspective(binding, proposed)
+        val output = GeometrySizing.output(perspective, RenderPurpose.PREVIEW, 384).size
+        val budget = ImageAllocationBudget(2_000_000)
+        RgbImage(160, 120, 480, ByteArray(160 * 120 * 3) { i -> luminance(i / 3 % 160, i / 480).toByte() }).use { input ->
+            render(budget, input, perspective, output).use { result ->
+                assertEquals("perspective_v1", result.stage.stageId)
+                assertTrue(result.image.width in 110..114 && result.image.height in 78..82)
+                assertEquals(50, result.image.getUnsigned(result.image.width / 2, result.image.height / 2, 0))
+                assertEquals(160, result.image.getUnsigned(result.image.width / 8, result.image.height / 8, 0))
+            }
+        }
+        assertEquals(0L, budget.usedBytes)
     }
 
     @Test fun publishedNonAffineMapRendersItsProjectiveCenterAndCorners() {

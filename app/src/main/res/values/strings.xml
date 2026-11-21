@@ -79,6 +79,10 @@
     <string name="editor_looks_sample_notice">These cards show a sample page. Choose a correction to preview it on your page.</string>
     <string name="editor_look_none">No enhancement</string>
     <string name="editor_look_paper">Paper white</string>
+    <string name="editor_look_document_color">Document color</string>
+    <string name="editor_look_document_color_description">Reduce paper tint and uneven lighting while protecting ink.</string>
+    <string name="editor_look_paper_shadow">Paper shadow</string>
+    <string name="editor_look_paper_shadow_description">Reduce a straight shadow across light paper when it can be identified.</string>
     <string name="editor_look_natural">Natural lightness</string>
     <string name="editor_look_gray">Grayscale</string>
     <string name="editor_look_binary">Black &amp; white</string>
@@ -187,4 +191,9 @@
     <string name="atelier_finding_edges">Looking for page edges…</string>
     <string name="atelier_frame_no_edges">No clear page edges found. Adjust the corners yourself.</string>
     <string name="atelier_frame_not_replaced">The frame changed while the app was looking for edges. Your frame was kept.</string>
+    <string name="atelier_find_curve">Suggest a curve</string>
+    <string name="atelier_finding_curve">Checking the page for curvature…</string>
+    <string name="atelier_curve_not_found">No reliable curve found. You can adjust the page in Manual curve.</string>
+    <string name="atelier_curve_not_replaced">The page changed during analysis. Your adjustments were kept.</string>
+    <string name="atelier_curve_resources">Not enough memory to check for a curve. Your frame was kept.</string>
 </resources>

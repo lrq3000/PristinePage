@@ -207,7 +207,7 @@ internal class AtelierCaptureViewModel(context: Context, private val graph: susp
                 override suspend fun load(documentId: DocumentId, pageId: PageId) = api.load(view, pageId)
                 override suspend fun save(pageId: PageId, expectedRevision: Long, recipe: app.pristinepage.core.pipeline.Recipe) =
                     api.checkpoint(view, pageId, expectedRevision, recipe, app.renderer)
-            }, app.renderer, viewModelScope, RenderedPreviewBitmapLoader(app.budget)).also { it.setActive(false) }
+            }, app.renderer, viewModelScope, RenderedPreviewBitmapLoader(app.budget), app.budget).also { it.setActive(false) }
         } else null
         val old = current.value.editor
         current.value = current.value.copy(draft = view, editor = editor)
@@ -216,13 +216,18 @@ internal class AtelierCaptureViewModel(context: Context, private val graph: susp
 
     private fun run(action: suspend () -> Unit) {
         if (current.value.busy) return
+        val departing = current.value.editor
+        departing?.setCurveTransition(true)
         current.value = current.value.copy(busy = true, error = null)
         viewModelScope.launch {
             try { action() }
             catch (canceled: CancellationException) { throw canceled }
             catch (failure: RepositoryFailure) { current.value = current.value.copy(error = failure.error.code) }
             catch (_: Exception) { current.value = current.value.copy(error = OperationErrorCode.STORAGE_FAILED) }
-            finally { current.value = current.value.copy(busy = false) }
+            finally {
+                departing?.setCurveTransition(false)
+                current.value = current.value.copy(busy = false)
+            }
         }
     }
 

@@ -70,11 +70,15 @@ import kotlinx.coroutines.withTimeoutOrNull
     val edit = editor?.state?.collectAsStateWithLifecycle()?.value
     val preview = editor?.preview?.collectAsStateWithLifecycle()?.value
     val canLeave = !state.busy && state.request == null && edit?.saving != true
+    fun askBeforeLeaving() {
+        editor?.cancelCurveAnalysis()
+        confirmExit = true
+    }
     fun back() {
         if (!canLeave) return
         if (review && draft?.editing == false) { review = false; return }
         if (draft?.pages.isNullOrEmpty() && draft?.pending == null) owner.leave(abandon = true)
-        else confirmExit = true
+        else askBeforeLeaving()
     }
     BackHandler { back() }
     if (state.resumeChoice) {
@@ -103,15 +107,15 @@ import kotlinx.coroutines.withTimeoutOrNull
             state.error?.let { Text(errorText(it), color = MaterialTheme.colorScheme.error) }
             Box(Modifier.weight(1f)) {
                 key(editor, draft.step) {
-                    PageEditorScreen(loadOriginal = loadOriginal, guidedStep = draft.step, guidedBusy = state.busy)
-                        .Content(editor) { confirmExit = true }
+                    PageEditorScreen(loadOriginal = loadOriginal, guidedStep = draft.step, guidedBusy = state.busy || confirmExit || confirmSkip)
+                        .Content(editor, ::askBeforeLeaving)
                 }
             }
             Row(Modifier.fillMaxWidth().padding(8.dp), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
                 TextButton(onClick = {
                     if (draft.step == 0) owner.addMore() else selected?.let { owner.navigate(it, draft.step - 1) }
                 }, enabled = move) { Text(stringResource(if (draft.step == 0) R.string.atelier_add_pages else R.string.atelier_back)) }
-                if (draft.step == 0) TextButton({ confirmSkip = true }, enabled = canLeave,
+                if (draft.step == 0) TextButton({ editor.cancelCurveAnalysis(); confirmSkip = true }, enabled = canLeave,
                     modifier = Modifier.testTag("atelier-wizard-skip-frame")) { Text(stringResource(R.string.atelier_wizard_skip_frame)) }
                 Button(onClick = {
                     if (draft.step == 2) owner.save() else selected?.let { owner.navigate(it, draft.step + 1) }

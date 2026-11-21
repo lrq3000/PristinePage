@@ -7,9 +7,9 @@ All26 live PRD requirements are mapped below, including U-04/FR-17. A mapping is
 | FR-01 | CAPTURE_IMPORT_EXPORT; UX_SPECIFICATION | T-05 | CaptureLifecycleTest, denial/revocation, orientation/mirror, manual shutter without models; V-04,V-06. |
 | FR-02 | CAPTURE_IMPORT_EXPORT; PIPELINE_CONTRACTS | T-03,T-04 | DecodeAdmissionTest, EXIF1..8, content/profile/alpha cases, revokedMidCopyDoesNotCommitPage; V-01,V-02,V-04. |
 | FR-03 | DATA_MODEL_AND_STORAGE; UX_SPECIFICATION | T-03,T-10 | DocumentOrderingTest, independent duplicate recipes/shared-source lifetimes, Undo/reopen; V-02,V-04. |
-| FR-04 | GEOMETRY_ALGORITHMS; UX_SPECIFICATION | T-06,T-09 | GEO-01, invalid quad/labels, manual correction/full-frame reset, detected=false fallback; V-01,V-04. |
+| FR-04 | GEOMETRY_ALGORITHMS; UX_SPECIFICATION | T-06,T-09 | GEO-01, invalid quad/labels, manual correction/full-frame reset, detected=false fallback, [regional edge and perspective witnesses](../../validation/geometry/atelier-regional-edge-detection.md); V-01,V-04. |
 | FR-05 | GEOMETRY_ALGORITHMS; MODEL_PROVIDERS | T-06,T-08 | Manual curves, inverse-map/corner-Jacobian/global overlap, crop/mask alignment; learned providers individually gated; V-01,V-03,V-05. |
-| FR-06 | PHOTOMETRIC_ALGORITHMS; PIPELINE_CONTRACTS | T-07,T-09 | ALG-01–ALG-06, ALG-10–ALG-11, stage-isolated white/natural/binary metrics; V-01,V-04,V-05. |
+| FR-06 | PHOTOMETRIC_ALGORITHMS; PIPELINE_CONTRACTS | T-07,T-09 | ALG-01–ALG-06, ALG-10–ALG-11, stage-isolated white/natural/binary metrics; [Document color candidate](../../validation/appearance/atelier-document-color.md); V-01,V-04,V-05. |
 | FR-07 | MODEL_PROVIDERS; LICENSES_AND_SOURCES | T-08 | ProviderGateTest, no-asset/no-network, contract/rights/asset checks; V-03 for each shipped model, no fake implemented card. |
 | FR-08 | PHOTOMETRIC_ALGORITHMS; PIPELINE_CONTRACTS | T-07 | ALG-07–ALG-09, exact off, one pass/headroom/denoise order; V-01,V-05. |
 | FR-09 | UX_SPECIFICATION; PERFORMANCE_AND_OFFLINE | T-09 | Same-geometry cards, synchronized input/result, stale-generation and no-substitute errors, real examples; V-04,V-05,V-06. |

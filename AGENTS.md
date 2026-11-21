@@ -10,6 +10,8 @@ Live PRD amendment U-01 makes multiple genuinely working neural geometry and app
 
 The canonical application and documentation base is the sanitized `main` on `lrq3000/PristinePage`; keep its local clone separate from the frozen original source package and all private Git objects and evidence. Follow `docs/specs/OPERATIONAL_PLAN.md` for publication boundaries. Create worker branches/worktrees under `.worktrees/` from an exact current sanitized `main` commit and target `main` in each PR or local PR-style handoff. Do not reuse or alter another worker's worktree. Preserve unrelated changes and never reset, clean, overwrite or delete them. Only the coordinator integrates or builds the coordinated `main` preview; workers edit and test only in their assigned worktrees.
 
+Before pushing, review all outgoing commits and run the [public-history guard](validation/git/README.md) against the exact candidate. Use public commits or relative documentation links for provenance; do not copy local-only refs, workstation paths, or unsanitized evidence into publishable history.
+
 For UI work, read the [Atelier interaction contract](docs/specs/ATELIER.md) and the [Carnet visual direction](docs/design/carnet/README.md) first. The approved mockup controls visual intent, not data or processing. The specs, reusable tokens and brand master live outside the Android source tree.
 
 Write all app-owned user-facing text and accessibility labels in idiomatic English. The French mockup is a historical design reference, not a localization. Keep user-entered content and system/provider dialogs in their own languages; do not change the device locale or translate user data to enforce this rule.
