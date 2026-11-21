@@ -34,12 +34,13 @@ import androidx.compose.ui.unit.dp
 import app.pristinepage.R
 import app.pristinepage.core.pipeline.Recipe
 
-internal enum class EditorLookCard(val id: String, val label: Int, val sample: Int) {
+internal enum class EditorLookCard(val id: String, val label: Int, val sample: Int?) {
     NONE("none", R.string.editor_look_none, R.drawable.editor_look_sample_none),
     PAPER("paper", R.string.editor_look_paper, R.drawable.editor_look_sample_paper),
     NATURAL("natural", R.string.editor_look_natural, R.drawable.editor_look_sample_natural),
     GRAY("gray", R.string.editor_look_gray, R.drawable.editor_look_sample_gray),
     BINARY("binary", R.string.editor_look_binary, R.drawable.editor_look_sample_binary),
+    DOCUMENT_COLOR("document-color", R.string.editor_look_document_color, null),
 }
 
 internal fun adjacentLook(selected: EditorLookCard?, delta: Int): EditorLookCard? {
@@ -84,7 +85,9 @@ internal fun EditorLookCarousel(selected: EditorLookCard?, enabled: Boolean, onC
                     horizontalAlignment = Alignment.CenterHorizontally,
                     verticalArrangement = Arrangement.spacedBy(6.dp),
                 ) {
-                    Image(painterResource(card.sample), contentDescription = null, modifier = Modifier.fillMaxWidth().height(84.dp))
+                    val sample = card.sample
+                    if (sample != null) Image(painterResource(sample), contentDescription = null, modifier = Modifier.fillMaxWidth().height(84.dp))
+                    else Text(stringResource(R.string.editor_look_document_color_description), style = MaterialTheme.typography.bodySmall, textAlign = TextAlign.Center)
                     Text(stringResource(card.label), style = MaterialTheme.typography.labelLarge, textAlign = TextAlign.Center)
                 }
             }

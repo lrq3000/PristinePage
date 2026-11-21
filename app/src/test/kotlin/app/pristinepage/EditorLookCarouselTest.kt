@@ -25,8 +25,20 @@ class EditorLookCarouselTest {
         assertNull(adjacentLook(EditorLookCard.NONE, -1))
         assertEquals(EditorLookCard.PAPER, adjacentLook(EditorLookCard.NONE, 1))
         assertEquals(EditorLookCard.GRAY, adjacentLook(EditorLookCard.BINARY, -1))
-        assertNull(adjacentLook(EditorLookCard.BINARY, 1))
+        assertEquals(EditorLookCard.DOCUMENT_COLOR, adjacentLook(EditorLookCard.BINARY, 1))
+        assertNull(adjacentLook(EditorLookCard.DOCUMENT_COLOR, 1))
         assertEquals(EditorLookCard.NONE, adjacentLook(null, 1))
+    }
+
+    @Test fun reopeningAndChoosingTheActiveDocumentColorKeepsBatchStrength() {
+        val saved = Recipe(
+            geometry = GeometryRecipe.None(SourceBinding("a".repeat(64), PixelSize(32, 24), "test-srgb-v1"), outputQuarterTurns = 1),
+            appearance = AppearanceRecipe.DocumentColorV1(.65),
+            detail = DetailRecipe.LumaDetail7V1(),
+        )
+        val reopened = RecipeCodec.decode(RecipeCodec.encode(saved))
+        assertEquals(EditorLookCard.DOCUMENT_COLOR, reopened.matchingLook())
+        assertEquals(saved, EditorLooks.select(reopened, "document-color"))
     }
 
     @Test fun precomputedCardsMatchProductionRenderingOfTheSameSamplePage() {
@@ -42,6 +54,7 @@ class EditorLookCarouselTest {
                 Triple("natural", R.string.editor_look_natural, R.drawable.editor_look_sample_natural),
                 Triple("gray", R.string.editor_look_gray, R.drawable.editor_look_sample_gray),
                 Triple("binary", R.string.editor_look_binary, R.drawable.editor_look_sample_binary),
+                Triple("document-color", R.string.editor_look_document_color, null),
             ),
             EditorLookCard.entries.map { Triple(it.id, it.label, it.sample) },
         )
@@ -51,7 +64,7 @@ class EditorLookCarouselTest {
             val output = GeometrySizing.output(base.geometry, RenderPurpose.CARD, 216)
             assertEquals(PixelSize(144, 216), output.size)
             println("F03-smooth fixture-v1, 512x768 opaque RGB8 sha256=${base.geometry.source.sourcePixelHash}")
-            EditorLookCard.entries.associate { card ->
+            EditorLookCard.entries.filter { it.sample != null }.associate { card ->
                 val id = card.id
                 val name = "editor_look_sample_$id.png"
                 val recipe = EditorLooks.select(base, id)

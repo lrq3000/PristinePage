@@ -3,6 +3,9 @@ package app.pristinepage.editor
 import app.pristinepage.core.pipeline.PixelSize
 import app.pristinepage.core.pipeline.Recipe
 import app.pristinepage.core.recipe.AppearanceRecipe
+import app.pristinepage.core.recipe.BinaryRecipe
+import app.pristinepage.core.recipe.DenoiseRecipe
+import app.pristinepage.core.recipe.DetailRecipe
 import app.pristinepage.core.recipe.GeometryRecipe
 import app.pristinepage.core.recipe.RecipeCodec
 import app.pristinepage.core.recipe.SourceBinding
@@ -89,6 +92,35 @@ class BatchEditSessionTest {
         assertEquals(listOf(1, 2, 2), f.saved.map { it.recipe.geometry.outputQuarterTurns })
     }
 
+    @Test fun documentColorAndStrengthSaveOnlyTheEditedPageWithItsIndependentGeometry() = runTest {
+        val f = Fixture()
+        val session = f.session()
+        val page = f.ids[1]
+        session.toggle(page)
+        session.rotateClockwise()
+        val geometry = session.recipes.getValue(page).geometry
+        assertNull(session.chooseLook(BatchLook.DOCUMENT_COLOR))
+        assertNull(session.setAppearanceStrength(65))
+        session.clearSelection()
+        assertTrue(session.done() is BatchEditOutcome.Saved)
+        val saved = f.saved.single()
+        assertEquals(page, saved.pageId)
+        assertEquals(geometry, saved.recipe.geometry)
+        assertEquals(AppearanceRecipe.DocumentColorV1(.65), saved.recipe.appearance)
+        assertEquals(f.original, session.recipes.getValue(f.ids.first()))
+    }
+
+    @Test fun documentColorPresetClearsConversionWithoutCopyingOtherPagesFinishingSettings() {
+        val f = Fixture()
+        val first = f.original.copy(appearance = AppearanceRecipe.DocumentColorV1(.65), denoise = DenoiseRecipe.BilateralLumaV1(strength = .3))
+        val second = f.original.copy(detail = DetailRecipe.LumaDetail7V1(), binary = BinaryRecipe.GrayscaleV1)
+        val session = f.session(initialRecipes = listOf(first, second))
+        f.ids.take(2).forEach(session::toggle)
+        assertNull(session.chooseLook(BatchLook.DOCUMENT_COLOR))
+        assertEquals(first, session.recipes.getValue(f.ids[0]))
+        assertEquals(second.copy(appearance = AppearanceRecipe.DocumentColorV1(), binary = null), session.recipes.getValue(f.ids[1]))
+    }
+
     @Test fun undoRedoTargetsTheOriginalSelectionAndFourTurnsAreNoOp() = runTest {
         val f = Fixture()
         val session = f.session()
@@ -150,17 +182,23 @@ class BatchEditSessionTest {
         private val document = DocumentId(UUID.randomUUID().toString())
         val ids = List(4) { PageId(UUID.randomUUID().toString()) }
         val original = Recipe(geometry = GeometryRecipe.None(SourceBinding("a".repeat(64), PixelSize(3, 2), "synthetic-v1")))
-        private val pages = ids.map { EditablePage(document, 7, it, SourceId(UUID.randomUUID().toString()), 1, RecipeCodec.hash(original), original) }
         var saves = 0
         var saved = emptyList<BatchRecipeChange>()
 
         fun session(admit: (PageId, Recipe) -> OperationError? = { _, _ -> null }, initialSelection: Set<PageId> = emptySet(),
+            initialRecipes: List<Recipe> = emptyList(),
             save: suspend (DocumentId, Long, List<BatchRecipeChange>) -> DocumentMutationResult = { target, revision, changes ->
                 assertEquals(document, target)
                 assertEquals(7, revision)
                 saves++
                 saved = changes
                 DocumentMutationResult.Applied(8, changes.map { it.pageId }, UndoId(UUID.randomUUID().toString()))
-            }): BatchEditSession = BatchEditSession(pages, admit, save, initialSelection)
+            }): BatchEditSession {
+            val pages = ids.mapIndexed { index, id ->
+                val recipe = initialRecipes.getOrElse(index) { original }
+                EditablePage(document, 7, id, SourceId(UUID.randomUUID().toString()), 1, RecipeCodec.hash(recipe), recipe)
+            }
+            return BatchEditSession(pages, admit, save, initialSelection)
+        }
     }
 }

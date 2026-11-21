@@ -81,11 +81,12 @@ class AppearanceEngine(private val budget: ImageAllocationBudget) {
         }
     }
 
-    private enum class Kind { NONE, PAPER, NATURAL, BILATERAL, DETAIL, GRAYSCALE, SAUVOLA, UNAVAILABLE }
+    private enum class Kind { NONE, PAPER, NATURAL, DOCUMENT_COLOR, BILATERAL, DETAIL, GRAYSCALE, SAUVOLA, UNAVAILABLE }
     private class Step(val kind: Kind, val id: String, val workspace: Long, val outcome: String = "OK", val warnings: List<String> = emptyList(), val provider: ProviderIdentity? = null) {
         fun apply(input: RgbImage, recipe: Recipe, protection: ProtectionMask?, checkpoint: () -> Unit): RgbImage = when (kind) {
             Kind.PAPER -> PaperGain.apply(input, recipe.appearance as AppearanceRecipe.PaperGainV1, protection, checkpoint)
             Kind.NATURAL -> NaturalLightness.apply(input, recipe.appearance as AppearanceRecipe.NaturalLV1, protection, checkpoint)
+            Kind.DOCUMENT_COLOR -> DocumentColor.apply(input, recipe.appearance as AppearanceRecipe.DocumentColorV1, protection, checkpoint)
             Kind.BILATERAL -> LumaDenoise.apply(input, recipe.denoise as DenoiseRecipe.BilateralLumaV1, protection, checkpoint)
             Kind.DETAIL -> LumaDetail.apply(input, recipe.detail as DetailRecipe.LumaDetail7V1, protection, checkpoint)
             Kind.GRAYSCALE -> Grayscale.apply(input, protection, checkpoint)
@@ -128,6 +129,7 @@ class AppearanceEngine(private val budget: ImageAllocationBudget) {
                 AppearanceRecipe.NoneV1 -> Step(Kind.NONE, "none_v1", 0, "EXACT_IDENTITY")
                 is AppearanceRecipe.PaperGainV1 -> Step(Kind.PAPER, "paper_gain_v1", PaperGain.workspaceBytes(w, h), outcome(appearance.strength == 0.0))
                 is AppearanceRecipe.NaturalLV1 -> Step(Kind.NATURAL, "natural_l_v1", NaturalLightness.workspaceBytes(w, h), outcome(appearance.strength == 0.0 || appearance.lightnessBlend == 0.0))
+                is AppearanceRecipe.DocumentColorV1 -> Step(Kind.DOCUMENT_COLOR, "document_color_v1", DocumentColor.workspaceBytes(w, h), outcome(appearance.strength == 0.0))
                 is AppearanceRecipe.LocalMaxGainV1 -> Step(Kind.UNAVAILABLE, "local_max_gain_v1", 0)
                 is AppearanceRecipe.ProviderAppearanceV1 -> Step(Kind.UNAVAILABLE, "provider_appearance_v1", 0, provider = ProviderIdentity(appearance.providerId, appearance.contractVersion, appearance.assetSha256, "unavailable", "unavailable"))
             })
