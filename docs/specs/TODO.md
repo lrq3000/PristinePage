@@ -53,6 +53,10 @@ Public input `b60f5b9`, isolated Carnet corrective worktree. Uses the existing T
 
 The operator added ordered gallery swipe, configurable new-album names (`pristinepage_%date_%time` by default), long-press page selection, and JPEG/ZIP/PDF export of an album or an explicit subset. The same checkpoint records T-11 prerequisites and the required immutable naming rule (`%album_%position.jpg`, `%album.zip`, `%album.pdf`), with original album position, not output index. The tested app-side review metadata does not construct an export or authorize its publication. Scope does not activate a second writer or bypass `PRIVATE_READY`.
 
+### Carnet release boundary — T-11 / CARNET-SHARE-LEASE-01
+
+Input is the audited public copy of the 16 Carnet corrective commits, through the JPEG/ZIP follow-up. Scope: guard provider display-name and size metadata by the same durable lease as file reads, verify the provider boundary, and retain live-share, Save as and frozen-name semantics. Post-revocation readability of already opened descriptors, external copies, and native acceptance are separate. The [operational plan](OPERATIONAL_PLAN.md) governs integration, public branches and the v0.3.0 bump.
+
 ### Atelier geometry continuation — T-06 / ATELIER-CUBIC-02
 
 Input `1abe2fb`; independent read-only review covers the projective map, actual edge reparameterization, corner residuals, topology, stretch and support. The outward proof, distinct `atelier_bezier_v1` recipe, real paired raster and Atelier controls are locally implemented and have host tests. A second review identified exact-chord restoration, signed-zero and rounded subdivision limits; the updated [ATELIER_BEZIER](ATELIER_BEZIER.md) records the semantics. The legacy codec remains unchanged. Android saving/reopening, accessible interaction and broader geometry/fidelity checks remain open; no midpoint algorithm substitutes for Bézier.

@@ -161,7 +161,14 @@ class AlbumExportJourneyTest {
                 val authority = "${context.packageName}.finished-exports"
                 val uri = FileProvider.getUriForFile(context, authority, share)
                 assertThrows(FileNotFoundException::class.java) { context.contentResolver.openFileDescriptor(uri, "r")?.close() }
+                val metadata = arrayOf(android.provider.OpenableColumns.DISPLAY_NAME, android.provider.OpenableColumns.SIZE)
+                checkNotNull(context.contentResolver.query(uri, metadata, null, null, null)).use { assertEquals(0, it.count) }
                 store.recordShare(result, shareId, result.filename)
+                context.contentResolver.query(uri, metadata, null, null, null)!!.use {
+                    assertTrue(it.moveToFirst())
+                    assertEquals(result.filename, it.getString(0))
+                    assertEquals(share.length(), it.getLong(1))
+                }
                 context.contentResolver.openInputStream(uri)!!.use { inputStream ->
                     ZipInputStream(inputStream).use { zip ->
                         assertEquals("${title}_1.jpg", zip.nextEntry.name)
@@ -174,9 +181,11 @@ class AlbumExportJourneyTest {
                 assertThrows(FileNotFoundException::class.java) { context.contentResolver.openFileDescriptor(uri, "rw")?.close() }
                 val foreign = Uri.withAppendedPath(checkNotNull(uri.buildUpon().path("/finished_exports/$shareId").build()), "Unrelated.zip")
                 assertThrows(FileNotFoundException::class.java) { context.contentResolver.openFileDescriptor(foreign, "r")?.close() }
+                checkNotNull(context.contentResolver.query(foreign, metadata, null, null, null)).use { assertEquals(0, it.count) }
                 store.revokeShare(result, shareId)
                 assertTrue(share.exists()) // Metadata revocation blocks new opens independently of unlink.
                 assertThrows(FileNotFoundException::class.java) { context.contentResolver.openFileDescriptor(uri, "r")?.close() }
+                checkNotNull(context.contentResolver.query(uri, metadata, null, null, null)).use { assertEquals(0, it.count) }
             } finally {
                 share.delete()
                 folder.delete()
