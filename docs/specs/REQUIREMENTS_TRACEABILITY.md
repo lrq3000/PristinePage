@@ -15,7 +15,7 @@ All26 live PRD requirements are mapped below, including U-04/FR-17. A mapping is
 | FR-09 | UX_SPECIFICATION; PERFORMANCE_AND_OFFLINE | T-09 | Same-geometry cards, synchronized input/result, stale-generation and no-substitute errors, real examples; V-04,V-05,V-06. |
 | FR-10 | PIPELINE_CONTRACTS; DATA_MODEL_AND_STORAGE | T-02,T-03,T-09 | RecipeCodecTest, revision CAS, draft/Apply/Undo/Redo and STATE-01; V-01,V-02,V-04. |
 | FR-11 | DATA_MODEL_AND_STORAGE; SECURITY_PRIVACY | T-03,T-10 | SourceJournalTest, migration/process-death, rename/reopen/confirmed deletion and shared-source retention; V-02,V-04. |
-| FR-12 | CAPTURE_IMPORT_EXPORT; PIPELINE_CONTRACTS | T-11 | STATE-02, exportUsesFrozenOrderAndRecipes, mixed-aspect PDF independent rasterization, PNG/JPEG decode/limits; V-02,V-07. |
+| FR-12 | CAPTURE_IMPORT_EXPORT; PIPELINE_CONTRACTS | T-11 | STATE-02, exportUsesFrozenOrderAndRecipes, mixed-aspect PDF independent rasterization, PNG/JPEG decode/limits and [Carnet JPEG/ZIP settings and readback witnesses](../../validation/export/carnet-jpeg-platform-profile.md); V-02,V-07. |
 | FR-13 | CAPTURE_IMPORT_EXPORT; SECURITY_PRIVACY | T-11,T-12 | FileProvider scope/grants/readback, no private-path exposure, destination revocation/partial copy; V-04,V-07. |
 | FR-14 | PIPELINE_CONTRACTS; UX_SPECIFICATION; DATA_MODEL_AND_STORAGE | T-02,T-03,T-08,T-09,T-11 | Failure-injection for each status, exact stage-input DEGRADED result, terminal skips/no recursive fallback, acceptedFallbackReusesPinnedActualRaster with frozen policy/actual dimensions and changed/lost-pin failure; V-01,V-02,V-04,V-07. |
 | FR-15 | UX_SPECIFICATION | T-09,T-12 | EditorAccessibilityTest plus physical TalkBack, font scaling,48dp targets/non-gesture controls; V-04,V-06. |

@@ -19,6 +19,7 @@ import app.pristinepage.core.pipeline.RenderPurpose
 import app.pristinepage.data.model.*
 import app.pristinepage.data.repository.NamedAlbumExports
 import app.pristinepage.image.export.AlbumArtifactEncoder
+import app.pristinepage.image.export.AlbumJpegQuality
 import app.pristinepage.library.AlbumExportReview
 import java.io.File
 import java.io.IOException
@@ -40,6 +41,7 @@ internal data class AlbumExportState(
     val pages: List<ExportPagePlan> = emptyList(),
     val format: ExportFormat? = null,
     val size: ExportSize = ExportSize.COMPACT,
+    val quality: AlbumJpegQuality = AlbumJpegQuality.BALANCED,
     val filename: String? = null,
     val busy: Boolean = false,
     val waitingForTarget: Boolean = false,
@@ -90,6 +92,10 @@ internal class AlbumExportViewModel(application: Application, private val import
         if (mayEdit()) current.value = current.value.copy(size = value, error = null)
     }
 
+    fun quality(value: AlbumJpegQuality) {
+        if (mayEdit() && current.value.format != ExportFormat.PDF) current.value = current.value.copy(quality = value, error = null)
+    }
+
     fun generate() {
         val state = current.value
         val names = state.review ?: return
@@ -99,7 +105,7 @@ internal class AlbumExportViewModel(application: Application, private val import
         run {
             val dimensions = exportOutputs(state.pages, state.size)
             val settings = ExportSettings(format, dimensions, AlbumArtifactEncoder.PDF.takeIf { format == ExportFormat.PDF },
-                AlbumArtifactEncoder.JPEG.takeIf { format == ExportFormat.JPEG || format == ExportFormat.IMAGE_ZIP }, emptyList(),
+                state.quality.settings.takeIf { format == ExportFormat.JPEG || format == ExportFormat.IMAGE_ZIP }, emptyList(),
                 AlbumExportScope(names.albumTitle, state.pages.map { it.position }))
             val graph = imports()
             val port = graph.store.albumExports

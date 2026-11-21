@@ -17,16 +17,17 @@ import kotlin.math.abs
 /** No source metadata enters the pixels-only writer. Verify encoded sampling, complete decode and bounded lossy fidelity separately. */
 internal class AlbumJpeg(private val budget: ImageAllocationBudget) {
     fun write(image: RgbImage, output: OutputStream, settings: JpegSettings, checkpoint: () -> Unit) {
-        require(settings == DEFAULT)
+        require(AlbumJpegQuality.supports(settings))
         budget.reserve(pngNativeBytes(image)).use {
             val bitmap = albumBitmap(image, checkpoint)
             try {
+                val normalized = PlatformJpegStream(output)
                 var failure: Exception? = null
                 val sink = object : OutputStream() {
                     override fun write(b: Int) = write(byteArrayOf(b.toByte()), 0, 1)
                     override fun write(b: ByteArray, off: Int, len: Int) {
                         failure?.let { throw it }
-                        try { checkpoint(); output.write(b, off, len) }
+                        try { checkpoint(); normalized.write(b, off, len) }
                         catch (error: Exception) { failure = error; throw error }
                     }
                 }
@@ -34,16 +35,23 @@ internal class AlbumJpeg(private val budget: ImageAllocationBudget) {
                     finally { failure?.let { throw it } }
                 checkpoint()
                 if (!encoded) refuse(OperationErrorCode.PROCESSING_FAILED, "export_jpeg_encode")
+                normalized.finish()
             } finally { bitmap.recycle() }
         }
     }
 
     fun verify(file: File, image: RgbImage, settings: JpegSettings, checkpoint: () -> Unit) {
-        require(settings == DEFAULT)
+        require(AlbumJpegQuality.supports(settings))
         if (Build.VERSION.SDK_INT < 28) refuse(OperationErrorCode.UNSUPPORTED_VERSION, "export_jpeg_readback_api")
         budget.reserve(pngNativeBytes(image, file.length())).use {
             val size = PixelSize(image.width, image.height)
-            SourceContainer.verifyExportJpeg(file, size, settings.expectedSampling, checkpoint)
+            try { SourceContainer.verifyExportJpeg(file, size, settings.expectedSampling, checkpoint) }
+            catch (failure: RepositoryFailure) {
+                if (failure.error.code == OperationErrorCode.UNSUPPORTED_FORMAT || failure.error.code == OperationErrorCode.INVALID_INPUT) {
+                    refuse(OperationErrorCode.INTEGRITY_FAILED, "export_jpeg_encoder_output")
+                }
+                throw failure
+            }
             val decoded = decode(file, size, checkpoint)
             try {
                 require(decoded.width == size.width && decoded.height == size.height && decoded.colorSpace?.isSrgb == true)
@@ -77,9 +85,6 @@ internal class AlbumJpeg(private val budget: ImageAllocationBudget) {
             reader.setOnPartialImageListener { false }
         }
 
-    companion object {
-        val DEFAULT = JpegSettings(92, "android_bitmap", 1, JpegChromaPolicy.PLATFORM_VERIFIED, JpegSampling.YUV420)
-    }
 }
 
 internal fun albumBitmap(image: RgbImage, checkpoint: () -> Unit): Bitmap {

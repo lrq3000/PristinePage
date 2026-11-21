@@ -13,6 +13,11 @@
     <string name="album_size_normal">Standard</string>
     <string name="album_size_compact">Compact</string>
     <string name="album_size_small">Small</string>
+    <string name="album_export_quality">JPEG quality</string>
+    <string name="album_quality_maximum">Maximum</string>
+    <string name="album_quality_balanced">Balanced</string>
+    <string name="album_quality_smaller_file">Smaller file</string>
+    <string name="album_export_verify_failed">The export could not be verified. No file is ready to save or share.</string>
     <string name="album_export_page_size">Page %1$d: %2$d × %3$d px</string>
     <string name="album_pdf_capacity">PDF export is unavailable in this build because the PDF writer’s memory limits have not been verified.</string>
     <string name="album_export_verified">The export is ready. Save it to Files or choose an app to share it with.</string>

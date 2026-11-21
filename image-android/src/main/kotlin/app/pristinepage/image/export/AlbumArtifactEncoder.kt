@@ -25,7 +25,7 @@ class AlbumArtifactEncoder(
         require(snapshot.settings.albumScope != null)
         when (snapshot.settings.format) {
             ExportFormat.JPEG, ExportFormat.IMAGE_ZIP -> {
-                require(snapshot.settings.jpeg == JPEG)
+                require(AlbumJpegQuality.supports(snapshot.settings.jpeg))
                 if (Build.VERSION.SDK_INT < 28) refuse(OperationErrorCode.UNSUPPORTED_VERSION, "export_jpeg_readback_api")
                 snapshot.pages.forEach {
                     val size = it.output.size
@@ -52,6 +52,7 @@ class AlbumArtifactEncoder(
                 render.render(snapshot.pages[index]).use { albumBitmap(checkNotNull(it.image), checkpoint) }
             }
         }
+        val jpegSettings = checkNotNull(snapshot.settings.jpeg)
         // Keep verified JPEGs on private scratch storage, not simultaneously in RAM. These random files are not share targets.
         val temporary = ArrayList<Part>(snapshot.pages.size)
         var remaining = NamedAlbumExports.MAX_ARTIFACT_BYTES
@@ -71,9 +72,9 @@ class AlbumArtifactEncoder(
                                 raw.write(bytes, off, len); remaining -= len
                             }
                         }
-                        jpeg.write(image, sink, JPEG, checkpoint)
+                        jpeg.write(image, sink, jpegSettings, checkpoint)
                     }
-                    jpeg.verify(file, image, JPEG, checkpoint)
+                    jpeg.verify(file, image, jpegSettings, checkpoint)
                 }
                 val length = file.length()
                 temporary += Part(file, length, file.inputStream().use { it.hashExactly(length, checkpoint) })
@@ -122,7 +123,6 @@ class AlbumArtifactEncoder(
 
     companion object {
         val PROFILE = OrdinaryExportProfile("classical-v1", "rgb8-v1", "android-cpu", "binary64")
-        val JPEG = AlbumJpeg.DEFAULT
         val PDF = AlbumPdf.DEFAULT
     }
 }

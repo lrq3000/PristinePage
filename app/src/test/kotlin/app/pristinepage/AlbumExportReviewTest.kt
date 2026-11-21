@@ -2,11 +2,39 @@ package app.pristinepage
 
 import app.pristinepage.data.model.*
 import app.pristinepage.library.AlbumExportReview
+import app.pristinepage.export.AlbumExportState
+import app.pristinepage.image.export.AlbumJpegQuality
+import app.pristinepage.core.pipeline.OutputSpec
+import app.pristinepage.core.pipeline.PixelSize
+import app.pristinepage.core.pipeline.RenderPurpose
+import java.util.Base64
 import java.util.UUID
 import org.junit.Assert.*
 import org.junit.Test
 
 class AlbumExportReviewTest {
+    @Test fun jpegQualityOffersOnlyThreeDistinctPresetsAndDefaultsToBalanced() {
+        assertEquals(listOf(100, 92, 80), AlbumJpegQuality.entries.map { it.settings.quality })
+        assertEquals(AlbumJpegQuality.BALANCED, AlbumExportState().quality)
+        assertEquals(listOf(JpegSampling.YUV420), AlbumJpegQuality.entries.map { it.settings.expectedSampling }.distinct())
+        val page = PageOutputSettings(PageId(id()), OutputSpec(PixelSize(180, 120), RenderPurpose.EXPORT))
+        val frozen = AlbumJpegQuality.entries.map {
+            ExportSettings(ExportFormat.JPEG, listOf(page), null, it.settings, emptyList(), AlbumExportScope("Review", listOf(1)))
+        }
+        assertEquals(3, frozen.map(ExportSettingsCodec::hash).toSet().size)
+        assertEquals(frozen.map { it.jpeg }, frozen.map { ExportSettingsCodec.decode(ExportSettingsCodec.encode(it)).jpeg })
+        assertTrue(frozen.all { it.pages == listOf(page) })
+    }
+
+    @Test fun legacyNamedJpegSettingsKeepTheirExactBytesAndAreNotRelabeledAsTheNewEncoder() {
+        val original = Base64.getDecoder().decode("cHJpc3RpbmVwYWdlLWV4cG9ydC1zZXR0aW5ncy12MgAAAAAESlBFRwAAAAEAAAAkMDEyMzQ1NjctODlhYi1jZGVmLTAxMjMtNDU2Nzg5YWJjZGVmAAAAtAAAAHgAAAC0AAAAeAAAAARGQUlMAAEAAABcAAAADmFuZHJvaWRfYml0bWFwAAAAAQAAABFQTEFURk9STV9WRVJJRklFRAAAAAZZVVY0MjAAAAAAAAAABlJldmlldwAAAAE=")
+        val settings = ExportSettingsCodec.decode(original)
+        assertEquals(JpegSettings(92, "android_bitmap", 1, JpegChromaPolicy.PLATFORM_VERIFIED, JpegSampling.YUV420), settings.jpeg)
+        assertArrayEquals(original, ExportSettingsCodec.encode(settings))
+        val updated = ExportSettings(settings.format, settings.pages, null, AlbumJpegQuality.BALANCED.settings, emptyList(), settings.albumScope)
+        assertNotEquals(ExportSettingsCodec.hash(settings), ExportSettingsCodec.hash(updated))
+    }
+
     @Test fun selectedFilesKeepAlbumOrderAndOriginalPositionsAndUseTheReviewedAlbumName() {
         val album = album("Invoices")
         val second = album.pages[1].pageId

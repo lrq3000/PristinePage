@@ -15,6 +15,8 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import app.pristinepage.R
 import app.pristinepage.data.model.ExportFormat
+import app.pristinepage.data.model.OperationErrorCode
+import app.pristinepage.image.export.AlbumJpegQuality
 import app.pristinepage.library.errorText
 import java.util.Locale
 
@@ -79,7 +81,16 @@ import java.util.Locale
                             }))
                         }, enabled = enabled, modifier = Modifier.heightIn(min = 48.dp))
                     }
-                    if (format == ExportFormat.PDF) Text(stringResource(R.string.album_pdf_capacity), style = MaterialTheme.typography.bodySmall)
+                    if (format == ExportFormat.PDF) {
+                        Text(stringResource(R.string.album_pdf_capacity), style = MaterialTheme.typography.bodySmall)
+                    } else {
+                        Text(stringResource(R.string.album_export_quality))
+                        FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                            for (choice in AlbumJpegQuality.entries) FilterChip(choice == state.quality, { owner.quality(choice) },
+                                label = { Text(stringResource(choice.label())) }, enabled = enabled,
+                                modifier = Modifier.heightIn(min = 48.dp).testTag("album-export-quality-${choice.name.lowercase(Locale.ROOT)}"))
+                        }
+                    }
                     outputs.forEachIndexed { index, output ->
                         Text(stringResource(R.string.album_export_page_size, state.pages[index].position, output.output.size.width, output.output.size.height))
                     }
@@ -89,7 +100,12 @@ import java.util.Locale
                     if (state.shared) Text(stringResource(R.string.album_export_share_retention), style = MaterialTheme.typography.bodySmall)
                 }
                 if (state.busy || state.waitingForTarget) LinearProgressIndicator(Modifier.fillMaxWidth())
-                state.error?.let { Text(errorText(it), color = MaterialTheme.colorScheme.error) }
+                state.error?.let {
+                    val message = if (state.filename == null && it == OperationErrorCode.INTEGRITY_FAILED) {
+                        stringResource(R.string.album_export_verify_failed)
+                    } else errorText(it)
+                    Text(message, color = MaterialTheme.colorScheme.error)
+                }
                 state.notice?.let { notice -> Text(stringResource(when (notice) {
                     ExportNotice.SAVED -> R.string.album_export_saved
                     ExportNotice.SENT_WITHOUT_READBACK -> R.string.album_export_saved_unchecked
@@ -131,4 +147,10 @@ private fun ExportFormat.label() = when (this) {
     ExportFormat.IMAGE_ZIP -> R.string.album_export_zip
     ExportFormat.PDF -> R.string.album_export_pdf
     ExportFormat.PNG -> error("Unexpected export format")
+}
+
+private fun AlbumJpegQuality.label() = when (this) {
+    AlbumJpegQuality.MAXIMUM -> R.string.album_quality_maximum
+    AlbumJpegQuality.BALANCED -> R.string.album_quality_balanced
+    AlbumJpegQuality.SMALLER_FILE -> R.string.album_quality_smaller_file
 }
