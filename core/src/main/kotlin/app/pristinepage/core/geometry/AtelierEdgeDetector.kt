@@ -4,6 +4,8 @@ import app.pristinepage.core.pipeline.PixelSize
 import app.pristinepage.core.pipeline.PointPx
 import app.pristinepage.core.pipeline.QuadPx
 import kotlin.math.abs
+import kotlin.math.ceil
+import kotlin.math.floor
 import kotlin.math.hypot
 import kotlin.math.roundToInt
 
@@ -30,15 +32,25 @@ object AtelierEdgeDetector {
             val vertical = regionalEdges(height, width, checkpoint, rows)
             val horizontal = regionalEdges(width, height, checkpoint, columns)
             // A bright sheet and a dark sheet are both possible. Do not silently pick a polarity if both fit.
-            listOf(-1, 1).mapNotNull { sign ->
+            val regional = listOf(-1, 1).mapNotNull { sign ->
                 quad(vertical[sign], horizontal[sign], width, height)?.takeIf { separatesPage(it, width, height, pixels, sign) }
-            }.singleOrNull()
+            }
+            if (regional.isNotEmpty()) regional.singleOrNull()
+            else {
+                val upright = narrowReceipt(width, height, rows, columns, checkpoint)
+                val sideways = narrowReceipt(height, width, columns, rows, checkpoint)?.let {
+                    fun transpose(p: PointPx) = PointPx(p.y, p.x)
+                    QuadPx(transpose(it.tl), transpose(it.bl), transpose(it.br), transpose(it.tr))
+                }
+                // An ambiguous result is not a safe default. Never invent end caps or extrapolate them past the preview.
+                listOfNotNull(upright, sideways).filter { separatesPage(it, width, height, pixels) }.singleOrNull()
+            }
         } ?: return null
         fun normalized(point: PointPx) = PointPx(point.x / (width - 1), point.y / (height - 1))
         return QuadPx(normalized(detected.tl), normalized(detected.tr), normalized(detected.br), normalized(detected.bl))
     }
 
-    private fun quad(vertical: Pair<Line, Line>?, horizontal: Pair<Line, Line>?, width: Int, height: Int): QuadPx? {
+    private fun quad(vertical: Pair<Line, Line>?, horizontal: Pair<Line, Line>?, width: Int, height: Int, minWidth: Double = .24, minHeight: Double = .24): QuadPx? {
         val (left, right) = vertical ?: return null
         val (top, bottom) = horizontal ?: return null
         val quad = QuadPx(
@@ -49,9 +61,72 @@ object AtelierEdgeDetector {
         catch (_: IllegalArgumentException) { return null }
         val w = (width - 1).toDouble()
         val h = (height - 1).toDouble()
-        if (minOf(quad.tr.x - quad.tl.x, quad.br.x - quad.bl.x) < w * .24 ||
-            minOf(quad.bl.y - quad.tl.y, quad.br.y - quad.tr.y) < h * .24) return null
+        if (minOf(quad.tr.x - quad.tl.x, quad.br.x - quad.bl.x) < w * minWidth ||
+            minOf(quad.bl.y - quad.tl.y, quad.br.y - quad.tr.y) < h * minHeight) return null
         return quad
+    }
+
+    private fun narrowReceipt(width: Int, height: Int, rows: (Int, Int) -> Int, columns: (Int, Int) -> Int, checkpoint: () -> Unit): QuadPx? {
+        val middle = height / 2
+        val minWidth = maxOf(16, width / 12)
+        val widthRange = minWidth.toDouble()..(.30 * width)
+        val sides = scanPair(height / 4..height * 3 / 4, width, height * 3 / 10, minWidth, false, rows, checkpoint) ?: return null
+        val (left, right) = sides
+        fun Line.at(y: Int) = slope * y + intercept
+        val lo = height / 4
+        val hi = height * 3 / 4
+        if (listOf(lo, middle, hi).any { right.at(it) - left.at(it) !in widthRange }) return null
+        // Only trace caps through the central interior common to the two fitted sides, not unrelated columns.
+        val start = ceil(maxOf(left.at(lo), left.at(hi)) + 3).toInt().coerceAtLeast(0)
+        val end = floor(minOf(right.at(lo), right.at(hi)) - 3).toInt().coerceAtMost(width - 1)
+        val count = end - start + 1
+        if (count < 8) return null
+        val caps = scanPair(start..end, height, maxOf(8, (3 * count + 3) / 4), height * 2 / 5, false, columns, checkpoint) ?: return null
+        val candidate = quad(sides, caps, width, height, minWidth = minWidth.toDouble() / width, minHeight = .40) ?: return null
+        val widestEnd = maxOf(hypot(candidate.tr.x - candidate.tl.x, candidate.tr.y - candidate.tl.y),
+            hypot(candidate.br.x - candidate.bl.x, candidate.br.y - candidate.bl.y))
+        val shorterSide = minOf(hypot(candidate.tl.x - candidate.bl.x, candidate.tl.y - candidate.bl.y),
+            hypot(candidate.tr.x - candidate.br.x, candidate.tr.y - candidate.br.y))
+        if (widestEnd !in widthRange || shorterSide < 1.8 * widestEnd) return null
+        fun capContinuous(line: Line): Boolean {
+            var unsupported = 0
+            for (x in start..end) {
+                val y = line.at(x)
+                val a = (y - 2).roundToInt()
+                val b = (y + 2).roundToInt()
+                val supported = a >= 0 && b < height && abs(columns(x, a) - columns(x, b)) >= REGION_CONTRAST
+                unsupported = if (supported) 0 else unsupported + 1
+                // Outermost transitions can enclose two separate strips. Both ends must be continuous across the fitted interior.
+                if (unsupported >= 3) return false
+            }
+            return true
+        }
+        fun sidesContinue(outsideRows: IntRange): Boolean {
+            var run = 0
+            for (y in outsideRows) {
+                checkpoint()
+                val a = left.at(y)
+                val b = right.at(y)
+                fun contrast(x: Double, inward: Int): Int {
+                    val inside = (x + 2 * inward).roundToInt()
+                    val outside = (x - 2 * inward).roundToInt()
+                    return if (inside in 0 until width && outside in 0 until width) rows(y, inside) - rows(y, outside) else 0
+                }
+                val l = contrast(a, 1)
+                val r = contrast(b, -1)
+                val supported = b - a >= minWidth && abs(l) >= REGION_CONTRAST && abs(r) >= REGION_CONTRAST && l * r > 0
+                run = if (supported) run + 1 else 0
+                // A shadow across the receipt can look like an end locally, but cannot terminate both visible side edges.
+                if (run >= 4) return true
+            }
+            return false
+        }
+        val top = floor(minOf(candidate.tl.y, candidate.tr.y)).toInt()
+        val bottom = ceil(maxOf(candidate.bl.y, candidate.br.y)).toInt()
+        if (!capContinuous(caps.first) || !capContinuous(caps.second) ||
+            sidesContinue(maxOf(0, top - 16)..top - 3) ||
+            sidesContinue(bottom + 3..minOf(height - 1, bottom + 16))) return null
+        return candidate
     }
 
     private fun separatesPage(quad: QuadPx, width: Int, height: Int, pixels: IntArray, requiredSign: Int? = null): Boolean {
@@ -193,23 +268,27 @@ object AtelierEdgeDetector {
         return refit(inliers, minSupport)
     }
 
-    private fun oppositeEdges(scanlines: Int, axis: Int, get: (Int, Int) -> Int): Pair<Line, Line>? {
-        val first = ArrayList<PointPx>(scanlines)
-        val last = ArrayList<PointPx>(scanlines)
+    private fun oppositeEdges(scanlines: Int, axis: Int, get: (Int, Int) -> Int): Pair<Line, Line>? =
+        scanPair(scanlines / 4..scanlines * 3 / 4, axis, maxOf(8, scanlines * 3 / 10), axis / 4, true, get) {}
+
+    private fun scanPair(scans: IntRange, axis: Int, minSupport: Int, minGap: Int, straddleCenter: Boolean,
+        get: (Int, Int) -> Int, checkpoint: () -> Unit): Pair<Line, Line>? {
+        val first = ArrayList<PointPx>()
+        val last = ArrayList<PointPx>()
         // Avoid fitting the end caps as side edges; a heavily occluded or oblique contour returns no proposal.
-        for (u in (scanlines / 4)..(scanlines * 3 / 4)) {
+        for (u in scans) {
+            checkpoint()
             var near = -1
             var far = -1
             for (v in 2 until axis - 1) if (abs(get(u, v) - get(u, v - 1)) >= MIN_CONTRAST) {
                 if (near == -1) near = v
                 far = v
             }
-            if (near < 0 || far - near < axis / 4 || near >= axis / 2 || far <= axis / 2) continue
+            if (near < 0 || far - near < minGap || (straddleCenter && (near >= axis / 2 || far <= axis / 2))) continue
             if ((get(u, near) - get(u, near - 1)) * (get(u, far) - get(u, far - 1)) >= 0) continue
             first += PointPx(u.toDouble(), near - .5)
             last += PointPx(u.toDouble(), far - .5)
         }
-        val minSupport = maxOf(8, scanlines * 3 / 10)
         val near = supportingLine(first, minSupport) ?: return null
         val far = supportingLine(last, minSupport) ?: return null
         return near to far

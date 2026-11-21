@@ -86,6 +86,65 @@ class AtelierEdgeDetectorTest {
         assertSame(cancellation, thrown)
     }
 
+    @Test fun findsBothEndsOfFullyVisibleNarrowReceiptsEvenOffCenterOrTurned() {
+        for ((left, right) in listOf(58 to 99, 22 to 46)) for (turn in listOf(false, true)) {
+            val w = if (turn) 120 else 160
+            val h = if (turn) 160 else 120
+            val result = AtelierEdgeDetector.detect(w, h) { x, y ->
+                val across = if (turn) y else x
+                val along = if (turn) x else y
+                when {
+                    across in left + 4..right - 4 && along in listOf(22, 41, 59, 77, 95) -> 33
+                    across in left..right && along in 9..110 -> 200
+                    else -> 60
+                }
+            } ?: throw AssertionError("Missing a fully visible receipt: left=$left, right=$right, turned=$turn")
+            val expected = if (turn) listOf(8.5 to left - .5, 110.5 to left - .5, 110.5 to right + .5, 8.5 to right + .5)
+            else listOf(left - .5 to 8.5, right + .5 to 8.5, right + .5 to 110.5, left - .5 to 110.5)
+            for ((point, xy) in result.points().zip(expected)) {
+                assertEquals(xy.first, point.x * (w - 1), 1.0)
+                assertEquals(xy.second, point.y * (h - 1), 1.0)
+            }
+        }
+    }
+
+    @Test fun doesNotTreatAPrintedLineAsTheMissingEndOfANarrowReceipt() {
+        assertNull(AtelierEdgeDetector.detect(160, 120) { x, y ->
+            when {
+                x !in 22..46 || y > 110 -> 60
+                y in 18..19 || y in 22..24 -> 30
+                else -> 200
+            }
+        })
+    }
+
+    @Test fun doesNotBridgeTwoSeparateNarrowObjectsIntoOneReceipt() {
+        assertNull(AtelierEdgeDetector.detect(160, 120) { x, y ->
+            if ((x in 22..29 || x in 39..46) && y in 9..110) 200 else 60
+        })
+    }
+
+    @Test fun aShadowCannotSupplyTheMissingEndWhenBothVisibleSidesContinue() {
+        for (turn in listOf(false, true)) {
+            assertNull(AtelierEdgeDetector.detect(if (turn) 120 else 160, if (turn) 160 else 120) { x, y ->
+                val across = if (turn) y else x
+                val along = if (turn) x else y
+                when {
+                    across !in 22..46 || along > 110 -> 60
+                    across in 26..41 && along in 8..10 -> 70
+                    along <= 24 -> 92
+                    else -> 200
+                }
+            })
+        }
+    }
+
+    @Test fun aSustainedThreePixelBackgroundGapCannotBecomeOneReceipt() {
+        assertNull(AtelierEdgeDetector.detect(160, 120) { x, y ->
+            if ((x in 22..32 || x in 36..46) && y in 9..110) 200 else 60
+        })
+    }
+
     private fun verifyLowContrast(inverted: Boolean) {
         val result = AtelierEdgeDetector.detect(160, 120) { x, y ->
             val left = 20.0 + y / 10.0
