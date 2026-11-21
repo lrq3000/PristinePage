@@ -1,11 +1,13 @@
 package app.pristinepage.editor
 
+import app.pristinepage.core.geometry.AtelierCurveProposal
 import app.pristinepage.core.geometry.GeometrySizing
 import app.pristinepage.core.geometry.QuadValidation
 import app.pristinepage.core.pipeline.*
 import app.pristinepage.core.recipe.GeometryRecipe
 import app.pristinepage.core.recipe.RecipeCodec
 import app.pristinepage.data.model.*
+import app.pristinepage.image.decode.ImageAllocationBudget
 import app.pristinepage.image.preview.RenderedPreviewBitmaps
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -13,7 +15,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 
 /** Main-confined retained editor state. Only immutable recipes enter history; every image request starts from the same retained source via the Application renderer. UI recreation may retain this session, but close is terminal and fences privately finishing IO. */
-class EditorSession @JvmOverloads constructor(documentId: String, pageId: String, private val actions: EditorActions, renderer: RenderCoordinator, private val scope: CoroutineScope, converter: RenderedPreviewBitmaps? = null) : AutoCloseable {
+class EditorSession @JvmOverloads constructor(documentId: String, pageId: String, private val actions: EditorActions, renderer: RenderCoordinator, private val scope: CoroutineScope, converter: RenderedPreviewBitmaps? = null, private val imageBudget: ImageAllocationBudget? = null) : AutoCloseable {
     private val document = DocumentId(documentId)
     private val selected = PageId(pageId)
     private val current = MutableStateFlow(EditorState())
@@ -26,6 +28,8 @@ class EditorSession @JvmOverloads constructor(documentId: String, pageId: String
     private var shapeDrag: ShapeDrag? = null
     private var frameDrag: FrameDrag? = null
     private var bezierDrag: BezierDrag? = null
+    private var curveAnalysis: CurveAnalysis? = null
+    private var curveTransition = false
     private var generation = 0L
     private var active = true
     private var closed = false
@@ -64,6 +68,7 @@ class EditorSession @JvmOverloads constructor(documentId: String, pageId: String
     }
 
     private fun replaceDraft(edits: RecipeHistory, recipe: Recipe) {
+        cancelCurveAnalysis()
         if (!edits.replace(recipe)) {
             // Choosing an already-selected recipe while looking at a reference still returns to its Result, without inventing another history entry or a dirty draft.
             if (current.value.view != EditorView.RESULT) { current.value = current.value.copy(view = EditorView.RESULT); renderDraft() }
@@ -99,6 +104,7 @@ class EditorSession @JvmOverloads constructor(documentId: String, pageId: String
         val edits = editable() ?: return null
         val contour = (edits.current.geometry as? GeometryRecipe.Bezier)?.contour ?: return null
         if (!active || current.value.confirmExit || control.read(contour) == null) return null
+        cancelCurveAnalysis()
         endShapeDrag()
         endFrameDrag()
         endBezierDrag()
@@ -163,6 +169,7 @@ class EditorSession @JvmOverloads constructor(documentId: String, pageId: String
         endBezierDrag()
         val geometry = edits.current.geometry
         val start = EditorShapes.points(geometry)[point] ?: return null
+        cancelCurveAnalysis()
         edits.beginGesture()
         return FrameDrag(point, geometry, start).also { frameDrag = it }
     }
@@ -187,6 +194,56 @@ class EditorSession @JvmOverloads constructor(documentId: String, pageId: String
         return true
     }
 
+    internal class CurveAnalysis(val request: RenderRequest, internal val job: Job?)
+
+    internal fun beginCurveAnalysis(expected: RenderRequest, job: Job? = null): CurveAnalysis? {
+        if (!mayUseCurveRequest(expected) || curveAnalysis != null) return null
+        return CurveAnalysis(expected, job).also { curveAnalysis = it }
+    }
+
+    internal fun endCurveAnalysis(analysis: CurveAnalysis) {
+        if (curveAnalysis === analysis) curveAnalysis = null
+    }
+
+    internal fun cancelCurveAnalysis() {
+        val analysis = curveAnalysis
+        curveAnalysis = null
+        analysis?.job?.cancel()
+    }
+
+    internal fun setCurveTransition(active: Boolean) {
+        curveTransition = active
+        if (active) cancelCurveAnalysis()
+    }
+
+    internal val supportsCurveAnalysis: Boolean get() = imageBudget != null
+
+    internal fun reserveCurveAnalysis(bitmapBytes: Int): AutoCloseable {
+        require(bitmapBytes > 0)
+        // The borrowing job can briefly outlive disposal of the display owner. Charge its bitmap retain until that job unwinds.
+        return checkNotNull(imageBudget).reserve(AtelierCurveProposal.workspaceBytes() + bitmapBytes.toLong())
+    }
+
+    private fun mayUseCurveRequest(expected: RenderRequest): Boolean {
+        val draft = editable()?.current ?: return false
+        val request = preview.value
+        return active && !curveTransition && !current.value.confirmExit && request.view == EditorView.RESULT && request.request == expected &&
+            !request.processing && !request.previous && request.failure == null && request.preview?.request == expected &&
+            draft.geometry is GeometryRecipe.Perspective && expected.recipe == draft && frameDrag == null && shapeDrag == null && bezierDrag == null
+    }
+
+    internal fun useDetectedCurve(analysis: CurveAnalysis, candidate: GeometryRecipe.ManualCurveFourSides): Boolean {
+        if (curveAnalysis !== analysis || !mayUseCurveRequest(analysis.request)) return false
+        val edits = editable() ?: return false
+        val frame = edits.current.geometry as? GeometryRecipe.Perspective ?: return false
+        if (candidate.straight || candidate.source != frame.source || candidate.quad != frame.quad ||
+            candidate.targetRule != frame.targetRule || candidate.outputQuarterTurns != frame.outputQuarterTurns) return false
+        // Rendering and save admission still use the selected generation and exact candidate recipe.
+        endCurveAnalysis(analysis)
+        edit(edits.current.copy(geometry = candidate))
+        return true
+    }
+
     private fun validFrame(geometry: GeometryRecipe.Perspective): Boolean {
         val size = geometry.source.sourceSize
         fun expand(p: PointPx) = PointPx(p.x * (size.width - 1), p.y * (size.height - 1))
@@ -200,6 +257,7 @@ class EditorSession @JvmOverloads constructor(documentId: String, pageId: String
     internal fun beginShapeDrag(label: ShapePoint, horizontal: Boolean): ShapeDrag? {
         val edits = editable() ?: return null
         if (!active || current.value.confirmExit || label !in EditorShapes.points(edits.current.geometry)) return null
+        cancelCurveAnalysis()
         endShapeDrag()
         endFrameDrag()
         edits.beginGesture()
@@ -241,6 +299,7 @@ class EditorSession @JvmOverloads constructor(documentId: String, pageId: String
     }
 
     private fun renderDraft() {
+        cancelCurveAnalysis()
         if (closed || !active) return
         val page = current.value.page ?: return
         val draft = current.value.draft ?: return
@@ -262,7 +321,7 @@ class EditorSession @JvmOverloads constructor(documentId: String, pageId: String
     fun setActive(value: Boolean) {
         if (closed || active == value) return
         active = value
-        if (active) renderDraft() else { endShapeDrag(); endFrameDrag(cancel = true); endBezierDrag(cancel = true); scheduler.clear() }
+        if (active) renderDraft() else { cancelCurveAnalysis(); endShapeDrag(); endFrameDrag(cancel = true); endBezierDrag(cancel = true); scheduler.clear() }
     }
 
     fun apply() = save(andBack = false)
@@ -270,6 +329,7 @@ class EditorSession @JvmOverloads constructor(documentId: String, pageId: String
 
     /** A wizard move can consume only the exact draft accepted by the ordinary save path, never a pending or failed write. */
     internal suspend fun checkpointForNavigation(): Boolean {
+        cancelCurveAnalysis()
         val edits = editable() ?: return false
         if (!edits.dirty) return true
         val expected = edits.current
@@ -281,6 +341,7 @@ class EditorSession @JvmOverloads constructor(documentId: String, pageId: String
     }
 
     private fun save(andBack: Boolean) {
+        cancelCurveAnalysis()
         val edits = editable() ?: return
         if (!edits.dirty) { if (andBack) exit(); return }
         // Both Apply paths pass this guard before enqueueing the repository CAS, not just when the buttons recompose.
@@ -318,6 +379,7 @@ class EditorSession @JvmOverloads constructor(documentId: String, pageId: String
     private fun saveFailed(error: OperationError) { if (!closed) current.value = current.value.copy(saving = false, error = error) }
     fun requestBack() {
         if (closed || current.value.saving) return
+        cancelCurveAnalysis()
         endShapeDrag()
         endFrameDrag(cancel = true)
         endBezierDrag(cancel = true)
@@ -330,6 +392,7 @@ class EditorSession @JvmOverloads constructor(documentId: String, pageId: String
     override fun close() {
         if (closed) return
         closed = true
+        cancelCurveAnalysis()
         endShapeDrag()
         endFrameDrag(cancel = true)
         endBezierDrag(cancel = true)

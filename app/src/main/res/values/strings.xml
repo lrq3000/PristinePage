@@ -189,4 +189,9 @@
     <string name="atelier_finding_edges">Looking for page edges…</string>
     <string name="atelier_frame_no_edges">No clear page edges found. Adjust the corners yourself.</string>
     <string name="atelier_frame_not_replaced">The frame changed while the app was looking for edges. Your frame was kept.</string>
+    <string name="atelier_find_curve">Suggest a curve</string>
+    <string name="atelier_finding_curve">Checking the page for curvature…</string>
+    <string name="atelier_curve_not_found">No reliable curve found. You can adjust the page in Manual curve.</string>
+    <string name="atelier_curve_not_replaced">The page changed during analysis. Your adjustments were kept.</string>
+    <string name="atelier_curve_resources">Not enough memory to check for a curve. Your frame was kept.</string>
 </resources>

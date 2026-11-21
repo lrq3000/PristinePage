@@ -213,6 +213,10 @@ class PageEditorScreen(
                         onSelectBezier = { bezierSelection = it },
                         placeBezierPoint = placeBezierPoint,
                         onPointPlaced = { placeBezierPoint = false },
+                        curveRequest = preview.request?.takeIf {
+                            preview.view == EditorView.RESULT && !preview.processing && !preview.previous &&
+                                preview.failure == null && preview.preview?.request == it && it.recipe == state.draft
+                        },
                         onSourceReady = if (!seed) null else { bitmap ->
                             try {
                                 val quad = detectAtelierFrame(bitmap)

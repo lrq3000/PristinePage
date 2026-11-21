@@ -37,16 +37,24 @@ import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.repeatOnLifecycle
 import app.pristinepage.R
+import app.pristinepage.core.geometry.AtelierCurveProposal
 import app.pristinepage.core.geometry.AtelierEdgeDetector
+import app.pristinepage.core.pipeline.PixelSize
 import app.pristinepage.core.pipeline.PointPx
+import app.pristinepage.core.pipeline.QuadPx
+import app.pristinepage.core.pipeline.RenderRequest
 import app.pristinepage.core.recipe.GeometryRecipe
 import app.pristinepage.core.recipe.ContourSide
 import app.pristinepage.core.recipe.BezierContour
 import app.pristinepage.core.recipe.BezierSegment
 import app.pristinepage.design.AtelierStyle
+import app.pristinepage.data.model.OperationErrorCode
+import app.pristinepage.data.model.RepositoryFailure
 import app.pristinepage.image.preview.OriginalPreviewBitmap
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.awaitCancellation
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
@@ -66,6 +74,7 @@ import kotlin.math.roundToInt
     placeBezierPoint: Boolean = false,
     onPointPlaced: () -> Unit = {},
     onSourceReady: (suspend (android.graphics.Bitmap) -> Unit)? = null,
+    curveRequest: RenderRequest? = null,
 ) {
     val lifecycle = LocalLifecycleOwner.current.lifecycle
     val load by rememberUpdatedState(loadOriginal)
@@ -73,6 +82,7 @@ import kotlin.math.roundToInt
     var failed by remember(sourceId) { mutableStateOf(false) }
     var attempt by remember(sourceId) { mutableIntStateOf(0) }
     var finding by remember(sourceId) { mutableStateOf(false) }
+    var findingCurve by remember(sourceId) { mutableStateOf(false) }
     var feedback by remember(sourceId) { mutableStateOf<Int?>(null) }
     val scope = rememberCoroutineScope()
     var magnify by remember(sourceId) { mutableStateOf<PointPx?>(null) }
@@ -268,7 +278,7 @@ import kotlin.math.roundToInt
         }
     }
     if (geometry !is GeometryRecipe.Perspective) return
-    Button(enabled = enabled && !finding, onClick = {
+    Button(enabled = enabled && !finding && !findingCurve, onClick = {
         val bitmap = image.bitmap
         val expected = geometry
         finding = true
@@ -287,6 +297,37 @@ import kotlin.math.roundToInt
         }
     }, modifier = Modifier.heightIn(min = 48.dp).testTag("atelier-detect-frame")) {
         Text(stringResource(if (finding) R.string.atelier_finding_edges else R.string.atelier_find_edges))
+    }
+    if (session.supportsCurveAnalysis) Button(enabled = enabled && !finding && !findingCurve && curveRequest != null, onClick = {
+        val request = curveRequest ?: return@Button
+        if (!lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED)) return@Button
+        findingCurve = true
+        feedback = null
+        // Register the ticket in this click before a later navigation or gesture can run on Main.
+        scope.launch(start = CoroutineStart.UNDISPATCHED) {
+            val analysis = session.beginCurveAnalysis(request, coroutineContext[Job])
+            try {
+                if (analysis == null) return@launch
+                val bitmap = image.bitmap
+                val result = session.reserveCurveAnalysis(bitmap.allocationByteCount).use {
+                    withAtelierLuma(bitmap, geometry.source.sourceSize) { w, h, checkpoint, luma ->
+                        AtelierCurveProposal.detect(geometry, w, h, checkpoint, luma)
+                    }
+                }
+                feedback = when {
+                    result == null -> R.string.atelier_curve_not_found
+                    original === image && lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED) && session.useDetectedCurve(analysis, result) -> null
+                    else -> R.string.atelier_curve_not_replaced
+                }
+            } catch (canceled: CancellationException) { throw canceled }
+            catch (failure: RepositoryFailure) {
+                feedback = if (failure.error.code == OperationErrorCode.RESOURCE_LIMIT) R.string.atelier_curve_resources else R.string.atelier_curve_not_found
+            }
+            catch (_: Exception) { feedback = R.string.atelier_curve_not_found }
+            finally { analysis?.let(session::endCurveAnalysis); findingCurve = false }
+        }
+    }, modifier = Modifier.heightIn(min = 48.dp).testTag("atelier-detect-curve")) {
+        Text(stringResource(if (findingCurve) R.string.atelier_finding_curve else R.string.atelier_find_curve))
     }
     feedback?.let { Text(stringResource(it)) }
 }
@@ -335,17 +376,40 @@ internal fun nearestInsertion(contour: BezierContour, touch: Offset, rect: Rect,
     return hit
 }
 
-internal suspend fun detectAtelierFrame(bitmap: android.graphics.Bitmap): app.pristinepage.core.pipeline.QuadPx? = withContext(Dispatchers.Default) {
+internal suspend fun detectAtelierFrame(bitmap: android.graphics.Bitmap): QuadPx? =
+    withAtelierLuma(bitmap) { w, h, checkpoint, luma -> AtelierEdgeDetector.detect(w, h, checkpoint, luma) }
+
+private suspend fun <R> withAtelierLuma(
+    bitmap: android.graphics.Bitmap,
+    orientedSource: PixelSize? = null,
+    analyze: (Int, Int, () -> Unit, (Int, Int) -> Int) -> R?,
+): R? = withContext(Dispatchers.Default) {
     val w = bitmap.width; val h = bitmap.height
     val scale = 384.0 / maxOf(w, h)
     val dw = minOf(w, (w * scale).roundToInt())
     val dh = minOf(h, (h * scale).roundToInt())
     if (dw < 2 || dh < 2) return@withContext null
     val jobContext = coroutineContext
-    AtelierEdgeDetector.detect(dw, dh, { jobContext.ensureActive() }) { x, y ->
-        val rgb = bitmap.getPixel((x.toDouble() * (w - 1) / (dw - 1)).roundToInt(),
-            (y.toDouble() * (h - 1) / (dh - 1)).roundToInt())
-        (77 * (rgb shr 16 and 255) + 150 * (rgb shr 8 and 255) + 29 * (rgb and 255) + 128) shr 8
+    fun luma(x: Int, y: Int): Int {
+        val rgb = bitmap.getPixel(x, y)
+        return (77 * (rgb shr 16 and 255) + 150 * (rgb shr 8 and 255) + 29 * (rgb and 255) + 128) shr 8
+    }
+    fun inBitmap(p: Int, samples: Int, source: Int, display: Int): Double {
+        val original = p.toDouble() * (source - 1) / (samples - 1)
+        return ((original + .5) * display / source - .5).coerceIn(0.0, (display - 1).toDouble())
+    }
+    analyze(dw, dh, { jobContext.ensureActive() }) { x, y ->
+        if (orientedSource == null) luma((x.toDouble() * (w - 1) / (dw - 1)).roundToInt(), (y.toDouble() * (h - 1) / (dh - 1)).roundToInt())
+        else {
+            // Sample the already half-pixel-resized preview at the detector's original-source-aligned sites.
+            val bx = inBitmap(x, dw, orientedSource.width, w)
+            val by = inBitmap(y, dh, orientedSource.height, h)
+            val i = bx.toInt(); val j = by.toInt()
+            val nx = minOf(w - 1, i + 1); val ny = minOf(h - 1, j + 1)
+            val fx = bx - i; val fy = by - j
+            ((1 - fy) * ((1 - fx) * luma(i, j) + fx * luma(nx, j)) +
+                fy * ((1 - fx) * luma(i, ny) + fx * luma(nx, ny))).roundToInt()
+        }
     }
 }
 
