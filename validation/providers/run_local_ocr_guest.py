@@ -24,6 +24,7 @@ RUNNER = TEST + "/androidx.test.runner.AndroidJUnitRunner"
 CASE = ("app.pristinepage.ocr.LocalOcrImportJourneyTest",
         "importedScansAreRecognizedAutomaticallyAndHomeOpensTheSecondPage")
 FILES_CASE = (CASE[0], "coldHomeSearchReopensTheSavedFilesPageAndCreatesJpeg")
+BACKFILL_CASE = ("app.pristinepage.ocr.LocalOcrStartupBackfillTest", "firstActivityLaunchFindsAndIndexesAnExistingUnqueuedPage")
 SIGNER = "7ef552d3eab5d93fac15b3d2dd7233f1b50a170d2baf68460b12f6085f8dadee"
 ALLOCATOR = "ebc068885e9e6af8c836fb658edebc245a4b8c3adf52bf6c040fa4fdac263c1d"
 GUEST_PATTERN = r"agent-pristinepage-ocr-[a-f0-9]{12}"
@@ -313,7 +314,7 @@ def run_type(ns):
                 self.lock.rmdir()
             raise RuntimeError("Unverified provisioning/launch; retained the exact allocator cleanup obligation")
 
-        def witness(self, pair, hashes, fresh, files_source, saved_album, diagnosis, previous_test):
+        def witness(self, pair, hashes, fresh, files_source, saved_album, backfill, diagnosis, previous_test):
             record = self.owned()
             row = self.exact(self.inventory())
             need([int(row[i]) for i in (5, 6)] == [item[0] for item in record["runtime_processes"]], "Target processes changed")
@@ -350,7 +351,7 @@ def run_type(ns):
                     # Preserve crash and resolver evidence before shutting down; do not reissue the unsuccessful UI action.
                     self.inspect_files_failure(target)
                     raise
-            case = FILES_CASE if saved_album else CASE
+            case = FILES_CASE if saved_album else BACKFILL_CASE if backfill else CASE
             extras = ["-e", "filesSavedAlbum", saved_album] if saved_album else []
             output = self.command([*target, "shell", "am", "instrument", "-w", "-r", "-e", "class",
                                    "#".join(case), *extras, RUNNER], timeout=250)
@@ -411,6 +412,7 @@ def main():
     files = parser.add_mutually_exclusive_group()
     files.add_argument("--files-source", type=Path)
     files.add_argument("--files-saved-album")
+    files.add_argument("--startup-backfill", action="store_true")
     diagnose = parser.add_mutually_exclusive_group()
     diagnose.add_argument("--diagnose-work", action="store_const", const="work", dest="diagnosis")
     diagnose.add_argument("--diagnose-files", action="store_const", const="files", dest="diagnosis")
@@ -427,7 +429,9 @@ def main():
         parser.error("Files UI validation requires the released OCR guest after the initial smoke")
     if args.files_saved_album and not re.fullmatch(r"pristinepage_\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2}", args.files_saved_album):
         parser.error("Only the exact saved synthetic Files album may be resumed")
-    if args.diagnosis and (not args.existing or args.files_source or args.files_saved_album or args.enable_local_adb):
+    if args.startup_backfill and not args.existing:
+        parser.error("Existing-library backfill validation requires the exact retained OCR guest")
+    if args.diagnosis and (not args.existing or args.files_source or args.files_saved_album or args.startup_backfill or args.enable_local_adb):
         parser.error("Diagnosis requires only the released OCR guest")
     if args.previous_test_sha and (not args.existing or args.diagnosis
                                   or not re.fullmatch(r"[0-9a-f]{64}", args.previous_test_sha)):
@@ -453,11 +457,13 @@ def main():
     print(f"Target {guest}; evidence {raw.relative_to(root)}", flush=True)
     try:
         run.prepare(args.new, args.recover_provision[1] if args.recover_provision else None, args.enable_local_adb)
-        run.witness(pair, hashes, args.new or bool(args.recover_provision), args.files_source, args.files_saved_album, args.diagnosis,
+        run.witness(pair, hashes, args.new or bool(args.recover_provision), args.files_source, args.files_saved_album,
+                    args.startup_backfill, args.diagnosis,
                     args.previous_test_sha)
         if not args.diagnosis:
             print("Verified search, reopen and private JPEG export of the previously saved Files scan." if args.files_saved_album else
                   "Verified the Files picker journey." if args.files_source else
+                  "Verified automatic startup backfill and exact Home navigation." if args.startup_backfill else
                   "The real import, background OCR, and exact-page Home smoke passed.", flush=True)
     finally:
         run.close_owned()

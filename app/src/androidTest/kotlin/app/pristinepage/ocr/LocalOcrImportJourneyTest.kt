@@ -5,16 +5,18 @@ import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.Paint
 import android.graphics.Typeface
+import androidx.compose.ui.test.assertIsEnabled
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
-import androidx.compose.ui.test.onAllNodesWithText
+import androidx.compose.ui.test.junit4.createEmptyComposeRule
 import androidx.compose.ui.test.onAllNodesWithTag
+import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
-import androidx.compose.ui.test.assertIsEnabled
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performScrollTo
 import androidx.compose.ui.test.performTextInput
 import androidx.lifecycle.ViewModelProvider
+import androidx.test.core.app.ActivityScenario
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import androidx.work.WorkInfo
@@ -144,27 +146,72 @@ class LocalOcrImportJourneyTest {
         compose.onNodeWithTag("album-export-save-as").assertIsEnabled()
     }
 
-    private suspend fun <T : Any> waitFor(read: suspend () -> T?): T {
-        while (true) {
-            read()?.let { return it }
-            delay(100)
+}
+
+/** Start from a real saved page with no OCR binding, not from an injected recognizer, wake, or result. */
+@RunWith(AndroidJUnit4::class)
+class LocalOcrStartupBackfillTest {
+    @get:Rule val compose = createEmptyComposeRule()
+
+    @Test
+    fun firstActivityLaunchFindsAndIndexesAnExistingUnqueuedPage(): Unit = runBlocking {
+        val context = InstrumentationRegistry.getInstrumentation().targetContext
+        val app = context.applicationContext as PristinePageApplication
+        assumeTrue("Only run with the private OCR-enabled application candidate", app.hasBundledOcr)
+        val graph = app.services.imports()
+        val title = "Startup backfill ${UUID.randomUUID()}"
+        val document = graph.store.documents.createDocument(title)
+        val dir = File(context.cacheDir, "editor-journey-fixtures")
+        check(dir.isDirectory || dir.mkdirs())
+        val id = UUID.randomUUID().toString()
+        val keyword = "HONEYDEW"
+        makePage(File(dir, "$id.png"), keyword)
+        val actions = ApplicationLibraryActions(context, app.services::imports)
+        val request = actions.begin(graph.store.catalog.load(document).document)
+        val saved = actions.deliver(request, LibraryPhotoResult.Selected(
+            listOf("content://${context.packageName}.editor-fixtures/$id"), 0,
+        )).single() as IngestResult.Committed
+        assertNull(graph.store.savedOcr.readStatus(document, saved.pageId))
+        assertFalse(graph.store.savedOcr.find(keyword, null, 20).hits.any { it.document == document })
+        // Seed without the post-save signal, then use MainActivity.onCreate as the only enrollment stimulus.
+        ActivityScenario.launch(MainActivity::class.java).use {
+            val ready = withTimeout(120_000) {
+                waitFor { graph.store.savedOcr.readStatus(document, saved.pageId)?.takeIf { it.phase == SavedOcrWork.PagePhase.READY } }
+            }
+            assertEquals(1, ready.attemptsStarted)
+            assertNull(ready.lastError)
+            assertEquals("tesseract-android", ready.configuration.engineId)
+            val hit = context.getString(R.string.home_matching_page, title, 1)
+            compose.onNodeWithTag("home-album-search").performTextInput(keyword)
+            compose.waitUntil(15_000) { compose.onAllNodesWithText(hit).fetchSemanticsNodes().size == 1 }
+            compose.onNodeWithText(hit).performClick()
+            lateinit var editor: EditorViewModel
+            it.onActivity { activity -> editor = ViewModelProvider(activity)[EditorViewModel::class.java] }
+            compose.waitUntil(15_000) { editor.state.value.identity?.pageId == saved.pageId }
         }
     }
+}
 
-    private fun makePage(file: File, word: String) {
-        check(file.createNewFile())
-        val bitmap = Bitmap.createBitmap(1024, 480, Bitmap.Config.ARGB_8888)
-        try {
-            bitmap.eraseColor(Color.WHITE)
-            val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-                color = Color.BLACK
-                textSize = 76f
-                typeface = Typeface.create(Typeface.SANS_SERIF, Typeface.BOLD)
-            }
-            Canvas(bitmap).drawText("Receipt $word", 50f, 220f, paint)
-            file.outputStream().use { check(bitmap.compress(Bitmap.CompressFormat.PNG, 100, it)) }
-        } finally {
-            bitmap.recycle()
+private suspend fun <T : Any> waitFor(read: suspend () -> T?): T {
+    while (true) {
+        read()?.let { return it }
+        delay(100)
+    }
+}
+
+private fun makePage(file: File, word: String) {
+    check(file.createNewFile())
+    val bitmap = Bitmap.createBitmap(1024, 480, Bitmap.Config.ARGB_8888)
+    try {
+        bitmap.eraseColor(Color.WHITE)
+        val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = Color.BLACK
+            textSize = 76f
+            typeface = Typeface.create(Typeface.SANS_SERIF, Typeface.BOLD)
         }
+        Canvas(bitmap).drawText("Receipt $word", 50f, 220f, paint)
+        file.outputStream().use { check(bitmap.compress(Bitmap.CompressFormat.PNG, 100, it)) }
+    } finally {
+        bitmap.recycle()
     }
 }
