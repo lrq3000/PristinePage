@@ -18,7 +18,7 @@ class OcrSearchTermsTest {
 
     @Test fun canonicalEquivalentTextAndScriptsSurviveTokenization() {
         val terms = OcrSearchTerms.create("E\u0301cole 48.25 東京")!!
-        assertEquals(""""École" "48" "25" "東京"""", terms.expression)
+        assertEquals(""""École" "48" "25" "東 京"""", terms.expression)
     }
 
     @Test fun noMatchExpressionForEmptyOrMalformedInput() {
@@ -39,5 +39,31 @@ class OcrSearchTermsTest {
         assertEquals("ộ", composed.recognizedText())
         assertNull(composed.verbatimText)
         assertEquals("\"${decomposed.indexedText}\"", OcrSearchTerms.create(original)?.expression)
+    }
+
+    @Test fun contiguousCjkInputIsSearchableAsAnOrderedPhraseWithoutChangingTheOriginal() {
+        val input = OcrInput("aaaaaaaa-aaaa-4aaa-8aaa-000000000004", 1, "a".repeat(64))
+        val engine = OcrConfiguration("fixture", 1, OcrLayout.AUTOMATIC)
+        val original = "東京都の領収書です Invoice한글"
+        val stored = OcrResultRow.fromRecognition(input, engine, OcrText(original))
+        assertEquals("東 京 都 の 領 収 書 で す Invoice 한 글", stored.indexedText)
+        assertEquals(original, stored.recognizedText())
+        assertEquals(""""領 収 書" "invoice" "한 글"""", OcrSearchTerms.create("領収書 invoice한글")?.expression)
+    }
+
+    @Test fun segmentationKeepsSupplementaryCharactersAndKanaLengthMarksWhole() {
+        val text = "\uD840\uDC00コーヒー"
+        assertEquals(""""𠀀 コ ー ヒ ー"""", OcrSearchTerms.create(text)?.expression)
+    }
+
+    @Test fun halfWidthKanaVoiceMarksStayWithTheBaseInSearchButVerbatimStaysUntouched() {
+        val input = OcrInput("aaaaaaaa-aaaa-4aaa-8aaa-000000000004", 1, "a".repeat(64))
+        val engine = OcrConfiguration("fixture", 1, OcrLayout.AUTOMATIC)
+        val original = "ｶﾞﾊﾟ ①"
+        val stored = OcrResultRow.fromRecognition(input, engine, OcrText(original))
+        assertEquals("ガ パ ①", stored.indexedText)
+        assertEquals(original, stored.recognizedText())
+        assertEquals(""""ガ パ"""", OcrSearchTerms.create("ｶﾞﾊﾟ")?.expression)
+        assertEquals(""""ガ パ"""", OcrSearchTerms.create("ガパ")?.expression)
     }
 }

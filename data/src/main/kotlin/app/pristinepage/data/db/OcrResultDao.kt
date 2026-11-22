@@ -36,7 +36,7 @@ internal class OcrResultRow(
     companion object {
         fun fromRecognition(input: OcrInput, configuration: OcrConfiguration, text: OcrText): OcrResultRow {
             val indexed = canonicalOcrSearchText(text.value)
-            require(indexed.length <= 262_144) // NFC can expand some inputs; do not truncate the index silently.
+            require(indexed.length <= 262_144) // NFC and segmentation can expand input; do not truncate the index silently.
             return OcrResultRow(0, input.pageId, input.recipeRevision, input.sourcePixelSha256, configuration.engineId,
                 configuration.engineVersion, configuration.layout.name, indexed, text.value.takeUnless { it == indexed })
         }

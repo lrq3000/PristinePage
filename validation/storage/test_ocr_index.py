@@ -128,6 +128,38 @@ class OcrIndexSqlTest(unittest.TestCase):
             "SELECT COALESCE(verbatimText,indexedText) FROM OcrResult",
         ]))
 
+    def test_literal_cjk_phrase_finds_an_inner_term_but_not_skipped_characters(self):
+        self.assertEqual([f"{DOC}|{PAGE}", "東京都の領収書です", f"{DOC}|{PAGE}"], self.run_sql([
+            "PRAGMA foreign_keys=ON", *create_tables(3), *sync_triggers(), SEED, INSERT_TEXT,
+            "UPDATE OcrResult SET indexedText='東 京 都 の 領 収 書 で す',verbatimText='東京都の領収書です'",
+            match().replace(":expression", """'"領 収 書"'""").replace(":afterPageId", "NULL").replace(":limit", "2"),
+            match().replace(":expression", """'"領 書"'""").replace(":afterPageId", "NULL").replace(":limit", "2"),
+            "SELECT COALESCE(verbatimText,indexedText) FROM OcrResult",
+            "UPDATE OcrResult SET indexedText='領、収 書',verbatimText='領、収書'",
+            match().replace(":expression", """'"領 収 書"'""").replace(":afterPageId", "NULL").replace(":limit", "2"),
+        ]))
+
+    def test_literal_voiced_kana_finds_combined_character_only(self):
+        voiced = match().replace(":expression", """'"ガ"'""").replace(":afterPageId", "NULL").replace(":limit", "2")
+        self.assertEqual(["ｶ ｷﾞ", f"{DOC}|{PAGE}", "ｷｶﾞｺ"], self.run_sql([
+            "PRAGMA foreign_keys=ON", *create_tables(3), *sync_triggers(), SEED, INSERT_TEXT,
+            "UPDATE OcrResult SET indexedText='カ ギ',verbatimText='ｶ ｷﾞ'", voiced,
+            "SELECT COALESCE(verbatimText,indexedText) FROM OcrResult",
+            "UPDATE OcrResult SET indexedText='キ ガ コ',verbatimText='ｷｶﾞｺ'", voiced,
+            "SELECT COALESCE(verbatimText,indexedText) FROM OcrResult",
+        ]))
+
+    def test_mixed_script_queries_require_each_literal_and_keep_cjk_token_order(self):
+        def query(phrase):
+            return match().replace(":expression", f"'{phrase}'").replace(":afterPageId", "NULL").replace(":limit", "2")
+
+        self.assertEqual([f"{DOC}|{PAGE}"] * 3, self.run_sql([
+            "PRAGMA foreign_keys=ON", *create_tables(3), *sync_triggers(), SEED, INSERT_TEXT,
+            "UPDATE OcrResult SET indexedText='北 京 市 の 領 収 書 영 수 증 입 니 다 Invoice فاتورة 𠀀 林'",
+            query('"京 市" "invoice" "فاتورة"'), query('"수 증"'), query('"𠀀 林"'),
+            query('"市 京" "invoice"'), query('"영 증"'), query('"京 市" "invoices" "فاتورة"'),
+        ]))
+
 
 if __name__ == "__main__":
     unittest.main()

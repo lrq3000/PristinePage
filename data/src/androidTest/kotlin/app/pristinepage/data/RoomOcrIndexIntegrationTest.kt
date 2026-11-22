@@ -5,8 +5,13 @@ import androidx.room.testing.MigrationTestHelper
 import androidx.sqlite.db.SupportSQLiteDatabase
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
+import app.pristinepage.core.ocr.OcrConfiguration
+import app.pristinepage.core.ocr.OcrInput
+import app.pristinepage.core.ocr.OcrLayout
+import app.pristinepage.core.ocr.OcrText
 import app.pristinepage.data.db.AtelierDraftMigration
 import app.pristinepage.data.db.OcrIndexMigration
+import app.pristinepage.data.db.OcrResultRow
 import app.pristinepage.data.db.PristineDatabase
 import app.pristinepage.data.repository.OcrSearchTerms
 import org.junit.Assert.*
@@ -73,6 +78,47 @@ class RoomOcrIndexIntegrationTest {
             sql.execSQL("""INSERT INTO AtelierDraft (draftId, stagingDocumentId, state, generation, step, createdAt) VALUES (?,?,'EDITING',1,1,0)""", arrayOf(DRAFT, DOCUMENT))
             assertTrue(matches().isEmpty())
         } finally { database.close() }
+    }
+
+    @Test fun findsAnOrderedPhraseInsideUnspacedCjkWithoutMatchingSkippedCharacters() {
+        val database = Room.inMemoryDatabaseBuilder(context, PristineDatabase::class.java).build()
+        try {
+            val sql = database.openHelper.writableDatabase
+            seed(sql)
+            val text = "東京都の領収書です"
+            insertRecognition(sql, text)
+            val dao = database.ocrResults()
+            fun matches(query: String) = dao.matchPages(checkNotNull(OcrSearchTerms.create(query)), null, 2).map { it.pageId }
+            assertEquals(listOf(PAGE), matches("領収書"))
+            assertTrue(matches("領書").isEmpty())
+            assertEquals(text, sql.scalar("SELECT COALESCE(verbatimText,indexedText) FROM OcrResult"))
+        } finally { database.close() }
+    }
+
+    @Test fun voicedKanaSearchMatchesBothWidthsButNotSeparateCharacters() {
+        val database = Room.inMemoryDatabaseBuilder(context, PristineDatabase::class.java).build()
+        try {
+            val sql = database.openHelper.writableDatabase
+            seed(sql)
+            val dao = database.ocrResults()
+            fun matches(query: String) = dao.matchPages(checkNotNull(OcrSearchTerms.create(query)), null, 2).map { it.pageId }
+            insertRecognition(sql, "ｶ ｷﾞ")
+            assertTrue(matches("ｶﾞ").isEmpty())
+            assertTrue(matches("ガ").isEmpty())
+            sql.execSQL("DELETE FROM OcrResult WHERE pageId=?", arrayOf(PAGE))
+            val text = "ｷｶﾞｺ"
+            insertRecognition(sql, text)
+            assertEquals(listOf(PAGE), matches("ｶﾞ"))
+            assertEquals(listOf(PAGE), matches("ガ"))
+            assertEquals(text, sql.scalar("SELECT COALESCE(verbatimText,indexedText) FROM OcrResult"))
+        } finally { database.close() }
+    }
+
+    private fun insertRecognition(sql: SupportSQLiteDatabase, original: String) {
+        val row = OcrResultRow.fromRecognition(OcrInput(PAGE, 1, PIXELS),
+            OcrConfiguration("fixture", 1, OcrLayout.AUTOMATIC), OcrText(original))
+        sql.execSQL("""INSERT INTO OcrResult (pageId,recipeRevision,sourcePixelSha256,engineId,engineVersion,layout,indexedText,verbatimText)
+            VALUES (?,1,?,'fixture',1,'AUTOMATIC',?,?)""", arrayOf(PAGE, PIXELS, row.indexedText, row.verbatimText))
     }
 
     private fun seed(sql: SupportSQLiteDatabase) {
