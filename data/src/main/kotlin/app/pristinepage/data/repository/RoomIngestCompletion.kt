@@ -41,14 +41,21 @@ class RoomIngestCompletion @JvmOverloads constructor(private val metadata: Metad
             coroutineContext.ensureActive()
             if (receipt != null) return@withContext metadata.transaction { replay(intent, before, receipt) }
             if (lease == null) return@withContext IngestResult.Pending(intent.sessionId, observed)
-            val result = completion.complete(lease) {
+            val verifyDate = if (seal.captureDate == null) null else {
+                {
+                    coroutineContext.ensureActive()
+                    verifyCaptureProjection(seal)
+                    coroutineContext.ensureActive()
+                }
+            }
+            val result = completion.completeWithReadback(lease, {
                 coroutineContext.ensureActive()
                 val live = readJournal(intent)
                 checkTerminalOutcomes(live, intent)
                 if (live.state != "MOVED" || !sameJournal(live, before)) reject(OperationErrorCode.INTEGRITY_FAILED, "ingest_journal_changed", intent)
                 validateJob(intent, committed = false)
                 publish(intent, live, seal)
-            }
+            }, verifyDate)
             if (result != null) return@withContext result
             // Another same-attempt call may have committed between preflight and the lease fence. Reuse its exact receipt, never rerun page writes after job success.
             metadata.transaction {
@@ -135,6 +142,7 @@ class RoomIngestCompletion @JvmOverloads constructor(private val metadata: Metad
         val revision = try { Math.addExact(doc.documentRevision, 1) } catch (_: ArithmeticException) { reject(OperationErrorCode.RESOURCE_LIMIT, "document_revision_limit", intent) }
         val inspection = seal.inspection
         sources.insertSourceBlob(SourceBlobRow(intent.sourceBlobId.value, seal.sourceByteHash, seal.byteCount, inspection.mime, inspection.encodedSize.width, inspection.encodedSize.height, row.finalPath!!, "READY", 1, intent.transactionId.value, now))
+        seal.captureDate?.let { sources.insertCaptureProjection(intent.sourceBlobId.value, seal.sourceByteHash, it.epochDay) }
         sources.insertSource(SourceRow(intent.sourceId.value, intent.sourceBlobId.value, inspection.sourcePixelHash, inspection.normalizedSize.width, inspection.normalizedSize.height, inspection.exifOrientation, inspection.conversionFingerprint, inspection.profileSha256, 0, "READY", now))
         // SQLite uniqueness is immediate. Move existing ordinals into a disjoint temporary range; none of these states can escape the same metadata transaction.
         for (page in old) if (q.updatePage(page.copy(ordinal = page.ordinal!! + 100)) != 1) reject(OperationErrorCode.INTEGRITY_FAILED, "import_page_unavailable", intent)
@@ -160,6 +168,8 @@ class RoomIngestCompletion @JvmOverloads constructor(private val metadata: Metad
     private fun replay(intent: IngestJournalIntent, before: FileTransactionRow, receipt: IngestJournalCommit): IngestResult.Committed {
         val live = readJournal(intent)
         if (live.state != "COMMITTED" || !sameJournal(live, before)) reject(OperationErrorCode.INTEGRITY_FAILED, "ingest_journal_changed", intent)
+        // For v2, refuse a mismatched backing digest without materializing the SourceBlob row.
+        verifyCaptureProjection(receipt.seal)
         val source = metadata.queries.source(intent.sourceId.value) ?: reject(OperationErrorCode.INTEGRITY_FAILED, "source_unavailable", intent)
         val blob = sources.sourceBlob(intent.sourceBlobId.value) ?: reject(OperationErrorCode.INTEGRITY_FAILED, "source_unavailable", intent)
         val page = metadata.queries.page(intent.pageId.value) ?: reject(OperationErrorCode.SESSION_EXPIRED, "import_page_unavailable", intent)
@@ -170,6 +180,12 @@ class RoomIngestCompletion @JvmOverloads constructor(private val metadata: Metad
         if (child.kind != "ITEM" || child.state != "COMMITTED" || child.transactionId != intent.transactionId.value || child.plannedPageId != intent.pageId.value || child.documentId != intent.documentId.value || parent.kind != "BATCH" || parent.parentSessionId != null || parent.documentId != intent.documentId.value) reject(OperationErrorCode.INTEGRITY_FAILED, "ingest_session_binding_mismatch", intent)
         validateJob(intent, committed = true)
         return result(receipt)
+    }
+
+    private fun verifyCaptureProjection(seal: IngestJournalSeal) {
+        val date = seal.captureDate ?: return
+        if (!sources.captureProjectionMatches(seal.intent.sourceBlobId.value, seal.sourceByteHash, date.epochDay))
+            reject(OperationErrorCode.INTEGRITY_FAILED, "ingest_capture_date_mismatch", seal.intent)
     }
 
     private fun result(receipt: IngestJournalCommit): IngestResult.Committed {

@@ -9,6 +9,8 @@ import app.pristinepage.data.model.IngestResult
 interface IngestCompletionQueries {
     fun sourceBlob(id: String): SourceBlobRow?
     fun insertSourceBlob(row: SourceBlobRow)
+    fun insertCaptureProjection(blobId: String, byteSha256: String, epochDay: Long?)
+    fun captureProjectionMatches(blobId: String, byteSha256: String, epochDay: Long?): Boolean
     fun insertSource(row: SourceRow)
     fun updateFileTransaction(row: FileTransactionRow, expectedState: String): Int
 }

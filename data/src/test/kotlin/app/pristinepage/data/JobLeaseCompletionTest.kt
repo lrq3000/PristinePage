@@ -98,6 +98,21 @@ class JobLeaseCompletionTest {
         assertEquals(1L, f.revision()); assertEquals("RUNNING", f.row.state)
     }
 
+    @Test fun elapsedDeadlineReachedDuringFinalReadbackRollsBackTheSuccessUpdate() {
+        val f = Fixture()
+        val completion = f.completion as JobLeaseTransactions
+        val failure = assertThrows(RepositoryFailure::class.java) {
+            completion.completeWithReadback(f.lease, f::writeDomain) {
+                assertEquals("SUCCEEDED", f.row.state)
+                f.now = 1100
+            }
+        }
+        assertEquals("job_lease_lost", failure.error.safeMessageKey)
+        assertEquals(1L, f.revision())
+        assertEquals("RUNNING", f.row.state)
+        assertEquals(f.lease.owner, f.row.leaseOwner)
+    }
+
     @Test fun jobStorageFailureIsSafeAndRollsBackTheDomainWriter() {
         val f = Fixture(); f.storageFault = true
         val failure = assertThrows(RepositoryFailure::class.java) { f.completion.complete(f.lease, f::writeDomain) }

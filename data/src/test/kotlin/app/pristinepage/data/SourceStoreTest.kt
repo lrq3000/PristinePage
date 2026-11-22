@@ -113,6 +113,7 @@ class SourceStoreTest {
         val row = f.db.files.getValue(id)
         val receipt = IngestJournalCodec.decodeCommit(row.payload, intent)
         assertEquals(expected, receipt.seal.captureDate)
+        assertTrue(f.db.captureProjectionMatches(intent.sourceBlobId.value, first.sourceByteHash, 19782))
         val recovered = f.files.recover(id, checkNotNull(row.sealSha256))!!
         assertEquals(expected, IngestJournalCodec.decodeSeal(recovered.metadata, intent).captureDate)
         assertEquals(first, f.store.ingestBoundProvider(f.db.uri, f.db.child))
@@ -124,6 +125,36 @@ class SourceStoreTest {
         assertArrayEquals(f.bytes, f.files.finalFile(intent.sourceBlobId.value).readBytes())
         assertEquals(1, f.inspected)
         assertEquals(1, f.db.catalog.pages.size)
+    }
+
+    @Test fun checkedAbsencePersistsAndChangedProjectionCannotReplayAsSuccessful() = runTest {
+        val f = Fixture(captureDate = SourceCaptureDate(null))
+        val first = f.store.ingestBoundProvider(f.db.uri, f.db.child) as IngestResult.Committed
+        val intent = RoomIngestLookup(f.db.metadata, f.db, f.db, f.db).find(f.db.child)!!
+        val blobId = intent.sourceBlobId.value
+        assertTrue(f.db.captureProjectionMatches(blobId, first.sourceByteHash, null))
+        f.db.captureDays[blobId] = "e".repeat(64) to null
+        val rejected = f.store.ingestBoundProvider(f.db.uri, f.db.child) as IngestResult.Rejected
+        assertEquals(OperationErrorCode.INTEGRITY_FAILED, rejected.error.code)
+        assertEquals(1, f.inspected)
+        assertEquals(1, f.db.catalog.pages.size)
+        assertArrayEquals(f.bytes, f.files.finalFile(blobId).readBytes())
+    }
+
+    @Test fun corruptionAfterJobSuccessRollsBackTheDateAndVisiblePageTogether() = runTest {
+        val f = Fixture(captureDate = SourceCaptureDate(19782))
+        f.db.afterJobUpdate = { job ->
+            if (job.state == "SUCCEEDED") {
+                val owner = f.db.blobs.keys.single()
+                f.db.captureDays[owner] = f.db.blobs.getValue(owner).byteSha256 to 19783L
+            }
+        }
+        val result = f.store.ingestBoundProvider(f.db.uri, f.db.child) as IngestResult.Rejected
+        assertEquals(OperationErrorCode.INTEGRITY_FAILED, result.error.code)
+        assertTrue(f.db.captureDays.isEmpty())
+        assertTrue(f.db.catalog.pages.isEmpty())
+        assertTrue(f.db.blobs.isEmpty())
+        assertFalse(f.db.jobs.values.any { it.state == "SUCCEEDED" })
     }
 
     @Test fun revokedMidCopyClosesTheDescriptorAndCannotCommitAPage() = runTest {

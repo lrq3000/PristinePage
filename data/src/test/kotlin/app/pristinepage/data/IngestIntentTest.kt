@@ -23,6 +23,8 @@ class IngestIntentTest {
         val files = linkedMapOf<String, FileTransactionRow>()
         val jobs = linkedMapOf<String, JobRow>()
         val blobs = catalog.blobs // One backing table for ingest and catalog/raw guards, as in the real Room database.
+        val captureDays = linkedMapOf<String, Pair<String, Long?>>()
+        var afterJobUpdate: (JobRow) -> Unit = {}
         var now = 1000L
         var rejectChildUpdate = false
         var rejectPhaseState: String? = null
@@ -37,10 +39,11 @@ class IngestIntentTest {
                 }.toLong()
             }
             override fun <T> transaction(action: () -> T): T {
-                val s = sessions.toMap(); val f = files.toMap(); val j = jobs.toMap(); val b = blobs.toMap()
+                val s = sessions.toMap(); val f = files.toMap(); val j = jobs.toMap(); val b = blobs.toMap(); val dates = captureDays.toMap()
                 return try { catalog.transaction(action) }
                 catch (failure: Throwable) {
                     sessions.clear(); sessions.putAll(s); files.clear(); files.putAll(f); jobs.clear(); jobs.putAll(j); blobs.clear(); blobs.putAll(b)
+                    captureDays.clear(); captureDays.putAll(dates)
                     throw failure
                 }
             }
@@ -74,10 +77,19 @@ class IngestIntentTest {
         override fun updateLease(row: JobRow, expectedGeneration: Long): Int {
             check(catalog.inTransaction)
             if (jobs[row.jobId]?.leaseGeneration != expectedGeneration) return 0
-            jobs[row.jobId] = row; return 1
+            jobs[row.jobId] = row
+            afterJobUpdate(row)
+            return 1
         }
         override fun sourceBlob(id: String): SourceBlobRow? { check(catalog.inTransaction); return blobs[id] }
         override fun insertSourceBlob(row: SourceBlobRow) { check(catalog.inTransaction); check(blobs.putIfAbsent(row.sourceBlobId, row) == null) }
+        override fun insertCaptureProjection(blobId: String, byteSha256: String, epochDay: Long?) {
+            check(catalog.inTransaction)
+            check(blobs.getValue(blobId).byteSha256 == byteSha256)
+            check(captureDays.putIfAbsent(blobId, byteSha256 to epochDay) == null)
+        }
+        override fun captureProjectionMatches(blobId: String, byteSha256: String, epochDay: Long?): Boolean =
+            captureDays[blobId] == (byteSha256 to epochDay) && blobs[blobId]?.byteSha256 == byteSha256 && blobs[blobId]?.state == "READY"
         override fun insertSource(row: SourceRow) { check(catalog.inTransaction); check(catalog.sources.putIfAbsent(row.sourceId, row) == null) }
         override fun updateFileTransaction(row: FileTransactionRow, expectedState: String): Int {
             check(catalog.inTransaction)
