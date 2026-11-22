@@ -98,6 +98,12 @@ Next U-06 prerequisite: bind ordered installed language-pack identities into the
 - [x] Review the boundary and reproduce the snapshot count defect. The pre-fix JVM admitted zero and 33 entries when the caller's reported size disagreed with iteration. The correction bounds the copy itself; keep the regression and the v2 payload-byte tampering test.
 - [x] Verify affected core and data suites and record the independent review. The resumed strict offline build passed 283 core and 788 data tests; see the [job v2 receipt](../../validation/storage/ocr-job-v2-receipt.md). Qualification of actual installed pack files and binding to durable current jobs are not covered by these tests.
 
+`OCR-JOB-READ-07` — coordinator continuation on `d2543c9`, in the same worktree. Add the OCR-only bounded job read to `JobLeaseDao` and its internal Room reader, plus actual-SQL host checks and an Android test source. Require exact v2 intent from a trusted caller, distinguish absent from malformed, and admit raw fields before materializing the row in the same transaction. No schema, current-page pointer, job writes, engine, scheduler or device action. First run the missing-query host witnesses, then verify the actual DAO SQL, data JVM suite and Android test compilation. Obtain independent persistence review before the local commit.
+
+- [x] Observe the missing scalar query in four failing host witnesses; add the guarded read and verify the final host storage suite (158 passing).
+- [x] Verify 788 data JVM tests and Android test compilation. Native execution remains a separate gate.
+- [x] Record the independent persistence reviews and state-vocabulary disposition in the [read boundary receipt](../../validation/storage/ocr-job-reader-receipt.md).
+
 ### Carnet release boundary — T-11 / CARNET-SHARE-LEASE-01
 
 Input is the audited public copy of the 16 Carnet corrective commits, through the JPEG/ZIP follow-up. Scope: guard provider display-name and size metadata by the same durable lease as file reads, verify the provider boundary, and retain live-share, Save as and frozen-name semantics. Post-revocation readability of already opened descriptors, external copies, and native acceptance are separate. The [operational plan](OPERATIONAL_PLAN.md) governs integration, public branches and the v0.3.0 bump.
