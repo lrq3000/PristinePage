@@ -1428,22 +1428,23 @@ class RoomOcrIndexIntegrationTest {
             runBlocking {
                 PrivateImportStore.open(isolated, provider, inspector).use { store ->
                     val search = store.sourceMetadata
-                    assertTrue(search.findCaptureDay(19782, null, 1).hits.isEmpty())
+                    val selector = "captured:2024-02-29"
+                    assertTrue(search.find(selector, null, 1).hits.isEmpty())
                     sql.execSQL("INSERT INTO SourceCaptureDay VALUES (?,?,19782)", arrayOf(BLOB, "a".repeat(64)))
-                    val empty = search.findCaptureDay(19782, null, 1)
+                    val empty = search.find(selector, null, 1)
                     assertTrue(empty.hits.isEmpty())
                     val next = checkNotNull(empty.next)
-                    assertTrue(runCatching { search.findCaptureDay(19783, next, 1) }.exceptionOrNull() is IllegalArgumentException)
+                    assertTrue(runCatching { search.find("captured:2024-03-01", next, 1) }.exceptionOrNull() is IllegalArgumentException)
                     assertTrue(runCatching { search.find("format:png", next, 1) }.exceptionOrNull() is IllegalArgumentException)
                     PrivateImportStore.open(isolated, provider, inspector).use { other ->
-                        assertTrue(runCatching { other.sourceMetadata.findCaptureDay(19782, next, 1) }.exceptionOrNull() is IllegalArgumentException)
+                        assertTrue(runCatching { other.sourceMetadata.find(selector, next, 1) }.exceptionOrNull() is IllegalArgumentException)
                     }
-                    val rest = search.findCaptureDay(19782, next, 1)
+                    val rest = search.find(selector, next, 1)
                     val hit = rest.hits.single()
                     assertEquals(second, hit.page)
                     assertEquals(original.documentId, hit.document)
                     assertTrue(search.canOpen(hit))
-                    assertTrue(search.findCaptureDay(19782, checkNotNull(rest.next), 1).hits.isEmpty())
+                    assertTrue(search.find(selector, checkNotNull(rest.next), 1).hits.isEmpty())
                     sql.execSQL("UPDATE SourceCaptureDay SET epochDay=19783 WHERE sourceBlobId=?", arrayOf(BLOB))
                     assertFalse(search.canOpen(hit))
                     sql.execSQL("UPDATE SourceCaptureDay SET epochDay=19782 WHERE sourceBlobId=?", arrayOf(BLOB))
@@ -1451,7 +1452,7 @@ class RoomOcrIndexIntegrationTest {
                     sql.execSQL("INSERT INTO AtelierDraft (draftId,stagingDocumentId,state,generation,step,createdAt) VALUES (?,?,'EDITING',1,1,0)",
                         arrayOf(DRAFT, DOCUMENT))
                     assertFalse(search.canOpen(hit))
-                    assertTrue(search.findCaptureDay(19782, null, 1).hits.isEmpty())
+                    assertTrue(search.find(selector, null, 1).hits.isEmpty())
                 }
             }
         } finally { database.close() }

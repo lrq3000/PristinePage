@@ -1,10 +1,9 @@
 package app.pristinepage.data
 
+import app.pristinepage.data.repository.CaptureDayMetadataQuery
 import app.pristinepage.data.repository.SourceMetadataQuery
-import app.pristinepage.data.repository.RoomSourceMetadataSearch
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
-import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class SourceMetadataQueryTest {
@@ -23,8 +22,14 @@ class SourceMetadataQueryTest {
         ) assertNull(query.take(32), SourceMetadataQuery.parse(query))
     }
 
-    @Test fun privateTypedDayEntryPointIsNotExposedToJavaSource() {
-        val method = RoomSourceMetadataSearch::class.java.declaredMethods.single { it.name.startsWith("findCaptureDay") }
-        assertTrue(method.isSynthetic)
+    @Test fun explicitCaptureDayAcceptsOnlyAnUnambiguousGregorianDate() {
+        for ((input, day) in mapOf("captured:0001-01-01" to -719162L, " CAPTURED:2024-02-29 " to 19782L, "captured:9999-12-31" to 2932896L)) {
+            val query = SourceMetadataQuery.parse(input) as? CaptureDayMetadataQuery
+            assertEquals(input, day, query?.epochDay)
+        }
+        for (input in listOf("2024-02-29", "captured:2023-02-29", "captured:0000-01-01", "captured:2024-2-29",
+            "captured:２０２４-02-29", "captured:2024-02-29Z", "captured:2024-02-29 format:png", "captured:2024-02-29\u0000")) {
+            assertNull(input, SourceMetadataQuery.parse(input))
+        }
     }
 }

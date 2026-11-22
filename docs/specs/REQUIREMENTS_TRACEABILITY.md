@@ -4,6 +4,8 @@ All26 live PRD requirements are mapped below, including U-04/FR-17. A mapping is
 
 U-06 adds a separate [OCR and Home search contract](OCR_SEARCH.md). T-03/T-10 govern the private result/index and visible search/navigation, T-09 governs per-scan actions, and T-12 governs current Android/offline/privacy evidence. The acceptance chain is existing and newly saved pages → real recognition or recoverable/terminal status → live Home result and exact page navigation → default or overridden rerun → explicit text export. V-01 covers state/query contracts, V-02 migration/restart/atomic index replacement, V-04 user journeys, and V-06/V-07 resource, offline and privacy gates. A title/date-only result and synthetic engine witness do not pass U-06.
 
+U-06 source-metadata evidence is tracked separately under `OCR-SOURCE-METADATA-54` through `OCR-CAPTURE-HOME-63` in [TODO](TODO.md). The capture-day chain verifies an opted-in byte-bound ingest, an additive empty schema upgrade, atomic projection/recovery, and exact-page lookup. It is not real OCR, a migration of existing originals' capture dates, or ordinary-app acceptance.
+
 | Requirement | Authoritative specification | Owning tasks | Required acceptance evidence |
 |---|---|---|---|
 | FR-01 | CAPTURE_IMPORT_EXPORT; UX_SPECIFICATION | T-05 | CaptureLifecycleTest, denial/revocation, orientation/mirror, manual shutter without models; V-04,V-06. |

@@ -44,15 +44,9 @@ class RoomSourceMetadataSearch private constructor(store: PrivateImportStore.Sou
 
     class Page internal constructor(val hits: List<Hit>, val next: Continuation?)
 
-    suspend fun find(raw: String, after: Continuation?, limit: Int): Page =
-        find(SourceMetadataQuery.parse(raw), after, limit)
-
-    @JvmSynthetic
-    internal suspend fun findCaptureDay(epochDay: Long, after: Continuation?, limit: Int): Page =
-        find(CaptureDayMetadataQuery(epochDay), after, limit)
-
-    private suspend fun find(query: SourceMetadataQuery?, after: Continuation?, limit: Int): Page {
+    suspend fun find(raw: String, after: Continuation?, limit: Int): Page {
         currentCoroutineContext().ensureActive()
+        val query = SourceMetadataQuery.parse(raw)
         val cursor = after as? ReturningAfter
         require(limit in 1..50 && (after == null || (cursor?.owner === this && cursor.query == query)))
         if (query == null) return Page(emptyList(), null)
