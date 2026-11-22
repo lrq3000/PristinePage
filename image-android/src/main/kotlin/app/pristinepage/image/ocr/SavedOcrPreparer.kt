@@ -5,9 +5,7 @@ import app.pristinepage.core.geometry.GeometrySizing
 import app.pristinepage.core.ocr.OcrConfiguration
 import app.pristinepage.core.ocr.OcrText
 import app.pristinepage.core.pipeline.FallbackPolicy
-import app.pristinepage.core.pipeline.OutputSpec
 import app.pristinepage.core.pipeline.RenderCoordinator
-import app.pristinepage.core.pipeline.RenderPurpose
 import app.pristinepage.core.pipeline.RenderRequest
 import app.pristinepage.core.pipeline.RenderStatus
 import app.pristinepage.data.model.EditablePage
@@ -37,10 +35,11 @@ class SavedOcrPreparer(
         active.ensureActive()
         if (configuration.languagePacks == null) refuse(OperationErrorCode.PROVIDER_UNAVAILABLE, "ocr_exact_packs_unavailable")
         val geometry = page.recipe.geometry
-        val size = try { GeometrySizing.target(geometry) }
+        val output = try { GeometrySizing.ocr(geometry) }
         catch (_: IllegalArgumentException) { refuse(OperationErrorCode.INVALID_INPUT, "ocr_render_invalid_geometry") }
+        val size = output.size
         val request = RenderRequest(page.sourceId.value, geometry.source.sourcePixelHash, page.pageId.value,
-            page.recipeRevision, page.recipe, OutputSpec(size, RenderPurpose.EXPORT), 0, null, FallbackPolicy.FAIL)
+            page.recipeRevision, page.recipe, output, 0, null, FallbackPolicy.FAIL)
         val resources = Resources()
         try {
             renderer.render(request).use { result ->

@@ -22,7 +22,7 @@ import kotlinx.serialization.Serializable
     init { require(x >= 0 && y >= 0 && width > 0 && height > 0 && x.toLong() + width <= Int.MAX_VALUE && y.toLong() + height <= Int.MAX_VALUE) }
 }
 @Serializable enum class GeometryMode { NONE, PERSPECTIVE, MANUAL_CURVE, ROUGH_CROP_DEWARP, ATELIER_BEZIER }
-@Serializable enum class RenderPurpose { CARD, PREVIEW, DETAIL_CROP, EXPORT }
+@Serializable enum class RenderPurpose { CARD, PREVIEW, DETAIL_CROP, EXPORT, OCR }
 @Serializable enum class FallbackPolicy { FAIL, KEEP_STAGE_INPUT }
 @Serializable data class OutputSpec(val size: PixelSize, val purpose: RenderPurpose)
 @Serializable data class ProviderIdentity(val id: String, val contractVersion: Int, val assetSha256: String?, val runtime: String, val precision: String) {

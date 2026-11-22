@@ -1,6 +1,7 @@
 package app.pristinepage.image.ocr
 
 import app.pristinepage.core.image.RgbImage
+import app.pristinepage.core.geometry.GeometrySizing
 import app.pristinepage.core.ocr.OcrConfiguration
 import app.pristinepage.core.ocr.OcrLanguagePack
 import app.pristinepage.core.ocr.OcrLanguagePacks
@@ -17,6 +18,7 @@ import app.pristinepage.data.model.PageId
 import app.pristinepage.data.model.RepositoryFailure
 import app.pristinepage.data.model.SourceId
 import app.pristinepage.image.decode.ImageAllocationBudget
+import app.pristinepage.image.render.GeometryEngine
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.*
@@ -41,7 +43,7 @@ class SavedOcrPreparerTest {
                     assertEquals(page.recipeRevision, request.recipeRevision)
                     assertEquals(page.recipe, request.recipe)
                     assertEquals(HASH, request.sourcePixelHash)
-                    assertEquals(OutputSpec(PixelSize(2, 3), RenderPurpose.EXPORT), request.output)
+                    assertEquals(OutputSpec(PixelSize(2, 3), RenderPurpose.OCR), request.output)
                     assertEquals(FallbackPolicy.FAIL, request.fallback)
                     val status = when (outcome) {
                         Case.DEGRADED -> RenderStatus.DEGRADED
@@ -97,6 +99,29 @@ class SavedOcrPreparerTest {
         }.exceptionOrNull() as? RepositoryFailure
         assertEquals(OperationErrorCode.INVALID_INPUT, failure?.error?.code)
         assertEquals(false, failure?.error?.retryable)
+    }
+
+    @Test fun boundsPortraitAndRotatedLandscapeWithoutRoundingBelowTheCommonScale() = runBlocking {
+        val source = SourceBinding(HASH, PixelSize(2105, 2526), "fixture-v1")
+        for ((turns, expected) in listOf(0 to PixelSize(2000, 2400), 1 to PixelSize(2400, 2000))) {
+            val recipe = Recipe(geometry = GeometryRecipe.None(source, outputQuarterTurns = turns))
+            val saved = page.copy(recipe = recipe, recipeHash = RecipeCodec.hash(recipe))
+            val renderer = object : RenderCoordinator {
+                override suspend fun render(request: RenderRequest): RenderResult {
+                    assertEquals(OutputSpec(expected, RenderPurpose.OCR), request.output)
+                    assertEquals(saved.recipe, request.recipe)
+                    assertEquals(FallbackPolicy.FAIL, request.fallback)
+                    GeometryEngine.validateOutput(GeometrySizing.target(saved.recipe.geometry), request.output.size, false)
+                    return RenderResult(request, RenderStatus.RESOURCE_LIMIT, null, emptyList(), emptyList())
+                }
+            }
+            val preparer = SavedOcrPreparer(renderer, ImageAllocationBudget(64)) { _, _ -> throw AssertionError("Refused raster reached engine") }
+            val failure = try {
+                preparer.prepare(saved, config) { throw AssertionError("Refused raster reached handoff") }
+                throw AssertionError("Preparation should report the renderer's resource limit")
+            } catch (expected: RepositoryFailure) { expected }
+            assertEquals(OperationErrorCode.RESOURCE_LIMIT, failure.error.code)
+        }
     }
 
     private enum class Case { STALE, WRONG_SIZE, DEGRADED, PRESSURE, STORAGE, CANCELED }

@@ -164,6 +164,24 @@ class RenderCoordinatorTest {
         assertEquals(0, f.loads); assertEquals(0, f.decodes); assertEquals(0L, f.budget.usedBytes)
     }
 
+    @Test fun ocrRejectsOversizedOrFallbackRequestsBeforeSourceLookup() = runTest {
+        val f = Fixture(2401, 2)
+        val coordinator = f.coordinator(UnconfinedTestDispatcher(testScheduler))
+        val request = f.request().copy(output = OutputSpec(PixelSize(2400, 1), RenderPurpose.OCR))
+        for (invalid in listOf(
+            request.copy(output = OutputSpec(PixelSize(2401, 2), RenderPurpose.OCR)),
+            request.copy(fallback = FallbackPolicy.KEEP_STAGE_INPUT),
+        )) {
+            coordinator.render(invalid).use { assertEquals(RenderStatus.INVALID_INPUT, it.status); assertNull(it.image) }
+        }
+        assertEquals(0, f.loads)
+        assertEquals(0, f.decodes)
+        assertEquals(0L, f.budget.usedBytes)
+        coordinator.render(request).use { assertEquals(RenderStatus.OK, it.status); assertEquals(2400, it.image?.width) }
+        assertEquals(1, f.decodes)
+        assertEquals(0L, f.budget.usedBytes)
+    }
+
     @Test fun verifiedDecodedIdentityStillMustMatchTheRequestedRecipeSource() = runTest {
         val f = Fixture(); val changed = f.binding.copy(orientationColorConversionVersion = "other-conversion")
         f.coordinator(UnconfinedTestDispatcher(testScheduler)).render(f.request(Recipe(geometry = GeometryRecipe.None(changed)))).use { assertEquals(RenderStatus.INVALID_INPUT, it.status); assertNull(it.image) }

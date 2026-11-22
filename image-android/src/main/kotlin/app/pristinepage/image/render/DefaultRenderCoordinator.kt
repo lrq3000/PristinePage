@@ -126,8 +126,16 @@ class DefaultRenderCoordinator @JvmOverloads constructor(private val decoder: So
         val size = request.output.size
         if (size.width > 12000 || size.height > 12000 || size.pixelCount > 48_000_000) refuse(OperationErrorCode.RESOURCE_LIMIT, "render_destination_limit")
         // OutputSpec is already resolved: reject a mislabeled oversized card/preview, never silently shrink it. Full-target detail and explicit source-resolution export have different policies.
-        val longEdgeLimit = when (request.output.purpose) { RenderPurpose.CARD -> 224; RenderPurpose.PREVIEW -> 1024; else -> null }
+        val longEdgeLimit = when (request.output.purpose) {
+            RenderPurpose.CARD -> 224
+            RenderPurpose.PREVIEW -> 1024
+            RenderPurpose.OCR -> GeometrySizing.OCR_LONG_EDGE
+            else -> null
+        }
         if (longEdgeLimit != null && maxOf(size.width, size.height) > longEdgeLimit) refuse(OperationErrorCode.INVALID_INPUT, "invalid_render_output_purpose")
+        if (request.output.purpose == RenderPurpose.OCR && request.fallback != FallbackPolicy.FAIL) {
+            refuse(OperationErrorCode.INVALID_INPUT, "invalid_ocr_render_fallback")
+        }
         GeometryEngine.validateOutput(target, size, request.recipe.geometry !is GeometryRecipe.None)
         AppearanceEngine.preflight(request.recipe, request.protectionMaskId != null, request.fallback)
         if (request.protectionMaskId != null) refuse(OperationErrorCode.PROVIDER_UNAVAILABLE, "durable_render_mask_not_implemented")
