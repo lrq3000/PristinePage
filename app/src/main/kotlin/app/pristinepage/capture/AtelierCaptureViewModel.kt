@@ -12,6 +12,7 @@ import app.pristinepage.core.recipe.GeometryRecipe
 import app.pristinepage.image.preview.RenderedPreviewBitmapLoader
 import app.pristinepage.library.ApplicationLibraryActions
 import app.pristinepage.library.LibraryPhotoResult
+import app.pristinepage.ocr.sendCommittedOcrHint
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -42,7 +43,11 @@ internal data class AtelierCaptureState(
 }
 
 /** One retained owner of platform callbacks and the durable draft. A reopened batch is never treated as a fresh picker launch or a retained permission. */
-internal class AtelierCaptureViewModel(context: Context, private val graph: suspend () -> ApplicationImports) : ViewModel() {
+internal class AtelierCaptureViewModel(
+    context: Context,
+    private val graph: suspend () -> ApplicationImports,
+    private val onPagesSaved: (DocumentId, List<PageId>) -> Unit,
+) : ViewModel() {
     private val imports = ApplicationLibraryActions(context.applicationContext, graph)
     private val current = MutableStateFlow(AtelierCaptureState())
     val state = current.asStateFlow()
@@ -179,6 +184,7 @@ internal class AtelierCaptureViewModel(context: Context, private val graph: susp
             val saved = api.save(snapshot, pages, app.renderer)
             current.value.editor?.close()
             current.value = AtelierCaptureState(saved = saved.document)
+            sendCommittedOcrHint(saved.document, saved.pageIds, onPagesSaved)
         }
     }
 

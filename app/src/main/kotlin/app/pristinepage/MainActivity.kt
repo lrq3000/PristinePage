@@ -98,6 +98,7 @@ class MainActivity : ComponentActivity() {
     private fun start(restored: LibraryIdentity, restoredEditor: EditorIdentity? = null) {
         val app = application as PristinePageApplication
         val services = app.services
+        app.savedOcrSignals.onStartup()
         val factory = object : ViewModelProvider.Factory {
             @Suppress("UNCHECKED_CAST") override fun <T : ViewModel> create(modelClass: Class<T>): T {
                 require(modelClass == ImportLibraryViewModel::class.java)
@@ -127,7 +128,7 @@ class MainActivity : ComponentActivity() {
         val acquisition = ViewModelProvider(this, object : ViewModelProvider.Factory {
             @Suppress("UNCHECKED_CAST") override fun <T : ViewModel> create(modelClass: Class<T>): T {
                 require(modelClass == AtelierCaptureViewModel::class.java)
-                return AtelierCaptureViewModel(applicationContext, services::imports) as T
+                return AtelierCaptureViewModel(applicationContext, services::imports, app.savedOcrSignals::onPagesSaved) as T
             }
         })[AtelierCaptureViewModel::class.java]
         editor = editorOwner
