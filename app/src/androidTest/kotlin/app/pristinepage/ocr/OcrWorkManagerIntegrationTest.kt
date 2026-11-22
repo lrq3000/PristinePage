@@ -8,6 +8,7 @@ import androidx.work.ExistingWorkPolicy
 import androidx.work.OneTimeWorkRequest
 import androidx.work.WorkInfo
 import androidx.work.WorkManager
+import app.pristinepage.PristinePageApplication
 import app.pristinepage.data.model.JobId
 import app.pristinepage.data.model.PageId
 import app.pristinepage.data.repository.SavedOcrWork
@@ -54,7 +55,7 @@ class OcrWorkManagerIntegrationTest {
         assertFalse(context.getDatabasePath("pristinepage.db").exists())
     }
 
-    @Test fun invalidInputFailsAndTheAbsentHostDoesNotOpenTheLibrary() = runBlocking {
+    @Test fun invalidInputFailsAndTheDormantRuntimeDoesNotOpenTheLibrary() = runBlocking {
         val context = dormantTarget()
         val manager = WorkManager.getInstance(context)
         val target = newTarget()
@@ -77,7 +78,7 @@ class OcrWorkManagerIntegrationTest {
         val context = instrumentation.targetContext.applicationContext
         assertEquals("app.pristinepage.debug.test", instrumentation.context.packageName)
         assertEquals("app.pristinepage.debug", context.packageName)
-        assertFalse(context is SavedOcrWorkerHost)
+        assertTrue(context is PristinePageApplication)
         assertFalse("Dedicated transport fixture must not use an existing document library", context.getDatabasePath("pristinepage.db").exists())
         return context
     }
