@@ -278,6 +278,10 @@ The first strict-offline image run passed 248 JVM tests. Independent review iden
 
 The corrected strict-offline image suite passed 251 JVM cases, including all six verifier tests with no failures or skips. The verifier is not wired to an installer or active native engine. Preserve the private-owner rule when a consuming runtime opens the directory.
 
+`OCR-DIRECT-IMPORT-SIGNAL-34` — coordinator, input `303d08e`. Attach the existing process-owned OCR notification to the non-Atelier library import path, one exact acknowledged child commit at a time. Gallery, file and camera all use the same controller. Keep the Atelier controller's staging imports silent until their existing authenticated Save. Preserve cancellation, mismatch refusal, replay idempotence and ingestion outcomes. Scope: app import callback routing and focused host tests, with no runtime packaging or device mutation.
+
+The focused build reproduced the missing post-commit callback at the three new call sites. The first implementation exposed an Android-test trailing lambda constructor compatibility issue, corrected while preserving the two-argument constructor used for silent staging and existing callers. The reviewed strict offline build passed 210 app JVM cases and compiled Android tests; real picker/camera and WorkManager delivery did not run. Failed wake dispatch cannot rewrite a successful import or notify for rejected, pending, or mismatched children.
+
 ### Carnet release boundary — T-11 / CARNET-SHARE-LEASE-01
 
 Input is the audited public copy of the 16 Carnet corrective commits, through the JPEG/ZIP follow-up. Scope: guard provider display-name and size metadata by the same durable lease as file reads, verify the provider boundary, and retain live-share, Save as and frozen-name semantics. Post-revocation readability of already opened descriptors, external copies, and native acceptance are separate. The [operational plan](OPERATIONAL_PLAN.md) governs integration, public branches and the v0.3.0 bump.

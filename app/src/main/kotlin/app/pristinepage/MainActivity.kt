@@ -102,7 +102,7 @@ class MainActivity : ComponentActivity() {
         val factory = object : ViewModelProvider.Factory {
             @Suppress("UNCHECKED_CAST") override fun <T : ViewModel> create(modelClass: Class<T>): T {
                 require(modelClass == ImportLibraryViewModel::class.java)
-                return ImportLibraryViewModel(ApplicationLibraryActions(applicationContext, services::imports), restored) as T
+                return ImportLibraryViewModel(ApplicationLibraryActions(applicationContext, app.savedOcrSignals::onPagesSaved, services::imports), restored) as T
             }
         }
         val retained = ViewModelProvider(this, factory)[ImportLibraryViewModel::class.java].session

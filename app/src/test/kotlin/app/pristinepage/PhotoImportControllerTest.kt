@@ -1,11 +1,10 @@
 package app.pristinepage
 
 import app.pristinepage.data.model.*
+import app.pristinepage.capture.PhotoImportController
 import app.pristinepage.data.repository.BoundSourceIngest
 import app.pristinepage.data.repository.ImportSelections
-import java.lang.reflect.InvocationTargetException
 import java.util.UUID
-import kotlin.coroutines.intrinsics.suspendCoroutineUninterceptedOrReturn
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.currentCoroutineContext
@@ -33,8 +32,6 @@ class PhotoImportControllerTest {
         var onIngest: suspend (Int) -> Unit = {}
         var overrideResult: IngestResult? = null
         suspend fun call(references: List<String> = refs): List<IngestResult> {
-            val type = try { Class.forName("app.pristinepage.capture.PhotoImportController") }
-            catch (_: ClassNotFoundException) { throw AssertionError("Ordered photo import controller is absent") }
             val selection = ImportSelections { id, selected ->
                 prepareCount++; assertEquals(parent, id); assertEquals(references.toList(), selected); onPrepare()
                 prepared ?: ImportBatch(parent, if (selected.isEmpty()) emptyList() else children.take(selected.size))
@@ -46,12 +43,7 @@ class PhotoImportControllerTest {
                     return overrideResult ?: results[ordinal]
                 }
             }
-            val controller = type.constructors.single { it.parameterCount == 2 }.newInstance(selection, source)
-            val method = type.methods.single { it.name.startsWith("importProviderReferences-") }
-            return suspendCoroutineUninterceptedOrReturn { continuation ->
-                try { method.invoke(controller, references, parent.value, continuation) }
-                catch (failure: InvocationTargetException) { throw failure.targetException }
-            }
+            return PhotoImportController(selection, source).importProviderReferences(references, parent)
         }
     }
     private suspend fun error(f: Fixture, refs: List<String> = f.refs): OperationError = try { f.call(refs); throw AssertionError("Invalid batch was accepted") } catch (failure: RepositoryFailure) { failure.error }
@@ -105,5 +97,46 @@ class PhotoImportControllerTest {
     @Test fun callbackOwnedListCannotChangeReferencesWhilePreparationSuspends() = runTest {
         val f = Fixture(); val callback = f.refs.toMutableList(); f.onPrepare = { callback[0] = "content://fixture.documents/replaced" }
         assertEquals(f.results, f.call(callback)); assertEquals(f.refs.zip(f.children), f.ingested)
+    }
+
+    @Test fun publishedChildSignalsEvenIfItsBatchIsInterrupted() = runTest {
+        val f = Fixture()
+        val committed = f.results.first() as IngestResult.Committed
+        val hints = mutableListOf<Pair<DocumentId, List<PageId>>>()
+        val controller = PhotoImportController(ImportSelections { id, _ -> ImportBatch(id, f.children) }, object : BoundSourceIngest {
+            override suspend fun ingestBoundProvider(boundReference: String, session: ImportSessionId): IngestResult {
+                if (session != committed.sessionId) {
+                    assertEquals(listOf(f.doc to listOf(committed.pageId)), hints)
+                    currentCoroutineContext().cancel()
+                    throw CancellationException()
+                }
+                return committed
+            }
+        })
+        launch { controller.importProviderReferences(f.refs, f.parent) { doc, pages -> hints += doc to pages } }.join()
+        assertEquals(listOf(f.doc to listOf(committed.pageId)), hints)
+    }
+
+    @Test fun rejectedPendingAndMismatchedChildrenDoNotSignalAndHintFailureDoesNotUndoCommit() = runTest {
+        val f = Fixture()
+        val committed = f.results.first() as IngestResult.Committed
+        var mismatched = false
+        val controller = PhotoImportController(ImportSelections { id, _ -> ImportBatch(id, f.children) }, object : BoundSourceIngest {
+            override suspend fun ingestBoundProvider(boundReference: String, session: ImportSessionId) =
+                if (mismatched) committed.copy(sessionId = f.children.last()) else f.results[f.children.indexOf(session)]
+        })
+        var notifications = 0
+        assertEquals(f.results, controller.importProviderReferences(f.refs, f.parent) { doc, pages ->
+            assertEquals(f.doc, doc)
+            assertEquals(listOf(committed.pageId), pages)
+            notifications++
+            error("Synthetic wake failure")
+        })
+        assertEquals(1, notifications)
+        mismatched = true
+        val refusal = runCatching {
+            controller.importProviderReferences(f.refs, f.parent) { _, _ -> throw AssertionError("Mismatched child signaled") }
+        }.exceptionOrNull() as RepositoryFailure
+        assertEquals(OperationErrorCode.INTEGRITY_FAILED, refusal.error.code)
     }
 }

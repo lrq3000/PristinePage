@@ -15,7 +15,13 @@ import kotlinx.coroutines.withContext
 import java.util.Locale
 
 /** A cold adapter to the one Application graph, not another store or acquisition path. Temporary references return to the existing router/controller; no grant, new journal, recovery engine or source normalization is duplicated here. */
-class ApplicationLibraryActions(private val context: Context? = null, private val open: suspend () -> ApplicationImports) : LibraryActions, OrderedLibraryActions, SearchableLibraryActions {
+class ApplicationLibraryActions(
+    private val context: Context?,
+    private val onPagesSaved: ((DocumentId, List<PageId>) -> Unit)?,
+    private val open: suspend () -> ApplicationImports,
+) : LibraryActions, OrderedLibraryActions, SearchableLibraryActions {
+    constructor(context: Context? = null, open: suspend () -> ApplicationImports) : this(context, null, open)
+
     override suspend fun startup() = open().startupRecovery
     override suspend fun list(after: DocumentId?, limit: Int) = open().store.catalog.list(after, limit)
     override suspend fun listAlbums(order: AlbumOrder, locale: Locale, after: AlbumPosition?, limit: Int) = open().store.albums.listAlbums(order, locale, after, limit)
@@ -41,7 +47,7 @@ class ApplicationLibraryActions(private val context: Context? = null, private va
             LibraryPhotoResult.Canceled -> PhotoSelection.Canceled
             is LibraryPhotoResult.Rejected -> PhotoSelection.Rejected(selection.error)
         }
-        val outcomes = PhotoImportResultRouter(graph.photoImports, graph.store.lifecycle).deliver(request, native)
+        val outcomes = PhotoImportResultRouter(graph.photoImports, graph.store.lifecycle, onPagesSaved).deliver(request, native)
         if (capture != null && outcomes.none { it is IngestResult.Pending }) withContext(Dispatchers.IO) { capture.discard() }
         return outcomes
     }

@@ -4,18 +4,20 @@ import android.net.Uri
 import app.pristinepage.data.model.*
 import app.pristinepage.data.repository.BoundSourceIngest
 import app.pristinepage.data.repository.ImportSelections
+import app.pristinepage.ocr.sendCommittedOcrHint
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
 
 /** Routes one picker callback to its originally persisted BATCH, never the currently visible document. Selection/bindings commit atomically before serial source IO; only SourceStore decides byte acceptance and durable page visibility. No provider reopening, grant acquisition, coroutine launch or UI lifetime is hidden here. */
 class PhotoImportController(private val selections: ImportSelections, private val sources: BoundSourceIngest) {
-    suspend fun import(uris: List<Uri>, session: ImportSessionId): List<IngestResult> {
+    suspend fun import(uris: List<Uri>, session: ImportSessionId, onPagesSaved: ((DocumentId, List<PageId>) -> Unit)? = null): List<IngestResult> {
         checkCount(uris.size, session)
-        return importProviderReferences(uris.map { it.toString() }, session)
+        return importProviderReferences(uris.map { it.toString() }, session, onPagesSaved)
     }
 
     /** Private process-local adapter boundary, also usable by an explicitly retained selection. References never enter saved-state bundles, scheduler input, logs or result/error messages. Android selection/grant validation is distinct from a successful metadata handoff. */
-    suspend fun importProviderReferences(references: List<String>, session: ImportSessionId): List<IngestResult> {
+    suspend fun importProviderReferences(references: List<String>, session: ImportSessionId,
+        onPagesSaved: ((DocumentId, List<PageId>) -> Unit)? = null): List<IngestResult> {
         val context = currentCoroutineContext()
         context.ensureActive()
         checkCount(references.size, session)
@@ -29,12 +31,16 @@ class PhotoImportController(private val selections: ImportSelections, private va
             context.ensureActive()
             val child = batch.childIds[ordinal]
             val result = sources.ingestBoundProvider(reference, child)
-            context.ensureActive()
             val actualSession = when (result) {
                 is IngestResult.Committed -> result.sessionId
                 is IngestResult.Rejected -> result.sessionId
                 is IngestResult.Pending -> result.sessionId
             }
+            if (actualSession == child && result is IngestResult.Committed && onPagesSaved != null) {
+                // This exact commit is durable even if cancellation stops a later child, or the caller is already unwinding.
+                sendCommittedOcrHint(result.documentId, listOf(result.pageId), onPagesSaved)
+            }
+            context.ensureActive()
             if (actualSession != child) refuse(session, OperationErrorCode.INTEGRITY_FAILED, "import_result_binding_mismatch")
             results += result
         }
