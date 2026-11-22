@@ -29,6 +29,7 @@ import kotlinx.coroutines.withContext
 class DecodedSource internal constructor(val inspection: SourceInspection, val image: RgbImage, private val permit: DecodePermit, val sourceByteHash: String) : AutoCloseable {
     init { requireSha256(sourceByteHash) }
     private val closed = AtomicBoolean(false)
+    internal fun chargedOn(budget: ImageAllocationBudget): Long = permit.chargedOn(budget)
     override fun close() { if (closed.compareAndSet(false, true)) { try { image.close() } finally { permit.close() } } }
 }
 

@@ -5,6 +5,7 @@ import app.pristinepage.data.model.OperationError
 import app.pristinepage.data.model.OperationErrorCode
 import app.pristinepage.data.model.RepositoryFailure
 import app.pristinepage.data.model.SourceId
+import app.pristinepage.data.model.SourceInspection
 import app.pristinepage.data.repository.CommittedSource
 import app.pristinepage.data.repository.CommittedSources
 import app.pristinepage.data.repository.ExportSourceBinding
@@ -25,7 +26,15 @@ class SourceDecoder(private val sources: CommittedSources, private val decoder: 
     internal suspend fun decodeForProducer(sourceId: String, output: OutputSpec, expected: ExportSourceBinding): DecodedSource =
         decode(sourceId, output, expected)
 
-    private suspend fun decode(sourceId: String, output: OutputSpec, expected: ExportSourceBinding?): DecodedSource {
+    /** Observe admitted metadata before opening the codec. This never replaces byte or decoded-pixel authentication. */
+    internal suspend fun decodeForOcr(
+        sourceId: String, output: OutputSpec, checkCapacity: (SourceInspection, Long) -> Unit,
+    ): DecodedSource = decode(sourceId, output, null, checkCapacity)
+
+    private suspend fun decode(
+        sourceId: String, output: OutputSpec, expected: ExportSourceBinding?,
+        checkCapacity: ((SourceInspection, Long) -> Unit)? = null,
+    ): DecodedSource {
         val context = currentCoroutineContext()
         context.ensureActive()
         val id = try { SourceId(sourceId) }
@@ -39,6 +48,8 @@ class SourceDecoder(private val sources: CommittedSources, private val decoder: 
             producer.loadForProducer(id, expected)
         }
         if (recorded.sourceId != id || (expected != null && !recorded.matches(expected))) refuse(OperationErrorCode.INTEGRITY_FAILED, "committed_source_binding_mismatch", id)
+        context.ensureActive()
+        checkCapacity?.invoke(recorded.inspection, recorded.byteCount)
         context.ensureActive()
         val decoded = decoder.decodeFile(recorded.file, recorded.sourceByteHash)
         var delivered = false

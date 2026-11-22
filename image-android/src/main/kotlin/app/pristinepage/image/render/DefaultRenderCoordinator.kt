@@ -6,7 +6,10 @@ import app.pristinepage.core.recipe.GeometryRecipe
 import app.pristinepage.core.recipe.SourceBinding
 import app.pristinepage.data.model.*
 import app.pristinepage.data.repository.ExportSourceBinding
+import app.pristinepage.image.decode.DecodeAdmission
+import app.pristinepage.image.decode.ImageAllocationBudget
 import app.pristinepage.image.decode.SourceDecoder
+import app.pristinepage.image.decode.sourceParserBytes
 import app.pristinepage.image.preview.PreviewProcessing
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineDispatcher
@@ -35,7 +38,7 @@ class DefaultRenderCoordinator @JvmOverloads constructor(private val decoder: So
                     val execution = Execution(request, expected)
                     val result = try { execution.run { context.ensureActive() } }
                     catch (canceled: CancellationException) { throw canceled }
-                    catch (failure: RepositoryFailure) { execution.failure(status(failure.error.code), failure.error.safeMessageKey) }
+                    catch (failure: RepositoryFailure) { execution.failure(failure) }
                     catch (_: OutOfMemoryError) { execution.failure(RenderStatus.RESOURCE_LIMIT, "render_allocation_failed") }
                     catch (_: Exception) { execution.failure(RenderStatus.PROCESSING_FAILED, "render_processing_failed") }
                     result.also { completed = it }
@@ -53,6 +56,9 @@ class DefaultRenderCoordinator @JvmOverloads constructor(private val decoder: So
         private var active: String? = null
         private var inputSize = request.recipe.geometry.source.sourceSize
         private var outputSize = inputSize
+        private var ocrIdleFits = false
+        private var ocrGeometryCharge = 0L
+        private var ocrHeldBytes = 0L
 
         suspend fun run(checkpoint: () -> Unit): RenderResult {
             checkpoint()
@@ -64,8 +70,11 @@ class DefaultRenderCoordinator @JvmOverloads constructor(private val decoder: So
             var transferred = false
             try {
                 active = "source_decode_v1"
-                val decoded = if (expected == null) decoder.decode(request.sourceId, request.output)
-                    else decoder.decodeForProducer(request.sourceId, request.output, expected)
+                val decoded = when {
+                    expected != null -> decoder.decodeForProducer(request.sourceId, request.output, expected)
+                    request.output.purpose == RenderPurpose.OCR -> decoder.decodeForOcr(request.sourceId, request.output, ::checkOcrCapacity)
+                    else -> decoder.decode(request.sourceId, request.output)
+                }
                 var sourceTransferred = false
                 try {
                     checkpoint()
@@ -82,6 +91,7 @@ class DefaultRenderCoordinator @JvmOverloads constructor(private val decoder: So
                         is GeometryRecipe.RoughCropDewarp -> "rough_crop_dewarp_v1"
                     }
                     inputSize = info.normalizedSize; outputSize = request.output.size
+                    if (ocrIdleFits) ocrHeldBytes = decoded.chargedOn(geometry.budget)
                     val shaped = try { geometry.render(decoded.image, actual, request.recipe.geometry, request.output, null, null, checkpoint) }
                     catch (error: Exception) {
                         val failure = StageFallback.failure(error, request.fallback, "geometry_processing_failed")
@@ -94,7 +104,10 @@ class DefaultRenderCoordinator @JvmOverloads constructor(private val decoder: So
                     }
                     shaped.use {
                         // OCR has no geometry fallback. The completed geometry raster independently owns every pixel consumed by appearance; release the now-unused full-source decode charge before reserving appearance.
-                        if (request.output.purpose == RenderPurpose.OCR) decoded.close()
+                        if (request.output.purpose == RenderPurpose.OCR) {
+                            decoded.close()
+                            ocrHeldBytes = ocrGeometryCharge
+                        }
                         records.add(shaped.stage)
                         active = "appearance_graph_v1"
                         inputSize = PixelSize(shaped.image.width, shaped.image.height); outputSize = inputSize
@@ -109,6 +122,36 @@ class DefaultRenderCoordinator @JvmOverloads constructor(private val decoder: So
                 val failure = raster.failure
                 return RenderResult(request, if (failure == null) RenderStatus.OK else RenderStatus.DEGRADED, raster.image, records, if (failure == null) emptyList() else listOf("KEEP_STAGE_INPUT", failure.safeMessageKey), raster).also { transferred = true }
             } finally { if (!transferred) final?.close() }
+        }
+
+        private fun checkOcrCapacity(source: SourceInspection, encodedBytes: Long) {
+            val expectedSource = request.recipe.geometry.source
+            if (source.sourcePixelHash != expectedSource.sourcePixelHash || source.normalizedSize != expectedSource.sourceSize ||
+                source.conversionFingerprint != expectedSource.orientationColorConversionVersion) {
+                refuse(OperationErrorCode.INVALID_INPUT, "render_source_binding_mismatch")
+            }
+            val extent = source.encodedSize
+            val decode = DecodeAdmission.estimate(encodedBytes, extent.width.toLong(), extent.height.toLong(), source.exifOrientation)
+            val size = request.output.size
+            val shaped = GeometryEngine.ordinaryCharge(request.recipe.geometry, size)
+            val appearance = AppearanceEngine.ordinaryCharge(request.recipe, size)
+            // Parser, decode+geometry, and geometry+appearance are sequential. The app's renderer uses one shared ledger for all three.
+            val peak = maxOf(sourceParserBytes(encodedBytes), Math.addExact(decode.bytes, shaped), Math.addExact(shaped, appearance))
+            val budget = geometry.budget
+            if (peak > budget.capacityBytes) refuse(OperationErrorCode.RESOURCE_LIMIT, "ocr_render_exceeds_idle_budget")
+            ocrGeometryCharge = shaped
+            ocrIdleFits = true
+            // This is an observation, not a reservation: a later consumer may still take headroom.
+            if (peak > budget.capacityBytes - budget.usedBytes) refuse(OperationErrorCode.RESOURCE_LIMIT, OCR_RENDER_BUDGET_BUSY)
+        }
+
+        fun failure(failure: RepositoryFailure): RenderResult {
+            val error = failure.error
+            val budget = geometry.budget
+            // Use the bytes and ledger that actually refused, not just the earlier fit estimate or a string key. Even one reservation can exceed idle capacity if the codec's parsed header differs from stored metadata.
+            val key = if (ocrIdleFits && failure is ImageAllocationBudget.Denied && failure.ledger === budget &&
+                failure.requestedBytes <= budget.capacityBytes - ocrHeldBytes) OCR_RENDER_BUDGET_BUSY else error.safeMessageKey
+            return failure(status(error.code), key)
         }
 
         fun failure(status: RenderStatus, key: String): RenderResult {
@@ -156,3 +199,6 @@ class DefaultRenderCoordinator @JvmOverloads constructor(private val decoder: So
     }
     private fun refuse(code: OperationErrorCode, key: String): Nothing = throw RepositoryFailure(OperationError(code, false, key, null))
 }
+
+/** Only a proven idle-fit shared-renderer ledger refusal is eligible for automatic redelivery. */
+internal const val OCR_RENDER_BUDGET_BUSY = "ocr_render_budget_busy"

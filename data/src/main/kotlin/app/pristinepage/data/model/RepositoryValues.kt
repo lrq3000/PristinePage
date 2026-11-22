@@ -12,7 +12,7 @@ import kotlinx.serialization.Serializable
 @Serializable data class OperationError(val code: OperationErrorCode, val retryable: Boolean, val safeMessageKey: String, val affectedId: String?) {
     init { require(safeMessageKey.matches(Regex("[a-z][a-z0-9_]{0,127}"))); affectedId?.let(::requireOpaqueId) }
 }
-class RepositoryFailure(val error: OperationError) : RuntimeException(error.safeMessageKey)
+open class RepositoryFailure(val error: OperationError) : RuntimeException(error.safeMessageKey)
 
 /** Decoder-produced normalized identity, not a borrowed image lease or an estimate computed from a smaller preview. Metadata ceilings do not grant memory/decode admission. */
 @Serializable data class SourceInspection(val mime: String, val encodedSize: PixelSize, val normalizedSize: PixelSize, val exifOrientation: Int, val profileSha256: String?, val conversionFingerprint: String, val sourcePixelHash: String) {

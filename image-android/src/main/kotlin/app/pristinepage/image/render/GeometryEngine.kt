@@ -39,7 +39,7 @@ class GeometryRaster internal constructor(val image: RgbImage, val protection: P
 }
 
 /** Synchronous off-UI-thread primitive. NONE and exact full-frame permutations bypass lossy solves. Other perspective and direct manual maps require their actual-map admission proofs before RGB/mask output allocation; unavailable learned maps still refuse explicitly. */
-class GeometryEngine(private val budget: ImageAllocationBudget) {
+class GeometryEngine(internal val budget: ImageAllocationBudget) {
     fun render(source: RgbImage, binding: SourceBinding, recipe: GeometryRecipe, output: OutputSpec, protection: ProtectionMask?, coverage: CoverageMask?, checkpoint: () -> Unit): GeometryRaster {
         checkpoint()
         val sourceSize = PixelSize(source.width, source.height)

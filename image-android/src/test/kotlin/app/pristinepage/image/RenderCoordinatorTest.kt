@@ -1,6 +1,10 @@
 package app.pristinepage.image
 
 import app.pristinepage.core.image.RgbImage
+import app.pristinepage.core.ocr.OcrConfiguration
+import app.pristinepage.core.ocr.OcrLanguagePack
+import app.pristinepage.core.ocr.OcrLanguagePacks
+import app.pristinepage.core.ocr.OcrLayout
 import app.pristinepage.core.pipeline.*
 import app.pristinepage.core.recipe.*
 import app.pristinepage.data.db.SourceBlobRow
@@ -8,6 +12,7 @@ import app.pristinepage.data.db.SourceRow
 import app.pristinepage.data.model.*
 import app.pristinepage.data.repository.*
 import app.pristinepage.image.decode.*
+import app.pristinepage.image.ocr.SavedOcrPreparer
 import app.pristinepage.image.render.AppearanceEngine
 import app.pristinepage.image.render.DefaultRenderCoordinator
 import app.pristinepage.image.render.GeometryEngine
@@ -36,6 +41,8 @@ class RenderCoordinatorTest {
         var beforeLoad: suspend () -> Unit = {}
         var beforeDecode: suspend () -> Unit = {}
         var afterDecode: suspend () -> Unit = {}
+        var decodeAdmissionBudget = budget
+        var decodeAdmissionWidth = width.toLong()
         init {
             val parent = File(System.getProperty("user.dir"), "build/test-render-coordinator").apply { mkdirs() }
             file = Files.createTempFile(parent.toPath(), "source-", ".bin").toFile().apply { writeBytes(byteArrayOf(1, 2, 3, 4)) }
@@ -54,7 +61,7 @@ class RenderCoordinatorTest {
         fun coordinator(dispatcher: CoroutineDispatcher, sources: CommittedSources = ordinarySources()): DefaultRenderCoordinator {
             val decoder = SourceDecoder(sources, SourceFileDecoder { requested, hash ->
                 assertEquals(file, requested); assertEquals(byteHash, hash); decodes++; beforeDecode()
-                val permit = DecodeAdmission(budget).admit(4, width.toLong(), height.toLong(), 1)
+                val permit = DecodeAdmission(decodeAdmissionBudget).admit(4, decodeAdmissionWidth, height.toLong(), 1)
                 val image = RgbImage(width, height, width * 3, pixels).also { lastDecoded = it }
                 val result = DecodedSource(info, image, permit, hash)
                 try { afterDecode(); result } catch (e: Throwable) { result.close(); throw e }
@@ -199,6 +206,88 @@ class RenderCoordinatorTest {
         assertEquals(1, f.loads)
         assertEquals(1, f.decodes)
         assertEquals(0L, f.budget.usedBytes)
+    }
+
+    @Test fun ocrRefusesAnImpossibleIdleLedgerBeforeDecodeAndDoesNotRequestRedelivery() = runTest {
+        // 1,048,676 decode + 65,572 geometry, one byte beyond this idle ledger.
+        val f = Fixture(capacity = 1_114_247L)
+        val failure = ocrPreparationFailure(f, UnconfinedTestDispatcher(testScheduler))
+        assertEquals(OperationErrorCode.RESOURCE_LIMIT, failure.code)
+        assertFalse(failure.retryable)
+        assertEquals(1, f.loads)
+        assertEquals(0, f.decodes)
+        assertEquals(0L, f.budget.usedBytes)
+    }
+
+    @Test fun ocrDefersWhenAnotherConsumerUsesHeadroomAndCanRenderAfterItEnds() = runTest {
+        val f = Fixture(capacity = 1_114_248L)
+        val dispatcher = UnconfinedTestDispatcher(testScheduler)
+        f.budget.reserve(1).use {
+            val failure = ocrPreparationFailure(f, dispatcher)
+            assertEquals(OperationErrorCode.RESOURCE_LIMIT, failure.code)
+            assertTrue(failure.retryable)
+            assertEquals(0, f.decodes)
+            assertEquals(1L, f.budget.usedBytes)
+        }
+        val request = f.request().copy(output = OutputSpec(PixelSize(3, 2), RenderPurpose.OCR))
+        f.coordinator(dispatcher).render(request).use { assertEquals(RenderStatus.OK, it.status) }
+        assertEquals(0L, f.budget.usedBytes)
+    }
+
+    @Test fun ocrDefersWhenHeadroomIsLostAfterDecodeAdmission() = runTest {
+        val f = Fixture(capacity = 1_114_248L)
+        val dispatcher = UnconfinedTestDispatcher(testScheduler)
+        var competing: AutoCloseable? = null
+        f.afterDecode = { competing = f.budget.reserve(1) }
+        try {
+            val failure = ocrPreparationFailure(f, dispatcher)
+            assertEquals(OperationErrorCode.RESOURCE_LIMIT, failure.code)
+            assertTrue(failure.retryable)
+            assertThrows(IllegalStateException::class.java) { f.lastDecoded!!.getUnsigned(0, 0, 0) }
+            assertEquals(1L, f.budget.usedBytes)
+        } finally { competing?.close() }
+        assertEquals(0L, f.budget.usedBytes)
+    }
+
+    @Test fun ocrDoesNotRetryAnImpossiblePermitOnASeparateDecoderLedger() = runTest {
+        val f = Fixture(capacity = 1_114_248L)
+        f.decodeAdmissionBudget = ImageAllocationBudget(1_048_675L)
+        val failure = ocrPreparationFailure(f, UnconfinedTestDispatcher(testScheduler))
+        assertEquals(OperationErrorCode.RESOURCE_LIMIT, failure.code)
+        assertFalse(failure.retryable)
+        assertEquals(0L, f.decodeAdmissionBudget.usedBytes)
+    }
+
+    @Test fun ocrDoesNotRetryWhenActualSourceHeaderRequiresAnImpossibleReservation() = runTest {
+        val f = Fixture(capacity = 1_114_248L)
+        // Substitute only the codec/header side: the admitted file metadata still claims a 3×2 source.
+        f.decodeAdmissionWidth = 3_000L
+        val failure = ocrPreparationFailure(f, UnconfinedTestDispatcher(testScheduler))
+        assertEquals(OperationErrorCode.RESOURCE_LIMIT, failure.code)
+        assertFalse(failure.retryable)
+        assertEquals(0L, f.budget.usedBytes)
+    }
+
+    @Test fun ocrDoesNotRetryWhenActualDecodeAndGeometryChargesCannotCoexistAtIdle() = runTest {
+        val f = Fixture(capacity = 1_114_248L)
+        // Decode itself fits but the real permit leaves 32 fewer bytes than the independently estimated 3×2 source.
+        f.decodeAdmissionWidth = 4L
+        val failure = ocrPreparationFailure(f, UnconfinedTestDispatcher(testScheduler))
+        assertEquals(OperationErrorCode.RESOURCE_LIMIT, failure.code)
+        assertFalse(failure.retryable)
+        assertEquals(0L, f.budget.usedBytes)
+    }
+
+    private suspend fun ocrPreparationFailure(f: Fixture, dispatcher: CoroutineDispatcher): OperationError {
+        val recipe = f.request().recipe
+        val saved = EditablePage(DocumentId(UUID.randomUUID().toString()), 1, f.page, f.id, 1, RecipeCodec.hash(recipe), recipe)
+        val configuration = OcrConfiguration("fixture", 1, OcrLayout.AUTOMATIC, OcrLanguagePacks(listOf(OcrLanguagePack("eng", "a".repeat(64)))))
+        return try {
+            SavedOcrPreparer(f.coordinator(dispatcher), f.budget) { _, _ ->
+                throw AssertionError("Pre-start resource refusal reached native preparation")
+            }.prepare(saved, configuration) { throw AssertionError("Resource refusal transferred a session") }
+            throw AssertionError("OCR preparation did not refuse")
+        } catch (failure: RepositoryFailure) { failure.error }
     }
 
     @Test fun verifiedDecodedIdentityStillMustMatchTheRequestedRecipeSource() = runTest {
