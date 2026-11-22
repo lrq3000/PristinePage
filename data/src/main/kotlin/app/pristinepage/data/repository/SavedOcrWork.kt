@@ -81,6 +81,13 @@ class SavedOcrWork private constructor(store: PrivateImportStore.OcrComposition)
                 Continuation.issue(this, Scan.BACKFILL, batch.nextAfter))
         }
 
+    /** Recheck an exact saved page after commit; an obsolete or repeated signal cannot rerun unchanged terminal work. */
+    suspend fun reconcilePage(document: DocumentId, page: PageId, configuration: OcrConfiguration?): Target? =
+        retained(page.value, "ocr_store_read_failed") {
+            if (configuration != null && configuration.languagePacks == null) invalid("ocr_invalid_reconciliation")
+            backfill.reconcilePage(document, page, configuration)?.let { Target(it.page, it.job) }
+        }
+
     suspend fun execute(target: Target, preparer: Preparer): Outcome = retained(target.page.value, "ocr_store_execution_failed") {
         execution.run(target.page, target.job) { page, config, handoff ->
             adapter(Stage.PREPARE) {

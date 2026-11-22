@@ -1015,6 +1015,45 @@ class RoomOcrIndexIntegrationTest {
         assertTrue(failure?.suppressed?.isEmpty() == true)
     }
 
+    @Test fun savedPageSignalQueuesOnlyItsNamedPageAndDeduplicatesConcurrentDelivery() = withOcrAttempts(publicStore = true) { f ->
+        val port = f.ocrPort()
+        val fresh = f.seedUnqueuedPage()
+        val document = DocumentId(DOCUMENT)
+        val config = queueConfig(OcrLayout.SINGLE_BLOCK)
+        assertNull(port.reconcilePage(DocumentId(UUID.randomUUID().toString()), fresh, config))
+        assertNull(port.reconcilePage(document, PageId(UUID.randomUUID().toString()), config))
+        assertNull(port.reconcilePage(document, fresh, null))
+        assertEquals("1", f.sql.scalar("SELECT COUNT(*) FROM OcrPageWork"))
+        val target = coroutineScope {
+            val first = async { port.reconcilePage(document, fresh, config) }
+            val second = async { port.reconcilePage(document, fresh, config) }
+            checkNotNull(first.await()).also { assertEquals(it, second.await()) }
+        }
+        assertEquals(fresh, target.page)
+        assertNotEquals(f.request.jobId, target.job)
+        assertEquals("2", f.sql.scalar("SELECT COUNT(*) FROM OcrPageWork"))
+        assertEquals("PENDING:0", f.sql.scalar("SELECT state||':'||attempt FROM Job WHERE jobId='${f.request.jobId.value}'"))
+        assertEquals(target, port.reconcilePage(document, fresh, queueConfig(OcrLayout.SPARSE_TEXT)))
+        assertEquals(SavedOcrWork.Outcome.PUBLISHED, port.execute(target) { page, effective, handoff ->
+            assertEquals(fresh, page.pageId)
+            assertEquals(config, effective)
+            handoff.retain(preparedText("Saved page notification"))
+        })
+        assertNull(port.reconcilePage(document, fresh, queueConfig(OcrLayout.SPARSE_TEXT)))
+        assertEquals("2", f.sql.scalar("SELECT COUNT(*) FROM Job WHERE kind='PAGE_OCR'"))
+    }
+
+    @Test fun exactSavedPageSignalRefusesHiddenAtelierWithoutCreatingWork() = withOcrAttempts(publicStore = true) { f ->
+        val port = f.ocrPort()
+        val fresh = f.seedUnqueuedPage()
+        val receipt = "atelier-publish-v1\n1\n$DOCUMENT\n$PAGE,0,${"c".repeat(64)},$PAGE"
+        f.sql.execSQL("""INSERT INTO AtelierDraft (draftId,stagingDocumentId,state,generation,step,createdAt,committedDocumentId,receiptPageIds)
+            VALUES (?,?,'COMMITTED',2,2,0,?,?)""", arrayOf(DRAFT, DOCUMENT, DOCUMENT, receipt))
+        assertNull(port.reconcilePage(DocumentId(DOCUMENT), fresh, queueConfig(OcrLayout.SINGLE_BLOCK)))
+        assertEquals("1", f.sql.scalar("SELECT COUNT(*) FROM OcrPageWork"))
+        assertEquals("1", f.sql.scalar("SELECT COUNT(*) FROM Job WHERE kind='PAGE_OCR'"))
+    }
+
     private data class AttemptFixture(
         val sql: SupportSQLiteDatabase,
         val attempts: RoomOcrAttempts,
@@ -1028,6 +1067,7 @@ class RoomOcrIndexIntegrationTest {
         val dispatch: (OperationOwnerProof) -> RoomOcrDispatch,
         val execution: () -> RoomOcrExecution,
         val additionalWork: suspend () -> Pair<PageId, JobId>,
+        val seedUnqueuedPage: () -> PageId,
         val ocrPort: () -> SavedOcrWork,
         val closeStore: () -> Unit,
     ) {
@@ -1088,7 +1128,7 @@ class RoomOcrIndexIntegrationTest {
                     {
                         val additional = seedAdditionalQueuePage(sql, page)
                         additional.pageId to queue.enqueue(additional, configuration, rerun = false)
-                    }, { checkNotNull(store).savedOcr }, { checkNotNull(store).close() }))
+                    }, { seedAdditionalQueuePage(sql, page).pageId }, { checkNotNull(store).savedOcr }, { checkNotNull(store).close() }))
             }
         } finally {
             try { store?.close() } finally { database.close() }

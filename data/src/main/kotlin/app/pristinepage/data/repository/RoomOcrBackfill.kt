@@ -35,28 +35,37 @@ internal class RoomOcrBackfill(
         val candidates = work.scanSavedPages(after?.value, limit)
         val targets = candidates.mapNotNull { row ->
             coroutineContext.ensureActive()
-            val page = PageId(row.pageId)
-            val document = DocumentId(row.documentId)
-            try {
-                val existing = liveWork(document, page)
-                if (existing != null) {
-                    existing.target()
-                } else if (configuration != null) {
-                    val saved = editable.load(document, page)
-                    queue.enqueue(saved, configuration, rerun = false)
-                    liveWork(document, page)?.target()
-                } else {
-                    null
-                }
-            } catch (failure: RepositoryFailure) {
-                // A missing, invalid or unsupported page must not hold up the rest of the batch. Storage failures must surface so a caller can retry the batch.
-                if (failure.error.code !in SKIP_PAGE) throw failure
-                null
-            }
+            targetFor(DocumentId(row.documentId), PageId(row.pageId), configuration)
         }
         coroutineContext.ensureActive()
         // Carry the scan position even if this batch found only terminal or rejected pages.
         Batch(Collections.unmodifiableList(targets), if (candidates.size == limit) PageId(candidates.last().pageId) else null)
+    }
+
+    /** Targeted save notification: no library scan or attempt admission. Startup still scans for missed saves. */
+    suspend fun reconcilePage(document: DocumentId, page: PageId, configuration: OcrConfiguration?): Target? = withContext(dispatcher) {
+        require(configuration == null || configuration.languagePacks != null)
+        coroutineContext.ensureActive()
+        val target = targetFor(document, page, configuration)
+        coroutineContext.ensureActive()
+        target
+    }
+
+    private suspend fun targetFor(document: DocumentId, page: PageId, configuration: OcrConfiguration?): Target? = try {
+        val existing = liveWork(document, page)
+        when {
+            existing != null -> existing.target()
+            configuration == null -> null
+            else -> {
+                val saved = editable.load(document, page)
+                queue.enqueue(saved, configuration, rerun = false)
+                liveWork(document, page)?.target()
+            }
+        }
+    } catch (failure: RepositoryFailure) {
+        // A missing, invalid or unsupported page is not a target. Storage failures remain distinguishable from a successful no-op.
+        if (failure.error.code !in SKIP_PAGE) throw failure
+        null
     }
 
     private fun liveWork(document: DocumentId, page: PageId): RoomOcrCurrentWork.Current? = metadata.transaction {
