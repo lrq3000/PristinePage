@@ -37,6 +37,7 @@ import app.pristinepage.data.repository.SourceInput
 import app.pristinepage.image.decode.AndroidSourceInspector
 import app.pristinepage.image.decode.ImageAllocationBudget
 import app.pristinepage.image.decode.SourceDecoder
+import app.pristinepage.image.ocr.PrivateOcrPackOwner
 import app.pristinepage.image.ocr.SavedOcrPreparer
 import app.pristinepage.image.ocr.VerifiedOcrPackDirectory
 import app.pristinepage.image.render.AppearanceEngine
@@ -74,20 +75,32 @@ class LocalSavedOcrIntegrationTest {
         val databaseFile = scoped.getDatabasePath("pristinepage.db")
         assertEquals(File(directory, "databases").canonicalFile, databaseFile.canonicalFile.parentFile)
         assertFalse(databaseFile.exists())
-        val packRoot = newDirectory(directory, "packs")
-        val tessdata = newDirectory(packRoot, "tessdata")
         val manifest = JSONObject(LocalTesseractProbeTest.load(context, "${ROOT}manifest.json", 32_768).toString(Charsets.UTF_8))
         val packs = manifest.getJSONArray("packs")
         val pins = (0 until packs.length()).associate { index ->
             val row = packs.getJSONObject(index)
             val code = row.getString("code")
             assertTrue(anchors.containsKey(code))
-            LocalTesseractProbeTest.stagePack(context, tessdata, code, row)
             code to VerifiedOcrPackDirectory.Pin(OcrLanguagePack(code, row.getString("sha256")), row.getLong("bytes"))
         }
         assertEquals(anchors.keys, pins.keys)
-        val selectedPacks = VerifiedOcrPackDirectory(packRoot.toPath(), pins.values.toList())
+        val nativePins = pins.values.toList()
         val english = pins.getValue("eng")
+        val englishOnly = OcrLanguagePacks(listOf(english.identity))
+        val firstOwner = checkNotNull(PrivateOcrPackOwner.forApplication(context, nativePins))
+        val alreadyInstalled = firstOwner.acquire(englishOnly) != null
+        val opened = mutableListOf<String>()
+        assertTrue(firstOwner.install { code ->
+            opened.add(code)
+            context.assets.open("${ROOT}tessdata/$code.traineddata")
+        })
+        assertEquals(if (alreadyInstalled) emptyList() else anchors.keys.sorted(), opened)
+        val selectedPacks = checkNotNull(PrivateOcrPackOwner.forApplication(context, nativePins.reversed()))
+        assertTrue(selectedPacks.install { throw AssertionError("Reopening verified packs must not copy them again") })
+        val packRoot = checkNotNull(selectedPacks.acquire(englishOnly)).toFile()
+        val tessdata = File(packRoot, "tessdata")
+        assertEquals(context.filesDir.canonicalFile, packRoot.parentFile.parentFile)
+        Log.i(TAG, "packOwner=${if (alreadyInstalled) "retained" else "fresh"} copied=${opened.size} reopenCopied=0")
         // Test corruption on a newly created non-aliased copy; never change the qualified owner directory or retained stage.
         val corruptRoot = newDirectory(directory, "corrupt-pack-control")
         val corruptPacks = newDirectory(corruptRoot, "tessdata")
@@ -110,7 +123,7 @@ class LocalSavedOcrIntegrationTest {
             override fun close() { packLeases-- }
         }
         val sessions = TesseractSavedOcrSessions(budget) { requested ->
-            if (selectedPacks.verifies(requested)) lease(packRoot) else null
+            selectedPacks.acquire(requested)?.toFile()?.let(::lease)
         }
         val changedBytes = TesseractSavedOcrSessions(budget) { requested ->
             assertFalse("Corrupt pack must not reach lease acquisition", corrupt.verifies(requested))

@@ -4,6 +4,8 @@ import android.app.Application
 import android.content.Context
 import android.system.ErrnoException
 import android.system.Os
+import android.system.OsConstants.S_IWGRP
+import android.system.OsConstants.S_IWOTH
 import app.pristinepage.core.ocr.OcrLanguagePacks
 import java.io.IOException
 import java.io.InputStream
@@ -70,7 +72,8 @@ internal class PrivateOcrPackOwner private constructor(
                 ownership.use {
                     if (!physicalDirectory(parent)) return false
                     if (Files.exists(destination, NOFOLLOW_LINKS)) return acquire(all, checkpoint) != null
-                    if (Files.getFileStore(parent).usableSpace < pins.sumOf { it.bytes }) return false
+                    // Android's NIO provider refuses getFileStore even for our own private directory. The path-local space estimate is only an admission hint; writes still handle I/O failure.
+                    if (parent.toFile().usableSpace < pins.sumOf { it.bytes }) return false
                     return stageAndPublish(checkpoint, open)
                 }
             }
@@ -175,7 +178,6 @@ internal class PrivateOcrPackOwner private constructor(
 
     companion object {
         private const val MAX_SET = 64L * 1024 * 1024
-        private const val GROUP_OR_OTHER_WRITE = 0b10010
         private val installing = AtomicBoolean(false)
         private val privateDirectoryMode = PosixFilePermissions.asFileAttribute(PosixFilePermissions.fromString("rwx------"))
         private val privateFileMode = PosixFilePermissions.asFileAttribute(PosixFilePermissions.fromString("rw-------"))
@@ -186,7 +188,9 @@ internal class PrivateOcrPackOwner private constructor(
             return try {
                 val sandbox = Paths.get(app.applicationInfo.dataDir).toRealPath()
                 val files = app.filesDir.toPath().toRealPath()
-                if (files != sandbox.resolve("files") || !androidOwned(sandbox) || !androidOwned(files)) return null
+                if (files != sandbox.resolve("files") || !androidOwned(sandbox) ||
+                    !androidOwned(files, platformFilesDirectory = true)
+                ) return null
                 val parent = files.resolve("ocr-verified-packs-v1")
                 try { Files.createDirectory(parent, privateDirectoryMode) } catch (_: FileAlreadyExistsException) { }
                 if (!Files.isDirectory(parent, NOFOLLOW_LINKS) || parent.toRealPath() != parent || !androidOwned(parent)) return null
@@ -197,9 +201,13 @@ internal class PrivateOcrPackOwner private constructor(
 
         private fun androidOwnedDirectory(path: Path): Boolean = androidOwned(path)
 
-        private fun androidOwned(path: Path, singleLink: Boolean = false): Boolean = try {
+        private fun androidOwned(path: Path, singleLink: Boolean = false, platformFilesDirectory: Boolean = false): Boolean = try {
             val stat = Os.lstat(path.toString())
-            stat.st_uid == Os.getuid() && (stat.st_mode and GROUP_OR_OTHER_WRITE) == 0 && (!singleLink || stat.st_nlink == 1L)
+            val uid = Os.getuid()
+            // Android can create the fixed "files" directory as 0771. Admit its group write bit only for this app's own UID/GID, never for the pack tree or its lock.
+            val appGroup = platformFilesDirectory && stat.st_gid == uid && Os.getgid() == uid
+            stat.st_uid == uid && (stat.st_mode and S_IWOTH) == 0 &&
+                (appGroup || (stat.st_mode and S_IWGRP) == 0) && (!singleLink || stat.st_nlink == 1L)
         } catch (_: ErrnoException) { false }
     }
 }
