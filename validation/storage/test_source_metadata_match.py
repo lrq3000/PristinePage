@@ -15,13 +15,14 @@ class SavedSourceMetadataTest(unittest.TestCase):
     def setUp(self):
         self.db = sqlite3.connect(":memory:")
         self.addCleanup(self.db.close)
-        self.db.executescript(";\n".join([*fixture.create_tables(2), fixture.SEED]))
+        date_schema = [sql for sql in fixture.create_tables(5) if "`SourceCaptureDay`" in sql]
+        self.db.executescript(";\n".join([*fixture.create_tables(2), *date_schema, fixture.SEED]))
 
     def match(self, *, mime=None, orientation=None, document=fixture.DOC):
         text = DAO.read_text(encoding="utf-8")
         pattern = r'@Query\("""((?:(?!""").)*)"""\)\s*internal abstract fun metadataMatchForSavedPage\('
         sql, = re.findall(pattern, text, re.S)
-        return self.db.execute(sql, dict(page=fixture.PAGE, document=document, mime=mime, orientation=orientation)).fetchall()
+        return self.db.execute(sql, dict(page=fixture.PAGE, document=document, mime=mime, orientation=orientation, epochDay=None)).fetchall()
 
     def test_candidate_discovery_pages_only_matching_saved_sources_in_key_order(self):
         later = "bbbbbbbb-bbbb-4bbb-8bbb-000000000001"

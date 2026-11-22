@@ -39,17 +39,25 @@ class RoomSourceMetadataSearch private constructor(store: PrivateImportStore.Sou
     sealed interface Continuation
     private class ReturningAfter(
         val owner: RoomSourceMetadataSearch, val query: SourceMetadataQuery, val lastCandidate: PageId,
+        val lastBlob: SourceBlobId? = null,
     ) : Continuation
 
     class Page internal constructor(val hits: List<Hit>, val next: Continuation?)
 
-    suspend fun find(raw: String, after: Continuation?, limit: Int): Page {
+    suspend fun find(raw: String, after: Continuation?, limit: Int): Page =
+        find(SourceMetadataQuery.parse(raw), after, limit)
+
+    @JvmSynthetic
+    internal suspend fun findCaptureDay(epochDay: Long, after: Continuation?, limit: Int): Page =
+        find(CaptureDayMetadataQuery(epochDay), after, limit)
+
+    private suspend fun find(query: SourceMetadataQuery?, after: Continuation?, limit: Int): Page {
         currentCoroutineContext().ensureActive()
-        val query = SourceMetadataQuery.parse(raw)
         val cursor = after as? ReturningAfter
         require(limit in 1..50 && (after == null || (cursor?.owner === this && cursor.query == query)))
         if (query == null) return Page(emptyList(), null)
         return reading { checkpoint ->
+            if (query is CaptureDayMetadataQuery) return@reading scanCaptureDay(query, cursor, limit, checkpoint)
             val mime = (query as? SourceMetadataQuery.Format)?.mime
             val orientation = (query as? SourceMetadataQuery.Orientation)?.value
             val candidates = catalog.scanSourceMetadataCandidates(cursor?.lastCandidate?.value, limit, mime, orientation)
@@ -57,11 +65,26 @@ class RoomSourceMetadataSearch private constructor(store: PrivateImportStore.Sou
                 checkpoint()
                 val document = DocumentId(it.documentId)
                 val page = PageId(it.pageId)
-                binding(document, page, mime, orientation)?.let { saved -> IssuedHit(this, document, page, query, saved) }
+                binding(document, page, query)?.let { saved -> IssuedHit(this, document, page, query, saved) }
             }
             Page(Collections.unmodifiableList(hits), if (candidates.size == limit)
                 ReturningAfter(this, query, PageId(candidates.last().pageId)) else null)
         }
+    }
+
+    private fun scanCaptureDay(query: CaptureDayMetadataQuery, cursor: ReturningAfter?, limit: Int, checkpoint: () -> Unit): Page {
+        val candidates = catalog.scanCaptureDayCandidates(query.epochDay, cursor?.lastBlob?.value, cursor?.lastCandidate?.value, limit)
+        val hits = candidates.mapNotNull {
+            checkpoint()
+            val document = DocumentId(it.documentId)
+            val page = PageId(it.pageId)
+            val saved = binding(document, page, query)?.takeIf { saved -> saved.blobId == it.sourceBlobId } ?: return@mapNotNull null
+            IssuedHit(this, document, page, query, saved)
+        }
+        val next = if (candidates.size == limit) candidates.last().let {
+            ReturningAfter(this, query, PageId(it.pageId), SourceBlobId(it.sourceBlobId))
+        } else null
+        return Page(Collections.unmodifiableList(hits), next)
     }
 
     internal suspend fun match(document: DocumentId, page: PageId, raw: String): Hit? {
@@ -78,12 +101,12 @@ class RoomSourceMetadataSearch private constructor(store: PrivateImportStore.Sou
     }
 
     private suspend fun read(document: DocumentId, page: PageId, query: SourceMetadataQuery): SavedSourceMetadataBinding? =
-        reading {
-            binding(document, page, (query as? SourceMetadataQuery.Format)?.mime, (query as? SourceMetadataQuery.Orientation)?.value)
-        }
+        reading { binding(document, page, query) }
 
-    private fun binding(document: DocumentId, page: PageId, mime: String?, orientation: Int?): SavedSourceMetadataBinding? {
-        val match = catalog.metadataMatchForSavedPage(page.value, document.value, mime, orientation) ?: return null
+    private fun binding(document: DocumentId, page: PageId, query: SourceMetadataQuery): SavedSourceMetadataBinding? {
+        val match = catalog.metadataMatchForSavedPage(page.value, document.value,
+            (query as? SourceMetadataQuery.Format)?.mime, (query as? SourceMetadataQuery.Orientation)?.value,
+            (query as? CaptureDayMetadataQuery)?.epochDay) ?: return null
         if (metadata.isHiddenAtelierDraft(document.value)) return null
         try {
             SourceId(match.sourceId)

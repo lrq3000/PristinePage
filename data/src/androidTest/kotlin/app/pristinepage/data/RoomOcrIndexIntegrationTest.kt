@@ -1414,6 +1414,49 @@ class RoomOcrIndexIntegrationTest {
         }
     }
 
+    @Test fun privateCaptureDaySearchContinuesPastARejectedSharedPageAndRechecksTheDayAtOpen() {
+        val isolated = isolatedOcrStoreContext()
+        val database = Room.databaseBuilder(isolated, PristineDatabase::class.java, "pristinepage.db").build()
+        try {
+            val sql = database.openHelper.writableDatabase
+            val original = seedQueuePage(sql)
+            val duplicate = seedAdditionalQueuePage(sql, original)
+            val (first, second) = listOf(original.pageId, duplicate.pageId).sortedBy { it.value }
+            sql.execSQL("UPDATE RecipeRevision SET recipeSha256=? WHERE pageId=?", arrayOf("z".repeat(64), first.value))
+            val provider = SourceInput { error("Capture day search must not open a provider") }
+            val inspector = SourceInspector { _, _ -> error("Capture day search must not decode a source") }
+            runBlocking {
+                PrivateImportStore.open(isolated, provider, inspector).use { store ->
+                    val search = store.sourceMetadata
+                    assertTrue(search.findCaptureDay(19782, null, 1).hits.isEmpty())
+                    sql.execSQL("INSERT INTO SourceCaptureDay VALUES (?,?,19782)", arrayOf(BLOB, "a".repeat(64)))
+                    val empty = search.findCaptureDay(19782, null, 1)
+                    assertTrue(empty.hits.isEmpty())
+                    val next = checkNotNull(empty.next)
+                    assertTrue(runCatching { search.findCaptureDay(19783, next, 1) }.exceptionOrNull() is IllegalArgumentException)
+                    assertTrue(runCatching { search.find("format:png", next, 1) }.exceptionOrNull() is IllegalArgumentException)
+                    PrivateImportStore.open(isolated, provider, inspector).use { other ->
+                        assertTrue(runCatching { other.sourceMetadata.findCaptureDay(19782, next, 1) }.exceptionOrNull() is IllegalArgumentException)
+                    }
+                    val rest = search.findCaptureDay(19782, next, 1)
+                    val hit = rest.hits.single()
+                    assertEquals(second, hit.page)
+                    assertEquals(original.documentId, hit.document)
+                    assertTrue(search.canOpen(hit))
+                    assertTrue(search.findCaptureDay(19782, checkNotNull(rest.next), 1).hits.isEmpty())
+                    sql.execSQL("UPDATE SourceCaptureDay SET epochDay=19783 WHERE sourceBlobId=?", arrayOf(BLOB))
+                    assertFalse(search.canOpen(hit))
+                    sql.execSQL("UPDATE SourceCaptureDay SET epochDay=19782 WHERE sourceBlobId=?", arrayOf(BLOB))
+                    assertTrue(search.canOpen(hit))
+                    sql.execSQL("INSERT INTO AtelierDraft (draftId,stagingDocumentId,state,generation,step,createdAt) VALUES (?,?,'EDITING',1,1,0)",
+                        arrayOf(DRAFT, DOCUMENT))
+                    assertFalse(search.canOpen(hit))
+                    assertTrue(search.findCaptureDay(19782, null, 1).hits.isEmpty())
+                }
+            }
+        } finally { database.close() }
+    }
+
     private fun withOcrAttempts(
         previousResult: Boolean = false,
         configuration: OcrConfiguration = queueConfig(OcrLayout.AUTOMATIC),

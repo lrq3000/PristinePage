@@ -1,8 +1,10 @@
 package app.pristinepage.data
 
 import app.pristinepage.data.repository.SourceMetadataQuery
+import app.pristinepage.data.repository.RoomSourceMetadataSearch
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class SourceMetadataQueryTest {
@@ -19,5 +21,10 @@ class SourceMetadataQueryTest {
             "orientation:06", "orientation:６", "orientation:+6", "orientation:6 format:jpeg", "orientation:6\u0000",
             "GPS:51", "serial:123", " ".repeat(161) + "format:jpeg")
         ) assertNull(query.take(32), SourceMetadataQuery.parse(query))
+    }
+
+    @Test fun privateTypedDayEntryPointIsNotExposedToJavaSource() {
+        val method = RoomSourceMetadataSearch::class.java.declaredMethods.single { it.name.startsWith("findCaptureDay") }
+        assertTrue(method.isSynthetic)
     }
 }
