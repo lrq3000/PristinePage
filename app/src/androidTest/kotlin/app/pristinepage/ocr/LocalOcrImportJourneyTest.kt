@@ -87,8 +87,9 @@ class LocalOcrImportJourneyTest {
         withTimeout(15_000) {
             waitFor {
                 // Run on a dedicated guest with no competing import. Prior successful wakes must not satisfy this witness.
+                // A delivery can defer behind the per-store OCR lane. Only the durable recognition count above is required to be one.
                 wakes().filterNot { it.id in existingWakes }.takeIf { it.size == 2 && it.all { wake ->
-                    wake.state == WorkInfo.State.SUCCEEDED && wake.runAttemptCount == 1
+                    wake.state == WorkInfo.State.SUCCEEDED
                 } }
             }
         }
