@@ -41,7 +41,7 @@ def normalized(text):
     return "".join(c for c in unicodedata.normalize("NFC", text).casefold() if not c.isspace())
 
 
-def control(tesseract, packs, fonts, languages):
+def render_control(fonts, languages):
     image = Image.new("L", (1500, 128 + 104 * len(languages)), 255)
     drawing = ImageDraw.Draw(image)
     for index, language in enumerate(languages):
@@ -53,10 +53,14 @@ def control(tesseract, packs, fonts, languages):
         )
     png = io.BytesIO()
     image.save(png, format="PNG", dpi=(300, 300))
+    return png.getvalue()
+
+
+def control(tesseract, packs, fonts, languages):
     config = "+".join(languages)
     result = subprocess.run(
         [tesseract, "stdin", "stdout", "--tessdata-dir", str(packs), "-l", config, "--psm", "6"],
-        input=png.getvalue(), capture_output=True, timeout=30,
+        input=render_control(fonts, languages), capture_output=True, timeout=30,
     )
     # Tesseract may emit successful output after falling back to one of several requested packs.
     if result.returncode or b"failed loading language" in result.stderr.lower() or b"error opening data file" in result.stderr.lower():

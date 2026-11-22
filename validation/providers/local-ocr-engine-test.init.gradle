@@ -1,0 +1,35 @@
+// Explicit invocation only: add the hash-pinned private AAR and assets to image-android instrumentation, never to the app or the library.
+import java.util.concurrent.TimeUnit
+
+def folder = System.getProperty("pristinepage.ocrProbe")
+def receipt = System.getProperty("pristinepage.ocrProbeReceipt")
+if (folder == null || folder.isBlank() || receipt == null || !(receipt ==~ /[a-f0-9]{64}/)
+        || !gradle.startParameter.offline || gradle.startParameter.taskNames != [":image-android:assembleDebugAndroidTest"]) {
+    throw new GradleException("The OCR probe requires only the image test APK task, --offline, an explicit stage and its independent receipt SHA-256")
+}
+
+gradle.beforeProject { project ->
+    if (project.path != ":image-android") return
+    project.plugins.withId("com.android.library") {
+        File privateRoot = new File(project.rootDir, "validation/raw/providers").canonicalFile
+        File stage = new File(folder).absoluteFile
+        if (stage.canonicalFile != stage || stage.parentFile != privateRoot || !(stage.name ==~ /ocr-engine-[a-z0-9-]+/)) {
+            throw new GradleException("The OCR probe must use an ignored, scoped local folder")
+        }
+        File aar = new File(stage, "tesseract4android.aar")
+        File assets = new File(stage, "assets")
+        def verifier = new File(project.rootDir, "validation/providers/prepare_ocr_android_probe.py")
+        def verified = new ProcessBuilder("python", "-B", verifier.path, "--verify", stage.path, receipt).redirectErrorStream(true).start()
+        if (!verified.waitFor(30, TimeUnit.SECONDS)) {
+            verified.destroyForcibly()
+            throw new GradleException("OCR staging verification exceeded its time limit")
+        }
+        if (verified.exitValue() != 0) {
+            throw new GradleException("Unverified OCR stage; run the local --verify command for details before building")
+        }
+        def test = project.extensions.getByName("android").sourceSets.getByName("androidTest")
+        test.assets.srcDir(assets)
+        test.java.srcDir(new File(project.rootDir, "validation/providers/android-ocr-probe"))
+        project.dependencies.add("androidTestImplementation", project.files(aar))
+    }
+}
