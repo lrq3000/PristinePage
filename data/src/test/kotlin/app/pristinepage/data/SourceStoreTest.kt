@@ -4,6 +4,8 @@ import app.pristinepage.core.pipeline.PixelSize
 import app.pristinepage.data.files.SourceFiles
 import app.pristinepage.data.files.SourceInspector
 import app.pristinepage.data.files.DirectorySync
+import app.pristinepage.data.files.InspectedSourceForIngest
+import app.pristinepage.data.journal.IngestJournalCodec
 import app.pristinepage.data.model.*
 import app.pristinepage.data.repository.*
 import java.io.ByteArrayInputStream
@@ -24,7 +26,7 @@ import org.junit.Test
 
 /** Real source-store orchestration/private files/journal/lease/owner/metadata commands. Only provider streams, normalized inspection and Android DB storage are substituted; this is not actual decoder/provider/device/process-death acceptance. */
 class SourceStoreTest {
-    internal class Fixture(directorySync: DirectorySync? = null, enableRetry: Boolean = false) {
+    internal class Fixture(directorySync: DirectorySync? = null, enableRetry: Boolean = false, captureDate: SourceCaptureDate? = null) {
         val db = IngestIntentTest.Fixture()
         val bytes = byteArrayOf(1, 2, 3, 4)
         private val parent = File(System.getProperty("user.dir"), "build/test-source-files").apply { mkdirs() }
@@ -52,12 +54,18 @@ class SourceStoreTest {
                 assertEquals(1, db.files.values.count { it.state == "COPYING" })
                 opened++; input()
             }
-            val inspector = SourceInspector { file, hash ->
+            val normalizedInspector = SourceInspector { file, hash ->
                 assertFalse(db.catalog.inTransaction); assertEquals(opened, closed)
                 assertEquals(1, db.files.values.count { it.state == "COPYING" })
                 assertArrayEquals(bytes, file.readBytes()); assertEquals("9f64a747e1b97f131fabb6b447296c9b6f0201e79fb3c5356e6c77e89b6a806a", hash)
                 inspected++; inspectionFailure?.let { throw it }; duringInspection()
                 SourceInspection("image/png", PixelSize(3, 2), PixelSize(3, 2), 1, null, "synthetic-v1", "a".repeat(64))
+            }
+            val inspector = if (captureDate == null) normalizedInspector else object : SourceInspector {
+                override suspend fun inspect(file: File, expectedByteSha256: String): SourceInspection =
+                    error("The date-capable ingest must use the same inspection, not the legacy path")
+                override suspend fun inspectForIngest(file: File, expectedByteSha256: String): InspectedSourceForIngest =
+                    InspectedSourceForIngest(normalizedInspector.inspect(file, expectedByteSha256), captureDate)
             }
             val completion = RoomIngestCompletion(db.metadata, db, db, db, db, files, { db.now }, { db.now }, Dispatchers.Unconfined)
             val replay = object : IngestReplay { override suspend fun replay(intent: IngestJournalIntent): IngestResult { beforeReplay(intent); return completion.replay(intent) } }
@@ -94,6 +102,28 @@ class SourceStoreTest {
         repeat(2) { assertEquals(first, f.store.ingestBoundProvider(f.db.uri, f.db.child)) }
         assertEquals(1, f.opened); assertEquals(1, f.closed); assertEquals(1, f.db.catalog.pages.size)
         assertEquals(2L, f.db.catalog.documents[f.db.document.value]!!.documentRevision)
+    }
+
+    @Test fun dateProjectionRemainsBoundToTheExactVerifiedSealOnReplay() = runTest {
+        val expected = SourceCaptureDate(19782)
+        val f = Fixture(captureDate = expected)
+        val first = f.store.ingestBoundProvider(f.db.uri, f.db.child) as IngestResult.Committed
+        val intent = RoomIngestLookup(f.db.metadata, f.db, f.db, f.db).find(f.db.child)!!
+        val id = intent.transactionId.value
+        val row = f.db.files.getValue(id)
+        val receipt = IngestJournalCodec.decodeCommit(row.payload, intent)
+        assertEquals(expected, receipt.seal.captureDate)
+        val recovered = f.files.recover(id, checkNotNull(row.sealSha256))!!
+        assertEquals(expected, IngestJournalCodec.decodeSeal(recovered.metadata, intent).captureDate)
+        assertEquals(first, f.store.ingestBoundProvider(f.db.uri, f.db.child))
+
+        val altered = receipt.copy(seal = receipt.seal.copy(captureDate = SourceCaptureDate(19783)))
+        f.db.files[id] = row.copy(payload = IngestJournalCodec.encodeCommit(altered))
+        val rejected = f.store.ingestBoundProvider(f.db.uri, f.db.child) as IngestResult.Rejected
+        assertEquals(OperationErrorCode.INTEGRITY_FAILED, rejected.error.code)
+        assertArrayEquals(f.bytes, f.files.finalFile(intent.sourceBlobId.value).readBytes())
+        assertEquals(1, f.inspected)
+        assertEquals(1, f.db.catalog.pages.size)
     }
 
     @Test fun revokedMidCopyClosesTheDescriptorAndCannotCommitAPage() = runTest {
