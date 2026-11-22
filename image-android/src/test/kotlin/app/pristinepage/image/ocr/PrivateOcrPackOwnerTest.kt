@@ -75,6 +75,19 @@ class PrivateOcrPackOwnerTest {
         assertNull(owner.resolveOrdered(listOf("eng")))
     }
 
+    @Test fun resolvingAnOrderedSubsetDoesNotTraverseItsPackBytesTwice() {
+        val owner = owner(fixture.newFolder().toPath())
+        assertTrue(owner.install { pack(it) })
+        val englishOnly = OcrLanguagePacks(listOf(english))
+        var acquisitionChecks = 0
+        assertNotNull(owner.acquire(englishOnly) { acquisitionChecks++ })
+        var resolutionChecks = 0
+        val resolved = owner.resolveOrdered(listOf("eng")) { resolutionChecks++ }
+        assertEquals(englishOnly, resolved)
+        // Both paths must authenticate the same two files once; the same real filesystem and checkpoint surround both scans.
+        assertEquals(acquisitionChecks, resolutionChecks)
+    }
+
     @Test fun callersCannotSupplyATrustedDirectoryOrOwnershipPredicate() {
         assertTrue(PrivateOcrPackOwner::class.java.declaredConstructors.all { it.isSynthetic || Modifier.isPrivate(it.modifiers) })
     }

@@ -48,8 +48,11 @@ internal class PrivateOcrPackOwner private constructor(
     private val installed = VerifiedOcrPackDirectory(destination, this.pins)
     private val posix = "posix" in this.parent.fileSystem.supportedFileAttributeViews()
 
-    fun resolveOrdered(codes: List<String>, checkpoint: () -> Unit = {}): OcrLanguagePacks? =
-        readInstalled(checkpoint) { installed.resolveOrdered(codes, checkpoint)?.takeIf { installed.verifies(all, checkpoint) } }
+    fun resolveOrdered(codes: List<String>, checkpoint: () -> Unit = {}): OcrLanguagePacks? = readInstalled(checkpoint) {
+        // Full-catalog authentication already includes every selected pack; do not hash the subset first.
+        val ordered = installed.orderedIdentities(codes) ?: return@readInstalled null
+        ordered.takeIf { installed.verifies(all, checkpoint) }
+    }
 
     /** The path is stable because no cooperating writer can touch a published set. The caller borrows it only for the verified engine session. */
     fun acquire(packs: OcrLanguagePacks, checkpoint: () -> Unit = {}): Path? = readInstalled(checkpoint) {

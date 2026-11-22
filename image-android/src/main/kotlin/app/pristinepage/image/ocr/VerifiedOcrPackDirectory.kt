@@ -22,6 +22,12 @@ internal class VerifiedOcrPackDirectory(root: Path, pins: List<Pin>) {
     }
 
     fun resolveOrdered(codes: List<String>, checkpoint: () -> Unit = {}): OcrLanguagePacks? {
+        val selected = orderedIdentities(codes) ?: return null
+        return selected.takeIf { verifies(it, checkpoint) }
+    }
+
+    /** Descriptor lookup only; the owner must authenticate the installed catalog before returning these identities as usable. */
+    fun orderedIdentities(codes: List<String>): OcrLanguagePacks? {
         val selected = ArrayList<OcrLanguagePack>()
         val seen = HashSet<String>()
         for (code in codes) {
@@ -29,7 +35,7 @@ internal class VerifiedOcrPackDirectory(root: Path, pins: List<Pin>) {
             selected.add((byCode[code] ?: return null).identity)
         }
         if (selected.isEmpty()) return null
-        return OcrLanguagePacks(selected).takeIf { verifies(it, checkpoint) }
+        return OcrLanguagePacks(selected)
     }
 
     /** Check the original job's pack identities first, never substituting the catalog's current digest. */
