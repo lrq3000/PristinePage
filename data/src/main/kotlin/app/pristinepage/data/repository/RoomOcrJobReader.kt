@@ -30,6 +30,15 @@ internal class RoomOcrJobReader(private val database: PristineDatabase) {
         return recovered to row
     }
 
+    /** While a new generation runs, the producer has no current-pointer extent. Admit a scalar locator first, never the old input BLOB. */
+    fun readProducerInTransaction(id: JobId, page: PageId): Pair<OcrJobInput, JobRow>? {
+        check(database.inTransaction()) { "OCR producing-job reads require the owning Room transaction" }
+        val locator = database.jobLeases().ocrProducerLocator(id.value) ?: return null
+        val generation = locator.idempotenceKey.substringAfterLast('/').toLongOrNull() ?: return null
+        if (generation < 1 || locator.idempotenceKey != "ocr-page-v2/${page.value}/$generation") return null
+        return recoverInTransaction(id, page, generation, locator.digest, locator.extent)
+    }
+
     private fun readBounded(id: JobId, key: String, digest: String, inputBytes: Int): JobRow? {
         val jobs = database.jobLeases()
         when (jobs.ocrJobReadIsBounded(id.value, key, digest, inputBytes)) {

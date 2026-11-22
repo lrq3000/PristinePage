@@ -40,6 +40,7 @@ import app.pristinepage.data.repository.RoomOcrAttempts
 import app.pristinepage.data.repository.RoomOcrCurrentWork
 import app.pristinepage.data.repository.RoomOcrQueue
 import app.pristinepage.data.repository.RoomOcrResults
+import app.pristinepage.data.repository.RoomOcrSearch
 import kotlinx.coroutines.async
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.*
@@ -416,6 +417,82 @@ class RoomOcrIndexIntegrationTest {
         assertEquals(emptyList<String>(), f.matches("replay"))
     }
 
+    @Test fun searchKeepsTheActualPreviousProducerDuringARerunButRejectsAMisboundProducer() = withOcrAttempts { f ->
+        val lease = f.start()
+        f.results.publish(f.request, lease, OcrText("Receipt, 東京都の領収書です"))
+        val hit = f.search.find("領収書", after = null, limit = 1).hits.single()
+        assertEquals(PageId(PAGE), hit.page)
+        assertEquals(DocumentId(DOCUMENT), hit.document)
+        assertEquals(f.request.jobId, hit.producingJob)
+        assertTrue(f.search.canOpen(hit))
+        assertNotEquals(hit.producingJob, f.queueAgain())
+        assertEquals(hit, f.search.find("領収書", after = null, limit = 1).hits.single())
+        assertTrue(f.search.canOpen(hit))
+        f.sql.execSQL("UPDATE Job SET idempotenceKey=? WHERE jobId=?", arrayOf("misbound-key", hit.producingJob.value))
+        assertFalse(f.search.canOpen(hit))
+        val rejected = f.search.find("領収書", after = null, limit = 1)
+        assertTrue(rejected.hits.isEmpty())
+        assertEquals(PageId(PAGE), rejected.nextAfter)
+        assertNull(f.search.find("領収書", rejected.nextAfter, limit = 1).nextAfter)
+    }
+
+    @Test fun noTextHitCanOpenAfterTheSavedRevisionChangesOrItsProjectionIsUnsupported() = withOcrAttempts { f ->
+        val lease = f.start()
+        f.results.publish(f.request, lease, OcrText("Receipt only for revision one"))
+        val hit = f.search.find("receipt", after = null, limit = 10).hits.single()
+        f.sql.execSQL("UPDATE OcrPageWork SET projectionVersion=2")
+        assertTrue(f.search.find("receipt", after = null, limit = 10).hits.isEmpty())
+        assertFalse(f.search.canOpen(hit))
+        f.sql.execSQL("UPDATE OcrPageWork SET projectionVersion=1")
+        assertTrue(f.search.canOpen(hit))
+        f.sql.execSQL("""INSERT INTO RecipeRevision SELECT pageId,2,sourceId,recipeSchemaVersion,canonicalRecipe,
+            recipeSha256,1,createdAt FROM RecipeRevision WHERE pageId=? AND recipeRevision=1""", arrayOf(PAGE))
+        f.sql.execSQL("UPDATE Page SET currentRecipeRevision=2 WHERE pageId=?", arrayOf(PAGE))
+        assertTrue(f.search.find("receipt", after = null, limit = 10).hits.isEmpty())
+        assertFalse(f.search.canOpen(hit))
+    }
+
+    @Test fun unboundLegacyTextIsNotPublicSearchAuthority() = withOcrAttempts { f ->
+        insertText(f.sql)
+        assertEquals(listOf(PAGE), f.matches("ecole"))
+        assertTrue(f.search.find("ecole", after = null, limit = 10).hits.isEmpty())
+    }
+
+    @Test fun malformedEarlierPageIdDoesNotDisplaceTheValidFirstHit() = withOcrAttempts { f ->
+        f.results.publish(f.request, f.start(), OcrText("Receipt"))
+        val malformed = "0".repeat(36)
+        f.sql.beginTransaction()
+        try {
+            f.sql.execSQL("""INSERT INTO Page SELECT ?,documentId,sourceId,1,'ACTIVE',1,NULL,createdAt
+                FROM Page WHERE pageId=?""", arrayOf(malformed, PAGE))
+            f.sql.execSQL("""INSERT INTO RecipeRevision SELECT ?,1,sourceId,recipeSchemaVersion,canonicalRecipe,recipeSha256,
+                NULL,createdAt FROM RecipeRevision WHERE pageId=? AND recipeRevision=1""", arrayOf(malformed, PAGE))
+            f.sql.execSQL("""INSERT INTO OcrResult (pageId,recipeRevision,sourcePixelSha256,engineId,engineVersion,layout,indexedText)
+                SELECT ?,recipeRevision,sourcePixelSha256,engineId,engineVersion,layout,indexedText FROM OcrResult WHERE pageId=?""",
+                arrayOf(malformed, PAGE))
+            f.sql.setTransactionSuccessful()
+        } finally { f.sql.endTransaction() }
+        val first = f.search.find("receipt", after = null, limit = 1)
+        assertEquals(PageId(PAGE), first.hits.single().page)
+        assertEquals(PageId(PAGE), first.nextAfter)
+        assertTrue(f.search.canOpen(first.hits.single()))
+    }
+
+    @Test fun storedBlobTextCannotAuthorizeAHitOrAPreviouslyDisplayedClick() = withOcrAttempts { f ->
+        f.results.publish(f.request, f.start(), OcrText("Receipt"))
+        val hit = f.search.find("receipt", after = null, limit = 10).hits.single()
+        assertTrue(f.search.canOpen(hit))
+        f.sql.execSQL("UPDATE OcrResult SET indexedText=CAST('receipt' AS BLOB)")
+        assertEquals(listOf(PAGE), f.matches("receipt")) // SQLite can index the malformed value.
+        assertTrue(f.search.find("receipt", after = null, limit = 10).hits.isEmpty())
+        assertFalse(f.search.canOpen(hit))
+        f.sql.execSQL("UPDATE OcrResult SET indexedText='receipt',verbatimText=CAST('receipt' AS BLOB)")
+        assertTrue(f.search.find("receipt", after = null, limit = 10).hits.isEmpty())
+        assertFalse(f.search.canOpen(hit))
+        f.sql.execSQL("UPDATE OcrResult SET verbatimText=NULL")
+        assertTrue(f.search.canOpen(hit))
+    }
+
     private data class AttemptFixture(
         val sql: SupportSQLiteDatabase,
         val attempts: RoomOcrAttempts,
@@ -425,6 +502,7 @@ class RoomOcrIndexIntegrationTest {
         val results: RoomOcrResults,
         val matches: (String) -> List<String>,
         val queueAgain: suspend () -> JobId,
+        val search: RoomOcrSearch,
     ) {
         suspend fun start(): JobLease {
             assertTrue(attempts.admit(request))
@@ -459,7 +537,7 @@ class RoomOcrIndexIntegrationTest {
                 test(AttemptFixture(sql, RoomOcrAttempts(database, liveness, leaseClock = clock::get),
                     RoomOcrAttempts.Request(id, stored.intent), owners, clock, RoomOcrResults(database, liveness, leaseClock = clock::get),
                     { query -> database.ocrResults().matchPages(checkNotNull(OcrSearchTerms.create(query)), null, 2).map { it.pageId } },
-                    { queue.enqueue(page, config, rerun = true) }))
+                    { queue.enqueue(page, config, rerun = true) }, RoomOcrSearch(database)))
             }
         } finally { database.close() }
     }

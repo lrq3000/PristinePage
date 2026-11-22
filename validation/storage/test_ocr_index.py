@@ -67,9 +67,42 @@ class OcrIndexSqlTest(unittest.TestCase):
         self.assertEqual(0, result.returncode, result.stderr)
         return result.stdout.splitlines()
 
-    def query(self, term="ecole"):
+    def query(self, term="ecole", limit=2):
         self.assertRegex(term, r"\A[a-z]+\Z")
-        return match().replace(":expression", f"""'"{term}"'""").replace(":afterPageId", "NULL").replace(":limit", "2")
+        return match().replace(":expression", f"""'"{term}"'""").replace(":afterPageId", "NULL").replace(":limit", str(limit))
+
+    def test_malformed_page_id_does_not_consume_the_first_match_slot(self):
+        malformed = "0" * 36
+        self.assertEqual([f"{DOC}|{PAGE}"], self.run_sql([
+            "PRAGMA foreign_keys=ON", *create_tables(3), *sync_triggers(), SEED, INSERT_TEXT,
+            "BEGIN",
+            f"INSERT INTO Page VALUES ('{malformed}','{DOC}','{SOURCE}',1,'ACTIVE',1,NULL,0)",
+            f"INSERT INTO RecipeRevision VALUES ('{malformed}',1,'{SOURCE}',1,X'010203','{'c' * 64}',NULL,0)",
+            INSERT_TEXT.replace(PAGE, malformed), "COMMIT",
+            self.query(limit=1),
+            "PRAGMA foreign_key_check",
+        ]))
+
+    def test_producer_metadata_guard_rejects_malformed_result_storage(self):
+        sql, = literals(DB / "OcrResultDao.kt", r'@Query\("""((?:(?!""").)*)"""\)\s*abstract fun matchesProducerMetadata\(')
+        for name, value in (
+            ("page", f"'{PAGE}'"), ("revision", "1"), ("sourceSha", f"'{'b' * 64}'"),
+            ("engineVersion", "1"), ("engine", "'fixture'"), ("layout", "'AUTOMATIC'"),
+        ):
+            sql = sql.replace(f":{name}", value)
+        for field, bad in (
+            ("indexedText", "CAST('invoice' AS BLOB)"),
+            ("indexedText", "'invoice' || char(0) || 'suffix'"),
+            ("indexedText", "replace(hex(zeroblob(262145)), '00', '界')"),
+            ("verbatimText", "CAST('invoice' AS BLOB)"),
+            ("verbatimText", "'invoice' || char(0) || 'suffix'"),
+            ("verbatimText", "replace(hex(zeroblob(131073)), '00', '界')"),
+        ):
+            with self.subTest(field=field, bad=bad):
+                self.assertEqual(["1", "0", "1"], self.run_sql([
+                    "PRAGMA foreign_keys=ON", *create_tables(3), *sync_triggers(), SEED, INSERT_TEXT, sql,
+                    "BEGIN", f"UPDATE OcrResult SET {field}={bad}", sql, "ROLLBACK", sql,
+                ]))
 
     def test_populated_v2_upgrade_preserves_recipe_and_has_no_invented_text(self):
         migration = DB / "OcrIndexMigration.kt"

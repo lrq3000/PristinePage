@@ -84,10 +84,18 @@ internal abstract class OcrResultDao {
         layout: String, indexed: String, verbatim: String?,
     ): Boolean
 
+    // The UTF-8 byte ceilings conservatively follow the 262,144/131,072 UTF-16-unit writer limits. Return a scalar, never either text field.
+    @Query("""SELECT EXISTS (SELECT 1 FROM OcrResult WHERE pageId=:page AND recipeRevision=:revision AND sourcePixelSha256=:sourceSha
+        AND engineId=:engine AND engineVersion=:engineVersion AND layout=:layout
+        AND (typeof(indexedText)='text' AND length(CAST(indexedText AS BLOB))<=786432 AND instr(indexedText,char(0))=0)
+        AND (verbatimText IS NULL OR (typeof(verbatimText)='text' AND length(CAST(verbatimText AS BLOB))<=393216
+            AND instr(verbatimText,char(0))=0)))""")
+    abstract fun matchesProducerMetadata(page: String, revision: Long, sourceSha: String, engine: String, engineVersion: Int, layout: String): Boolean
+
     fun matchPages(terms: OcrSearchTerms, afterPageId: PageId?, limit: Int): List<OcrMatchRow> =
         selectMatches(terms.expression, afterPageId?.value, limit)
 
-    // This narrow prefilter is not navigation authority. A consuming repository must also decode the bounded Atelier receipt and use the existing guarded page/document reads.
+    // IDs must be representable as typed UUIDs before LIMIT, or one malformed candidate can prevent the batch from advancing. This prefilter does not validate the decoded Atelier receipt or grant navigation authority.
     @Query("""SELECT Document.documentId, Page.pageId
         FROM OcrResultFts JOIN OcrResult ON OcrResult.rowid=OcrResultFts.rowid
         JOIN Page ON Page.pageId=OcrResult.pageId AND Page.currentRecipeRevision=OcrResult.recipeRevision
@@ -101,7 +109,11 @@ internal abstract class OcrResultDao {
           AND Document.lifecycle='ACTIVE' AND Document.deletedAt IS NULL AND NOT $HIDDEN_ATELIER_DOCUMENT
           AND Source.state='READY' AND SourceBlob.state='READY'
           AND typeof(Page.pageId)='text' AND length(CAST(Page.pageId AS BLOB))=36
+          AND (Page.pageId GLOB '????????-????-????-????-????????????' AND length(replace(Page.pageId,'-',''))=32
+            AND Page.pageId NOT GLOB '*[^0-9a-f-]*')
           AND typeof(Document.documentId)='text' AND length(CAST(Document.documentId AS BLOB))=36
+          AND (Document.documentId GLOB '????????-????-????-????-????????????' AND length(replace(Document.documentId,'-',''))=32
+            AND Document.documentId NOT GLOB '*[^0-9a-f-]*')
         ORDER BY Page.pageId LIMIT CASE WHEN :limit BETWEEN 1 AND 50 THEN :limit ELSE 0 END""")
     protected abstract fun selectMatches(expression: String, afterPageId: String?, limit: Int): List<OcrMatchRow>
 }
