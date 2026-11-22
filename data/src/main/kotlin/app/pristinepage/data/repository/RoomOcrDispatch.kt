@@ -68,25 +68,38 @@ internal class RoomOcrDispatch(
         }
     }
 
-    private suspend fun read(page: PageId, job: JobId): Observation? {
+    /** Report supersession only. Do not refresh a process owner or recover a lease while classifying a failed execution. */
+    suspend fun isObsolete(page: PageId, job: JobId): Boolean = withContext(dispatcher) {
+        readSnapshot(job) { matchingSavedWork(page, job) == null }
+    }
+
+    private fun matchingSavedWork(page: PageId, job: JobId): RoomOcrCurrentWork.Current? {
+        val saved = current.readStoredInTransaction(page) ?: return null
+        return saved.takeIf { it.job.jobId == job.value && current.isSavedInputInTransaction(it.intent) }
+    }
+
+    private suspend fun read(page: PageId, job: JobId): Observation? = readSnapshot(job) {
+        val saved = matchingSavedWork(page, job) ?: return@readSnapshot null
+        val request = RoomOcrAttempts.Request(job, saved.intent)
+        if (!RoomOcrAttempts.hasConsistentStoredState(saved.job)) throw RepositoryFailure(
+            OperationError(OperationErrorCode.INTEGRITY_FAILED, false, "ocr_dispatch_state_invalid", job.value),
+        )
+        when (saved.job.state) {
+            "PENDING", "ADMITTED", "RUNNING" -> {
+                val pinned = attempts.readPinnedInTransaction(request).job
+                val lease = if (pinned.state == "RUNNING") JobLease(job, checkNotNull(pinned.leaseOwner), pinned.leaseGeneration) else null
+                Observation(request, terminal = false, lease = lease)
+            }
+            else -> Observation(request, terminal = true)
+        }
+    }
+
+    private suspend fun <T> readSnapshot(job: JobId, lookup: () -> T): T {
         val active = currentCoroutineContext()
         val observation = try {
             metadata.transaction {
                 active.ensureActive()
-                val saved = current.readStoredInTransaction(page) ?: return@transaction null
-                if (saved.job.jobId != job.value || !current.isSavedInputInTransaction(saved.intent)) return@transaction null
-                val request = RoomOcrAttempts.Request(job, saved.intent)
-                if (!RoomOcrAttempts.hasConsistentStoredState(saved.job)) throw RepositoryFailure(
-                    OperationError(OperationErrorCode.INTEGRITY_FAILED, false, "ocr_dispatch_state_invalid", job.value),
-                )
-                when (saved.job.state) {
-                    "PENDING", "ADMITTED", "RUNNING" -> {
-                        val pinned = attempts.readPinnedInTransaction(request).job
-                        val lease = if (pinned.state == "RUNNING") JobLease(job, checkNotNull(pinned.leaseOwner), pinned.leaseGeneration) else null
-                        Observation(request, terminal = false, lease = lease)
-                    }
-                    else -> Observation(request, terminal = true)
-                }
+                lookup()
             }
         } catch (canceled: CancellationException) {
             throw canceled

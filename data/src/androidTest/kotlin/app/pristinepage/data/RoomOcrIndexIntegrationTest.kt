@@ -26,6 +26,7 @@ import app.pristinepage.data.db.PristineDatabase
 import app.pristinepage.data.model.DocumentId
 import app.pristinepage.data.model.EditablePage
 import app.pristinepage.data.model.JobId
+import app.pristinepage.data.model.OperationError
 import app.pristinepage.data.model.OperationErrorCode
 import app.pristinepage.data.model.PageId
 import app.pristinepage.data.model.RepositoryFailure
@@ -42,22 +43,30 @@ import app.pristinepage.data.repository.RoomOcrAttempts
 import app.pristinepage.data.repository.RoomOcrBackfill
 import app.pristinepage.data.repository.RoomOcrCurrentWork
 import app.pristinepage.data.repository.RoomOcrDispatch
+import app.pristinepage.data.repository.RoomOcrExecution
+import app.pristinepage.data.repository.FileOperationOwners
 import app.pristinepage.data.repository.RoomOcrQueue
 import app.pristinepage.data.repository.RoomOcrResults
 import app.pristinepage.data.repository.RoomOcrSearch
 import kotlinx.coroutines.async
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeout
 import org.junit.Assert.*
 import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
+import java.io.File
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.CountDownLatch
 import java.util.concurrent.Executor
+import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicLong
 import java.util.concurrent.atomic.AtomicReference
 
@@ -715,6 +724,190 @@ class RoomOcrIndexIntegrationTest {
         override suspend fun refresh(owner: String): LeaseOwnerState = error("This scenario must not invoke external proof")
     }
 
+    @Test fun unpreparedRuntimeOrCapacityDoesNotSpendAnOcrStart() = withOcrAttempts { f ->
+        val worker = f.execution()
+        for (code in listOf(OperationErrorCode.PROVIDER_UNAVAILABLE, OperationErrorCode.RESOURCE_LIMIT)) {
+            val refused = runCatching {
+                worker.run(f.request.page, f.request.jobId) { _, _, _ ->
+                    throw RepositoryFailure(OperationError(code, true, "fixture_not_prepared", null))
+                }
+            }.exceptionOrNull() as? RepositoryFailure
+            assertEquals(code, refused?.error?.code)
+            assertEquals("PENDING:0", f.sql.scalar("SELECT state||':'||attempt FROM Job"))
+            assertEquals("0", f.sql.scalar("SELECT COUNT(*) FROM OcrResult"))
+        }
+    }
+
+    @Test fun oneFencedExecutionPublishesVerbatimTextAndAnExactSearchHit() = withOcrAttempts { f ->
+        var closed = 0
+        val worker = f.execution()
+        val outcome = worker.run(f.request.page, f.request.jobId) { page, config, handoff ->
+            assertEquals(PageId(PAGE), page.pageId)
+            assertEquals(f.request.binding.configuration, config)
+            assertEquals("PENDING:0", f.sql.scalar("SELECT state||':'||attempt FROM Job"))
+            handoff.retain(object : RoomOcrExecution.Prepared {
+                override suspend fun recognize(): OcrText {
+                    assertEquals("RUNNING:1", f.sql.scalar("SELECT state||':'||attempt FROM Job"))
+                    return OcrText(" École 東京都の領収書です\n")
+                }
+                override fun close() { closed++ }
+            })
+        }
+        assertEquals(RoomOcrExecution.Outcome.PUBLISHED, outcome)
+        assertEquals(1, closed)
+        assertEquals("SUCCEEDED:1", f.sql.scalar("SELECT state||':'||attempt FROM Job"))
+        assertEquals(" École 東京都の領収書です\n", f.sql.scalar("SELECT COALESCE(verbatimText,indexedText) FROM OcrResult"))
+        assertEquals(f.request.jobId, f.search.find("領収書", null, 1).hits.single().producingJob)
+    }
+
+    @Test fun supersededPreparationClosesWithoutAnOcrStartOrRecognition() = withOcrAttempts { f ->
+        var recognized = 0
+        var closed = 0
+        val worker = f.execution()
+        val outcome = worker.run(f.request.page, f.request.jobId) { _, _, handoff ->
+            assertNotEquals(f.request.jobId, f.queueAgain())
+            handoff.retain(object : RoomOcrExecution.Prepared {
+                override suspend fun recognize(): OcrText { recognized++; return OcrText("must not index") }
+                override fun close() { closed++ }
+            })
+        }
+        assertEquals(RoomOcrExecution.Outcome.OBSOLETE, outcome)
+        assertEquals(0, recognized)
+        assertEquals(1, closed)
+        assertEquals("0", f.sql.scalar("SELECT SUM(attempt) FROM Job"))
+        assertEquals("0", f.sql.scalar("SELECT COUNT(*) FROM OcrResult"))
+    }
+
+    @Test fun startedEngineFailuresAreRecordedWithoutAStartBeyondThree() = withOcrAttempts { f ->
+        var started = 0
+        var closed = 0
+        val worker = f.execution()
+        repeat(3) {
+            assertEquals(RoomOcrExecution.Outcome.FAILURE_RECORDED, worker.run(f.request.page, f.request.jobId) { _, _, handoff ->
+                handoff.retain(object : RoomOcrExecution.Prepared {
+                    override suspend fun recognize(): OcrText {
+                        started++
+                        throw RepositoryFailure(OperationError(OperationErrorCode.PROCESSING_FAILED, true, "fixture_ocr_engine_failed", null))
+                    }
+                    override fun close() { closed++ }
+                })
+            })
+        }
+        assertEquals(RoomOcrExecution.Outcome.TERMINAL, worker.run(f.request.page, f.request.jobId) { _, _, _ ->
+            error("Terminal job must not prepare the engine")
+        })
+        assertEquals(3, started)
+        assertEquals(3, closed)
+        assertEquals("FAILED:3:ENGINE_FAILED", f.sql.scalar("SELECT state||':'||attempt||':'||errorCode FROM Job"))
+        assertEquals("0", f.sql.scalar("SELECT COUNT(*) FROM OcrResult"))
+    }
+
+    @Test fun twoExecutorsForTheSameStoreCannotOverlapEvenDuringResourceClose() = withOcrAttempts { f ->
+        val (otherPage, otherJob) = f.additionalWork()
+        val first = f.execution()
+        val second = f.execution()
+        assertNotSame(first, second)
+        val closing = CompletableDeferred<Unit>()
+        val release = CountDownLatch(1)
+        coroutineScope {
+            val pending = async {
+                first.run(f.request.page, f.request.jobId) { _, _, handoff ->
+                    handoff.retain(object : RoomOcrExecution.Prepared {
+                        override suspend fun recognize() = OcrText("first")
+                        override fun close() {
+                            closing.complete(Unit)
+                            check(release.await(20, TimeUnit.SECONDS))
+                        }
+                    })
+                }
+            }
+            var secondPrepared = false
+            val other = try {
+                withTimeout(10_000) { closing.await() }
+                second.run(otherPage, otherJob) { _, _, handoff ->
+                    secondPrepared = true
+                    handoff.retain(preparedText("second"))
+                }
+            } finally { release.countDown() }
+            assertEquals(RoomOcrExecution.Outcome.PUBLISHED, pending.await())
+            assertEquals(RoomOcrExecution.Outcome.BUSY, other)
+            assertFalse(secondPrepared)
+            assertEquals("1", f.sql.scalar("SELECT SUM(attempt) FROM Job"))
+        }
+    }
+
+    @Test fun startedStorageFailureIsNotPersistedAsAnEngineError() = assertWorkerInfrastructureFailure(OperationErrorCode.STORAGE_FAILED)
+
+    @Test fun startedTypedCancellationIsNotPersistedAsAnEngineError() = assertWorkerInfrastructureFailure(OperationErrorCode.CANCELED)
+
+    private fun assertWorkerInfrastructureFailure(code: OperationErrorCode) = withOcrAttempts { f ->
+        val failure = runCatching {
+            f.execution().run(f.request.page, f.request.jobId) { _, _, handoff ->
+                handoff.retain(object : RoomOcrExecution.Prepared {
+                    override suspend fun recognize(): OcrText {
+                        throw RepositoryFailure(OperationError(code, false, "fixture_infrastructure_fault", null))
+                    }
+                    override fun close() = Unit
+                })
+            }
+        }.exceptionOrNull() as? RepositoryFailure
+        assertEquals(code, failure?.error?.code)
+        assertEquals("RUNNING:1:none", f.sql.scalar("SELECT state||':'||attempt||':'||COALESCE(errorCode,'none') FROM Job"))
+    }
+
+    @Test fun canceledPreparationDeliveryClosesTheAlreadyAllocatedResource() = withOcrAttempts { f ->
+        var allocated = false
+        var closed = 0
+        val failure = runCatching {
+            f.execution().run(f.request.page, f.request.jobId) { _, _, handoff ->
+                withContext(Dispatchers.Default) {
+                    val ready = object : RoomOcrExecution.Prepared {
+                        override suspend fun recognize(): OcrText = error("Preparation was canceled")
+                        override fun close() { closed++ }
+                    }
+                    allocated = true
+                    handoff.retain(ready)
+                    checkNotNull(coroutineContext[Job]).cancel()
+                }
+            }
+        }.exceptionOrNull()
+        assertTrue(failure is CancellationException)
+        assertTrue(allocated)
+        assertEquals(1, closed)
+        assertEquals("PENDING:0", f.sql.scalar("SELECT state||':'||attempt FROM Job"))
+    }
+
+    @Test fun oversizedSearchProjectionRecordsInvalidOutputUnderItsLease() = withOcrAttempts { f ->
+        val result = runCatching {
+            f.execution().run(f.request.page, f.request.jobId) { _, _, handoff -> handoff.retain(preparedText("\uFB2C".repeat(131_072))) }
+        }
+        assertEquals(RoomOcrExecution.Outcome.FAILURE_RECORDED, result.getOrNull())
+        assertEquals("ADMITTED:1:INVALID_OUTPUT", f.sql.scalar("SELECT state||':'||attempt||':'||errorCode FROM Job"))
+        assertEquals("0", f.sql.scalar("SELECT COUNT(*) FROM OcrResult"))
+    }
+
+    @Test fun lostPublicationLeaseDoesNotRecoverAsASideEffectOfCheckingObsolescence() = withOcrAttempts { f ->
+        val failure = runCatching {
+            f.execution().run(f.request.page, f.request.jobId) { _, _, handoff ->
+                handoff.retain(object : RoomOcrExecution.Prepared {
+                    override suspend fun recognize(): OcrText {
+                        f.clock.addAndGet(900_000)
+                        return OcrText("too late")
+                    }
+                    override fun close() = Unit
+                })
+            }
+        }.exceptionOrNull() as? RepositoryFailure
+        assertEquals(OperationErrorCode.REVISION_CONFLICT, failure?.error?.code)
+        assertEquals("RUNNING:1:none", f.sql.scalar("SELECT state||':'||attempt||':'||COALESCE(errorCode,'none') FROM Job"))
+        assertEquals("0", f.sql.scalar("SELECT COUNT(*) FROM OcrResult"))
+    }
+
+    private fun preparedText(text: String) = object : RoomOcrExecution.Prepared {
+        override suspend fun recognize() = OcrText(text)
+        override fun close() = Unit
+    }
+
     private data class AttemptFixture(
         val sql: SupportSQLiteDatabase,
         val attempts: RoomOcrAttempts,
@@ -726,6 +919,8 @@ class RoomOcrIndexIntegrationTest {
         val queueAgain: suspend () -> JobId,
         val search: RoomOcrSearch,
         val dispatch: (OperationOwnerProof) -> RoomOcrDispatch,
+        val execution: () -> RoomOcrExecution,
+        val additionalWork: suspend () -> Pair<PageId, JobId>,
     ) {
         suspend fun start(): JobLease {
             assertTrue(attempts.admit(request))
@@ -763,11 +958,17 @@ class RoomOcrIndexIntegrationTest {
                     checkNotNull(RoomOcrCurrentWork(database).readInTransaction(page.pageId))
                 }
                 assertEquals(id, JobId(stored.job.jobId))
+                val executionRoot by lazy { File(context.filesDir, "ocr-execution-${UUID.randomUUID()}") }
                 test(AttemptFixture(sql, RoomOcrAttempts(database, liveness, leaseClock = clock::get),
                     RoomOcrAttempts.Request(id, stored.intent), owners, clock, RoomOcrResults(database, liveness, leaseClock = clock::get),
                     { query -> database.ocrResults().matchPages(checkNotNull(OcrSearchTerms.create(query)), null, 2).map { it.pageId } },
                     { queue.enqueue(page, configuration, rerun = true) }, RoomOcrSearch(database),
-                    { proof -> RoomOcrDispatch(database, liveness, proof, leaseClock = clock::get) }))
+                    { proof -> RoomOcrDispatch(database, liveness, proof, leaseClock = clock::get) },
+                    { RoomOcrExecution(database, FileOperationOwners(executionRoot), leaseClock = clock::get) },
+                    {
+                        val additional = seedAdditionalQueuePage(sql, page)
+                        additional.pageId to queue.enqueue(additional, configuration, rerun = false)
+                    }))
             }
         } finally { database.close() }
     }
@@ -835,6 +1036,22 @@ class RoomOcrIndexIntegrationTest {
         sql.execSQL("INSERT INTO SourceReference VALUES ('RECIPE_HISTORY',?,?,0)", arrayOf("recipe-v1/$PAGE/1", SOURCE))
         sql.execSQL("UPDATE Source SET refCount=2")
         return EditablePage(DocumentId(DOCUMENT), 1, PageId(PAGE), SourceId(SOURCE), 1, hash, recipe)
+    }
+
+    private fun seedAdditionalQueuePage(sql: SupportSQLiteDatabase, original: EditablePage): EditablePage {
+        val page = PageId(UUID.randomUUID().toString())
+        sql.beginTransaction()
+        try {
+            sql.execSQL("INSERT INTO Page VALUES (?,?,?,1,'ACTIVE',1,NULL,0)", arrayOf(page.value, DOCUMENT, SOURCE))
+            sql.execSQL("INSERT INTO RecipeRevision VALUES (?,1,?,1,?,?,NULL,0)",
+                arrayOf(page.value, SOURCE, RecipeCodec.encode(original.recipe), original.recipeHash))
+            sql.execSQL("INSERT INTO SourceReference VALUES ('PAGE',?,?,0)", arrayOf(page.value, SOURCE))
+            sql.execSQL("INSERT INTO SourceReference VALUES ('RECIPE_HISTORY',?,?,0)", arrayOf("recipe-v1/${page.value}/1", SOURCE))
+            sql.execSQL("UPDATE Source SET refCount=(SELECT COUNT(*) FROM SourceReference WHERE sourceId=?) WHERE sourceId=?",
+                arrayOf(SOURCE, SOURCE))
+            sql.setTransactionSuccessful()
+        } finally { sql.endTransaction() }
+        return original.copy(pageId = page)
     }
 
     private fun queueConfig(layout: OcrLayout) = OcrConfiguration("fixture", 1, layout,

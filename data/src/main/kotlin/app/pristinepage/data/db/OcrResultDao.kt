@@ -18,6 +18,9 @@ import app.pristinepage.data.model.PageId
 import app.pristinepage.data.repository.OcrSearchTerms
 import app.pristinepage.data.repository.canonicalOcrSearchText
 
+/** Raised only by projection preparation, before any result transaction or SQL write. */
+internal class OcrProjectionLimit : IllegalArgumentException("OCR search projection exceeds its size limit")
+
 /** The immutable source/recipe binding keeps a result private to its exact saved page revision. */
 @Entity(tableName = "OcrResult", foreignKeys = [
     ForeignKey(entity = PageRow::class, parentColumns = ["pageId"], childColumns = ["pageId"], onDelete = ForeignKey.CASCADE),
@@ -38,7 +41,7 @@ internal class OcrResultRow(
     companion object {
         fun fromRecognition(input: OcrInput, configuration: OcrConfiguration, text: OcrText): OcrResultRow {
             val indexed = canonicalOcrSearchText(text.value)
-            require(indexed.length <= 262_144) // NFC and segmentation can expand input; do not truncate the index silently.
+            if (indexed.length > 262_144) throw OcrProjectionLimit() // Do not truncate an expanded index.
             return OcrResultRow(0, input.pageId, input.recipeRevision, input.sourcePixelSha256, configuration.engineId,
                 configuration.engineVersion, configuration.layout.name, indexed, text.value.takeUnless { it == indexed })
         }

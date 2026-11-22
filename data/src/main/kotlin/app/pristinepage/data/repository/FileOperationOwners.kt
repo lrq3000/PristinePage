@@ -45,6 +45,13 @@ class FileOperationOwners @JvmOverloads constructor(root: File, retainedEnded: I
 
     internal fun ownsCanonicalRoot(root: File): Boolean = rootKey(pool.root) == rootKey(root)
 
+    /** Shared by every OCR executor using this canonical store root in the application process. Hold it until preparation, recognition and resource closure are all finished. */
+    internal suspend fun <T : Any> tryOcrExecutionLane(block: suspend () -> T): T? {
+        currentCoroutineContext().ensureActive()
+        if (!pool.ocrExecution.tryLock()) return null
+        try { return block() } finally { pool.ocrExecution.unlock() }
+    }
+
     /** Ordinary render-final participants only. Call outside Room on a file dispatcher. This lane excludes cooperating peers; it neither registers a requester nor proves a lease live. */
     internal suspend fun <T> withOrdinaryDerivedLane(jobId: JobId, block: suspend CoroutineScope.() -> T): T {
         currentCoroutineContext().ensureActive()
@@ -102,6 +109,7 @@ class FileOperationOwners @JvmOverloads constructor(root: File, retainedEnded: I
     private class Pool(val root: File, val retainedEnded: Int) {
         val local = LocalOperationOwners(retainedEnded)
         val ordinaryDerived = Mutex()
+        val ocrExecution = Mutex()
         private val terminal = LinkedHashMap<String, Unit>()
         private var lifetime: Lifetime? = null
 
