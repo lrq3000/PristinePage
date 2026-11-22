@@ -28,6 +28,14 @@
     <string name="ocr_language_vietnamese">Vietnamese</string>
     <string name="home_search_scans">Search scans</string>
     <string name="home_search_available_fields">Album titles and dates</string>
+    <string name="home_search_with_text">Album titles, dates, and recognized text</string>
+    <string name="home_page_search_unavailable">Page search is unavailable. Album results are still shown.</string>
+    <string name="home_album_search_unavailable">Album search is unavailable. Page results are still shown.</string>
+    <string name="home_search_more">More matches</string>
+    <string name="home_search_retry_more">Retry loading matches</string>
+    <string name="home_search_no_page_or_album_matches">No albums or pages match this search.</string>
+    <string name="home_matching_pages">Matching pages</string>
+    <string name="home_matching_page">%1$s — Page %2$d</string>
     <string name="home_search_clear">Clear</string>
     <string name="home_search_no_matches">No albums match this search.</string>
     <string name="carnet_bezier_place_point">Place a point</string>

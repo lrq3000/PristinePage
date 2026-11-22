@@ -195,7 +195,13 @@ class MainActivity : ComponentActivity() {
                          batch.savedDocument != album.documentId ||
                              (!batch.saving && album.documentRevision >= (batch.savedRevision ?: 0L))
                      },
-                      openAtelier = acquisition::open, onSettings = { settingsPage = SettingsPage.ROOT }) { document, page ->
+                       openAtelier = { title, target ->
+                           retained.accept(LibraryEvent.LeaveHomeSearch)
+                           acquisition.open(title, target)
+                       }, onSettings = {
+                           retained.accept(LibraryEvent.LeaveHomeSearch)
+                           settingsPage = SettingsPage.ROOT
+                       }) { document, page ->
                     editorOwner.open(document.value, page.value)
                 }
             }

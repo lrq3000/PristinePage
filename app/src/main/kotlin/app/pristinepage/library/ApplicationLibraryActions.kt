@@ -10,6 +10,7 @@ import app.pristinepage.capture.PhotoImportResultRouter
 import app.pristinepage.capture.PhotoSelection
 import app.pristinepage.data.model.*
 import app.pristinepage.data.repository.AlbumSearchQuery
+import app.pristinepage.data.repository.SavedOcrWork
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.util.Locale
@@ -19,7 +20,7 @@ class ApplicationLibraryActions(
     private val context: Context?,
     private val onPagesSaved: ((DocumentId, List<PageId>) -> Unit)?,
     private val open: suspend () -> ApplicationImports,
-) : LibraryActions, OrderedLibraryActions, SearchableLibraryActions {
+) : LibraryActions, OrderedLibraryActions, SearchableLibraryActions, SearchablePageActions {
     constructor(context: Context? = null, open: suspend () -> ApplicationImports) : this(context, null, open)
 
     override suspend fun startup() = open().startupRecovery
@@ -27,6 +28,27 @@ class ApplicationLibraryActions(
     override suspend fun listAlbums(order: AlbumOrder, locale: Locale, after: AlbumPosition?, limit: Int) = open().store.albums.listAlbums(order, locale, after, limit)
     override suspend fun searchAlbums(query: AlbumSearchQuery, order: AlbumOrder, locale: Locale, after: AlbumPosition?, limit: Int) =
         open().store.albumSearch.searchAlbums(query, order, locale, after, limit)
+
+    override suspend fun searchPages(query: String): HomePageSearchPage = searchPages(query, null)
+
+    private suspend fun searchPages(query: String, cursor: SavedOcrWork.Continuation?): HomePageSearchPage {
+        val store = open().store
+        val page = store.savedOcr.find(query, cursor, 20)
+        val albums = mutableMapOf<DocumentId, DocumentOverview?>()
+        val hits = page.hits.mapNotNull { hit ->
+            if (!albums.containsKey(hit.document)) {
+                albums[hit.document] = try { store.catalog.load(hit.document) }
+                catch (failure: RepositoryFailure) {
+                    if (failure.error.code != OperationErrorCode.SOURCE_UNAVAILABLE) throw failure
+                    null
+                }
+            }
+            val album = albums[hit.document] ?: return@mapNotNull null
+            val member = album.pages.firstOrNull { it.pageId == hit.page } ?: return@mapNotNull null
+            HomePageSearchHit(hit.document, hit.page, album.document.title, member.ordinal + 1) { store.savedOcr.canOpen(hit) }
+        }
+        return HomePageSearchPage(hits, page.nextAfter?.let { next -> { searchPages(query, next) } })
+    }
     override suspend fun rename(document: DocumentId, revision: Long, title: String) = open().store.documents.renameDocument(document, revision, title)
     override suspend fun load(id: DocumentId) = open().store.catalog.load(id)
     override suspend fun activeImport(id: DocumentId) = open().store.catalog.activeImport(id)

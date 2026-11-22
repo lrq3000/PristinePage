@@ -134,7 +134,7 @@ import kotlinx.coroutines.launch
                 value = state.albumSearch,
                 onValueChange = { session.accept(LibraryEvent.SetAlbumSearch(it, ZoneId.systemDefault())) },
                 label = { Text(stringResource(R.string.home_search_scans)) },
-                supportingText = { Text(stringResource(R.string.home_search_available_fields)) },
+                supportingText = { Text(stringResource(if (state.canSearchPages) R.string.home_search_with_text else R.string.home_search_available_fields)) },
                 singleLine = true,
                 keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
                 trailingIcon = if (state.albumSearch.isEmpty()) null else {{
@@ -154,15 +154,37 @@ import kotlinx.coroutines.launch
                 item { Text(stringResource(preferencesState.order.label()), style = MaterialTheme.typography.labelMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant) }
                 item { LibraryFeedback(state, session) }
-                if (state.documents.isEmpty() && !state.loading && state.error == null) {
-                    item { Text(stringResource(if (searching) R.string.home_search_no_matches else R.string.atelier_empty), Modifier.padding(vertical = 12.dp)) }
+                if (searching && state.pageSearchUnavailable) item {
+                    Text(stringResource(R.string.home_page_search_unavailable), Modifier.padding(vertical = 4.dp))
+                }
+                if (searching && state.albumSearchUnavailable) item {
+                    Text(stringResource(R.string.home_album_search_unavailable), Modifier.padding(vertical = 4.dp))
+                }
+                if (state.documents.isEmpty() && state.pageMatches.isEmpty() && !state.loading && !state.hasMore && state.error == null &&
+                    !state.albumSearchUnavailable && !state.pageSearchUnavailable) {
+                    item { Text(stringResource(if (!searching) R.string.atelier_empty
+                        else if (state.canSearchPages) R.string.home_search_no_page_or_album_matches
+                        else R.string.home_search_no_matches), Modifier.padding(vertical = 12.dp)) }
                 }
                 items(state.documents, key = { it.documentId.value }) { album ->
                     AlbumCard(album, creation, preferencesState.homeThumbnailLayout, loadOverview, loadThumbnail,
                         canClose, thumbnailsCurrent(album)) { session.accept(LibraryEvent.Open(album.documentId)) }
                 }
+                if (searching && state.pageMatches.isNotEmpty()) {
+                    item { Text(stringResource(R.string.home_matching_pages), Modifier.semantics { heading() }, style = MaterialTheme.typography.titleMedium) }
+                    items(state.pageMatches, key = { "matching-page-${it.page.value}" }) { hit ->
+                        TextButton(onClick = { session.accept(LibraryEvent.OpenPageMatch(hit, onEdit)) }, enabled = canAcquire,
+                            modifier = Modifier.fillMaxWidth().heightIn(min = AtelierStyle.touchTarget)) {
+                            Text(stringResource(R.string.home_matching_page, hit.albumTitle, hit.pageNumber))
+                        }
+                    }
+                }
                 if (state.hasMore) item {
-                    TextButton(onClick = { session.accept(LibraryEvent.More) }, enabled = !state.loading) { Text(stringResource(R.string.more_documents)) }
+                    TextButton(onClick = { session.accept(LibraryEvent.More) }, enabled = !state.loading) {
+                        Text(stringResource(if (!searching) R.string.more_documents
+                            else if (state.albumSearchUnavailable || state.pageSearchUnavailable) R.string.home_search_retry_more
+                            else R.string.home_search_more))
+                    }
                 }
             }
             HorizontalDivider(color = AtelierStyle.divider)
