@@ -38,6 +38,7 @@ import app.pristinepage.image.decode.AndroidSourceInspector
 import app.pristinepage.image.decode.ImageAllocationBudget
 import app.pristinepage.image.decode.SourceDecoder
 import app.pristinepage.image.ocr.SavedOcrPreparer
+import app.pristinepage.image.ocr.VerifiedOcrPackDirectory
 import app.pristinepage.image.render.AppearanceEngine
 import app.pristinepage.image.render.ClassicalRecipeAdmission
 import app.pristinepage.image.render.DefaultRenderCoordinator
@@ -82,9 +83,25 @@ class LocalSavedOcrIntegrationTest {
             val code = row.getString("code")
             assertTrue(anchors.containsKey(code))
             LocalTesseractProbeTest.stagePack(context, tessdata, code, row)
-            code to OcrLanguagePack(code, row.getString("sha256"))
+            code to VerifiedOcrPackDirectory.Pin(OcrLanguagePack(code, row.getString("sha256")), row.getLong("bytes"))
         }
         assertEquals(anchors.keys, pins.keys)
+        val selectedPacks = VerifiedOcrPackDirectory(packRoot.toPath(), pins.values.toList())
+        val english = pins.getValue("eng")
+        // Test corruption on a newly created non-aliased copy; never change the qualified owner directory or retained stage.
+        val corruptRoot = newDirectory(directory, "corrupt-pack-control")
+        val corruptPacks = newDirectory(corruptRoot, "tessdata")
+        File(tessdata, "eng.traineddata").copyTo(File(corruptPacks, "eng.traineddata"))
+        File(corruptPacks, "eng.traineddata").let { copy ->
+            java.io.RandomAccessFile(copy, "rw").use { bytes ->
+                val first = bytes.readUnsignedByte()
+                bytes.seek(0)
+                bytes.write(first xor 1)
+            }
+            assertEquals(english.bytes, copy.length())
+        }
+        val corrupt = VerifiedOcrPackDirectory(corruptRoot.toPath(), listOf(english))
+        assertNull(corrupt.resolveOrdered(listOf("eng")))
         val budget = ImageAllocationBudget.forMemoryClass(checkNotNull(context.getSystemService(ActivityManager::class.java)).memoryClass)
         var packLeases = 0
         fun lease(directory: File): TesseractSavedOcrSessions.PackLease = object : TesseractSavedOcrSessions.PackLease {
@@ -93,7 +110,11 @@ class LocalSavedOcrIntegrationTest {
             override fun close() { packLeases-- }
         }
         val sessions = TesseractSavedOcrSessions(budget) { requested ->
-            if (requested.ordered.any { pins[it.code] != it }) null else lease(packRoot)
+            if (selectedPacks.verifies(requested)) lease(packRoot) else null
+        }
+        val changedBytes = TesseractSavedOcrSessions(budget) { requested ->
+            assertFalse("Corrupt pack must not reach lease acquisition", corrupt.verifies(requested))
+            null
         }
         val missingDataDirectory = newDirectory(directory, "missing-tessdata-control")
         val missingData = TesseractSavedOcrSessions(budget) { lease(missingDataDirectory) }
@@ -111,7 +132,7 @@ class LocalSavedOcrIntegrationTest {
             assertEquals(0L, budget.usedBytes)
         }
         verifyPrivateBitmapLifecycle(OcrConfiguration(TesseractSavedOcrSessions.ENGINE_ID, TesseractSavedOcrSessions.CONTRACT_VERSION, OcrLayout.SINGLE_BLOCK,
-            OcrLanguagePacks(listOf(pins.getValue("eng")))))
+            OcrLanguagePacks(listOf(english.identity))))
         val inspector = AndroidSourceInspector(budget)
         val activeInput = AtomicReference<Pair<String, ByteArray>?>()
         val provider = SourceInput { reference ->
@@ -122,6 +143,7 @@ class LocalSavedOcrIntegrationTest {
         suspend fun open() = PrivateImportStore.open(scoped, provider, inspector, ClassicalRecipeAdmission())
         val failures = mutableListOf<String>()
         val observed = linkedMapOf<String, SavedOcrWork.Target>()
+        val exactText = linkedMapOf<String, Pair<OcrConfiguration, OcrText>>()
         val cases = manifest.getJSONArray("cases")
         val caseIds = anchors.keys.toList() + listOf("eng-fra", "jpn-eng", "ara-eng", "blank")
         assertEquals(caseIds.size, cases.length())
@@ -142,7 +164,8 @@ class LocalSavedOcrIntegrationTest {
                     else -> OcrLayout.SINGLE_BLOCK
                 }
                 val configuration = OcrConfiguration(TesseractSavedOcrSessions.ENGINE_ID, TesseractSavedOcrSessions.CONTRACT_VERSION, layout,
-                    OcrLanguagePacks(selected.map(pins::getValue)))
+                    checkNotNull(selectedPacks.resolveOrdered(selected)))
+                assertEquals(selected.map { pins.getValue(it).identity }, configuration.languagePacks?.ordered)
                 val png = LocalTesseractProbeTest.load(context, "${ROOT}controls/$id.png", 1_048_576)
                 assertEquals(row.getInt("imageBytes"), png.size)
                 val actualHash = LocalTesseractProbeTest.hex(MessageDigest.getInstance("SHA-256").digest(png))
@@ -176,6 +199,7 @@ class LocalSavedOcrIntegrationTest {
                     assertEquals(0L, budget.usedBytes)
                     assertEquals(0, packLeases)
                     failBeforeStart(store, target, renderer, missingData, OperationErrorCode.PROVIDER_UNAVAILABLE)
+                    failBeforeStart(store, target, renderer, changedBytes, OperationErrorCode.PROVIDER_UNAVAILABLE)
                     failBeforeStart(store, target, renderer, refusedPixAllocation, OperationErrorCode.RESOURCE_LIMIT)
                     assertEquals(target, store.savedOcr.reconcilePage(document, saved.pageId, null))
                 }
@@ -187,6 +211,7 @@ class LocalSavedOcrIntegrationTest {
                         override suspend fun recognize(): OcrText = native.recognize().also { text ->
                             assertEquals(1, packLeases)
                             score = grade(id, row.getString("expected"), text.value)
+                            exactText[id] = config to text
                         }
                         override fun close() = native.close()
                     }
@@ -199,6 +224,10 @@ class LocalSavedOcrIntegrationTest {
                 assertEquals(0L, budget.usedBytes)
                 assertEquals(0, packLeases)
                 val result = checkNotNull(score)
+                val readback = checkNotNull(store.savedOcr.readText(document, saved.pageId))
+                assertEquals(exactText.getValue(id).second.value, readback.text.value)
+                assertEquals(configuration, readback.configuration)
+                assertFalse(readback.previousGeneration)
                 if (!result.accepted) failures.add(id)
                 Log.i(TAG, "case=$id edits=${result.edits} length=${result.length} exact=${result.edits == 0}")
                 assertNull(observed.put(id, target))
@@ -212,6 +241,10 @@ class LocalSavedOcrIntegrationTest {
             for ((id, target) in observed) {
                 val terminal = store.savedOcr.execute(target) { _, _, _ -> error("Reopen attempted to prepare completed OCR work") }
                 if (terminal != SavedOcrWork.Outcome.TERMINAL) failures.add("$id:reopen")
+                val restoredText = checkNotNull(store.savedOcr.readText(document, target.page))
+                assertEquals(exactText.getValue(id).first, restoredText.configuration)
+                assertEquals(exactText.getValue(id).second.value, restoredText.text.value)
+                assertFalse(restoredText.previousGeneration)
             }
         }
         verifyPersistedControls(databaseFile, observed)
