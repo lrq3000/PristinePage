@@ -7,6 +7,8 @@ import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import app.pristinepage.core.ocr.OcrConfiguration
 import app.pristinepage.core.ocr.OcrInput
+import app.pristinepage.core.ocr.OcrLanguagePack
+import app.pristinepage.core.ocr.OcrLanguagePacks
 import app.pristinepage.core.ocr.OcrLayout
 import app.pristinepage.core.ocr.OcrText
 import app.pristinepage.data.db.AtelierDraftMigration
@@ -14,7 +16,15 @@ import app.pristinepage.data.db.OcrIndexMigration
 import app.pristinepage.data.db.OcrResultRow
 import app.pristinepage.data.db.OcrWorkMigration
 import app.pristinepage.data.db.PristineDatabase
+import app.pristinepage.data.model.DocumentId
+import app.pristinepage.data.model.OperationErrorCode
+import app.pristinepage.data.model.PageId
+import app.pristinepage.data.model.RepositoryFailure
+import app.pristinepage.data.model.SourceId
+import app.pristinepage.data.repository.OcrJobInput
 import app.pristinepage.data.repository.OcrSearchTerms
+import app.pristinepage.data.repository.RoomMetadataAccess
+import app.pristinepage.data.repository.RoomOcrCurrentWork
 import org.junit.Assert.*
 import org.junit.Rule
 import org.junit.Test
@@ -83,6 +93,55 @@ class RoomOcrIndexIntegrationTest {
             sql.execSQL("UPDATE Page SET state='ACTIVE', ordinal=0, removedAt=NULL WHERE pageId=?", arrayOf(PAGE))
             sql.execSQL("""INSERT INTO AtelierDraft (draftId, stagingDocumentId, state, generation, step, createdAt) VALUES (?,?,'EDITING',1,1,0)""", arrayOf(DRAFT, DOCUMENT))
             assertTrue(matches().isEmpty())
+        } finally { database.close() }
+    }
+
+    @Test fun currentJobRecoversExactStoredPacksButRefusesHiddenStaleOrMisboundWork() {
+        val database = Room.inMemoryDatabaseBuilder(context, PristineDatabase::class.java).build()
+        try {
+            val sql = database.openHelper.writableDatabase
+            seed(sql)
+            val reader = RoomOcrCurrentWork(database)
+            val metadata = RoomMetadataAccess(database)
+            val page = PageId(PAGE)
+            fun current() = metadata.transaction { reader.readInTransaction(page) }
+            assertNull(current())
+            assertThrows(IllegalStateException::class.java) { reader.readInTransaction(page) }
+            val jobId = UUID.randomUUID().toString()
+            val config = OcrConfiguration("fixture", 1, OcrLayout.AUTOMATIC,
+                OcrLanguagePacks(listOf(OcrLanguagePack("fra", "d".repeat(64)), OcrLanguagePack("eng", "e".repeat(64)))))
+            val binding = OcrJobInput(DocumentId(DOCUMENT), OcrInput(PAGE, 1, PIXELS), SourceId(SOURCE), "c".repeat(64), 1, config)
+            sql.execSQL("""INSERT INTO Job (jobId,kind,idempotenceKey,canonicalInputSha256,input,state,attempt,leaseGeneration,createdAt,updatedAt)
+                VALUES (?,'PAGE_OCR',?,?,?,'PENDING',0,0,10,10)""",
+                arrayOf(jobId, binding.key, binding.digest, binding.encode()))
+            sql.execSQL("INSERT INTO OcrPageWork VALUES (?,?,1,?,?,NULL,NULL)",
+                arrayOf<Any>(PAGE, jobId, binding.digest, binding.encode().size))
+            assertEquals(binding, current()?.intent)
+            assertEquals("PENDING", current()?.job?.state)
+
+            sql.execSQL("INSERT INTO RecipeRevision VALUES (?,2,?,1,X'010203',?,NULL,0)",
+                arrayOf(PAGE, SOURCE, "c".repeat(64)))
+            sql.execSQL("UPDATE Page SET currentRecipeRevision=2 WHERE pageId=?", arrayOf(PAGE))
+            assertEquals(OperationErrorCode.REVISION_CONFLICT, assertThrows(RepositoryFailure::class.java) { current() }.error.code)
+            sql.execSQL("UPDATE Page SET currentRecipeRevision=1 WHERE pageId=?", arrayOf(PAGE))
+            sql.execSQL("""INSERT INTO AtelierDraft (draftId,stagingDocumentId,state,generation,step,createdAt)
+                VALUES (?,?,'EDITING',1,1,0)""", arrayOf(DRAFT, DOCUMENT))
+            assertEquals(OperationErrorCode.REVISION_CONFLICT, assertThrows(RepositoryFailure::class.java) { current() }.error.code)
+            sql.execSQL("DELETE FROM AtelierDraft WHERE draftId=?", arrayOf(DRAFT))
+
+            val receipt = "atelier-publish-v1\n1\n$DOCUMENT\n$PAGE,1,${"c".repeat(64)},$PAGE"
+            sql.execSQL("""INSERT INTO AtelierDraft (draftId,stagingDocumentId,state,generation,step,createdAt,committedDocumentId,receiptPageIds)
+                VALUES (?,?,'COMMITTED',2,2,0,?,?)""", arrayOf(DRAFT, DOCUMENT, DOCUMENT, receipt))
+            assertEquals(binding, current()?.intent)
+            sql.execSQL("UPDATE AtelierDraft SET receiptPageIds=? WHERE draftId=?", arrayOf(receipt.replace("$PAGE,1,", "$PAGE,0,"), DRAFT))
+            assertEquals(false, database.atelierDrafts().savedDocumentIsHidden(DOCUMENT))
+            assertEquals(OperationErrorCode.REVISION_CONFLICT, assertThrows(RepositoryFailure::class.java) { current() }.error.code)
+            sql.execSQL("DELETE FROM AtelierDraft WHERE draftId=?", arrayOf(DRAFT))
+
+            val wrong = binding.copy(generation = 2)
+            sql.execSQL("UPDATE Job SET input=?,canonicalInputSha256=? WHERE jobId=?", arrayOf(wrong.encode(), wrong.digest, jobId))
+            sql.execSQL("UPDATE OcrPageWork SET inputSha256=? WHERE pageId=?", arrayOf(wrong.digest, PAGE))
+            assertEquals(OperationErrorCode.INTEGRITY_FAILED, assertThrows(RepositoryFailure::class.java) { current() }.error.code)
         } finally { database.close() }
     }
 

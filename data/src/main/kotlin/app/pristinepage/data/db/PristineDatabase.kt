@@ -17,4 +17,5 @@ abstract class PristineDatabase : RoomDatabase() {
     abstract fun referenceAudit(): ReferenceAuditDao
     abstract fun exportSnapshots(): ExportSnapshotDao
     internal abstract fun ocrResults(): OcrResultDao
+    internal abstract fun ocrPageWork(): OcrPageWorkDao
 }
