@@ -520,6 +520,8 @@ Controlled reproduction confirmed `NoClassDefFoundError` for Kotlin `Collections
 
 The rebuilt test provider let the same From files action open DocumentsUI without a crash. Ruling: handle the observed French navigation label in the driver, not by changing the guest locale, and select only the verified synthetic file under its exact unique name. Picker selection and subsequent app actions remain open at this checkpoint.
 
+The next attempt opened Downloads and displayed the verified fixture directory, but DocumentsUI's row delegates its tap to the list and does not advertise `clickable=true`. The saved tree places that exact title in an enabled, focusable direct child of the picker directory list. A subsequent run hit an intermittent null UI root during the activity transition. Ruling: admit only that exact platform row shape for the synthetic filename/folder, keep the app's usual clickable guard unchanged, and reobserve once on an explicit null-root read without replaying input. No partial picker selection or application defect was inferred.
+
 ### Carnet release boundary — T-11 / CARNET-SHARE-LEASE-01
 
 Input is the audited public copy of the 16 Carnet corrective commits, through the JPEG/ZIP follow-up. Scope: guard provider display-name and size metadata by the same durable lease as file reads, verify the provider boundary, and retain live-share, Save as and frozen-name semantics. Post-revocation readability of already opened descriptors, external copies, and native acceptance are separate. The [operational plan](OPERATIONAL_PLAN.md) governs integration, public branches and the v0.3.0 bump.

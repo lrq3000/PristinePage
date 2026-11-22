@@ -35,6 +35,17 @@ class LocalOcrGuestTest(unittest.TestCase):
                     LocalFilesJourney.read_tree_output(read)
             self.assertEqual([("exec-out", "uiautomator", "dump", "/dev/tty")] * 2, read.calls)
 
+    def test_transient_null_root_is_reobserved_without_input(self):
+        calls = []
+
+        class Read:
+            def command(self, *args, **kwargs):
+                calls.append(args)
+                return "ERROR: null root node returned by UiTestAutomationBridge." if len(calls) == 1 else "<hierarchy/>"
+
+        self.assertEqual("<hierarchy/>", LocalFilesJourney.read_tree_output(Read()))
+        self.assertEqual([("exec-out", "uiautomator", "dump", "/dev/tty")] * 2, calls)
+
     def test_only_reviewed_instrumentation_can_be_updated_in_place(self):
         self.assertEqual(["-t"], install_flags(TEST, None, "new", None))
         self.assertIsNone(install_flags(APP, "same", "same", None))
@@ -58,6 +69,15 @@ class LocalOcrGuestTest(unittest.TestCase):
         self.assertEqual(("25", "40"), LocalFilesJourney.point(ET.fromstring("<hierarchy>" + xml + "</hierarchy>"), labels))
         with self.assertRaises(RuntimeError):
             LocalFilesJourney.point(ET.fromstring("<hierarchy>" + xml + xml.replace(labels[1], labels[0]) + "</hierarchy>"), labels)
+
+    def test_only_a_picker_document_row_can_use_the_focusable_fallback(self):
+        label = "ocr-test.png"
+        row = ('<node package="com.android.documentsui" focusable="true" enabled="true" bounds="[0,10][100,60]">'
+               f'<node package="com.android.documentsui" text="{label}" resource-id="android:id/title" enabled="true"/></node>')
+        inside = f'<hierarchy><node resource-id="com.android.documentsui:id/dir_list">{row}</node></hierarchy>'
+        self.assertEqual(("50", "35"), LocalFilesJourney.point(ET.fromstring(inside), label, document_row=True))
+        self.assertIsNone(LocalFilesJourney.point(ET.fromstring(inside), label))
+        self.assertIsNone(LocalFilesJourney.point(ET.fromstring(f"<hierarchy>{row}</hierarchy>"), label, document_row=True))
 
     def test_guest_debug_setting_changes_only_local_bridge(self):
         self.assertEqual({"basicSettings.rootMode": False, "basicSettings.adbDebug": 1},

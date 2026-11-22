@@ -30,10 +30,13 @@ class LocalFilesJourney:
     def read_tree_output(self):
         argv = ("exec-out", "uiautomator", "dump", "/dev/tty")
         try:
-            return self.command(*argv, timeout=20)
+            readback = self.command(*argv, timeout=20)
         except subprocess.TimeoutExpired:
             # A deadlined read is not evidence that the prior tap failed. Observe again, without replaying input.
             return self.command(*argv, timeout=20)
+        if readback.strip() == "ERROR: null root node returned by UiTestAutomationBridge.":
+            return self.command(*argv, timeout=20)
+        return readback
 
     def tree(self):
         raw = self.read_tree_output()
@@ -49,13 +52,26 @@ class LocalFilesJourney:
         return tree, top[0].get("package")
 
     @staticmethod
-    def point(tree, label):
+    def point(tree, label, document_row=False):
         labels = (label,) if isinstance(label, str) else label
         parents = {child: parent for parent in tree.iter() for child in parent}
         actionable = set()
         for node in tree.iter("node"):
             if not any(value in (node.get("text"), node.get("content-desc")) for value in labels):
                 continue
+            if document_row and node.get("resource-id") == "android:id/title" and node.get("enabled") == "true":
+                owner = node.get("package")
+                if owner in FILES:
+                    row = node
+                    while row in parents:
+                        parent = parents[row]
+                        if parent.get("resource-id") == owner + ":id/dir_list":
+                            # API 28 DocumentsUI delegates row taps to the list and exposes focusability, not clickability, on the row.
+                            if row.get("focusable") == row.get("enabled") == "true" and row.get("package") == owner:
+                                actionable.add(row)
+                            break
+                        row = parent
+                    continue
             while node.get("clickable") != "true" and node in parents:
                 node = parents[node]
             if node.get("clickable") == node.get("enabled") == "true":
@@ -84,8 +100,8 @@ class LocalFilesJourney:
             time.sleep(0.4)
         raise RuntimeError("Timed out waiting for the expected on-screen state")
 
-    def tap(self, label, packages=None):
-        x, y = self.wait(packages or {self.app}, lambda tree, _: self.point(tree, label))
+    def tap(self, label, packages=None, document_row=False):
+        x, y = self.wait(packages or {self.app}, lambda tree, _: self.point(tree, label, document_row))
         self.command("shell", "input", "tap", x, y)
 
     @staticmethod
@@ -120,14 +136,14 @@ class LocalFilesJourney:
         # Open only the hash-checked uniquely named file, whether the picker exposes it in Recents or under Downloads.
         drawer = ("Show roots", "Afficher les répertoires racines")
         def locate_fixture(tree, _):
-            return self.point(tree, self.name) or (("drawer",) if self.point(tree, drawer) else None)
+            return self.point(tree, self.name, document_row=True) or (("drawer",) if self.point(tree, drawer) else None)
 
         destination = self.wait(FILES, locate_fixture)
         if destination == ("drawer",):
             self.tap(drawer, FILES)
             self.tap(("Downloads", "Téléchargements"), FILES)
-            self.tap(f"PristinePage-{self.nonce}", FILES)
-            self.tap(self.name, FILES)
+            self.tap(f"PristinePage-{self.nonce}", FILES, document_row=True)
+            self.tap(self.name, FILES, document_row=True)
         else:
             self.command("shell", "input", "tap", *destination)
         self.tap("Review pages")
