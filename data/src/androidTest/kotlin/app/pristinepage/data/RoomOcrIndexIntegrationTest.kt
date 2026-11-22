@@ -12,6 +12,7 @@ import app.pristinepage.core.ocr.OcrText
 import app.pristinepage.data.db.AtelierDraftMigration
 import app.pristinepage.data.db.OcrIndexMigration
 import app.pristinepage.data.db.OcrResultRow
+import app.pristinepage.data.db.OcrWorkMigration
 import app.pristinepage.data.db.PristineDatabase
 import app.pristinepage.data.repository.OcrSearchTerms
 import org.junit.Assert.*
@@ -26,21 +27,26 @@ class RoomOcrIndexIntegrationTest {
     private val context = instrumentation.targetContext
     @get:Rule val migration = MigrationTestHelper(instrumentation, PristineDatabase::class.java)
 
-    @Test fun populatedV1AndV2MigrateWithoutInventedTextAndRetainTheIndexOnReopen() {
-        for (version in 1..2) {
+    @Test fun populatedV1ToV3MigrateWithoutInventingWorkAndRetainTheIndexOnReopen() {
+        for (version in 1..3) {
             val name = "ocr-migration-${UUID.randomUUID()}"
             fun open() = Room.databaseBuilder(context, PristineDatabase::class.java, name)
-                .addMigrations(AtelierDraftMigration, OcrIndexMigration).build()
+                .addMigrations(AtelierDraftMigration, OcrIndexMigration, OcrWorkMigration).build()
             try {
-                migration.createDatabase(name, version).use(::seed)
+                migration.createDatabase(name, version).use { sql ->
+                    seed(sql)
+                    if (version == 3) insertText(sql)
+                }
                 val database = open()
                 try {
                     val sql = database.openHelper.writableDatabase
-                    assertEquals(3, sql.version)
+                    assertEquals(4, sql.version)
                     assertEquals("010203", sql.scalar("SELECT hex(canonicalRecipe) FROM RecipeRevision"))
                     assertEquals("Existing album", sql.scalar("SELECT title FROM Document"))
-                    assertEquals("0", sql.scalar("SELECT COUNT(*) FROM OcrResult"))
-                    insertText(sql)
+                    assertEquals("0", sql.scalar("SELECT COUNT(*) FROM OcrPageWork"))
+                    assertEquals("0", sql.scalar("SELECT COUNT(*) FROM Job"))
+                    assertEquals(if (version == 3) "1" else "0", sql.scalar("SELECT COUNT(*) FROM OcrResult"))
+                    if (version < 3) insertText(sql)
                     assertEquals("1", sql.scalar("SELECT COUNT(*) FROM OcrResultFts WHERE OcrResultFts MATCH 'ecole'"))
                     sql.execSQL("UPDATE OcrResult SET indexedText='replacement' WHERE pageId=?", arrayOf(PAGE))
                     assertEquals("0", sql.scalar("SELECT COUNT(*) FROM OcrResultFts WHERE OcrResultFts MATCH 'ecole'"))

@@ -5,6 +5,7 @@ import androidx.room.Room
 import app.pristinepage.data.db.PristineDatabase
 import app.pristinepage.data.db.AtelierDraftMigration
 import app.pristinepage.data.db.OcrIndexMigration
+import app.pristinepage.data.db.OcrWorkMigration
 import app.pristinepage.data.files.DerivedFiles
 import app.pristinepage.data.files.SourceFiles
 import app.pristinepage.data.files.SourceInspector
@@ -100,7 +101,7 @@ class PrivateImportStore private constructor(
                 return withContext(Dispatchers.IO) {
                     coroutineContext.ensureActive()
                 val database = Room.databaseBuilder(context.applicationContext, PristineDatabase::class.java, "pristinepage.db")
-                    .addMigrations(AtelierDraftMigration, OcrIndexMigration).build()
+                    .addMigrations(AtelierDraftMigration, OcrIndexMigration, OcrWorkMigration).build()
                     opened = database
                     database.openHelper.writableDatabase
                     val root = File(context.applicationContext.filesDir, "store").canonicalFile
