@@ -51,6 +51,7 @@ import app.pristinepage.data.repository.FileOperationOwners
 import app.pristinepage.data.repository.RoomOcrQueue
 import app.pristinepage.data.repository.RoomOcrResults
 import app.pristinepage.data.repository.RoomOcrSearch
+import app.pristinepage.data.repository.RoomSourceMetadataSearch
 import app.pristinepage.data.repository.SavedOcrWork
 import app.pristinepage.data.repository.PrivateImportStore
 import app.pristinepage.data.repository.SourceInput
@@ -1343,6 +1344,54 @@ class RoomOcrIndexIntegrationTest {
             owners[owner] = LeaseOwnerState.ALIVE
             return (attempts.start(request, owner, 500) as AcquireLeaseResult.Granted).lease
         }
+    }
+
+    @Test fun sourceMetadataLookupUsesExactLiveSourceWithoutOcrAndRevokesRemovedPageHits() {
+        val database = Room.inMemoryDatabaseBuilder(context, PristineDatabase::class.java).build()
+        try {
+            val sql = database.openHelper.writableDatabase
+            seed(sql)
+            val search = RoomSourceMetadataSearch(database)
+            val document = DocumentId(DOCUMENT)
+            val page = PageId(PAGE)
+            runBlocking {
+                assertNull(search.match(document, page, "orientation:2"))
+                val hit = checkNotNull(search.match(document, page, "format:png"))
+                assertEquals(document, hit.document)
+                assertEquals(page, hit.page)
+                assertTrue(search.canOpen(hit))
+                assertNull(search.match(DocumentId(DRAFT), page, "format:png"))
+                val other = RoomSourceMetadataSearch(database)
+                assertFalse(other.canOpen(hit))
+                val replacementBlob = UUID.randomUUID().toString()
+                sql.execSQL("""INSERT INTO SourceBlob SELECT ?,?,byteCount,mime,encodedWidth,encodedHeight,?,
+                    state,sourceCount,ingestTransactionId,createdAt FROM SourceBlob WHERE sourceBlobId=?""",
+                    arrayOf(replacementBlob, "d".repeat(64), "sources/$replacementBlob/original.bin", BLOB))
+                sql.execSQL("UPDATE Source SET sourceBlobId=? WHERE sourceId=?", arrayOf(replacementBlob, SOURCE))
+                assertFalse("Same source ID cannot authorize a different backing blob", search.canOpen(hit))
+                sql.execSQL("UPDATE Source SET sourceBlobId=? WHERE sourceId=?", arrayOf(BLOB, SOURCE))
+                val malformedBlob = "z".repeat(36)
+                sql.execSQL("""INSERT INTO SourceBlob SELECT ?,byteSha256,byteCount,mime,encodedWidth,encodedHeight,?,
+                    state,sourceCount,ingestTransactionId,createdAt FROM SourceBlob WHERE sourceBlobId=?""",
+                    arrayOf(malformedBlob, "sources/$malformedBlob/original.bin", BLOB))
+                sql.execSQL("UPDATE Source SET sourceBlobId=? WHERE sourceId=?", arrayOf(malformedBlob, SOURCE))
+                assertNull(search.match(document, page, "format:png"))
+                sql.execSQL("UPDATE Source SET sourceBlobId=? WHERE sourceId=?", arrayOf(BLOB, SOURCE))
+                sql.execSQL("UPDATE RecipeRevision SET recipeSha256=? WHERE pageId=?", arrayOf("d".repeat(64), PAGE))
+                assertFalse("Same revision ordinal cannot authorize a different digest", search.canOpen(hit))
+                sql.execSQL("UPDATE RecipeRevision SET recipeSha256=? WHERE pageId=?", arrayOf("c".repeat(64), PAGE))
+                assertTrue(search.canOpen(hit))
+                sql.execSQL("""INSERT INTO AtelierDraft (draftId,stagingDocumentId,state,generation,step,createdAt)
+                    VALUES (?,?,'EDITING',1,1,0)""", arrayOf(DRAFT, DOCUMENT))
+                assertFalse(search.canOpen(hit))
+                assertNull(search.match(document, page, "format:png"))
+                sql.execSQL("DELETE FROM AtelierDraft WHERE draftId=?", arrayOf(DRAFT))
+                assertTrue(search.canOpen(hit))
+                sql.execSQL("UPDATE Page SET state='REMOVED',ordinal=NULL,removedAt=10 WHERE pageId=?", arrayOf(PAGE))
+                assertFalse(search.canOpen(hit))
+                assertNull(search.match(document, page, "format:png"))
+            }
+        } finally { database.close() }
     }
 
     private fun withOcrAttempts(

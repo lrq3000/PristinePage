@@ -13,8 +13,40 @@ import app.pristinepage.data.repository.EditablePageQueries
 private const val ACTIVE_DOCUMENT_IDS_SQL = """SELECT CASE WHEN (typeof(documentId)='text' AND length(documentId)=36 AND length(CAST(documentId AS BLOB))=36) THEN documentId ELSE '' END
     FROM Document INDEXED BY sqlite_autoindex_Document_1 WHERE documentId>=COALESCE(:after,'') AND (:after IS NULL OR documentId>:after) AND lifecycle='ACTIVE' AND NOT $HIDDEN_ATELIER_DOCUMENT ORDER BY documentId LIMIT :limit"""
 
+internal data class SavedSourceMetadataBinding(
+    val sourceId: String, val recipeRevision: Long, val blobId: String, val byteHash: String,
+    val pixelHash: String, val recipeHash: String, val recipeBytes: Long,
+)
+
 /** Bound SQL only. Business commands run these synchronous metadata operations on IO inside Room's transaction, never across provider/decode/render work. */
 @Dao abstract class CatalogDao : CatalogQueries, EditablePageQueries, AlbumMetadataQueries {
+    // The caller separately validates the decoded Atelier receipt. No raw EXIF, paths, or recipe byte array crosses this query.
+    @Query("""SELECT p.sourceId AS sourceId, p.currentRecipeRevision AS recipeRevision, b.sourceBlobId AS blobId,
+        b.byteSha256 AS byteHash, s.pixelSha256 AS pixelHash, r.recipeSha256 AS recipeHash, length(r.canonicalRecipe) AS recipeBytes
+        FROM Page p
+        JOIN Document d ON d.documentId=p.documentId
+        JOIN RecipeRevision r ON r.pageId=p.pageId AND r.recipeRevision=p.currentRecipeRevision AND r.sourceId=p.sourceId
+        JOIN Source s ON s.sourceId=p.sourceId JOIN SourceBlob b ON b.sourceBlobId=s.sourceBlobId
+        WHERE (p.pageId=:page AND p.documentId=:document AND p.state='ACTIVE' AND p.removedAt IS NULL)
+        AND (typeof(p.ordinal)='integer' AND p.ordinal BETWEEN 0 AND 99 AND typeof(p.currentRecipeRevision)='integer' AND p.currentRecipeRevision>=1)
+        AND (d.lifecycle='ACTIVE' AND d.deletedAt IS NULL AND s.state='READY' AND b.state='READY')
+        AND (typeof(p.sourceId)='text' AND length(CAST(p.sourceId AS BLOB))=36)
+        AND (typeof(b.sourceBlobId)='text' AND length(CAST(b.sourceBlobId AS BLOB))=36)
+        AND (typeof(b.byteSha256)='text' AND length(b.byteSha256)=64 AND length(CAST(b.byteSha256 AS BLOB))=64 AND b.byteSha256 NOT GLOB '*[^0-9a-f]*')
+        AND (typeof(s.pixelSha256)='text' AND length(s.pixelSha256)=64 AND length(CAST(s.pixelSha256 AS BLOB))=64 AND s.pixelSha256 NOT GLOB '*[^0-9a-f]*')
+        AND (typeof(r.recipeSha256)='text' AND length(r.recipeSha256)=64 AND length(CAST(r.recipeSha256 AS BLOB))=64 AND r.recipeSha256 NOT GLOB '*[^0-9a-f]*')
+        AND (typeof(r.canonicalRecipe)='blob' AND length(r.canonicalRecipe) BETWEEN 1 AND 524288)
+        AND (typeof(b.mime)='text' AND b.mime IN ('image/png','image/jpeg','image/webp'))
+        AND (typeof(s.exifOrientation)='integer' AND s.exifOrientation BETWEEN 1 AND 8)
+        AND (typeof(b.encodedWidth)='integer' AND b.encodedWidth BETWEEN 1 AND 12000
+          AND typeof(b.encodedHeight)='integer' AND b.encodedHeight BETWEEN 1 AND 12000 AND b.encodedWidth*b.encodedHeight<=48000000)
+        AND (typeof(s.width)='integer' AND typeof(s.height)='integer')
+        AND ((s.exifOrientation<=4 AND s.width=b.encodedWidth AND s.height=b.encodedHeight)
+          OR (s.exifOrientation>=5 AND s.width=b.encodedHeight AND s.height=b.encodedWidth))
+        AND ((:mime IS NOT NULL AND :orientation IS NULL AND b.mime=:mime)
+          OR (:mime IS NULL AND :orientation IS NOT NULL AND s.exifOrientation=:orientation))""")
+    internal abstract fun metadataMatchForSavedPage(page: String, document: String, mime: String?, orientation: Int?): SavedSourceMetadataBinding?
+
     // Only bounded identities cross the first projection. A malformed row remains observable as a tiny invalid sentinel; filtering it out would falsely present an intact empty library.
     @Query(ACTIVE_DOCUMENT_IDS_SQL)
     abstract override fun activeDocumentIdsAfter(after: String?, limit: Int): List<String>
