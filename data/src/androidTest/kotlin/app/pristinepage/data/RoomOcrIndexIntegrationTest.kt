@@ -540,6 +540,72 @@ class RoomOcrIndexIntegrationTest {
         assertArrayEquals(byteArrayOf(), work.resolveTextExport(observed))
     }
 
+    @Test fun privateOcrTextArtifactSealsOnlyTheReviewedBytesAndRefusesAnUnseenProducer() = withOcrAttempts(publicStore = true) { f ->
+        val work = f.ocrPort()
+        val page = PageId(PAGE)
+        val document = DocumentId(DOCUMENT)
+        val text = "  École\r\n領収書 · إيصال  \n"
+        f.results.publish(f.request, f.start(), OcrText(text))
+        val observed = checkNotNull(work.readText(document, page, 1)).exportObservation
+        val ready = checkNotNull(work.prepareTextExport(observed))
+        assertEquals(36L, ready.byteCount)
+        assertEquals("90b8051d4594a1f0bb3715981105bf56cf5854bd0602e4e483d0520e3f8025f8", ready.byteSha256)
+        val relative = f.sql.scalar("SELECT finalPath FROM FileTransaction WHERE kind='OCR_TEXT' AND state='COMMITTED'")
+        assertPrivateOcrFile(f.sql, relative, text.encodeToByteArray())
+        assertEquals("0", f.sql.scalar("SELECT COUNT(*) FROM ExportSnapshot"))
+        assertEquals("0", f.sql.scalar("SELECT COUNT(*) FROM Publication"))
+
+        val status = checkNotNull(work.readStatus(document, page, 1))
+        val successor = work.requestRerun(status, status.configuration)
+        assertEquals(SavedOcrWork.Outcome.PUBLISHED, work.execute(successor) { _, _, handoff -> handoff.retain(preparedText("")) })
+        assertNull(work.prepareTextExport(observed))
+        val blank = checkNotNull(work.prepareTextExport(checkNotNull(work.readText(document, page, 1)).exportObservation))
+        assertEquals(0L, blank.byteCount)
+        assertEquals("e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", blank.byteSha256)
+        val blankPath = f.sql.scalar("SELECT finalPath FROM FileTransaction WHERE kind='OCR_TEXT' AND state='COMMITTED' AND expectedByteCount=0")
+        assertPrivateOcrFile(f.sql, blankPath, byteArrayOf())
+    }
+
+    @Test fun ignoredPrivateOcrTextCompletionNeverReturnsReady() =
+        refusesPrivateOcrTextCommit("""CREATE TRIGGER ignore_ocr_artifact_commit BEFORE UPDATE ON FileTransaction
+            WHEN OLD.kind='OCR_TEXT' AND NEW.state='COMMITTED' BEGIN SELECT RAISE(IGNORE); END""")
+
+    @Test fun changedPrivateOcrTextCompletionRollsBackAfterTheCas() =
+        refusesPrivateOcrTextCommit("""CREATE TRIGGER drift_ocr_artifact_commit AFTER UPDATE OF state ON FileTransaction
+            WHEN OLD.kind='OCR_TEXT' AND NEW.state='COMMITTED' BEGIN UPDATE FileTransaction SET expectedByteCount=0
+            WHERE transactionId=NEW.transactionId; END""")
+
+    private fun refusesPrivateOcrTextCommit(trigger: String) = withOcrAttempts(publicStore = true) { f ->
+        val work = f.ocrPort()
+        val text = "Synthetic private export"
+        f.results.publish(f.request, f.start(), OcrText(text))
+        val observed = checkNotNull(work.readText(DocumentId(DOCUMENT), PageId(PAGE), 1)).exportObservation
+        f.sql.execSQL(trigger)
+        val failure = runCatching { work.prepareTextExport(observed) }.exceptionOrNull() as? RepositoryFailure
+        assertEquals(OperationErrorCode.INTEGRITY_FAILED, failure?.error?.code)
+        assertEquals("0", f.sql.scalar("SELECT COUNT(*) FROM FileTransaction WHERE kind='OCR_TEXT' AND state='COMMITTED'"))
+        val relative = f.sql.scalar("SELECT finalPath FROM FileTransaction WHERE kind='OCR_TEXT' AND state='MOVED'")
+        assertEquals(text.encodeToByteArray().size.toString(),
+            f.sql.scalar("SELECT expectedByteCount FROM FileTransaction WHERE kind='OCR_TEXT' AND state='MOVED'"))
+        assertPrivateOcrFile(f.sql, relative, text.encodeToByteArray())
+        assertEquals("0", f.sql.scalar("SELECT COUNT(*) FROM Publication"))
+    }
+
+    private fun assertPrivateOcrFile(sql: SupportSQLiteDatabase, relative: String, expected: ByteArray) {
+        assertTrue(relative.matches(Regex("ocr-text-exports/[0-9a-f-]{36}/text\\.bin")))
+        val root = File(File(sql.path!!).parentFile!!.parentFile!!, "files/store").canonicalFile
+        val file = File(root, relative)
+        assertEquals(file, file.canonicalFile)
+        assertTrue(file.isFile)
+        assertEquals(expected.size.toLong(), file.length())
+        java.io.DataInputStream(file.inputStream()).use { source ->
+            val actual = ByteArray(expected.size)
+            source.readFully(actual)
+            assertEquals(-1, source.read())
+            assertArrayEquals(expected, actual)
+        }
+    }
+
     @Test fun liveOcrStatusSeparatesQueuedRunningAndTerminalFailure() = withOcrAttempts(publicStore = true) { f ->
         val work = f.ocrPort()
         val page = PageId(PAGE)

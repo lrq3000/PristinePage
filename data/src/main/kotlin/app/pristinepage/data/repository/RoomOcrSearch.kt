@@ -37,7 +37,7 @@ internal class RoomOcrSearch(
     class TextSnapshot(val text: OcrText, val configuration: OcrConfiguration, val previousGeneration: Boolean, val binding: TextBinding)
 
     /** Capture a digest of the exact UTF-8 seen by the panel without retaining plaintext in its export token. */
-    class TextBinding(val producer: Hit, private val inputDigest: String, reviewedBytes: ByteArray) {
+    class TextBinding(val producer: Hit, val inputDigest: String, reviewedBytes: ByteArray) {
         private val digest = sha256(reviewedBytes)
         fun matchesInput(hit: Hit, intent: OcrJobInput): Boolean = producer == hit && inputDigest == intent.digest
         fun matches(bytes: ByteArray): Boolean = MessageDigest.isEqual(digest, sha256(bytes))
@@ -89,14 +89,17 @@ internal class RoomOcrSearch(
 
     suspend fun resolveTextExport(binding: TextBinding): ByteArray? = withContext(dispatcher) {
         val active = coroutineContext
-        val payload = metadata.transaction {
-            active.ensureActive()
-            val producer = checkedProducer(binding.producer.page)?.takeIf { binding.matchesInput(it.hit, it.intent) } ?: return@transaction null
-            // Equality with the digest of the previously accepted bytes authenticates their encoding as well as their content.
-            selectVerbatim(producer)?.takeIf(binding::matches)
-        }
+        val payload = metadata.transaction { resolveTextExportInTransaction(binding) { active.ensureActive() } }
         active.ensureActive()
         payload
+    }
+
+    @JvmSynthetic
+    internal fun resolveTextExportInTransaction(binding: TextBinding, checkpoint: () -> Unit): ByteArray? {
+        checkpoint()
+        val producer = checkedProducer(binding.producer.page)?.takeIf { binding.matchesInput(it.hit, it.intent) } ?: return null
+        // Equality with the digest of the previously accepted bytes authenticates their encoding as well as their content.
+        return selectVerbatim(producer)?.takeIf(binding::matches).also { checkpoint() }
     }
 
     private fun selectVerbatim(producing: Producer): ByteArray? {

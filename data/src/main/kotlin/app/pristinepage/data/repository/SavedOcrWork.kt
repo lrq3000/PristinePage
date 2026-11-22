@@ -23,6 +23,7 @@ class SavedOcrWork private constructor(store: PrivateImportStore.OcrComposition)
     private val backfill = RoomOcrBackfill(store.database)
     private val execution = RoomOcrExecution(store.database, store.owners)
     private val search = RoomOcrSearch(store.database)
+    private val textExport by lazy { RoomOcrTextExport(store, search) }
     private val editable = RoomEditablePages(RoomMetadataAccess(store.database), store.database.catalog())
     private val queue = RoomOcrQueue(store.database)
     private val invalidation = store.database.invalidationTracker
@@ -76,6 +77,17 @@ class SavedOcrWork private constructor(store: PrivateImportStore.OcrComposition)
             @JvmSynthetic
             internal fun issue(owner: SavedOcrWork, binding: RoomOcrSearch.TextBinding): TextExportObservation =
                 TextExportObservation(owner, binding)
+        }
+    }
+
+    /** Verified private completion from this facade only. It is not consent and exposes no filesystem location. */
+    class PreparedTextExport private constructor(private val issuer: SavedOcrWork, private val receipt: RoomOcrTextExport.Receipt) {
+        val byteCount: Long get() = receipt.intent.byteCount
+        val byteSha256: String get() = receipt.intent.textSha256
+
+        companion object {
+            @JvmSynthetic
+            internal fun issue(owner: SavedOcrWork, receipt: RoomOcrTextExport.Receipt): PreparedTextExport = PreparedTextExport(owner, receipt)
         }
     }
 
@@ -170,6 +182,14 @@ class SavedOcrWork private constructor(store: PrivateImportStore.OcrComposition)
     suspend fun resolveTextExport(observation: TextExportObservation): ByteArray? {
         val binding = observation.bindingFor(this) ?: return null
         return retained(binding.producer.page.value, "ocr_store_read_failed") { search.resolveTextExport(binding) }
+    }
+
+    /** Freeze and verify one private .txt from the exact displayed result. Access to any destination is separate. */
+    suspend fun prepareTextExport(observation: TextExportObservation): PreparedTextExport? {
+        val binding = observation.bindingFor(this) ?: return null
+        return retained(binding.producer.page.value, "ocr_text_export_failed") {
+            textExport.prepare(binding)?.let { PreparedTextExport.issue(this, it) }
+        }
     }
 
     /** Metadata only: observing a live page's status does not load recognition text, grant a job lease or touch its original. */

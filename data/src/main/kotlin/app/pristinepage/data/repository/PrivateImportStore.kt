@@ -99,6 +99,8 @@ class PrivateImportStore private constructor(
         internal val database = store.database
         internal val owners = store.owners
         internal val lifetime = store.exportLifetime
+        private val root = store.root
+        internal fun derivedFiles() = DerivedFiles(root)
 
         companion object {
             @JvmSynthetic
