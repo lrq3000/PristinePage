@@ -492,6 +492,60 @@ class RoomOcrIndexIntegrationTest {
         assertEquals("", f.search.readText(document, page)?.text?.value)
     }
 
+    @Test fun liveOcrStatusSeparatesQueuedRunningAndTerminalFailure() = withOcrAttempts(publicStore = true) { f ->
+        val work = f.ocrPort()
+        val page = PageId(PAGE)
+        val document = DocumentId(DOCUMENT)
+        val queued = checkNotNull(work.readStatus(document, page))
+        assertEquals(SavedOcrWork.PagePhase.QUEUED, queued.phase)
+        assertEquals(0, queued.attemptsStarted)
+        assertNull(queued.lastError)
+        assertNull(work.readStatus(DocumentId(UUID.randomUUID().toString()), page))
+        assertNull(work.readStatus(document, f.seedUnqueuedPage()))
+        repeat(3) { zeroBased ->
+            val lease = f.start()
+            val running = checkNotNull(work.readStatus(document, page))
+            assertEquals(SavedOcrWork.PagePhase.RUNNING, running.phase)
+            assertEquals(zeroBased + 1, running.attemptsStarted)
+            assertNull(running.lastError)
+            assertTrue(f.attempts.fail(f.request, lease, OcrError.ENGINE_FAILED))
+            val after = checkNotNull(work.readStatus(document, page))
+            assertEquals(if (zeroBased < 2) SavedOcrWork.PagePhase.QUEUED else SavedOcrWork.PagePhase.FAILED, after.phase)
+            assertEquals(zeroBased + 1, after.attemptsStarted)
+            assertEquals(OcrError.ENGINE_FAILED, after.lastError)
+        }
+        assertNull(work.readText(document, page))
+        f.sql.execSQL("UPDATE Page SET state='REMOVED',ordinal=NULL,removedAt=10 WHERE pageId=?", arrayOf(PAGE))
+        assertNull(work.readStatus(document, page))
+    }
+
+    @Test fun nonVisibleOcrStatusDoesNotInspectEvenKnownCorruptWork() = withOcrAttempts(publicStore = true) { f ->
+        val work = f.ocrPort()
+        val page = PageId(PAGE)
+        val document = DocumentId(DOCUMENT)
+        f.sql.execSQL("UPDATE Job SET attempt=4 WHERE jobId=?", arrayOf(f.request.jobId.value))
+        assertNull(work.readStatus(DocumentId(UUID.randomUUID().toString()), page))
+        val failure = runCatching { work.readStatus(document, page) }.exceptionOrNull() as? RepositoryFailure
+        assertEquals(OperationErrorCode.INTEGRITY_FAILED, failure?.error?.code)
+        f.sql.execSQL("""INSERT INTO AtelierDraft (draftId,stagingDocumentId,state,generation,step,createdAt)
+            VALUES (?,?,'ACQUIRING',1,0,0)""", arrayOf(DRAFT, DOCUMENT))
+        assertNull(work.readStatus(document, page))
+    }
+
+    @Test fun readyOcrStatusRequiresTheCurrentProducingResultAndReportsAnExplicitBlankAsReady() = withOcrAttempts(publicStore = true) { f ->
+        val work = f.ocrPort()
+        val page = PageId(PAGE)
+        val document = DocumentId(DOCUMENT)
+        f.results.publish(f.request, f.start(), OcrText(""))
+        val ready = checkNotNull(work.readStatus(document, page))
+        assertEquals(SavedOcrWork.PagePhase.READY, ready.phase)
+        assertEquals(1, ready.attemptsStarted)
+        assertNull(ready.lastError)
+        f.sql.execSQL("UPDATE OcrPageWork SET projectionVersion=2 WHERE pageId=?", arrayOf(PAGE))
+        val failure = runCatching { work.readStatus(document, page) }.exceptionOrNull() as? RepositoryFailure
+        assertEquals(OperationErrorCode.INTEGRITY_FAILED, failure?.error?.code)
+    }
+
     @Test fun noTextHitCanOpenAfterTheSavedRevisionChangesOrItsProjectionIsUnsupported() = withOcrAttempts { f ->
         val lease = f.start()
         f.results.publish(f.request, lease, OcrText("Receipt only for revision one"))

@@ -1,6 +1,7 @@
 package app.pristinepage.data.repository
 
 import app.pristinepage.core.ocr.OcrConfiguration
+import app.pristinepage.core.ocr.OcrError
 import app.pristinepage.core.ocr.OcrText
 import android.database.SQLException
 import app.pristinepage.data.model.DocumentId
@@ -58,6 +59,13 @@ class SavedOcrWork private constructor(store: PrivateImportStore.OcrComposition)
 
     /** Private on-device display/export value. Keep it out of store diagnostics and scheduler/search payloads. */
     class ReadText internal constructor(val text: OcrText, val configuration: OcrConfiguration, val previousGeneration: Boolean)
+
+    enum class PagePhase { QUEUED, RUNNING, READY, FAILED, CANCELED }
+
+    /** Snapshot of the current durable generation. QUEUED/RUNNING do not prove scheduler or owner liveness. READY verifies producer metadata; a separate readText also decodes/validates the payload and may see a newer generation. */
+    class PageStatus internal constructor(
+        val phase: PagePhase, val attemptsStarted: Int, val lastError: OcrError?, val configuration: OcrConfiguration,
+    )
 
     /** Own every budgeted resource needed to recognize the supplied saved page and exact installed configuration. Close must finish all use. Preparation and closure may not perform recognition. */
     interface Prepared : AutoCloseable {
@@ -119,6 +127,10 @@ class SavedOcrWork private constructor(store: PrivateImportStore.OcrComposition)
 
     suspend fun readText(document: DocumentId, page: PageId): ReadText? =
         retained(page.value, "ocr_store_read_failed") { search.readText(document, page) }
+
+    /** Metadata only: observing a live page's status does not load recognition text, grant a job lease or touch its original. */
+    suspend fun readStatus(document: DocumentId, page: PageId): PageStatus? =
+        retained(page.value, "ocr_store_read_failed") { search.readStatus(document, page) }
 
     private fun Continuation?.position(scan: Scan): PageId? =
         this?.let { cursor -> cursor.positionFor(this@SavedOcrWork, scan) ?: invalid("ocr_invalid_continuation") }

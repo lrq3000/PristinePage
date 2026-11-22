@@ -80,6 +80,15 @@ class OcrIndexSqlTest(unittest.TestCase):
         self.assertRegex(term, r"\A[a-z]+\Z")
         return match().replace(":expression", f"""'"{term}"'""").replace(":afterPageId", "NULL").replace(":limit", str(limit))
 
+    def test_status_checks_live_page_membership_without_projecting_ocr_work(self):
+        clause, = literals(DB / "OcrPageWorkDao.kt", r'@Query\("""((?:(?!""").)*)"""\)\s*abstract fun visibleStatusPage\(')
+        query = clause.replace(":page", f"'{PAGE}'").replace(":document", f"'{DOC}'")
+        self.assertEqual(["1", "0", "0", "0"], self.run_sql([
+            *create_tables(2), SEED, query, query.replace(f"'{DOC}'", f"'{DRAFT}'"),
+            "BEGIN", "UPDATE Page SET state='REMOVED', ordinal=NULL, removedAt=10", query, "ROLLBACK",
+            "UPDATE Document SET lifecycle='TOMBSTONED',deletedAt=10", query,
+        ]))
+
     def test_malformed_page_id_does_not_consume_the_first_match_slot(self):
         malformed = "0" * 36
         self.assertEqual([f"{DOC}|{PAGE}"], self.run_sql([

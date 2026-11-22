@@ -42,6 +42,13 @@ internal abstract class OcrPageWorkDao {
     @Query("SELECT * FROM OcrPageWork WHERE pageId=:page")
     abstract fun pointer(page: String): OcrPageWorkRow?
 
+    /** Authorize the requested visible membership before touching an OCR pointer or job that could fail validation. */
+    @Query("""SELECT EXISTS (SELECT 1 FROM Page p JOIN Document d ON d.documentId=p.documentId
+        WHERE p.pageId=:page AND p.documentId=:document AND p.state='ACTIVE' AND p.removedAt IS NULL
+        AND typeof(p.ordinal)='integer' AND p.ordinal BETWEEN 0 AND 99
+        AND d.lifecycle='ACTIVE' AND d.deletedAt IS NULL)""")
+    abstract fun visibleStatusPage(page: String, document: String): Boolean
+
     // This checks only accepted metadata. The caller separately checks the decoded Atelier promotion receipt; no recipe BLOB, title, or original is read here.
     @Query("""SELECT EXISTS (SELECT 1 FROM Page p
         JOIN Document d ON d.documentId=p.documentId

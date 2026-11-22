@@ -1,5 +1,6 @@
 package app.pristinepage.data.repository
 
+import app.pristinepage.core.ocr.OcrError
 import app.pristinepage.core.ocr.OcrText
 import app.pristinepage.data.db.PristineDatabase
 import app.pristinepage.data.model.DocumentId
@@ -9,6 +10,8 @@ import app.pristinepage.data.model.OperationErrorCode
 import app.pristinepage.data.model.PageId
 import app.pristinepage.data.model.RepositoryFailure
 import app.pristinepage.data.model.SourceId
+import app.pristinepage.data.repository.SavedOcrWork.PagePhase
+import app.pristinepage.data.repository.SavedOcrWork.PageStatus
 import java.nio.charset.CharacterCodingException
 import java.util.Collections
 import kotlinx.coroutines.CoroutineDispatcher
@@ -25,6 +28,7 @@ internal class RoomOcrSearch(
     private val results = database.ocrResults()
     private val jobs = RoomOcrJobReader(database)
     private val work = RoomOcrCurrentWork(database)
+    private val pageWork = database.ocrPageWork()
 
     data class Hit(val document: DocumentId, val page: PageId, val source: SourceId, val recipeRevision: Long, val producingJob: JobId)
     data class Page(val hits: List<Hit>, val nextAfter: PageId?)
@@ -72,6 +76,38 @@ internal class RoomOcrSearch(
         }
     }
 
+    suspend fun readStatus(document: DocumentId, page: PageId): PageStatus? = withContext(dispatcher) {
+        val active = coroutineContext
+        val status = metadata.transaction {
+            active.ensureActive()
+            if (!pageWork.visibleStatusPage(page.value, document.value) || metadata.isHiddenAtelierDraft(document.value)) return@transaction null
+            val current = work.readStoredInTransaction(page) ?: return@transaction null
+            if (current.intent.documentId != document || !work.isSavedInputInTransaction(current.intent)) return@transaction null
+            val job = current.job
+            if (!RoomOcrAttempts.hasConsistentStoredState(job)) invalidStatus(page)
+            val phase = when (job.state) {
+                "PENDING", "ADMITTED" -> PagePhase.QUEUED
+                "RUNNING" -> PagePhase.RUNNING
+                "FAILED" -> PagePhase.FAILED
+                "CANCELED" -> PagePhase.CANCELED
+                "SUCCEEDED" -> {
+                    // Check result provenance and bounded TEXT metadata, not the recognized-text projection returned to the editor.
+                    if (verifyProducer(page, current)?.previousGeneration != false) invalidStatus(page)
+                    PagePhase.READY
+                }
+                else -> invalidStatus(page)
+            }
+            if ((phase == PagePhase.QUEUED || phase == PagePhase.RUNNING) &&
+                !pageWork.hasExactJobPin(job.jobId, current.intent.sourceId.value)) invalidStatus(page)
+            PageStatus(phase, job.attempt.toInt(), job.errorCode?.let(OcrError::valueOf), current.intent.configuration)
+        }
+        active.ensureActive()
+        status
+    }
+
+    private fun invalidStatus(page: PageId): Nothing =
+        throw RepositoryFailure(OperationError(OperationErrorCode.INTEGRITY_FAILED, false, "ocr_status_invalid", page.value))
+
     private class Producer(val hit: Hit, val intent: OcrJobInput, val previousGeneration: Boolean)
 
     private fun checkedProducer(page: PageId): Producer? = try {
@@ -81,8 +117,8 @@ internal class RoomOcrSearch(
         null
     }
 
-    private fun verifyProducer(page: PageId): Producer? {
-        val current = work.readStoredInTransaction(page) ?: return null
+    private fun verifyProducer(page: PageId, current: RoomOcrCurrentWork.Current? = work.readStoredInTransaction(page)): Producer? {
+        current ?: return null
         val distinctProducer = current.resultJobId ?: return null
         if (current.projectionVersion != RoomOcrResults.PROJECTION_VERSION) return null
         val sameJob = distinctProducer.value == current.job.jobId
