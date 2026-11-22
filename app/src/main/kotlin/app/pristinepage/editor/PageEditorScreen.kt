@@ -38,6 +38,9 @@ import app.pristinepage.core.recipe.GeometryRecipe
 import app.pristinepage.image.preview.OriginalPreviewBitmap
 import app.pristinepage.design.AtelierStyle
 import app.pristinepage.library.errorText
+import app.pristinepage.ocr.SavedPageOcrDetails
+import app.pristinepage.ocr.SavedPageOcrPanel
+import app.pristinepage.ocr.SavedPageOcrReader
 
 /** A view of one retained session, not a second processing/store owner. The viewport is finite even inside a scroll container and never derives an unbounded height from a narrow source aspect. */
 class PageEditorScreen(
@@ -49,6 +52,7 @@ class PageEditorScreen(
     private val albumPageCount: Int? = null,
     private val previousPage: (() -> Unit)? = null,
     private val nextPage: (() -> Unit)? = null,
+    private val savedOcr: SavedPageOcrReader? = null,
 ) : EditorContent {
     @Composable override fun Content(session: EditorSession, onExit: () -> Unit) {
         val state by session.state.collectAsStateWithLifecycle()
@@ -57,6 +61,7 @@ class PageEditorScreen(
         var applyRevision by rememberSaveable { mutableStateOf<Long?>(null) }
         val panel = when (guidedStep) { 0 -> "shape"; 1 -> "rotate"; 2 -> "looks"; else -> chosenPanel }
         var information by rememberSaveable { mutableStateOf(false) }
+        var ocrPanel by remember(session, state.page?.recipeRevision) { mutableStateOf<SavedPageOcrPanel?>(null) }
         val lifecycle = LocalLifecycleOwner.current.lifecycle
         val exit by rememberUpdatedState(onExit)
         DisposableEffect(session, lifecycle) {
@@ -82,7 +87,7 @@ class PageEditorScreen(
         var seedFeedback by rememberSaveable(state.page?.pageId?.value) { mutableStateOf(false) }
         var bezierSelection by remember(session) { mutableStateOf<BezierControl?>(null) }
         var placeBezierPoint by remember(session, panel, state.draft?.geometry is GeometryRecipe.Bezier) { mutableStateOf(false) }
-        val mayBrowse = editable && !state.dirty && !state.confirmExit && panel.isEmpty() && !information
+        val mayBrowse = editable && !state.dirty && !state.confirmExit && panel.isEmpty() && !information && ocrPanel == null
         val swipePrevious by rememberUpdatedState(previousPage)
         val swipeNext by rememberUpdatedState(nextPage)
         val shapeBlocksApply = state.shapeBlocksApply(preview)
@@ -304,9 +309,22 @@ class PageEditorScreen(
                     session.showView(if (state.view == EditorView.ORIGINAL) "result" else "original")
                 }
                 RibbonTool("info", "ⓘ", R.string.atelier_info, information, editable) { information = true }
+                if (savedOcr != null) {
+                    // A saved editor can still explain unavailability when the recipe cannot be opened.
+                    RibbonTool("processing-details", "ⓘ", R.string.ocr_processing_details, ocrPanel == SavedPageOcrPanel.PROCESSING, !state.saving && !state.exitReady) {
+                        ocrPanel = SavedPageOcrPanel.PROCESSING
+                    }
+                    RibbonTool("ocr-text", "≡", R.string.ocr_text, ocrPanel == SavedPageOcrPanel.TEXT, editable) {
+                        ocrPanel = SavedPageOcrPanel.TEXT
+                    }
+                }
             }
             }
         }
+        }
+        if (guidedStep == null && savedOcr != null) {
+            val shown = ocrPanel
+            if (shown != null) SavedPageOcrDetails(shown, state.page, savedOcr) { ocrPanel = null }
         }
         if (information) AlertDialog(onDismissRequest = { information = false },
             title = { Text(stringResource(R.string.atelier_info)) },

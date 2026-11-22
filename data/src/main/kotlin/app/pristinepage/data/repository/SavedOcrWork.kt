@@ -125,12 +125,12 @@ class SavedOcrWork private constructor(store: PrivateImportStore.OcrComposition)
         return retained(hit.page.value, "ocr_store_read_failed") { search.canOpen(binding) }
     }
 
-    suspend fun readText(document: DocumentId, page: PageId): ReadText? =
-        retained(page.value, "ocr_store_read_failed") { search.readText(document, page) }
+    suspend fun readText(document: DocumentId, page: PageId, expectedRevision: Long? = null): ReadText? =
+        retained(page.value, "ocr_store_read_failed") { search.readText(document, page, expectedRevision) }
 
     /** Metadata only: observing a live page's status does not load recognition text, grant a job lease or touch its original. */
-    suspend fun readStatus(document: DocumentId, page: PageId): PageStatus? =
-        retained(page.value, "ocr_store_read_failed") { search.readStatus(document, page) }
+    suspend fun readStatus(document: DocumentId, page: PageId, expectedRevision: Long? = null): PageStatus? =
+        retained(page.value, "ocr_store_read_failed") { search.readStatus(document, page, expectedRevision) }
 
     private fun Continuation?.position(scan: Scan): PageId? =
         this?.let { cursor -> cursor.positionFor(this@SavedOcrWork, scan) ?: invalid("ocr_invalid_continuation") }

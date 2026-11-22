@@ -61,11 +61,13 @@ internal class RoomOcrSearch(
         }
     }
 
-    suspend fun readText(document: DocumentId, page: PageId): SavedOcrWork.ReadText? = withContext(dispatcher) {
+    suspend fun readText(document: DocumentId, page: PageId, expectedRevision: Long? = null): SavedOcrWork.ReadText? = withContext(dispatcher) {
         val active = coroutineContext
         metadata.transaction {
             active.ensureActive()
-            val producing = checkedProducer(page)?.takeIf { it.hit.document == document } ?: return@transaction null
+            val producing = checkedProducer(page)?.takeIf {
+                it.hit.document == document && (expectedRevision == null || it.hit.recipeRevision == expectedRevision)
+            } ?: return@transaction null
             val intent = producing.intent
             val config = intent.configuration
             val raw = results.selectVerbatim(page.value, intent.input.recipeRevision, intent.input.sourcePixelSha256,
@@ -76,13 +78,14 @@ internal class RoomOcrSearch(
         }
     }
 
-    suspend fun readStatus(document: DocumentId, page: PageId): PageStatus? = withContext(dispatcher) {
+    suspend fun readStatus(document: DocumentId, page: PageId, expectedRevision: Long? = null): PageStatus? = withContext(dispatcher) {
         val active = coroutineContext
         val status = metadata.transaction {
             active.ensureActive()
             if (!pageWork.visibleStatusPage(page.value, document.value) || metadata.isHiddenAtelierDraft(document.value)) return@transaction null
             val current = work.readStoredInTransaction(page) ?: return@transaction null
-            if (current.intent.documentId != document || !work.isSavedInputInTransaction(current.intent)) return@transaction null
+            if (current.intent.documentId != document || (expectedRevision != null && current.intent.input.recipeRevision != expectedRevision) ||
+                !work.isSavedInputInTransaction(current.intent)) return@transaction null
             val job = current.job
             if (!RoomOcrAttempts.hasConsistentStoredState(job)) invalidStatus(page)
             val phase = when (job.state) {

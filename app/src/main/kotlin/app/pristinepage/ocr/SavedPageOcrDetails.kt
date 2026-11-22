@@ -1,0 +1,158 @@
+package app.pristinepage.ocr
+
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
+import androidx.compose.runtime.*
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.text.style.TextDirection
+import androidx.compose.ui.unit.dp
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.compose.LocalLifecycleOwner
+import androidx.lifecycle.repeatOnLifecycle
+import app.pristinepage.R
+import app.pristinepage.core.ocr.OcrConfiguration
+import app.pristinepage.core.ocr.OcrError
+import app.pristinepage.core.ocr.OcrLayout
+import app.pristinepage.core.ocr.OcrText
+import app.pristinepage.data.model.EditablePage
+import app.pristinepage.data.repository.SavedOcrWork
+import app.pristinepage.data.repository.SavedOcrWork.PagePhase
+import app.pristinepage.design.OcrLanguage
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.awaitCancellation
+import kotlinx.coroutines.ensureActive
+
+/** Read only the chosen private panel. The view never combines a status and a separate result as if they were one snapshot. */
+class SavedPageOcrReader(private val open: suspend () -> SavedOcrWork) {
+    internal suspend fun status(page: EditablePage) = open().readStatus(page.documentId, page.pageId, page.recipeRevision)
+    internal suspend fun text(page: EditablePage) = open().readText(page.documentId, page.pageId, page.recipeRevision)
+}
+
+internal enum class SavedPageOcrPanel(val title: Int) { PROCESSING(R.string.ocr_processing_details), TEXT(R.string.ocr_text) }
+
+@Composable
+internal fun SavedPageOcrDetails(panel: SavedPageOcrPanel, page: EditablePage?, reader: SavedPageOcrReader, dismiss: () -> Unit) {
+    val lifecycle = LocalLifecycleOwner.current.lifecycle
+    var refresh by remember { mutableIntStateOf(0) }
+    var result by remember(panel, page, reader, lifecycle, refresh) {
+        mutableStateOf<Reading>(if (page == null) Reading.Unavailable else Reading.Loading)
+    }
+    LaunchedEffect(panel, page, reader, lifecycle, refresh) {
+        if (page == null) return@LaunchedEffect
+        lifecycle.repeatOnLifecycle(Lifecycle.State.STARTED) {
+            result = Reading.Loading
+            try {
+                val snapshot = try {
+                    when (panel) {
+                        SavedPageOcrPanel.PROCESSING -> Reading.Status(reader.status(page))
+                        SavedPageOcrPanel.TEXT -> Reading.TextValue(reader.text(page))
+                    }
+                } catch (canceled: CancellationException) {
+                    throw canceled
+                } catch (_: Exception) {
+                    Reading.Unavailable
+                }
+                ensureActive()
+                result = snapshot
+                awaitCancellation()
+            } finally {
+                // Privacy and navigation: do not retain requested text after the panel leaves its started lifetime.
+                result = Reading.Loading
+            }
+        }
+    }
+    AlertDialog(
+        onDismissRequest = dismiss,
+        title = { Text(stringResource(panel.title)) },
+        text = {
+            Column(Modifier.verticalScroll(rememberScrollState())) {
+                when (val shown = result) {
+                    Reading.Loading -> Text(stringResource(R.string.ocr_details_loading))
+                    Reading.Unavailable -> Text(stringResource(R.string.ocr_details_unavailable))
+                    is Reading.Status -> {
+                        val status = shown.value
+                        Text(stringResource(ocrPhaseLabel(status?.phase)))
+                        if (status != null) Text(stringResource(R.string.ocr_details_attempts, status.attemptsStarted))
+                        Text(stringResource(ocrErrorLabel(status?.lastError)))
+                        status?.configuration?.let { OcrSettingsSummary(it) }
+                    }
+                    is Reading.TextValue -> {
+                        val item = shown.value
+                        val text = presentOcrText(item?.text, item?.previousGeneration == true)
+                        text.message?.let { Text(stringResource(it)) }
+                        item?.configuration?.let { OcrSettingsSummary(it) }
+                        text.verbatim?.let { original ->
+                            // Do not pass private OCR to platform text classification or clipboard via selectable text.
+                            Text(original, style = MaterialTheme.typography.bodyMedium.copy(textDirection = TextDirection.Content))
+                        }
+                    }
+                }
+            }
+        },
+        confirmButton = { TextButton(onClick = dismiss, modifier = Modifier.heightIn(min = 48.dp)) { Text(stringResource(R.string.atelier_close)) } },
+        dismissButton = {
+            TextButton(onClick = { refresh++ }, enabled = page != null && result != Reading.Loading, modifier = Modifier.heightIn(min = 48.dp)) {
+                Text(stringResource(R.string.ocr_details_refresh))
+            }
+        },
+    )
+}
+
+private sealed interface Reading {
+    data object Loading : Reading
+    data object Unavailable : Reading
+    class Status(val value: SavedOcrWork.PageStatus?) : Reading
+    class TextValue(val value: SavedOcrWork.ReadText?) : Reading
+}
+
+@Composable
+private fun OcrSettingsSummary(configuration: OcrConfiguration) {
+    val engine = if (configuration.engineId == "tesseract-android") stringResource(R.string.ocr_engine_tesseract) else configuration.engineId
+    Text(stringResource(R.string.ocr_details_engine, engine, configuration.engineVersion))
+    val layout = when (configuration.layout) {
+        OcrLayout.AUTOMATIC -> R.string.ocr_layout_automatic
+        OcrLayout.SINGLE_BLOCK -> R.string.ocr_layout_block
+        OcrLayout.SPARSE_TEXT -> R.string.ocr_layout_sparse
+    }
+    Text(stringResource(R.string.ocr_details_layout, stringResource(layout)))
+    val ordered = configuration.languagePacks?.ordered.orEmpty()
+    if (ordered.isNotEmpty()) {
+        val languages = ordered.map { pack ->
+            OcrLanguage.entries.firstOrNull { it.packCode == pack.code }?.let { stringResource(it.label) } ?: pack.code
+        }
+        Text(stringResource(R.string.ocr_details_languages, languages.joinToString(", ")))
+    }
+}
+
+/** No data-class toString: recognized text is not incidental diagnostic output. */
+internal class OcrTextPresentation(val message: Int?, val verbatim: String?)
+
+internal fun presentOcrText(text: OcrText?, previousGeneration: Boolean): OcrTextPresentation = when {
+    text == null -> OcrTextPresentation(R.string.ocr_text_not_available, null)
+    text.value.isEmpty() -> OcrTextPresentation(if (previousGeneration) R.string.ocr_text_previous_blank else R.string.ocr_text_blank, null)
+    else -> OcrTextPresentation(R.string.ocr_text_previous.takeIf { previousGeneration }, text.value)
+}
+
+internal fun ocrPhaseLabel(phase: PagePhase?) = when (phase) {
+    null -> R.string.ocr_details_no_status
+    PagePhase.QUEUED -> R.string.ocr_details_queued
+    PagePhase.RUNNING -> R.string.ocr_details_running
+    PagePhase.READY -> R.string.ocr_details_ready
+    PagePhase.FAILED -> R.string.ocr_details_failed
+    PagePhase.CANCELED -> R.string.ocr_details_canceled
+}
+
+internal fun ocrErrorLabel(error: OcrError?) = when (error) {
+    null -> R.string.ocr_details_no_errors
+    OcrError.ENGINE_FAILED -> R.string.ocr_details_engine_failed
+    OcrError.RESOURCE_LIMIT -> R.string.ocr_details_resource_limit
+    OcrError.INVALID_OUTPUT -> R.string.ocr_details_invalid_output
+    OcrError.INTERRUPTED -> R.string.ocr_details_interrupted
+}

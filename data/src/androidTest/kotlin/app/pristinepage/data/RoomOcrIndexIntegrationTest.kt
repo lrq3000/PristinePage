@@ -537,13 +537,22 @@ class RoomOcrIndexIntegrationTest {
         val page = PageId(PAGE)
         val document = DocumentId(DOCUMENT)
         f.results.publish(f.request, f.start(), OcrText(""))
-        val ready = checkNotNull(work.readStatus(document, page))
+        assertNull(work.readStatus(document, page, expectedRevision = 2))
+        assertNull(work.readText(document, page, expectedRevision = 2))
+        assertEquals("", work.readText(document, page, expectedRevision = 1)?.text?.value)
+        val ready = checkNotNull(work.readStatus(document, page, expectedRevision = 1))
         assertEquals(SavedOcrWork.PagePhase.READY, ready.phase)
         assertEquals(1, ready.attemptsStarted)
         assertNull(ready.lastError)
         f.sql.execSQL("UPDATE OcrPageWork SET projectionVersion=2 WHERE pageId=?", arrayOf(PAGE))
         val failure = runCatching { work.readStatus(document, page) }.exceptionOrNull() as? RepositoryFailure
         assertEquals(OperationErrorCode.INTEGRITY_FAILED, failure?.error?.code)
+        f.sql.execSQL("UPDATE OcrPageWork SET projectionVersion=1 WHERE pageId=?", arrayOf(PAGE))
+        f.queueWithConfig(f.request.binding.configuration.copy(layout = OcrLayout.SPARSE_TEXT))
+        assertEquals(SavedOcrWork.PagePhase.QUEUED, work.readStatus(document, page, expectedRevision = 1)?.phase)
+        val previous = checkNotNull(work.readText(document, page, expectedRevision = 1))
+        assertTrue(previous.previousGeneration)
+        assertEquals("", previous.text.value)
     }
 
     @Test fun noTextHitCanOpenAfterTheSavedRevisionChangesOrItsProjectionIsUnsupported() = withOcrAttempts { f ->

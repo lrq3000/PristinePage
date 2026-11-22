@@ -62,6 +62,7 @@ import app.pristinepage.library.AtelierThumbnailLoader
 import app.pristinepage.library.OriginalPagePreview
 import app.pristinepage.library.LibrarySession
 import app.pristinepage.library.ImportPhase
+import app.pristinepage.ocr.SavedPageOcrReader
 import app.pristinepage.image.preview.OriginalPreviewBitmap
 import app.pristinepage.image.preview.RenderedPreviewBitmap
 import app.pristinepage.image.preview.RenderedPreviewBitmapLoader
@@ -224,7 +225,9 @@ class MainActivity : ComponentActivity() {
                         }
                     }
                 }
-                if (selected != null) key(identity) { PageEditorScreen(loadOriginal = loadOriginal,
+                 if (selected != null) key(identity) {
+                     val savedOcr = remember(services) { SavedPageOcrReader { services.imports().store.savedOcr } }
+                     PageEditorScreen(loadOriginal = loadOriginal, savedOcr = savedOcr,
                     pageNumber = fallback?.ordinal?.plus(1), albumPageCount = orderedPages.size,
                     previousPage = destination(-1), nextPage = destination(1), originalOnLoadFailure = {
                     if (fallback != null) key(fallback) {
