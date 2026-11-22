@@ -29,8 +29,8 @@ class SavedOcrPreparer(
     private val sessions: SessionFactory,
 ) : SavedOcrWork.Preparer {
     fun interface SessionFactory {
-        /** Open the exact independently verified installed configuration, not current defaults. Borrow the private input until the returned session closes; never recycle or publish it. On failure the factory owns cleanup of any partial session. Neither open nor close may recognize. */
-        fun open(configuration: OcrConfiguration, input: Bitmap): SavedOcrWork.Prepared
+        /** Open the exact independently verified installed configuration, not current defaults. Check cancellation during bounded I/O and pixel copying. Borrow the private input until the returned session closes; never recycle or publish it. On failure the factory owns cleanup of any partial session. Neither open nor close may recognize. */
+        fun open(configuration: OcrConfiguration, input: Bitmap, checkpoint: () -> Unit): SavedOcrWork.Prepared
     }
 
     override suspend fun prepare(page: EditablePage, configuration: OcrConfiguration, handoff: SavedOcrWork.Handoff) {
@@ -63,7 +63,7 @@ class SavedOcrPreparer(
             }
             // Release the full render and its permit before allocating native resources. All remaining ownership transfers synchronously.
             active.ensureActive()
-            resources.session = sessions.open(configuration, checkNotNull(resources.bitmap).bitmap)
+            resources.session = sessions.open(configuration, checkNotNull(resources.bitmap).bitmap) { active.ensureActive() }
             active.ensureActive()
             handoff.retain(resources)
         } catch (failure: Throwable) {

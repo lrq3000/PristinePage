@@ -116,25 +116,35 @@ class LocalSavedOcrIntegrationTest {
         val corrupt = VerifiedOcrPackDirectory(corruptRoot.toPath(), listOf(english))
         assertNull(corrupt.resolveOrdered(listOf("eng")))
         val budget = ImageAllocationBudget.forMemoryClass(checkNotNull(context.getSystemService(ActivityManager::class.java)).memoryClass)
+        val runtime = TesseractInstalledOcr(selectedPacks, budget)
+        assertNull(runtime.configurationFor(emptyList()))
+        assertNull(runtime.configurationFor(listOf("fra", "eng", "fra")))
+        assertNull(runtime.configurationFor(listOf("unknown")))
+        val reversed = checkNotNull(runtime.configurationFor(listOf("fra", "eng")))
+        assertEquals(OcrLayout.AUTOMATIC, reversed.layout)
+        assertEquals(listOf(pins.getValue("fra").identity, pins.getValue("eng").identity), reversed.languagePacks?.ordered)
         var packLeases = 0
         fun lease(directory: File): TesseractSavedOcrSessions.PackLease = object : TesseractSavedOcrSessions.PackLease {
             init { packLeases++ }
             override val root = directory
             override fun close() { packLeases-- }
         }
-        val sessions = TesseractSavedOcrSessions(budget) { requested ->
-            selectedPacks.acquire(requested)?.toFile()?.let(::lease)
-        }
-        val changedBytes = TesseractSavedOcrSessions(budget) { requested ->
-            assertFalse("Corrupt pack must not reach lease acquisition", corrupt.verifies(requested))
+        val sessions = runtime.sessions
+        val changedBytes = TesseractSavedOcrSessions(budget) { requested, checkpoint ->
+            assertFalse("Corrupt pack must not reach lease acquisition", corrupt.verifies(requested, checkpoint))
             null
         }
         val missingDataDirectory = newDirectory(directory, "missing-tessdata-control")
-        val missingData = TesseractSavedOcrSessions(budget) { lease(missingDataDirectory) }
+        val missingData = TesseractSavedOcrSessions(budget) { _, _ -> lease(missingDataDirectory) }
         val refusedPixAllocation = TesseractSavedOcrSessions(budget, allocatePix = { _, _ ->
             assertEquals(1, packLeases)
             Pix(0L) // The pinned dimension constructor can contain a zero pointer. Do not deliberately exhaust the device heap.
-        }) { lease(packRoot) }
+        }) { _, _ -> lease(packRoot) }
+        var canceledPix: Pix? = null
+        val canceledDuringPixCopy = TesseractSavedOcrSessions(budget, allocatePix = { width, height ->
+            assertEquals(1, packLeases)
+            Pix(width, height, 32).also { canceledPix = it }
+        }) { _, _ -> lease(packRoot) }
         suspend fun failBeforeStart(store: PrivateImportStore, target: SavedOcrWork.Target, renderer: RenderCoordinator,
             factory: SavedOcrPreparer.SessionFactory, expected: OperationErrorCode) {
             val failed = runCatching {
@@ -176,8 +186,10 @@ class LocalSavedOcrIntegrationTest {
                     "jpn" -> OcrLayout.SPARSE_TEXT
                     else -> OcrLayout.SINGLE_BLOCK
                 }
-                val configuration = OcrConfiguration(TesseractSavedOcrSessions.ENGINE_ID, TesseractSavedOcrSessions.CONTRACT_VERSION, layout,
-                    checkNotNull(selectedPacks.resolveOrdered(selected)))
+                val configuration = checkNotNull(runtime.configurationFor(selected, layout))
+                assertEquals(layout, configuration.layout)
+                assertEquals("tesseract-android", configuration.engineId)
+                assertEquals(1, configuration.engineVersion)
                 assertEquals(selected.map { pins.getValue(it).identity }, configuration.languagePacks?.ordered)
                 val png = LocalTesseractProbeTest.load(context, "${ROOT}controls/$id.png", 1_048_576)
                 assertEquals(row.getInt("imageBytes"), png.size)
@@ -198,13 +210,14 @@ class LocalSavedOcrIntegrationTest {
                     findAll(store, probe.query).any { it.page == saved.pageId }
                 })
                 val target = store.savedOcr.reconcile(configuration, null, 50).targets.single { it.page == saved.pageId }
+                if (id == "eng-fra") assertEquals(target, store.savedOcr.reconcilePage(document, saved.pageId, reversed))
                 if (id == "eng") {
                     var opened = false
-                    val unavailable = SavedOcrPreparer(renderer, budget) { config, bitmap ->
+                    val unavailable = SavedOcrPreparer(renderer, budget) { config, bitmap, checkpoint ->
                         assertFalse(bitmap.isRecycled)
                         assertTrue(budget.usedBytes > 0)
                         opened = true
-                        sessions.open(config.copy(languagePacks = OcrLanguagePacks(listOf(OcrLanguagePack("eng", "0".repeat(64))))), bitmap)
+                        sessions.open(config.copy(languagePacks = OcrLanguagePacks(listOf(OcrLanguagePack("eng", "0".repeat(64))))), bitmap, checkpoint)
                     }
                     val failure = runCatching { store.savedOcr.execute(target, unavailable) }.exceptionOrNull()
                     assertTrue(opened)
@@ -214,15 +227,44 @@ class LocalSavedOcrIntegrationTest {
                     failBeforeStart(store, target, renderer, missingData, OperationErrorCode.PROVIDER_UNAVAILABLE)
                     failBeforeStart(store, target, renderer, changedBytes, OperationErrorCode.PROVIDER_UNAVAILABLE)
                     failBeforeStart(store, target, renderer, refusedPixAllocation, OperationErrorCode.RESOURCE_LIMIT)
+                    var borrowed: Bitmap? = null
+                    var openCheckpointsAfterAllocation = 0
+                    var checkpointObservedCancellation = false
+                    var sessionReturned = false
+                    coroutineScope {
+                        val child = launch {
+                            val active = currentCoroutineContext()
+                            store.savedOcr.execute(target, SavedOcrPreparer(renderer, budget) { config, bitmap, checkpoint ->
+                                borrowed = bitmap
+                                assertTrue(bitmap.height >= 2)
+                                canceledDuringPixCopy.open(config, bitmap) {
+                                    // Row checkpoints precede each copy: the second one follows a complete first row.
+                                    if (canceledPix != null && ++openCheckpointsAfterAllocation == 2) active.cancel()
+                                    try { checkpoint() } catch (canceled: CancellationException) {
+                                        checkpointObservedCancellation = true
+                                        throw canceled
+                                    }
+                                }.also { sessionReturned = true }
+                            })
+                        }
+                        child.join()
+                        assertTrue(child.isCancelled)
+                    }
+                    assertTrue("The preparer's checkpoint must propagate real cancellation", checkpointObservedCancellation)
+                    assertFalse("Canceled preparation returned a native session", sessionReturned)
+                    assertTrue(checkNotNull(borrowed).isRecycled)
+                    val pix = checkNotNull(canceledPix)
+                    assertTrue(runCatching { pix.nativePix }.exceptionOrNull() is IllegalStateException)
+                    assertEquals(0, packLeases)
+                    assertEquals(0L, budget.usedBytes)
                     assertEquals(target, store.savedOcr.reconcilePage(document, saved.pageId, null))
                 }
                 var score: Score? = null
-                val prepare = SavedOcrPreparer(renderer, budget) { config, bitmap ->
+                val prepare = SavedOcrPreparer(renderer, budget) { config, bitmap, checkpoint ->
                     assertEquals(configuration, config)
-                    val native = sessions.open(config, bitmap)
+                    val native = sessions.open(config, bitmap, checkpoint)
                     object : SavedOcrWork.Prepared {
                         override suspend fun recognize(): OcrText = native.recognize().also { text ->
-                            assertEquals(1, packLeases)
                             score = grade(id, row.getString("expected"), text.value)
                             exactText[id] = config to text
                         }
@@ -284,11 +326,12 @@ class LocalSavedOcrIntegrationTest {
             }
             val child = launch {
                 val active = currentCoroutineContext()
-                val preparer = SavedOcrPreparer(renderer, budget) { _, input ->
+                val preparer = SavedOcrPreparer(renderer, budget) { _, input, checkpoint ->
                     assertTrue("Full render still owned during session open", renderReleased)
                     assertEquals(56L, budget.usedBytes) // 8 * (2 * 3) + 4 * 2: the bitmap-only reservation.
                     assertFalse(input.isRecycled)
                     assertEquals(0xff0080ff.toInt(), input.getPixel(0, 0))
+                    checkpoint()
                     borrowed = input
                     if (cancelDuringOpen) active.cancel(CancellationException("Synthetic session-open cancellation"))
                     object : SavedOcrWork.Prepared {

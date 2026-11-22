@@ -21,20 +21,22 @@ import kotlinx.coroutines.ensureActive
 internal class TesseractSavedOcrSessions(
     private val budget: ImageAllocationBudget,
     private val allocatePix: (Int, Int) -> Pix? = { width, height -> Pix(width, height, 32) },
-    private val acquirePacks: (OcrLanguagePacks) -> PackLease?,
+    private val acquirePacks: (OcrLanguagePacks, () -> Unit) -> PackLease?,
 ) : SavedOcrPreparer.SessionFactory {
     interface PackLease : AutoCloseable {
         /** Trusted owner supplies a read-only directory containing exactly the claimed pack bytes for the session lifetime. */
         val root: File
     }
 
-    override fun open(configuration: OcrConfiguration, input: Bitmap): SavedOcrWork.Prepared {
+    override fun open(configuration: OcrConfiguration, input: Bitmap, checkpoint: () -> Unit): SavedOcrWork.Prepared {
+        checkpoint()
         if (configuration.engineId != ENGINE_ID || configuration.engineVersion != CONTRACT_VERSION) unavailable()
         val packs = configuration.languagePacks ?: unavailable()
-        val lease = acquirePacks(packs) ?: unavailable()
+        val lease = acquirePacks(packs, checkpoint) ?: unavailable()
         var engine: TessBaseAPI? = null
         var reservation: AutoCloseable? = null
         try {
+            checkpoint()
             val root = lease.root
             if (!File(root, "tessdata").isDirectory) unavailable()
             val width = input.width
@@ -47,6 +49,7 @@ internal class TesseractSavedOcrSessions(
             val local = TessBaseAPI()
             engine = local
             if (local.version != NATIVE_VERSION || !initialize(local, root, packs) || !local.setVariable("user_defined_dpi", "300")) unavailable()
+            checkpoint()
             val mode = when (configuration.layout) {
                 OcrLayout.AUTOMATIC -> TessBaseAPI.PageSegMode.PSM_AUTO
                 OcrLayout.SINGLE_BLOCK -> TessBaseAPI.PageSegMode.PSM_SINGLE_BLOCK
@@ -54,7 +57,8 @@ internal class TesseractSavedOcrSessions(
             }
             local.setPageSegMode(mode)
             if (local.pageSegMode != mode) unavailable()
-            setCheckedImage(local, input, width, height)
+            setCheckedImage(local, input, width, height, checkpoint)
+            checkpoint()
             return Session(local, lease, reserved)
         } catch (failure: Throwable) {
             val reported = when (failure) {
@@ -76,16 +80,18 @@ internal class TesseractSavedOcrSessions(
         false
     }
 
-    private fun setCheckedImage(engine: TessBaseAPI, input: Bitmap, width: Int, height: Int) {
+    private fun setCheckedImage(engine: TessBaseAPI, input: Bitmap, width: Int, height: Int, checkpoint: () -> Unit) {
         // The pinned Bitmap JNI path dereferences a failed Pix allocation. Pix(width,height,32) returns the pointer unchanged, so check it before copying or passing it to Tesseract.
         val pix = allocatePix(width, height) ?: allocationRefused()
         if (pix.nativePix == 0L) allocationRefused()
         try {
             val row = IntArray(width)
             for (y in 0 until height) {
+                checkpoint()
                 input.getPixels(row, 0, width, 0, y, width, 1)
                 for (x in row.indices) pix.setPixel(x, y, row[x])
             }
+            checkpoint()
             engine.setImage(pix)
         } finally {
             // The qualified JNI SetImage(Pix) path takes its own reference; the engine keeps it until recycle().

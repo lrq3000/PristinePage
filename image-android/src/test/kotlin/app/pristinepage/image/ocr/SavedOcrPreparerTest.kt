@@ -65,7 +65,7 @@ class SavedOcrPreparerTest {
                     })
                 }
             }
-            val preparer = SavedOcrPreparer(renderer, budget) { _, _ -> throw AssertionError("Invalid render reached engine") }
+            val preparer = SavedOcrPreparer(renderer, budget) { _, _, _ -> throw AssertionError("Invalid render reached engine") }
             val failure = runCatching { preparer.prepare(page, config) { throw AssertionError("Invalid render reached handoff") } }.exceptionOrNull()
             if (expected == null) assertTrue(failure is CancellationException)
             else assertEquals(expected, (failure as? RepositoryFailure)?.error?.code)
@@ -78,7 +78,7 @@ class SavedOcrPreparerTest {
         val renderer = object : RenderCoordinator {
             override suspend fun render(request: RenderRequest): RenderResult = throw AssertionError("Unbound engine triggered decode")
         }
-        val preparer = SavedOcrPreparer(renderer, ImageAllocationBudget(64)) { _, _ -> throw AssertionError("Unbound engine was opened") }
+        val preparer = SavedOcrPreparer(renderer, ImageAllocationBudget(64)) { _, _, _ -> throw AssertionError("Unbound engine was opened") }
         val failure = runCatching {
             preparer.prepare(page, config.copy(languagePacks = null)) { throw AssertionError("Unbound engine reached handoff") }
         }.exceptionOrNull()
@@ -91,7 +91,7 @@ class SavedOcrPreparerTest {
                 request, RenderStatus.RESOURCE_LIMIT, null, emptyList(), listOf("ocr_render_exceeds_idle_budget"),
             )
         }
-        val preparer = SavedOcrPreparer(renderer, ImageAllocationBudget(64)) { _, _ -> error("No native session expected") }
+        val preparer = SavedOcrPreparer(renderer, ImageAllocationBudget(64)) { _, _, _ -> error("No native session expected") }
         val failure = runCatching { preparer.prepare(page, config) { error("No prepared handoff expected") } }
             .exceptionOrNull() as? RepositoryFailure
         assertEquals(OperationErrorCode.RESOURCE_LIMIT, failure?.error?.code)
@@ -107,7 +107,7 @@ class SavedOcrPreparerTest {
         val renderer = object : RenderCoordinator {
             override suspend fun render(request: RenderRequest): RenderResult = throw AssertionError("Incompatible geometry reached decode")
         }
-        val preparer = SavedOcrPreparer(renderer, ImageAllocationBudget(64)) { _, _ -> throw AssertionError("Incompatible geometry reached engine") }
+        val preparer = SavedOcrPreparer(renderer, ImageAllocationBudget(64)) { _, _, _ -> throw AssertionError("Incompatible geometry reached engine") }
         val failure = runCatching {
             preparer.prepare(incompatible, config) { throw AssertionError("Incompatible geometry reached handoff") }
         }.exceptionOrNull() as? RepositoryFailure
@@ -129,7 +129,7 @@ class SavedOcrPreparerTest {
                     return RenderResult(request, RenderStatus.RESOURCE_LIMIT, null, emptyList(), emptyList())
                 }
             }
-            val preparer = SavedOcrPreparer(renderer, ImageAllocationBudget(64)) { _, _ -> throw AssertionError("Refused raster reached engine") }
+            val preparer = SavedOcrPreparer(renderer, ImageAllocationBudget(64)) { _, _, _ -> throw AssertionError("Refused raster reached engine") }
             val failure = try {
                 preparer.prepare(saved, config) { throw AssertionError("Refused raster reached handoff") }
                 throw AssertionError("Preparation should report the renderer's resource limit")

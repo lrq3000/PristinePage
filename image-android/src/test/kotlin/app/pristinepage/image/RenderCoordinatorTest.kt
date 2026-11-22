@@ -283,7 +283,7 @@ class RenderCoordinatorTest {
         val saved = EditablePage(DocumentId(UUID.randomUUID().toString()), 1, f.page, f.id, 1, RecipeCodec.hash(recipe), recipe)
         val configuration = OcrConfiguration("fixture", 1, OcrLayout.AUTOMATIC, OcrLanguagePacks(listOf(OcrLanguagePack("eng", "a".repeat(64)))))
         return try {
-            SavedOcrPreparer(f.coordinator(dispatcher), f.budget) { _, _ ->
+            SavedOcrPreparer(f.coordinator(dispatcher), f.budget) { _, _, _ ->
                 throw AssertionError("Pre-start resource refusal reached native preparation")
             }.prepare(saved, configuration) { throw AssertionError("Resource refusal transferred a session") }
             throw AssertionError("OCR preparation did not refuse")
