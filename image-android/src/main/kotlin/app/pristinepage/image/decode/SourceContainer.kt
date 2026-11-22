@@ -9,10 +9,12 @@ import java.io.EOFException
 import java.io.File
 import java.io.IOException
 import java.io.InputStream
+import java.time.LocalDate
 import java.util.zip.CRC32
 
 data class EncodedSourceHeader(val mime: String, val size: PixelSize, val exifOrientation: Int = 1) {
     internal var jpegProjection: JpegDecodeView? = null
+    internal var capturedOn: LocalDate? = null
 }
 
 /** Bounded static-container preflight, NOT entropy/pixel decode validation. A strict codec must still decode the complete image and agree with this header. Unknown color transforms are refused rather than relabeled sRGB; later validated profile support may extend this unreleased policy explicitly. */
@@ -29,7 +31,12 @@ object SourceContainer {
         catch (_: IOException) { refuse(OperationErrorCode.STORAGE_FAILED, "export_jpeg_read_failed", true) }
     }
 
-    fun read(file: File, checkpoint: () -> Unit): EncodedSourceHeader {
+    fun read(file: File, checkpoint: () -> Unit): EncodedSourceHeader = inspect(file, false, checkpoint)
+
+    /** Optional header metadata from unverified bytes; the ingest owner still has to authenticate the complete source. */
+    internal fun readWithCaptureDate(file: File, checkpoint: () -> Unit): EncodedSourceHeader = inspect(file, true, checkpoint)
+
+    private fun inspect(file: File, captureDate: Boolean, checkpoint: () -> Unit): EncodedSourceHeader {
         try {
             val length = file.length()
             if (length <= 0) invalid()
@@ -39,13 +46,13 @@ object SourceContainer {
                 val c = Cursor(input, length, checkpoint)
                 val start = c.bytes(minOf(length, 8).toInt())
                 return when {
-                    start.contentEquals(byteArrayOf(-119, 80, 78, 71, 13, 10, 26, 10)) -> png(c)
+                    start.contentEquals(byteArrayOf(-119, 80, 78, 71, 13, 10, 26, 10)) -> png(c, captureDate)
                     start.size >= 2 && start[0] == (-1).toByte() && start[1] == (-40).toByte() -> {
                         // Reopen only these immutable app-owned bytes, never a provider stream. No original-byte rewrite is performed.
                         input.close()
-                        file.inputStream().buffered(65536).use { jpeg(Cursor(it, length, checkpoint)) }
+                        file.inputStream().buffered(65536).use { jpeg(Cursor(it, length, checkpoint), captureDate = captureDate) }
                     }
-                    start.size == 8 && start.copyOfRange(0, 4).toString(Charsets.US_ASCII) == "RIFF" -> webp(c, uint(start, 4, true) + 8 == length)
+                    start.size == 8 && start.copyOfRange(0, 4).toString(Charsets.US_ASCII) == "RIFF" -> webp(c, uint(start, 4, true) + 8 == length, captureDate)
                     else -> refuse(OperationErrorCode.UNSUPPORTED_FORMAT, "source_format_unsupported")
                 }
             }
@@ -54,13 +61,13 @@ object SourceContainer {
         catch (_: IOException) { refuse(OperationErrorCode.STORAGE_FAILED, "source_header_read_failed", true) }
     }
 
-    private fun png(c: Cursor): EncodedSourceHeader {
+    private fun png(c: Cursor, captureDate: Boolean): EncodedSourceHeader {
         var size: PixelSize? = null
         var dataSeen = false
         var dataEnded = false
         var metadata = 0L
         var chunks = 0
-        val exif = ExifState()
+        val exif = ExifState(captureDate)
         while (c.remaining > 0) {
             c.checkpoint()
             if (++chunks > 4096) refuse(OperationErrorCode.RESOURCE_LIMIT, "source_metadata_limit")
@@ -91,7 +98,7 @@ object SourceContainer {
                     if (!legalDepth || f[10].toInt() != 0 || f[11].toInt() != 0 || f[12].toInt() !in 0..1) unsupported()
                 }
                 "IDAT" -> { if (dataEnded) invalid(); dataSeen = true }
-                "IEND" -> { if (!dataSeen || n != 0L || c.remaining != 0L) invalid(); return EncodedSourceHeader("image/png", checkNotNull(size), exif.orientation) }
+                "IEND" -> { if (!dataSeen || n != 0L || c.remaining != 0L) invalid(); return exif.header("image/png", checkNotNull(size)) }
                 "eXIf" -> exif.accept(checkNotNull(fields), c.checkpoint)
                 "acTL", "fcTL", "fdAT", "iCCP", "cICP", "mDCv", "cLLi" -> unsupported()
                 "sRGB" -> if (n != 1L || checkNotNull(fields)[0].toInt() !in 0..3) invalid()
@@ -107,12 +114,12 @@ object SourceContainer {
         invalid()
     }
 
-    private fun jpeg(c: Cursor, export: JpegSampling? = null): EncodedSourceHeader {
+    private fun jpeg(c: Cursor, export: JpegSampling? = null, captureDate: Boolean = false): EncodedSourceHeader {
         if (c.byte() != 255 || c.byte() != 216) invalid()
         var size: PixelSize? = null
         var scans = 0
         var markers = 0
-        val exif = ExifState()
+        val exif = ExifState(captureDate)
         var exifSegment: LongRange? = null
         var exifCompatible = false
         var jfif = false
@@ -133,7 +140,7 @@ object SourceContainer {
                         raw.contains("MotionPhoto", ignoreCase = true) || raw.contains("GainMap", ignoreCase = true)
                     ) unsupported()
                 }
-                return EncodedSourceHeader("image/jpeg", size ?: invalid(), exif.orientation).also { header ->
+                return exif.header("image/jpeg", size ?: invalid()).also { header ->
                     if (exifCompatible) header.jpegProjection = JpegDecodeView(primaryBytes.toInt(), checkNotNull(exifSegment), exif.orientation)
                 }
             }
@@ -204,12 +211,12 @@ object SourceContainer {
         }
     }
 
-    private fun webp(c: Cursor, validLength: Boolean): EncodedSourceHeader {
+    private fun webp(c: Cursor, validLength: Boolean, captureDate: Boolean): EncodedSourceHeader {
         if (!validLength || c.bytes(4).toString(Charsets.US_ASCII) != "WEBP") invalid()
         var extended: PixelSize? = null
         var image: PixelSize? = null
         var chunks = 0
-        val exif = ExifState()
+        val exif = ExifState(captureDate)
         while (c.remaining > 0) {
             c.checkpoint()
             if (++chunks > 4096) refuse(OperationErrorCode.RESOURCE_LIMIT, "source_metadata_limit")
@@ -246,23 +253,21 @@ object SourceContainer {
         }
         val size = image ?: invalid()
         if (extended != null && extended != size) invalid()
-        return EncodedSourceHeader("image/webp", size, exif.orientation)
+        return exif.header("image/webp", size)
     }
 
-    private class ExifState {
-        var orientation: Int = 1
-            private set
-        private var seen = false
+    private class ExifState(private val captureDate: Boolean) {
+        private var metadata: TiffOrientation.Metadata? = null
+        val orientation get() = metadata?.orientation ?: 1
+
+        fun header(mime: String, size: PixelSize): EncodedSourceHeader =
+            EncodedSourceHeader(mime, size, orientation).also { it.capturedOn = metadata?.capturedOn }
+
         fun accept(bytes: ByteArray, checkpoint: () -> Unit, cameraJpeg: Boolean = false): Boolean {
-            if (seen) invalid()
-            seen = true
-            if (!cameraJpeg) {
-                orientation = TiffOrientation.read(bytes, checkpoint)
-                return false
-            }
-            val (value, compatibility) = TiffOrientation.readCameraJpeg(bytes, checkpoint)
-            orientation = value
-            return compatibility
+            if (metadata != null) invalid()
+            val accepted = TiffOrientation.inspect(bytes, checkpoint, cameraJpeg, captureDate)
+            metadata = accepted
+            return accepted.needsProjection
         }
     }
 

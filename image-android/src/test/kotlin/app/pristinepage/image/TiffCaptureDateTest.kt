@@ -14,16 +14,19 @@ import org.junit.Assert.assertThrows
 import org.junit.Test
 
 class TiffCaptureDateTest {
+    private fun readCaptureDate(bytes: ByteArray, checkpoint: () -> Unit): LocalDate? =
+        TiffOrientation.inspect(bytes, checkpoint, cameraJpeg = false, captureDate = true).capturedOn
+
     @Test fun capturesOnlyTheCalendarDayInBothTiffByteOrders() {
         val day = LocalDate.of(2024, 2, 29)
-        assertEquals(day, TiffOrientation.readCaptureDate(tiff()) {})
+        assertEquals(day, readCaptureDate(tiff()) {})
         val app1 = "Exif\u0000\u0000".encodeToByteArray() + tiff(order = ByteOrder.BIG_ENDIAN)
-        assertEquals(day, TiffOrientation.readCaptureDate(app1) {})
+        assertEquals(day, readCaptureDate(app1) {})
     }
 
     @Test fun dateFromGpsOrThumbnailChainIsNotThePrimaryCaptureDate() {
-        assertNull(TiffOrientation.readCaptureDate(tiff(primaryTag = 0x8825)) {})
-        assertNull(TiffOrientation.readCaptureDate(tiff(primaryTag = null)) {})
+        assertNull(readCaptureDate(tiff(primaryTag = 0x8825)) {})
+        assertNull(readCaptureDate(tiff(primaryTag = null)) {})
     }
 
     @Test fun malformedOptionalDateDoesNotTurnIntoAValidDayOrChangeOrientation() {
@@ -31,18 +34,18 @@ class TiffCaptureDateTest {
             "2024:02:29 09:20:01x", "2024:02:29\u000009:20:01\u0000", "0000:02:29 09:20:01\u0000",
             "2024-02-29 09:20:01\u0000", "20240229\u0000")) {
             val bytes = tiff(text = text)
-            assertNull(text, TiffOrientation.readCaptureDate(bytes) {})
+            assertNull(text, readCaptureDate(bytes) {})
             assertEquals(6, TiffOrientation.read(bytes) {})
         }
-        assertNull(TiffOrientation.readCaptureDate(tiff(fieldType = 7)) {})
+        assertNull(readCaptureDate(tiff(fieldType = 7)) {})
     }
 
     @Test fun truncatedPayloadRemainsAnEnvelopeFailureAndCancellationPropagates() {
         val cut = tiff().let { it.copyOf(it.size - 1) }
-        val failure = assertThrows(RepositoryFailure::class.java) { TiffOrientation.readCaptureDate(cut) {} }
+        val failure = assertThrows(RepositoryFailure::class.java) { readCaptureDate(cut) {} }
         assertEquals(OperationErrorCode.INVALID_INPUT, failure.error.code)
         val canceled = CancellationException("synthetic")
-        assertSame(canceled, assertThrows(CancellationException::class.java) { TiffOrientation.readCaptureDate(tiff()) { throw canceled } })
+        assertSame(canceled, assertThrows(CancellationException::class.java) { readCaptureDate(tiff()) { throw canceled } })
     }
 
     private fun tiff(

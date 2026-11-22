@@ -10,16 +10,13 @@ import java.time.LocalDate
 object TiffOrientation {
     fun read(bytes: ByteArray, checkpoint: () -> Unit): Int = Reader(bytes, checkpoint).read()
 
-    internal fun readCaptureDate(bytes: ByteArray, checkpoint: () -> Unit): LocalDate? {
-        val reader = Reader(bytes, checkpoint, captureDate = true)
-        reader.read()
-        return reader.capturedOn
-    }
+    internal class Metadata(val orientation: Int, val needsProjection: Boolean, val capturedOn: LocalDate?)
 
-    /** These narrow exceptions are only safe when the complete APP1 is replaced before native decode. */
-    internal fun readCameraJpeg(bytes: ByteArray, checkpoint: () -> Unit): Pair<Int, Boolean> {
-        val reader = Reader(bytes, checkpoint, cameraJpeg = true)
-        return reader.read() to reader.needsProjection
+    /** Camera-JPEG exceptions are only safe when the complete APP1 is replaced before native decode. */
+    internal fun inspect(bytes: ByteArray, checkpoint: () -> Unit, cameraJpeg: Boolean, captureDate: Boolean): Metadata {
+        val reader = Reader(bytes, checkpoint, cameraJpeg, captureDate)
+        val orientation = reader.read()
+        return Metadata(orientation, reader.needsProjection, reader.capturedOn)
     }
 
     private class Reader(
