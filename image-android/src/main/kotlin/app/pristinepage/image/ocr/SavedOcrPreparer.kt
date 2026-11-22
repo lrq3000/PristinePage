@@ -52,7 +52,7 @@ class SavedOcrPreparer(
                 if (image == null || image.width != size.width || image.height != size.height) {
                     refuse(OperationErrorCode.INTEGRITY_FAILED, "ocr_render_size_invalid")
                 }
-                resources.bitmap = SrgbPreviewBitmap.convert(image, budget) { active.ensureActive() }
+                resources.bitmap = SrgbPreviewBitmap.convertForOcr(image, budget) { active.ensureActive() }
             }
             // Release the full render and its permit before allocating native resources. All remaining ownership transfers synchronously.
             active.ensureActive()

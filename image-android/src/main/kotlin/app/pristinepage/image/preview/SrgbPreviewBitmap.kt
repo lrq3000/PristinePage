@@ -30,7 +30,13 @@ internal class SrgbPreviewBitmap private constructor(initial: Bitmap, private va
     }
 
     companion object {
-        fun convert(image: RgbImage, budget: ImageAllocationBudget, checkpoint: () -> Unit): SrgbPreviewBitmap {
+        fun convert(image: RgbImage, budget: ImageAllocationBudget, checkpoint: () -> Unit): SrgbPreviewBitmap =
+            convert(image, budget, display = true, checkpoint)
+
+        fun convertForOcr(image: RgbImage, budget: ImageAllocationBudget, checkpoint: () -> Unit): SrgbPreviewBitmap =
+            convert(image, budget, display = false, checkpoint)
+
+        private fun convert(image: RgbImage, budget: ImageAllocationBudget, display: Boolean, checkpoint: () -> Unit): SrgbPreviewBitmap {
             try {
             checkpoint()
             // Bitmap4N + provisional draw/upload copy4N + one ARGB row4W, in addition to the caller's still-live RGB accounting. Checked Long arithmetic precedes every output allocation. This is not a measured bound on graphics/PSS or GC latency.
@@ -56,8 +62,9 @@ internal class SrgbPreviewBitmap private constructor(initial: Bitmap, private va
                 if (!transferred) { try { bitmap?.recycle() } finally { permit.close() } }
             }
             } catch (_: OutOfMemoryError) {
-                // Logical admission cannot guarantee Java/native/graphics availability. The inner finally relinquishes only this unpublished conversion; both original and rendered routes receive one controlled resource refusal. Other VM Errors are not swallowed.
-                throw RepositoryFailure(OperationError(OperationErrorCode.RESOURCE_LIMIT, true, "preview_display_allocation_failed", null))
+                // Real allocation failure is not evidence that a competing owner held the ledger. Preserve the foreground retry affordance without asking background OCR to retry automatically.
+                val key = if (display) "preview_display_allocation_failed" else "ocr_bitmap_allocation_failed"
+                throw RepositoryFailure(OperationError(OperationErrorCode.RESOURCE_LIMIT, display, key, null))
             }
         }
     }
