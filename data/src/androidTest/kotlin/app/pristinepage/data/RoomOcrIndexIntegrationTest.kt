@@ -51,7 +51,6 @@ import app.pristinepage.data.repository.FileOperationOwners
 import app.pristinepage.data.repository.RoomOcrQueue
 import app.pristinepage.data.repository.RoomOcrResults
 import app.pristinepage.data.repository.RoomOcrSearch
-import app.pristinepage.data.repository.RoomSourceMetadataSearch
 import app.pristinepage.data.repository.SavedOcrWork
 import app.pristinepage.data.repository.PrivateImportStore
 import app.pristinepage.data.repository.SourceInput
@@ -1347,22 +1346,35 @@ class RoomOcrIndexIntegrationTest {
     }
 
     @Test fun sourceMetadataLookupUsesExactLiveSourceWithoutOcrAndRevokesRemovedPageHits() {
-        val database = Room.inMemoryDatabaseBuilder(context, PristineDatabase::class.java).build()
+        val isolated = isolatedOcrStoreContext()
+        val database = Room.databaseBuilder(isolated, PristineDatabase::class.java, "pristinepage.db").build()
+        val provider = SourceInput { error("Source metadata must not open a provider") }
+        val inspector = SourceInspector { _, _ -> error("Source metadata must not decode a source") }
+        var opened: PrivateImportStore? = null
         try {
             val sql = database.openHelper.writableDatabase
             seed(sql)
-            val search = RoomSourceMetadataSearch(database)
             val document = DocumentId(DOCUMENT)
             val page = PageId(PAGE)
             runBlocking {
+                val store = PrivateImportStore.open(isolated, provider, inspector).also { opened = it }
+                val search = store.sourceMetadata
                 assertNull(search.match(document, page, "orientation:2"))
                 val hit = checkNotNull(search.match(document, page, "format:png"))
                 assertEquals(document, hit.document)
                 assertEquals(page, hit.page)
                 assertTrue(search.canOpen(hit))
+                val discovered = search.find("format:png", null, 1)
+                assertEquals(listOf(page), discovered.hits.map { it.page })
+                assertTrue(search.canOpen(discovered.hits.single()))
+                val next = checkNotNull(discovered.next)
+                assertTrue(search.find("format:png", next, 1).hits.isEmpty())
+                assertTrue(runCatching { search.find("orientation:1", next, 1) }.exceptionOrNull() is IllegalArgumentException)
                 assertNull(search.match(DocumentId(DRAFT), page, "format:png"))
-                val other = RoomSourceMetadataSearch(database)
-                assertFalse(other.canOpen(hit))
+                PrivateImportStore.open(isolated, provider, inspector).use { other ->
+                    assertFalse(other.sourceMetadata.canOpen(hit))
+                    assertTrue(runCatching { other.sourceMetadata.find("format:png", next, 1) }.exceptionOrNull() is IllegalArgumentException)
+                }
                 val replacementBlob = UUID.randomUUID().toString()
                 sql.execSQL("""INSERT INTO SourceBlob SELECT ?,?,byteCount,mime,encodedWidth,encodedHeight,?,
                     state,sourceCount,ingestTransactionId,createdAt FROM SourceBlob WHERE sourceBlobId=?""",
@@ -1390,8 +1402,13 @@ class RoomOcrIndexIntegrationTest {
                 sql.execSQL("UPDATE Page SET state='REMOVED',ordinal=NULL,removedAt=10 WHERE pageId=?", arrayOf(PAGE))
                 assertFalse(search.canOpen(hit))
                 assertNull(search.match(document, page, "format:png"))
+                store.close()
+                val closed = runCatching { search.find("format:png", null, 1) }.exceptionOrNull() as? RepositoryFailure
+                assertEquals("source_metadata_store_closed", closed?.error?.safeMessageKey)
             }
-        } finally { database.close() }
+        } finally {
+            try { opened?.close() } finally { database.close() }
+        }
     }
 
     private fun withOcrAttempts(

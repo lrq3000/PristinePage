@@ -10,7 +10,10 @@ import app.pristinepage.capture.PhotoImportResultRouter
 import app.pristinepage.capture.PhotoSelection
 import app.pristinepage.data.model.*
 import app.pristinepage.data.repository.AlbumSearchQuery
+import app.pristinepage.data.repository.DocumentCatalog
+import app.pristinepage.data.repository.RoomSourceMetadataSearch
 import app.pristinepage.data.repository.SavedOcrWork
+import app.pristinepage.data.repository.SourceMetadataQuery
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.util.Locale
@@ -29,26 +32,24 @@ class ApplicationLibraryActions(
     override suspend fun searchAlbums(query: AlbumSearchQuery, order: AlbumOrder, locale: Locale, after: AlbumPosition?, limit: Int) =
         open().store.albumSearch.searchAlbums(query, order, locale, after, limit)
 
-    override suspend fun searchPages(query: String): HomePageSearchPage = searchPages(query, null)
+    override suspend fun searchPages(query: String): HomePageSearchPage =
+        if (SourceMetadataQuery.parse(query) != null) searchMetadata(query, null) else searchRecognizedText(query, null)
 
-    private suspend fun searchPages(query: String, cursor: SavedOcrWork.Continuation?): HomePageSearchPage {
+    private suspend fun searchRecognizedText(query: String, cursor: SavedOcrWork.Continuation?): HomePageSearchPage {
         val store = open().store
         val page = store.savedOcr.find(query, cursor, 20)
-        val albums = mutableMapOf<DocumentId, DocumentOverview?>()
-        val hits = page.hits.mapNotNull { hit ->
-            if (!albums.containsKey(hit.document)) {
-                albums[hit.document] = try { store.catalog.load(hit.document) }
-                catch (failure: RepositoryFailure) {
-                    if (failure.error.code != OperationErrorCode.SOURCE_UNAVAILABLE) throw failure
-                    null
-                }
-            }
-            val album = albums[hit.document] ?: return@mapNotNull null
-            val member = album.pages.firstOrNull { it.pageId == hit.page } ?: return@mapNotNull null
-            HomePageSearchHit(hit.document, hit.page, album.document.title, member.ordinal + 1) { store.savedOcr.canOpen(hit) }
-        }
-        return HomePageSearchPage(hits, page.nextAfter?.let { next -> { searchPages(query, next) } })
+        return HomePageSearchPage(presentPageHits(page.hits, { it.document }, { it.page }, store.catalog, store.savedOcr::canOpen),
+            page.nextAfter?.let { next -> { searchRecognizedText(query, next) } })
     }
+
+    private suspend fun searchMetadata(query: String, cursor: RoomSourceMetadataSearch.Continuation?): HomePageSearchPage {
+        val store = open().store
+        val page = store.sourceMetadata.find(query, cursor, 20)
+        return HomePageSearchPage(presentPageHits(page.hits, { it.document }, { it.page }, store.catalog, store.sourceMetadata::canOpen,
+            skipMalformedAlbums = true),
+            page.next?.let { next -> { searchMetadata(query, next) } })
+    }
+
     override suspend fun rename(document: DocumentId, revision: Long, title: String) = open().store.documents.renameDocument(document, revision, title)
     override suspend fun load(id: DocumentId) = open().store.catalog.load(id)
     override suspend fun activeImport(id: DocumentId) = open().store.catalog.activeImport(id)
@@ -77,5 +78,29 @@ class ApplicationLibraryActions(
         open().store.lifecycle.cancelBatch(request.session)
         // A durable batch rediscovered without Activity state no longer carries its original UI route.
         context?.let { app -> withContext(Dispatchers.IO) { CaptureStage(app, request.batchId).discard() } }
+    }
+}
+
+internal suspend fun <Hit> presentPageHits(
+    candidates: List<Hit>, document: (Hit) -> DocumentId, page: (Hit) -> PageId,
+    catalog: DocumentCatalog, revalidate: suspend (Hit) -> Boolean, skipMalformedAlbums: Boolean = false,
+): List<HomePageSearchHit> {
+    val albums = mutableMapOf<DocumentId, DocumentOverview?>()
+    return candidates.mapNotNull { hit ->
+        val documentId = document(hit)
+        val pageId = page(hit)
+        if (!albums.containsKey(documentId)) {
+            albums[documentId] = try { catalog.load(documentId) }
+            catch (failure: RepositoryFailure) {
+                // Metadata selection can match a page whose sibling prevents the album from opening. Keep the other hits and the cursor.
+                if (failure.error.code != OperationErrorCode.SOURCE_UNAVAILABLE &&
+                    !(skipMalformedAlbums && failure.error.code == OperationErrorCode.INTEGRITY_FAILED && !failure.error.retryable)
+                ) throw failure
+                null
+            }
+        }
+        val album = albums[documentId] ?: return@mapNotNull null
+        val member = album.pages.firstOrNull { it.pageId == pageId } ?: return@mapNotNull null
+        HomePageSearchHit(documentId, pageId, album.document.title, member.ordinal + 1) { revalidate(hit) }
     }
 }

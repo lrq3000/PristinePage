@@ -43,8 +43,20 @@ class PrivateImportStore private constructor(
     val albumSearch: SearchableAlbumCatalog get() = documentCatalog
     private val exportLifetime = OrdinaryExportLifetime(database::close)
     val savedOcr: SavedOcrWork by lazy { SavedOcrWork.bind(OcrComposition.from(this)) }
+    val sourceMetadata: RoomSourceMetadataSearch by lazy { SourceMetadataComposition.bind(this) }
 
     override fun close() = exportLifetime.close()
+
+    /** Pair the readonly metadata reader with the issuing store's exact database and retirement boundary. */
+    internal class SourceMetadataComposition private constructor(store: PrivateImportStore) {
+        internal val database = store.database
+        internal val lifetime = store.exportLifetime
+
+        companion object {
+            @JvmSynthetic
+            internal fun bind(store: PrivateImportStore) = RoomSourceMetadataSearch.bind(SourceMetadataComposition(store))
+        }
+    }
 
     // Internal only and lazy: the import-only path does not construct derived-file or export participants.
     internal val ordinaryExport: OrdinaryExport by lazy { ExportComposition.bind(this) }

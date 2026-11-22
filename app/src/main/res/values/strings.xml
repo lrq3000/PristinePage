@@ -68,7 +68,7 @@
     <string name="ocr_language_vietnamese">Vietnamese</string>
     <string name="home_search_scans">Search scans</string>
     <string name="home_search_available_fields">Album titles and dates</string>
-    <string name="home_search_with_text">Album titles, dates, and recognized text</string>
+    <string name="home_search_with_text">Album titles, dates, and recognized text. Try format:jpeg or orientation:6.</string>
     <string name="home_page_search_unavailable">Page search is unavailable. Album results are still shown.</string>
     <string name="home_album_search_unavailable">Album search is unavailable. Page results are still shown.</string>
     <string name="home_search_more">More matches</string>

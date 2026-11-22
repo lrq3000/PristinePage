@@ -17,9 +17,29 @@ internal data class SavedSourceMetadataBinding(
     val sourceId: String, val recipeRevision: Long, val blobId: String, val byteHash: String,
     val pixelHash: String, val recipeHash: String, val recipeBytes: Long,
 )
+internal data class SavedSourceMetadataLocator(val documentId: String, val pageId: String)
 
 /** Bound SQL only. Business commands run these synchronous metadata operations on IO inside Room's transaction, never across provider/decode/render work. */
 @Dao abstract class CatalogDao : CatalogQueries, EditablePageQueries, AlbumMetadataQueries {
+    // Keep the ordered Page key seek outermost. This limits returned locators, not how far SQLite may scan for a rare value.
+    @Query("""SELECT Page.documentId,Page.pageId FROM Page
+        WHERE Page.pageId>COALESCE(:after,'')
+        AND (Page.state='ACTIVE' AND Page.removedAt IS NULL AND typeof(Page.ordinal)='integer' AND Page.ordinal BETWEEN 0 AND 99)
+        AND (typeof(Page.pageId)='text' AND length(CAST(Page.pageId AS BLOB))=36
+          AND Page.pageId GLOB '????????-????-????-????-????????????' AND length(replace(Page.pageId,'-',''))=32
+          AND Page.pageId NOT GLOB '*[^0-9a-f-]*')
+        AND (typeof(Page.documentId)='text' AND length(CAST(Page.documentId AS BLOB))=36
+          AND Page.documentId GLOB '????????-????-????-????-????????????' AND length(replace(Page.documentId,'-',''))=32
+          AND Page.documentId NOT GLOB '*[^0-9a-f-]*')
+        AND EXISTS (SELECT 1 FROM Document WHERE Document.documentId=Page.documentId
+          AND Document.lifecycle='ACTIVE' AND Document.deletedAt IS NULL AND NOT $HIDDEN_ATELIER_DOCUMENT)
+        AND EXISTS (SELECT 1 FROM Source s JOIN SourceBlob b ON b.sourceBlobId=s.sourceBlobId
+          WHERE s.sourceId=Page.sourceId AND s.state='READY' AND b.state='READY'
+          AND ((:mime IS NOT NULL AND :orientation IS NULL AND b.mime=:mime)
+            OR (:mime IS NULL AND :orientation IS NOT NULL AND s.exifOrientation=:orientation)))
+        ORDER BY Page.pageId LIMIT CASE WHEN :limit BETWEEN 1 AND 50 THEN :limit ELSE 0 END""")
+    internal abstract fun scanSourceMetadataCandidates(after: String?, limit: Int, mime: String?, orientation: Int?): List<SavedSourceMetadataLocator>
+
     // The caller separately validates the decoded Atelier receipt. No raw EXIF, paths, or recipe byte array crosses this query.
     @Query("""SELECT p.sourceId AS sourceId, p.currentRecipeRevision AS recipeRevision, b.sourceBlobId AS blobId,
         b.byteSha256 AS byteHash, s.pixelSha256 AS pixelHash, r.recipeSha256 AS recipeHash, length(r.canonicalRecipe) AS recipeBytes

@@ -9,22 +9,21 @@ import app.pristinepage.data.model.PageId
 import app.pristinepage.data.model.RepositoryFailure
 import app.pristinepage.data.model.SourceBlobId
 import app.pristinepage.data.model.SourceId
+import java.util.Collections
 import kotlinx.coroutines.CancellationException
-import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.withContext
 
 /** Exact-page selector. This lookup uses stored source metadata, not OCR state or file access. */
-internal class RoomSourceMetadataSearch(
-    database: PristineDatabase,
-    private val dispatcher: CoroutineDispatcher = Dispatchers.IO,
-) {
+class RoomSourceMetadataSearch private constructor(store: PrivateImportStore.SourceMetadataComposition) {
+    private val database: PristineDatabase = store.database
+    private val lifetime = store.lifetime
     private val metadata = RoomMetadataAccess(database)
     private val catalog = database.catalog()
 
-    internal sealed interface Hit {
+    sealed interface Hit {
         val document: DocumentId
         val page: PageId
     }
@@ -37,7 +36,35 @@ internal class RoomSourceMetadataSearch(
         val binding: SavedSourceMetadataBinding,
     ) : Hit
 
-    suspend fun match(document: DocumentId, page: PageId, raw: String): Hit? {
+    sealed interface Continuation
+    private class ReturningAfter(
+        val owner: RoomSourceMetadataSearch, val query: SourceMetadataQuery, val lastCandidate: PageId,
+    ) : Continuation
+
+    class Page internal constructor(val hits: List<Hit>, val next: Continuation?)
+
+    suspend fun find(raw: String, after: Continuation?, limit: Int): Page {
+        currentCoroutineContext().ensureActive()
+        val query = SourceMetadataQuery.parse(raw)
+        val cursor = after as? ReturningAfter
+        require(limit in 1..50 && (after == null || (cursor?.owner === this && cursor.query == query)))
+        if (query == null) return Page(emptyList(), null)
+        return reading { checkpoint ->
+            val mime = (query as? SourceMetadataQuery.Format)?.mime
+            val orientation = (query as? SourceMetadataQuery.Orientation)?.value
+            val candidates = catalog.scanSourceMetadataCandidates(cursor?.lastCandidate?.value, limit, mime, orientation)
+            val hits = candidates.mapNotNull {
+                checkpoint()
+                val document = DocumentId(it.documentId)
+                val page = PageId(it.pageId)
+                binding(document, page, mime, orientation)?.let { saved -> IssuedHit(this, document, page, query, saved) }
+            }
+            Page(Collections.unmodifiableList(hits), if (candidates.size == limit)
+                ReturningAfter(this, query, PageId(candidates.last().pageId)) else null)
+        }
+    }
+
+    internal suspend fun match(document: DocumentId, page: PageId, raw: String): Hit? {
         currentCoroutineContext().ensureActive()
         val query = SourceMetadataQuery.parse(raw) ?: return null
         val original = read(document, page, query) ?: return null
@@ -50,20 +77,30 @@ internal class RoomSourceMetadataSearch(
         return issued.owner === this && read(issued.document, issued.page, issued.query) == issued.binding
     }
 
-    private suspend fun read(document: DocumentId, page: PageId, query: SourceMetadataQuery): SavedSourceMetadataBinding? = withContext(dispatcher) {
+    private suspend fun read(document: DocumentId, page: PageId, query: SourceMetadataQuery): SavedSourceMetadataBinding? =
+        reading {
+            binding(document, page, (query as? SourceMetadataQuery.Format)?.mime, (query as? SourceMetadataQuery.Orientation)?.value)
+        }
+
+    private fun binding(document: DocumentId, page: PageId, mime: String?, orientation: Int?): SavedSourceMetadataBinding? {
+        val match = catalog.metadataMatchForSavedPage(page.value, document.value, mime, orientation) ?: return null
+        if (metadata.isHiddenAtelierDraft(document.value)) return null
+        try {
+            SourceId(match.sourceId)
+            SourceBlobId(match.blobId)
+        } catch (_: IllegalArgumentException) { return null }
+        return match
+    }
+
+    private suspend fun <T> reading(action: (() -> Unit) -> T): T =
+        lifetime.retainSourceMetadata { readingRetained(action) }
+
+    private suspend fun <T> readingRetained(action: (() -> Unit) -> T): T = withContext(Dispatchers.IO) {
         val active = coroutineContext
         try {
             val result = metadata.transaction {
                 active.ensureActive()
-                val match = catalog.metadataMatchForSavedPage(page.value, document.value,
-                    (query as? SourceMetadataQuery.Format)?.mime, (query as? SourceMetadataQuery.Orientation)?.value)
-                    ?: return@transaction null
-                if (metadata.isHiddenAtelierDraft(document.value)) return@transaction null
-                try {
-                    SourceId(match.sourceId)
-                    SourceBlobId(match.blobId)
-                } catch (_: IllegalArgumentException) { return@transaction null }
-                match
+                action { active.ensureActive() }
             }
             active.ensureActive()
             result
@@ -72,5 +109,10 @@ internal class RoomSourceMetadataSearch(
         } catch (_: Exception) {
             throw RepositoryFailure(OperationError(OperationErrorCode.STORAGE_FAILED, true, "source_metadata_lookup_failed", null))
         }
+    }
+
+    companion object {
+        @JvmSynthetic
+        internal fun bind(store: PrivateImportStore.SourceMetadataComposition) = RoomSourceMetadataSearch(store)
     }
 }
