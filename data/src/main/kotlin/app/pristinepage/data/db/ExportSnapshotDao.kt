@@ -425,6 +425,33 @@ import app.pristinepage.data.repository.RenderIntentQueries
     internal abstract fun namedAlbumJournalMatches(id: String, owner: String, stage: String, final: String, payload: ByteArray,
         seal: String, hash: String, size: Long): Boolean
 
+    // The caller supplies an already canonical OCR intent. Raw journal fields never leave SQLite for this read.
+    @Query("""SELECT EXISTS(SELECT 1 FROM FileTransaction WHERE transactionId=:id AND kind='OCR_TEXT' AND ownerId=:artifact
+        AND (state=:phase AND typeof(attempt)='integer' AND attempt=1 AND errorCode IS NULL)
+        AND (stagingPath=:stage AND finalPath=:final AND typeof(payload)='blob' AND length(payload) BETWEEN 274 AND 279 AND payload=:payload)
+        AND (typeof(expectedByteCount)='integer' AND expectedByteCount BETWEEN 0 AND 393216 AND expectedByteCount=:size AND expectedByteSha256=:hash)
+        AND (sealSha256 IS :seal)
+        AND ((:phase IN ('INTENT','COPYING') AND :seal IS NULL)
+          OR (:phase IN ('SEALED','MOVED','COMMITTED') AND length(:seal)=64
+              AND length(CAST(:seal AS BLOB))=64 AND :seal NOT GLOB '*[^0-9a-f]*')))""")
+    internal abstract fun ocrTextJournalMatches(id: String, artifact: String, stage: String, final: String, payload: ByteArray,
+        phase: String, seal: String?, hash: String, size: Long): Boolean
+
+    // Expected bytes and both locations are frozen at INTENT. Only the COPYING -> SEALED edge may add a seal.
+    @Query("""UPDATE FileTransaction SET state=:next, updatedAt=:audit, sealSha256=:seal
+        WHERE transactionId=:id AND kind='OCR_TEXT' AND ownerId=:artifact
+        AND (state=:previous AND typeof(attempt)='integer' AND attempt=1 AND errorCode IS NULL)
+        AND (stagingPath=:stage AND finalPath=:final AND typeof(payload)='blob' AND length(payload) BETWEEN 274 AND 279 AND payload=:payload)
+        AND (typeof(expectedByteCount)='integer' AND expectedByteCount BETWEEN 0 AND 393216 AND expectedByteCount=:size AND expectedByteSha256=:hash)
+        AND (sealSha256 IS :previousSeal)
+        AND ((:previous='INTENT' AND :next='COPYING' AND :previousSeal IS NULL AND :seal IS NULL)
+          OR ((length(:seal)=64 AND length(CAST(:seal AS BLOB))=64 AND :seal NOT GLOB '*[^0-9a-f]*')
+            AND ((:previous='COPYING' AND :next='SEALED' AND :previousSeal IS NULL)
+              OR (:previous='SEALED' AND :next='MOVED' AND :seal=:previousSeal)
+              OR (:previous='MOVED' AND :next='COMMITTED' AND :seal=:previousSeal))))""")
+    internal abstract fun advanceOcrTextJournal(id: String, artifact: String, stage: String, final: String, payload: ByteArray,
+        previous: String, next: String, audit: Long, previousSeal: String?, seal: String?, hash: String, size: Long): Int
+
     @Query("""UPDATE FileTransaction SET state='FAILED', errorCode=:error, updatedAt=:now
         WHERE transactionId=:id AND kind='EXPORT' AND ownerId=:owner AND attempt=1 AND errorCode IS NULL
         AND state IN ('INTENT','COPYING','SEALED','MOVED') AND stagingPath=:stage AND finalPath=:final AND payload=:payload""")
