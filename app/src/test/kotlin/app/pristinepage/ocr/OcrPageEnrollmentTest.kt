@@ -29,7 +29,7 @@ class OcrPageEnrollmentTest {
         assertEquals(BackoffPolicy.EXPONENTIAL, spec.backoffPolicy)
     }
 
-    @Test fun workerCanBeCreatedByTheExistingAndroidInitializer() {
+    @Test fun workerExposesTheDefaultWorkManagerConstructor() {
         val type = SavedOcrPageWorker::class.java
         assertTrue(CoroutineWorker::class.java.isAssignableFrom(type))
         assertTrue(Modifier.isPublic(type.getConstructor(Context::class.java, WorkerParameters::class.java).modifiers))
