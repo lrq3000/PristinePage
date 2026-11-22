@@ -14,7 +14,10 @@ data class EditorIdentity(val documentId: DocumentId, val pageId: PageId)
 data class EditorHostState(val identity: EditorIdentity? = null, val loading: Boolean = false, val error: OperationError? = null)
 
 /** Retains draft/history across Activity recreation, not process death. Only opaque identity is saved by the Activity; a new process performs a guarded reopen of the accepted revision. The Application alone owns the graph/decoder/budget. */
-class EditorViewModel(private val openGraph: suspend () -> ApplicationImports) : ViewModel() {
+class EditorViewModel(
+    private val openGraph: suspend () -> ApplicationImports,
+    private val onPagesSaved: (DocumentId, List<PageId>) -> Unit,
+) : ViewModel() {
     private val current = MutableStateFlow<EditorSession?>(null)
     val session: StateFlow<EditorSession?> = current.asStateFlow()
     private val host = MutableStateFlow(EditorHostState())
@@ -33,7 +36,8 @@ class EditorViewModel(private val openGraph: suspend () -> ApplicationImports) :
                 val graph = openGraph()
                 currentCoroutineContext().ensureActive()
                 if (generation != attempt) return@launch
-                val editor = EditorSession(documentId, pageId, ApplicationEditorActions { graph }, graph.renderer, viewModelScope, RenderedPreviewBitmapLoader(graph.budget), graph.budget)
+                val editor = EditorSession(documentId, pageId, ApplicationEditorActions { graph }, graph.renderer, viewModelScope,
+                    RenderedPreviewBitmapLoader(graph.budget), graph.budget, onPagesSaved)
                 // Construction can begin guarded metadata loading, but rendering belongs to a STARTED composition, not an invisible retained ViewModel.
                 editor.setActive(false)
                 current.value = editor

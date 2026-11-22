@@ -109,14 +109,14 @@ class MainActivity : ComponentActivity() {
         val editorFactory = object : ViewModelProvider.Factory {
             @Suppress("UNCHECKED_CAST") override fun <T : ViewModel> create(modelClass: Class<T>): T {
                 require(modelClass == EditorViewModel::class.java)
-                return EditorViewModel(services::imports) as T
+                return EditorViewModel(services::imports, app.savedOcrSignals::onPagesSaved) as T
             }
         }
         val editorOwner = ViewModelProvider(this, editorFactory)[EditorViewModel::class.java]
         val batchOwner = ViewModelProvider(this, object : ViewModelProvider.Factory {
             @Suppress("UNCHECKED_CAST") override fun <T : ViewModel> create(modelClass: Class<T>): T {
                 require(modelClass == BatchEditViewModel::class.java)
-                return BatchEditViewModel(services::imports) as T
+                return BatchEditViewModel(services::imports, app.savedOcrSignals::onPagesSaved) as T
             }
         })[BatchEditViewModel::class.java]
         val exportOwner = ViewModelProvider(this, object : ViewModelProvider.Factory {
