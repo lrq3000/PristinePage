@@ -6,6 +6,7 @@ import androidx.sqlite.db.SupportSQLiteDatabase
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import app.pristinepage.core.ocr.OcrConfiguration
+import app.pristinepage.core.ocr.OcrError
 import app.pristinepage.core.ocr.OcrInput
 import app.pristinepage.core.ocr.OcrLanguagePack
 import app.pristinepage.core.ocr.OcrLanguagePacks
@@ -23,13 +24,19 @@ import app.pristinepage.data.db.OcrWorkMigration
 import app.pristinepage.data.db.PristineDatabase
 import app.pristinepage.data.model.DocumentId
 import app.pristinepage.data.model.EditablePage
+import app.pristinepage.data.model.JobId
 import app.pristinepage.data.model.OperationErrorCode
 import app.pristinepage.data.model.PageId
 import app.pristinepage.data.model.RepositoryFailure
 import app.pristinepage.data.model.SourceId
 import app.pristinepage.data.repository.OcrJobInput
 import app.pristinepage.data.repository.OcrSearchTerms
+import app.pristinepage.data.repository.AcquireLeaseResult
+import app.pristinepage.data.repository.JobLease
+import app.pristinepage.data.repository.LeaseOwnerLiveness
+import app.pristinepage.data.repository.LeaseOwnerState
 import app.pristinepage.data.repository.RoomMetadataAccess
+import app.pristinepage.data.repository.RoomOcrAttempts
 import app.pristinepage.data.repository.RoomOcrCurrentWork
 import app.pristinepage.data.repository.RoomOcrQueue
 import kotlinx.coroutines.async
@@ -39,6 +46,8 @@ import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
 import java.util.UUID
+import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.atomic.AtomicLong
 
 @RunWith(AndroidJUnit4::class)
 class RoomOcrIndexIntegrationTest {
@@ -253,6 +262,141 @@ class RoomOcrIndexIntegrationTest {
             assertEquals(next, queueSaved(latest))
             assertEquals("2", sql.scalar("SELECT COUNT(*) FROM Job"))
             assertEquals("2", sql.scalar("SELECT generation FROM OcrPageWork"))
+        } finally { database.close() }
+    }
+
+    @Test fun admissionIsFreeAndTheThirdFailureRetainsItsErrorWithoutAFourthStart() = withOcrAttempts { fixture ->
+        val (sql, attempts, request, owners, _) = fixture
+        assertTrue(attempts.admit(request))
+        assertTrue(attempts.admit(request))
+        assertEquals("ADMITTED:0:", sql.scalar("SELECT state||':'||attempt||':'||coalesce(errorCode,'') FROM Job"))
+        for ((ordinal, error) in listOf(OcrError.ENGINE_FAILED, OcrError.INVALID_OUTPUT, OcrError.RESOURCE_LIMIT).withIndex()) {
+            val owner = UUID.randomUUID().toString()
+            owners[owner] = LeaseOwnerState.ALIVE
+            val lease = (attempts.start(request, owner, 500) as AcquireLeaseResult.Granted).lease
+            assertEquals((ordinal + 1).toLong(), lease.generation)
+            assertFalse(attempts.start(request, owner, 500) is AcquireLeaseResult.Granted)
+            val another = UUID.randomUUID().toString()
+            owners[another] = LeaseOwnerState.ALIVE
+            assertFalse(attempts.fail(request, JobLease(lease.jobId, another, lease.generation), error))
+            val interruption = runCatching { attempts.fail(request, lease, OcrError.INTERRUPTED) }.exceptionOrNull()
+            assertEquals(OperationErrorCode.INVALID_INPUT, (interruption as? RepositoryFailure)?.error?.code)
+            assertTrue(attempts.fail(request, lease, error))
+            assertFalse(attempts.fail(request, lease, OcrError.INVALID_OUTPUT))
+            val state = if (ordinal == 2) "FAILED" else "ADMITTED"
+            assertEquals("$state:${ordinal + 1}:${error.name}", sql.scalar("SELECT state||':'||attempt||':'||errorCode FROM Job"))
+            assertEquals("0", sql.scalar("SELECT COUNT(*) FROM Job WHERE leaseOwner IS NOT NULL OR leaseUntil IS NOT NULL"))
+        }
+        val fourth = UUID.randomUUID().toString()
+        owners[fourth] = LeaseOwnerState.ALIVE
+        assertFalse(attempts.admit(request))
+        assertFalse(attempts.start(request, fourth, 500) is AcquireLeaseResult.Granted)
+        assertEquals("FAILED:3:RESOURCE_LIMIT", sql.scalar("SELECT state||':'||attempt||':'||errorCode FROM Job"))
+    }
+
+    @Test fun abandonedAttemptsRequirePositiveEndProofAndCountEvenBeforeTheRecordedDeadline() = withOcrAttempts { fixture ->
+        val (sql, attempts, request, owners, clock) = fixture
+        assertTrue(attempts.admit(request))
+        repeat(3) { index ->
+            val owner = UUID.randomUUID().toString()
+            owners[owner] = LeaseOwnerState.ALIVE
+            clock.set(10)
+            val lease = (attempts.start(request, owner, 500) as AcquireLeaseResult.Granted).lease
+            clock.set(1_000)
+            assertFalse(attempts.recoverEnded(request, lease))
+            owners[owner] = LeaseOwnerState.UNKNOWN
+            assertFalse(attempts.recoverEnded(request, lease))
+            assertEquals("RUNNING:${index + 1}", sql.scalar("SELECT state||':'||attempt FROM Job"))
+            owners[owner] = LeaseOwnerState.ENDED
+            val next = UUID.randomUUID().toString()
+            owners[next] = LeaseOwnerState.ALIVE
+            assertFalse(attempts.start(request, next, 500) is AcquireLeaseResult.Granted)
+            assertEquals("RUNNING:${index + 1}", sql.scalar("SELECT state||':'||attempt FROM Job"))
+            clock.set(1) // A restarted clock cannot authenticate an old persisted deadline.
+            assertTrue(attempts.recoverEnded(request, lease))
+            assertFalse(attempts.recoverEnded(request, lease))
+            val state = if (index == 2) "FAILED" else "ADMITTED"
+            assertEquals("$state:${index + 1}:INTERRUPTED", sql.scalar("SELECT state||':'||attempt||':'||errorCode FROM Job"))
+            assertEquals("0", sql.scalar("SELECT COUNT(*) FROM Job WHERE leaseOwner IS NOT NULL OR leaseUntil IS NOT NULL"))
+            assertFalse(attempts.start(request, owner, 500) is AcquireLeaseResult.Granted)
+        }
+    }
+
+    @Test fun aLateLeaseWriteCannotGrantWorkAfterItsSourcePinIsRemoved() = withOcrAttempts { fixture ->
+        val (sql, attempts, request, owners) = fixture
+        assertTrue(attempts.admit(request))
+        sql.execSQL("""CREATE TRIGGER remove_pin_on_start AFTER UPDATE OF state ON Job WHEN NEW.state='RUNNING'
+            BEGIN DELETE FROM SourceReference WHERE ownerType='JOB' AND ownerId=NEW.jobId; END""")
+        val owner = UUID.randomUUID().toString()
+        owners[owner] = LeaseOwnerState.ALIVE
+        val result = attempts.start(request, owner, 500)
+        assertEquals(OperationErrorCode.INTEGRITY_FAILED, (result as? AcquireLeaseResult.Rejected)?.error?.code)
+        assertEquals("ADMITTED:0", sql.scalar("SELECT state||':'||attempt FROM Job"))
+        assertEquals("1", sql.scalar("SELECT COUNT(*) FROM SourceReference WHERE ownerType='JOB'"))
+    }
+
+    @Test fun ignoredStartUpdateRollsBackItsTriggerSideEffects() = withOcrAttempts { fixture ->
+        val (sql, attempts, request, owners) = fixture
+        assertTrue(attempts.admit(request))
+        sql.execSQL("""CREATE TRIGGER ignore_start_after_removing_pin BEFORE UPDATE OF state ON Job WHEN NEW.state='RUNNING'
+            BEGIN DELETE FROM SourceReference WHERE ownerType='JOB' AND ownerId=NEW.jobId; SELECT RAISE(IGNORE); END""")
+        val owner = UUID.randomUUID().toString()
+        owners[owner] = LeaseOwnerState.ALIVE
+        assertEquals(AcquireLeaseResult.Busy("ADMITTED"), attempts.start(request, owner, 500))
+        assertEquals("ADMITTED:0", sql.scalar("SELECT state||':'||attempt FROM Job"))
+        assertEquals("1", sql.scalar("SELECT COUNT(*) FROM SourceReference WHERE ownerType='JOB'"))
+        assertEquals("3", sql.scalar("SELECT refCount FROM Source"))
+    }
+
+    @Test fun startingARerunRollsBackIfThePreviousResultLosesItsProvenance() = withOcrAttempts(previousResult = true) { fixture ->
+        val (sql, attempts, request, owners) = fixture
+        assertTrue(attempts.admit(request))
+        val previous = sql.scalar("SELECT resultJobId FROM OcrPageWork")
+        assertNotEquals(request.jobId.value, previous)
+        sql.execSQL("""CREATE TRIGGER clear_provenance_on_start AFTER UPDATE OF state ON Job WHEN NEW.state='RUNNING'
+            BEGIN UPDATE OcrPageWork SET resultJobId=NULL,projectionVersion=NULL WHERE jobId=NEW.jobId; END""")
+        val owner = UUID.randomUUID().toString()
+        owners[owner] = LeaseOwnerState.ALIVE
+        val result = attempts.start(request, owner, 500)
+        assertEquals(OperationErrorCode.INTEGRITY_FAILED, (result as? AcquireLeaseResult.Rejected)?.error?.code)
+        assertEquals("ADMITTED:0", sql.scalar("SELECT state||':'||attempt FROM Job JOIN OcrPageWork USING(jobId)"))
+        assertEquals("$previous:1", sql.scalar("SELECT resultJobId||':'||projectionVersion FROM OcrPageWork"))
+        assertEquals("Previous recognition", sql.scalar("SELECT COALESCE(verbatimText,indexedText) FROM OcrResult"))
+    }
+
+    private data class AttemptFixture(
+        val sql: SupportSQLiteDatabase,
+        val attempts: RoomOcrAttempts,
+        val request: RoomOcrAttempts.Request,
+        val owners: ConcurrentHashMap<String, LeaseOwnerState>,
+        val clock: AtomicLong,
+    )
+
+    private fun withOcrAttempts(previousResult: Boolean = false, test: suspend (AttemptFixture) -> Unit) {
+        val database = Room.inMemoryDatabaseBuilder(context, PristineDatabase::class.java).build()
+        try {
+            val sql = database.openHelper.writableDatabase
+            val page = seedQueuePage(sql)
+            val owners = ConcurrentHashMap<String, LeaseOwnerState>()
+            val clock = AtomicLong(10)
+            val liveness = LeaseOwnerLiveness { owners[it] ?: LeaseOwnerState.UNKNOWN }
+            runBlocking {
+                val queue = RoomOcrQueue(database)
+                val config = queueConfig(OcrLayout.AUTOMATIC)
+                val initial = queue.enqueue(page, config, rerun = false)
+                val id = if (previousResult) {
+                    insertRecognition(sql, "Previous recognition")
+                    sql.execSQL("UPDATE Job SET state='SUCCEEDED',attempt=1,leaseGeneration=1 WHERE jobId=?", arrayOf(initial.value))
+                    sql.execSQL("UPDATE OcrPageWork SET resultJobId=?,projectionVersion=1 WHERE jobId=?", arrayOf(initial.value, initial.value))
+                    queue.enqueue(page, config, rerun = true)
+                } else initial
+                val stored = RoomMetadataAccess(database).transaction {
+                    checkNotNull(RoomOcrCurrentWork(database).readInTransaction(page.pageId))
+                }
+                assertEquals(id, JobId(stored.job.jobId))
+                test(AttemptFixture(sql, RoomOcrAttempts(database, liveness, leaseClock = clock::get),
+                    RoomOcrAttempts.Request(id, stored.intent), owners, clock))
+            }
         } finally { database.close() }
     }
 
