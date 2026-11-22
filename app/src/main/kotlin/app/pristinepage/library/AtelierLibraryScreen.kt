@@ -15,8 +15,6 @@ import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.selection.selectable
-import androidx.compose.foundation.selection.selectableGroup
-import androidx.compose.foundation.selection.toggleable
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.text.KeyboardOptions
@@ -79,6 +77,7 @@ import kotlinx.coroutines.launch
     batchError: OperationErrorCode? = null,
     thumbnailsCurrent: (DocumentSummary) -> Boolean = { true },
     openAtelier: ((String, DocumentSummary?) -> Unit)? = null,
+    onSettings: () -> Unit,
     onEdit: (DocumentId, PageId) -> Unit,
 ) {
     val state by session.state.collectAsStateWithLifecycle()
@@ -174,7 +173,7 @@ import kotlinx.coroutines.launch
                     Icon(painterResource(R.drawable.ic_atelier_plus), stringResource(R.string.atelier_new), Modifier.size(29.dp))
                 }
                 Box(Modifier.weight(1f), contentAlignment = Alignment.CenterEnd) {
-                    AtelierIcon(R.drawable.ic_atelier_settings, R.string.atelier_settings, "atelier-settings") { sheet = "settings" }
+                    AtelierIcon(R.drawable.ic_atelier_settings, R.string.atelier_settings, "atelier-settings", onClick = onSettings)
                 }
             }
         } else {
@@ -248,49 +247,6 @@ import kotlinx.coroutines.launch
     }
     val stopSheet = { sheet = null }
     when (sheet) {
-        "settings" -> AtelierSheet(R.string.atelier_settings, stopSheet) {
-            OutlinedButton(onClick = { sheet = "title-template" },
-                modifier = Modifier.fillMaxWidth().heightIn(min = AtelierStyle.touchTarget).testTag("carnet-title-template")) {
-                Text(stringResource(R.string.carnet_title_template))
-            }
-            Text(stringResource(R.string.carnet_home_thumbnails), Modifier.semantics { heading() }, style = MaterialTheme.typography.titleMedium)
-            Column(Modifier.selectableGroup()) {
-                HomeThumbnailLayout.entries.forEach { layout ->
-                    val selected = layout == preferencesState.homeThumbnailLayout
-                    val isStack = layout == HomeThumbnailLayout.STACK
-                    Row(Modifier.fillMaxWidth().heightIn(min = AtelierStyle.touchTarget)
-                        .testTag("home-thumbnails-${layout.name.lowercase(Locale.ROOT)}")
-                        .selectable(selected, role = Role.RadioButton, onClick = { preferences.setHomeThumbnailLayout(layout) }),
-                        verticalAlignment = Alignment.CenterVertically) {
-                        RadioButton(selected, onClick = null)
-                        Column(Modifier.padding(start = 12.dp)) {
-                            Text(stringResource(if (isStack) R.string.carnet_stack else R.string.carnet_row))
-                            Text(stringResource(if (isStack) R.string.carnet_stack_help else R.string.carnet_row_help),
-                                style = MaterialTheme.typography.bodySmall)
-                        }
-                    }
-                }
-            }
-            SwitchRow(R.string.atelier_grid, preferencesState.showCameraGrid, "atelier-grid-setting", preferences::setShowCameraGrid)
-            SwitchRow(R.string.atelier_created, preferencesState.showCreationInNameSort, "atelier-date-setting", preferences::setShowCreationInNameSort)
-            Text(stringResource(R.string.atelier_date_setting_note), style = MaterialTheme.typography.bodySmall)
-        }
-        "title-template" -> AtelierSheet(R.string.carnet_title_template, { sheet = "settings" }) {
-            var pattern by rememberSaveable { mutableStateOf(preferencesState.albumTitleTemplate.pattern) }
-            val parsed = remember(pattern) { AlbumTitleTemplate.parse(pattern) }
-            OutlinedTextField(value = pattern, onValueChange = { value -> if (value.length <= 160) pattern = value },
-                modifier = Modifier.fillMaxWidth().testTag("carnet-title-template-field"),
-                singleLine = true, isError = parsed == null, label = { Text(stringResource(R.string.carnet_title_pattern)) })
-            Text(stringResource(R.string.carnet_title_template_help), style = MaterialTheme.typography.bodySmall)
-            if (parsed == null) Text(stringResource(R.string.carnet_title_template_invalid), color = MaterialTheme.colorScheme.error)
-            else Text(stringResource(R.string.carnet_title_template_preview, defaultAlbumTitle(template = parsed)))
-            TextButton(onClick = { pattern = AlbumTitleTemplate.DEFAULT.pattern },
-                modifier = Modifier.heightIn(min = AtelierStyle.touchTarget)) { Text(stringResource(R.string.carnet_title_template_reset)) }
-            Button(onClick = { parsed?.let(preferences::setAlbumTitleTemplate); sheet = "settings" }, enabled = parsed != null,
-                modifier = Modifier.fillMaxWidth().heightIn(min = AtelierStyle.touchTarget).testTag("carnet-title-template-save")) {
-                Text(stringResource(R.string.carnet_title_template_save))
-            }
-        }
         "sort" -> AtelierSheet(R.string.atelier_sort, stopSheet) {
             AlbumOrder.entries.forEach { order ->
                 val selected = preferencesState.order == order
@@ -533,21 +489,13 @@ import kotlinx.coroutines.launch
     }
 }
 
-@Composable private fun SwitchRow(label: Int, checked: Boolean, tag: String, change: (Boolean) -> Unit) {
-    Row(Modifier.fillMaxWidth().heightIn(min = AtelierStyle.touchTarget).testTag(tag).toggleable(checked, role = Role.Switch, onValueChange = change),
-        horizontalArrangement = Arrangement.spacedBy(12.dp), verticalAlignment = Alignment.CenterVertically) {
-        Text(stringResource(label), Modifier.weight(1f))
-        Switch(checked, onCheckedChange = null)
-    }
-}
-
 @Composable private fun AtelierIcon(icon: Int, label: Int, tag: String, enabled: Boolean = true, onClick: () -> Unit) {
     IconButton(onClick = onClick, enabled = enabled, modifier = Modifier.size(AtelierStyle.touchTarget).testTag(tag)) {
         Icon(painterResource(icon), stringResource(label))
     }
 }
 
-private fun AlbumOrder.label() = when (this) {
+internal fun AlbumOrder.label() = when (this) {
     AlbumOrder.MODIFIED -> R.string.atelier_sort_modified
     AlbumOrder.CREATED -> R.string.atelier_sort_created
     AlbumOrder.TITLE_AZ -> R.string.atelier_sort_az

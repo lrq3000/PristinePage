@@ -83,6 +83,14 @@ Continuation of `OCR-JOB-03` on `0445d67`: prepare the result-side transaction w
 
 [Completion evidence](../../validation/storage/ocr-job-completion-receipt.md): verified internal callback contract, a reproduced no-op write refusal, post-CAS rollback, 784 passing data JVM tests and 150 host storage tests. The actual Room current-generation/read/write ports, WorkManager lifecycle, multilingual configuration identity and Home consumer are still open.
 
+Operator continuation on `5b4be50`, same U-06 coordinator worktree: `OCR-SEGMENT-04` extends the existing private text projection with bounded multilingual segmentation in `OcrSearchTerms`, `OcrResultDao` documentation of the bound, and host/Android text-index witnesses. See the [segmentation receipt](../../validation/storage/ocr-segmentation-receipt.md). No engine or weight acquisition, production OCR activation, schema change, signing, device action or publication.
+
+Segmentation landed locally in `7773457`: 787 data JVM and 153 host storage checks passed. Room's device tests compiled but did not run.
+
+`OCR-SETTINGS-05` is the separate Settings increment, also on the `5b4be50` worktree. It reuses the existing private Atelier preference owner/keys, moves preferences into a dedicated destination with subpages and saves ordered OCR defaults from 20 choices. Scope: app Compose/navigation/preferences/English resources, focused app tests and [Settings evidence](../../validation/ui/ocr-settings.md). It does not install packs or start OCR.
+
+Next U-06 prerequisite: bind ordered installed language-pack identities into the versioned job input; then add the same-database current job pointer, capped lease starts/recovery and exact result readback. Before enabling OCR results in Home, version the index projection and verify the live page, source and Atelier promotion receipt before navigating. Leave real OCR activation gated on exact runtime/pack qualification.
+
 ### Carnet release boundary — T-11 / CARNET-SHARE-LEASE-01
 
 Input is the audited public copy of the 16 Carnet corrective commits, through the JPEG/ZIP follow-up. Scope: guard provider display-name and size metadata by the same durable lease as file reads, verify the provider boundary, and retain live-share, Save as and frozen-name semantics. Post-revocation readability of already opened descriptors, external copies, and native acceptance are separate. The [operational plan](OPERATIONAL_PLAN.md) governs integration, public branches and the v0.3.0 bump.
