@@ -41,3 +41,7 @@ The operator approved continuing the proposed local model and runtime implementa
 ### Downloadable-model foundation integration
 
 The operator authorized fast-forwarding `main` from `5c184dc` to the verified `feat/downloadable-models` work through `42208a3` with the required patch-version bump and pushing only `refs/heads/main` to `lrq3000/PristinePage`. Keep the feature branch, worktree and local evidence. The published source checkpoint does not enable an Android model provider or authorize app networking, APK signing, model redistribution, device changes, tags or other ref updates.
+
+### Home search and Settings development preview
+
+The operator authorized a classic two-parent merge of the verified OCR foundation branch onto `main`, with a self-contained intention and full included commit records, followed by a separate semantic version bump and a push of `refs/heads/main` only to `lrq3000/PristinePage`. Then build one local debug APK from the published commit using S-01/I-01. The minor bump to `0.4.0` (Android code `7`) reflects the new album title/date search and standalone Settings, not working recognition. This does not authorize an APK upload, tag or feature-branch push, device operations, a new signing key or provider acquisition. Preserve the feature branch, worktrees, prior APKs and local evidence.
