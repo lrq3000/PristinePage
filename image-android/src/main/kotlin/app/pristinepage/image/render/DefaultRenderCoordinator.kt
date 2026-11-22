@@ -93,6 +93,8 @@ class DefaultRenderCoordinator @JvmOverloads constructor(private val decoder: So
                         return RenderResult(request, RenderStatus.DEGRADED, decoded.image, records, omissions, decoded).also { sourceTransferred = true }
                     }
                     shaped.use {
+                        // OCR has no geometry fallback. The completed geometry raster independently owns every pixel consumed by appearance; release the now-unused full-source decode charge before reserving appearance.
+                        if (request.output.purpose == RenderPurpose.OCR) decoded.close()
                         records.add(shaped.stage)
                         active = "appearance_graph_v1"
                         inputSize = PixelSize(shaped.image.width, shaped.image.height); outputSize = inputSize

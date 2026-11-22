@@ -182,6 +182,25 @@ class RenderCoordinatorTest {
         assertEquals(0L, f.budget.usedBytes)
     }
 
+    @Test fun ocrCanRenderA12MegapixelSourceWithoutKeepingTheDecodeChargeThroughAppearance() = runTest {
+        val pixels = ByteArray(3024 * 4032 * 3) { if (it % 3 == 1) 120 else 60 }
+        val f = Fixture(3024, 4032, pixels, capacity = 192L * 1024 * 1024)
+        val request = f.request(output = PixelSize(1800, 2400)).copy(output = OutputSpec(PixelSize(1800, 2400), RenderPurpose.OCR))
+        f.coordinator(UnconfinedTestDispatcher(testScheduler)).render(request).use { result ->
+            assertEquals(RenderStatus.OK, result.status)
+            val cropped = checkNotNull(result.image)
+            assertEquals(PixelSize(1800, 2400), PixelSize(cropped.width, cropped.height))
+            assertEquals(120, cropped.getUnsigned(1799, 2399, 1))
+            assertEquals(60, cropped.getUnsigned(0, 0, 0))
+            assertEquals(listOf("source_decode_v1", "source_resize_half_pixel_v1", "none_v1"), result.stages.map { it.stageId })
+            assertThrows(IllegalStateException::class.java) { f.lastDecoded!!.getUnsigned(0, 0, 0) }
+            assertEquals(25_985_536L, f.budget.usedBytes) // Only the identity appearance's 6N + 64 KiB result permit.
+        }
+        assertEquals(1, f.loads)
+        assertEquals(1, f.decodes)
+        assertEquals(0L, f.budget.usedBytes)
+    }
+
     @Test fun verifiedDecodedIdentityStillMustMatchTheRequestedRecipeSource() = runTest {
         val f = Fixture(); val changed = f.binding.copy(orientationColorConversionVersion = "other-conversion")
         f.coordinator(UnconfinedTestDispatcher(testScheduler)).render(f.request(Recipe(geometry = GeometryRecipe.None(changed)))).use { assertEquals(RenderStatus.INVALID_INPUT, it.status); assertNull(it.image) }
