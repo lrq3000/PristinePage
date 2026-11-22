@@ -1,0 +1,161 @@
+package app.pristinepage.design
+
+import androidx.activity.compose.BackHandler
+import androidx.compose.foundation.background
+import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.selection.selectable
+import androidx.compose.foundation.selection.selectableGroup
+import androidx.compose.foundation.selection.toggleable
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.*
+import androidx.compose.runtime.*
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.heading
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.unit.dp
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import app.pristinepage.R
+import app.pristinepage.data.model.AlbumOrder
+import app.pristinepage.library.AlbumTitleTemplate
+import app.pristinepage.library.defaultAlbumTitle
+import app.pristinepage.library.label
+import java.util.Locale
+
+internal enum class SettingsPage(val title: Int, val parent: SettingsPage?) {
+    ROOT(R.string.atelier_settings, null),
+    HOME(R.string.settings_home_and_albums, ROOT),
+    CAMERA(R.string.settings_camera, ROOT),
+    OCR(R.string.settings_ocr, ROOT),
+    TITLE(R.string.carnet_title_template, HOME),
+    OCR_LANGUAGES(R.string.settings_ocr_languages, OCR),
+}
+
+@Composable
+internal fun AtelierSettingsScreen(page: SettingsPage, preferences: AtelierPreferences, navigate: (SettingsPage?) -> Unit) {
+    val settings by preferences.settings.collectAsStateWithLifecycle()
+    val back = { navigate(page.parent) }
+    BackHandler(onBack = back)
+    Column(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background).safeDrawingPadding()
+        .testTag("settings-screen-${page.name.lowercase(Locale.ROOT)}")) {
+        Row(Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 6.dp), verticalAlignment = Alignment.CenterVertically) {
+            IconButton(onClick = back, modifier = Modifier.size(AtelierStyle.touchTarget).testTag("settings-back")) {
+                Icon(painterResource(R.drawable.ic_atelier_back), stringResource(R.string.atelier_back))
+            }
+            Text(stringResource(page.title), Modifier.weight(1f).semantics { heading() }, style = MaterialTheme.typography.headlineSmall)
+        }
+        HorizontalDivider(color = AtelierStyle.divider)
+        key(page) {
+            Column(Modifier.weight(1f).fillMaxWidth().verticalScroll(rememberScrollState()).imePadding().padding(16.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                when (page) {
+                    SettingsPage.ROOT -> listOf(SettingsPage.HOME, SettingsPage.CAMERA, SettingsPage.OCR).forEach {
+                        SettingsLink(it, navigate)
+                    }
+                    SettingsPage.HOME -> {
+                        SettingsLink(SettingsPage.TITLE, navigate, tag = "carnet-title-template")
+                        SettingsHeading(R.string.atelier_sort)
+                        Column(Modifier.selectableGroup()) {
+                            AlbumOrder.entries.forEach { order ->
+                                SettingsRadio(order.label(), settings.order == order, "settings-sort-${order.name}") { preferences.setOrder(order) }
+                            }
+                        }
+                        SettingsHeading(R.string.carnet_home_thumbnails)
+                        Column(Modifier.selectableGroup()) {
+                            HomeThumbnailLayout.entries.forEach { layout ->
+                                val stack = layout == HomeThumbnailLayout.STACK
+                                SettingsRadio(if (stack) R.string.carnet_stack else R.string.carnet_row,
+                                    settings.homeThumbnailLayout == layout, "home-thumbnails-${layout.name.lowercase(Locale.ROOT)}",
+                                    if (stack) R.string.carnet_stack_help else R.string.carnet_row_help) { preferences.setHomeThumbnailLayout(layout) }
+                            }
+                        }
+                        SettingsSwitch(R.string.atelier_created, settings.showCreationInNameSort, "atelier-date-setting", preferences::setShowCreationInNameSort)
+                        Text(stringResource(R.string.atelier_date_setting_note), style = MaterialTheme.typography.bodySmall)
+                    }
+                    SettingsPage.CAMERA -> SettingsSwitch(R.string.atelier_grid, settings.showCameraGrid, "atelier-grid-setting", preferences::setShowCameraGrid)
+                    SettingsPage.OCR -> {
+                        Text(stringResource(R.string.settings_ocr_not_active))
+                        SettingsLink(SettingsPage.OCR_LANGUAGES, navigate)
+                    }
+                    SettingsPage.TITLE -> AlbumTemplateSettings(settings.albumTitleTemplate) { template ->
+                        preferences.setAlbumTitleTemplate(template)
+                        back()
+                    }
+                    SettingsPage.OCR_LANGUAGES -> {
+                        Text(stringResource(R.string.settings_ocr_not_active))
+                        Text(stringResource(R.string.settings_ocr_languages_help), style = MaterialTheme.typography.bodySmall)
+                        val names = settings.ocrLanguages.map { stringResource(it.label) }
+                        Text(stringResource(R.string.settings_ocr_language_order, names.joinToString(", ")), style = MaterialTheme.typography.bodySmall)
+                        OcrLanguage.entries.forEach { language ->
+                            val checked = language in settings.ocrLanguages
+                            val enabled = !checked || settings.ocrLanguages.size > 1
+                            Row(Modifier.fillMaxWidth().heightIn(min = AtelierStyle.touchTarget)
+                                .testTag("settings-ocr-${language.packCode}").toggleable(checked, enabled = enabled, role = Role.Checkbox,
+                                    onValueChange = { preferences.setOcrLanguage(language, it) }),
+                                verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                                Checkbox(checked, onCheckedChange = null, enabled = enabled)
+                                Text(stringResource(language.label))
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable private fun SettingsHeading(label: Int) {
+    Text(stringResource(label), Modifier.semantics { heading() }, style = MaterialTheme.typography.titleMedium)
+}
+
+@Composable private fun SettingsLink(
+    destination: SettingsPage, onOpen: (SettingsPage) -> Unit, tag: String = "settings-open-${destination.name.lowercase(Locale.ROOT)}",
+) {
+    OutlinedButton(onClick = { onOpen(destination) },
+        modifier = Modifier.fillMaxWidth().heightIn(min = AtelierStyle.touchTarget).testTag(tag)) {
+        Text(stringResource(destination.title), Modifier.weight(1f))
+    }
+}
+
+@Composable private fun SettingsRadio(label: Int, selected: Boolean, tag: String, help: Int? = null, select: () -> Unit) {
+    Row(Modifier.fillMaxWidth().heightIn(min = AtelierStyle.touchTarget).testTag(tag).selectable(selected, role = Role.RadioButton, onClick = select),
+        verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+        RadioButton(selected, onClick = null)
+        Column {
+            Text(stringResource(label))
+            help?.let { Text(stringResource(it), style = MaterialTheme.typography.bodySmall) }
+        }
+    }
+}
+
+@Composable private fun SettingsSwitch(label: Int, checked: Boolean, tag: String, change: (Boolean) -> Unit) {
+    Row(Modifier.fillMaxWidth().heightIn(min = AtelierStyle.touchTarget).testTag(tag).toggleable(checked, role = Role.Switch, onValueChange = change),
+        horizontalArrangement = Arrangement.spacedBy(12.dp), verticalAlignment = Alignment.CenterVertically) {
+        Text(stringResource(label), Modifier.weight(1f))
+        Switch(checked, onCheckedChange = null)
+    }
+}
+
+@Composable private fun AlbumTemplateSettings(template: AlbumTitleTemplate, save: (AlbumTitleTemplate) -> Unit) {
+    var pattern by rememberSaveable { mutableStateOf(template.pattern) }
+    val parsed = remember(pattern) { AlbumTitleTemplate.parse(pattern) }
+    OutlinedTextField(value = pattern, onValueChange = { if (it.length <= 160) pattern = it },
+        modifier = Modifier.fillMaxWidth().testTag("carnet-title-template-field"),
+        singleLine = true, isError = parsed == null, label = { Text(stringResource(R.string.carnet_title_pattern)) })
+    Text(stringResource(R.string.carnet_title_template_help), style = MaterialTheme.typography.bodySmall)
+    if (parsed == null) Text(stringResource(R.string.carnet_title_template_invalid), color = MaterialTheme.colorScheme.error)
+    else Text(stringResource(R.string.carnet_title_template_preview, defaultAlbumTitle(template = parsed)))
+    TextButton(onClick = { pattern = AlbumTitleTemplate.DEFAULT.pattern }, modifier = Modifier.heightIn(min = AtelierStyle.touchTarget)) {
+        Text(stringResource(R.string.carnet_title_template_reset))
+    }
+    Button(onClick = { parsed?.let(save) }, enabled = parsed != null,
+        modifier = Modifier.fillMaxWidth().heightIn(min = AtelierStyle.touchTarget).testTag("carnet-title-template-save")) {
+        Text(stringResource(R.string.carnet_title_template_save))
+    }
+}

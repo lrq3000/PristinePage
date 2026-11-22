@@ -16,8 +16,11 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.saveable.rememberSaveableStateHolder
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
@@ -39,6 +42,8 @@ import app.pristinepage.data.model.DocumentSummary
 import app.pristinepage.data.model.ImportSessionId
 import app.pristinepage.data.model.PageId
 import app.pristinepage.design.CarnetTheme
+import app.pristinepage.design.AtelierSettingsScreen
+import app.pristinepage.design.SettingsPage
 import app.pristinepage.editor.EditorIdentity
 import app.pristinepage.editor.EditorViewModel
 import app.pristinepage.editor.PageEditorScreen
@@ -138,6 +143,7 @@ class MainActivity : ComponentActivity() {
         }
         setContent { AppTheme {
             val libraryState = rememberSaveableStateHolder()
+            var settingsPage by rememberSaveable { mutableStateOf<SettingsPage?>(null) }
             val thumbnailPermit = remember { Semaphore(1) }
             val settings by app.atelierPreferences.settings.collectAsStateWithLifecycle()
             val host by editorOwner.state.collectAsStateWithLifecycle()
@@ -146,6 +152,8 @@ class MainActivity : ComponentActivity() {
             val batch by batchOwner.state.collectAsStateWithLifecycle()
             val acquiring by acquisition.state.collectAsStateWithLifecycle()
             val camera = library.request?.takeIf { it.kind == PhotoImportKind.CAMERA && library.phase == ImportPhase.WAITING_PICKER }
+            val atHome = !acquiring.open && batch.album == null && host.identity == null && camera == null && library.selectedId == null
+            LaunchedEffect(atHome) { if (!atHome) settingsPage = null }
             fun leaveEditor() { editorOwner.closeEditor(); retained.accept(LibraryEvent.RefreshAlbum) }
             LaunchedEffect(batch.savedDocument, batch.savedRevision, batch.undo) {
                 if (batch.savedDocument != null) retained.accept(LibraryEvent.RefreshAlbum)
@@ -163,6 +171,9 @@ class MainActivity : ComponentActivity() {
                 CaptureScreen(camera, { retained.accept(LibraryEvent.CancelImport) }, settings.showCameraGrid) { still ->
                     retained.submitCapture(LibraryEvent.PhotoResult(camera, still))
                 }
+            }
+            else if (atHome && settingsPage != null) {
+                AtelierSettingsScreen(checkNotNull(settingsPage), app.atelierPreferences) { settingsPage = it }
             }
             else if (host.identity == null) libraryState.SaveableStateProvider("atelier-library") {
                 val loadThumbnail: suspend (DocumentSummary, DocumentPage) -> RenderedPreviewBitmap = { album, tile ->
@@ -183,7 +194,7 @@ class MainActivity : ComponentActivity() {
                          batch.savedDocument != album.documentId ||
                              (!batch.saving && album.documentRevision >= (batch.savedRevision ?: 0L))
                      },
-                     openAtelier = acquisition::open) { document, page ->
+                      openAtelier = acquisition::open, onSettings = { settingsPage = SettingsPage.ROOT }) { document, page ->
                     editorOwner.open(document.value, page.value)
                 }
             }

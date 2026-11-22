@@ -3,7 +3,9 @@ package app.pristinepage.library
 import app.pristinepage.capture.PhotoImportRequest
 import app.pristinepage.capture.PhotoImportKind
 import app.pristinepage.data.model.*
+import app.pristinepage.data.repository.AlbumSearchQuery
 import kotlinx.coroutines.flow.StateFlow
+import java.time.ZoneId
 import java.util.Locale
 
 /** Immediate foreground commands against the existing Application-owned store. These ports carry no Activity, live bitmap, private path or persistable-grant promise. Real adapter delegates to the already tested repositories/controller. */
@@ -23,6 +25,10 @@ interface LibraryActions {
 /** Opt-in so older/synthetic consumers of the plain ID-ordered catalog keep their own cursor contract. */
 internal interface OrderedLibraryActions {
     suspend fun listAlbums(order: AlbumOrder, locale: Locale, after: AlbumPosition?, limit: Int): AlbumPage
+}
+
+internal interface SearchableLibraryActions {
+    suspend fun searchAlbums(query: AlbumSearchQuery, order: AlbumOrder, locale: Locale, after: AlbumPosition?, limit: Int): AlbumPage
 }
 
 /** Only opaque identity may be placed in app saved state. A restored batch is not permission to relaunch a picker, reopen a URI, or infer a successful import. */
@@ -54,13 +60,19 @@ data class LibraryState(
     val albumOrder: AlbumOrder = AlbumOrder.MODIFIED,
     val renaming: Boolean = false,
     val renameResult: DocumentMutationResult? = null,
-)
+    val albumSearch: String = "",
+    val canSearchAlbums: Boolean = false,
+) {
+    // Keep transient search input (which can contain a private quote) out of incidental diagnostics.
+    override fun toString() = "LibraryState(loading=$loading, albumCount=${documents.size}, hasMore=$hasMore, phase=$phase)"
+}
 
 sealed interface LibraryEvent {
     data class Open(val id: DocumentId) : LibraryEvent
     data class SelectPage(val id: PageId) : LibraryEvent
     data object CloseAlbum : LibraryEvent
     data class SetAlbumSort(val order: AlbumOrder, val locale: Locale) : LibraryEvent
+    class SetAlbumSearch(val text: String, val zone: ZoneId) : LibraryEvent
     data class RenameAlbum(val documentId: DocumentId, val expectedDocumentRevision: Long, val title: String) : LibraryEvent
     data object ClearRenameResult : LibraryEvent
     data class NewDocument @JvmOverloads constructor(val title: String, val importAfterCreate: Boolean = false, val kind: PhotoImportKind = PhotoImportKind.GALLERY) : LibraryEvent

@@ -14,7 +14,7 @@ import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.withContext
 
 /** Metadata discovery through the existing Room owner. Guards and row projections share one short snapshot; no file proof, source lease, recipe decode or write is implied by showing a library entry. */
-class RoomDocumentCatalog @JvmOverloads constructor(private val metadata: MetadataAccess, private val bounds: DocumentReadQueries, private val dispatcher: CoroutineDispatcher = Dispatchers.IO) : DocumentCatalog, AlbumCatalog {
+class RoomDocumentCatalog @JvmOverloads constructor(private val metadata: MetadataAccess, private val bounds: DocumentReadQueries, private val dispatcher: CoroutineDispatcher = Dispatchers.IO) : DocumentCatalog, SearchableAlbumCatalog {
     override suspend fun list(after: DocumentId?, limit: Int): List<DocumentSummary> = read(null) {
         if (limit !in 1..50) refuse(OperationErrorCode.INVALID_INPUT, "invalid_library_limit", null)
         val visible = ArrayList<DocumentSummary>(limit)
@@ -29,7 +29,13 @@ class RoomDocumentCatalog @JvmOverloads constructor(private val metadata: Metada
         owned(visible)
     }
 
-    override suspend fun listAlbums(order: AlbumOrder, locale: Locale, after: AlbumPosition?, limit: Int): AlbumPage = withContext(dispatcher) {
+    override suspend fun listAlbums(order: AlbumOrder, locale: Locale, after: AlbumPosition?, limit: Int): AlbumPage =
+        albums(order, locale, after, limit, null)
+
+    override suspend fun searchAlbums(query: AlbumSearchQuery, order: AlbumOrder, locale: Locale, after: AlbumPosition?, limit: Int): AlbumPage =
+        albums(order, locale, after, limit, query)
+
+    private suspend fun albums(order: AlbumOrder, locale: Locale, after: AlbumPosition?, limit: Int, query: AlbumSearchQuery?): AlbumPage = withContext(dispatcher) {
         val checkpoint = { coroutineContext.ensureActive() }
         read(null) {
             if (limit !in 1..50) refuse(OperationErrorCode.INVALID_INPUT, "invalid_library_limit", null)
@@ -48,6 +54,7 @@ class RoomDocumentCatalog @JvmOverloads constructor(private val metadata: Metada
                     idCursor = id.value
                     if (metadata.isHiddenAtelierDraft(id.value)) continue
                     val row = rows?.get(index)?.also { validateDocument(it, id) } ?: document(id)
+                    if (query != null && !query.matches(row.title, row.createdAt, row.updatedAt)) continue
                     val position = AlbumPosition(id, row.title, row.createdAt, row.updatedAt)
                     if (after != null && comparator.compare(position, after) <= 0) continue
                     if (top.size < limit + 1) top.add(position)

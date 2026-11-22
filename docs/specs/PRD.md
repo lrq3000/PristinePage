@@ -30,6 +30,10 @@ On2026-11-15, the operator requested album-style multi-selection editing: rotate
 
 ## Purpose and users
 
+### User amendment U-06 — offline background OCR and Home search
+
+The operator requested automatic, local OCR of saved scan pages and a search box at the top of Home spanning recognized text, album titles, creation/modification dates and supported scan/image metadata. This explicitly adds OCR and library search; it does not add searchable PDF, uploads or document transmission. See [Background OCR and search](OCR_SEARCH.md) for retry, privacy, diagnostics and acceptance boundaries. The historical exclusion below remains applicable to all other unapproved scope.
+
 Turn ordinary photographs of receipts, printed pages, handwritten notes, colored documents and curved book pages into useful scan-like digital documents, while retaining faint marks, colored content and the original photograph. The user must be able to choose between faithful appearance and white-paper aesthetics rather than have information erased by an invisible enhancement decision.
 
 Version 1 is a complete local scanner, not just an image-filter demonstrator. It must remain useful without any research model installed. Multiple strong algorithm alternatives are retained only when they fill distinct gaps; installation availability and device evidence govern what is selectable, not paper recency or attractive publisher examples.
@@ -87,7 +91,7 @@ Live U-04 additionally makes FR-17 mandatory for P0; live U-01 supersedes the pr
 
 P1 gated experiments: DocQuad detection, UVDoc map-based dewarp, GCDRNet field/full appearance, DocRes task modes and coarse SyntheticDoc geometry. Keep a second candidate only for a useful measured trade-off. FSENet is a conditional slow research comparator, not promised handset functionality. [MODEL_PROVIDERS.md](MODEL_PROVIDERS.md) controls exact statuses and interfaces.
 
-Out of scope: OCR/searchable text, cloud sync, PDF import, document authentication/forensic claims, text/content synthesis, seal/signature/watermark removal, moiré restoration, arbitrary occluded-fold recovery, stitching/book splitting, billing and app-store publication. These may be separate later PRDs; a “complete scanner” does not silently include them.
+Out of scope: a searchable PDF text layer or OCR beyond U-06, cloud sync, PDF import, document authentication/forensic claims, text/content synthesis, seal/signature/watermark removal, moiré restoration, arbitrary occluded-fold recovery, stitching/book splitting, billing and app-store publication. These may be separate later PRDs; a “complete scanner” does not silently include them.
 
 ## Acceptance and user control
 

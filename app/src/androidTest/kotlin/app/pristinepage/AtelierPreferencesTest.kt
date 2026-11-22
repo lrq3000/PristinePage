@@ -7,6 +7,7 @@ import app.pristinepage.data.model.AlbumOrder
 import app.pristinepage.design.AtelierPreferences
 import app.pristinepage.design.AtelierSettings
 import app.pristinepage.design.HomeThumbnailLayout
+import app.pristinepage.design.OcrLanguage
 import app.pristinepage.library.AlbumTitleTemplate
 import java.util.UUID
 import org.junit.Assert.assertEquals
@@ -15,6 +16,21 @@ import org.junit.runner.RunWith
 
 @RunWith(AndroidJUnit4::class)
 class AtelierPreferencesTest {
+    @Test fun savedOcrLanguagesAreIndependentOfTheCameraAndRetainSelectionOrder() {
+        val context = InstrumentationRegistry.getInstrumentation().targetContext
+        val name = "test-ocr-prefs-${UUID.randomUUID()}"
+        try {
+            val preferences = AtelierPreferences(context, name)
+            preferences.setShowCameraGrid(false)
+            preferences.setOcrLanguage(OcrLanguage.JAPANESE, true)
+            preferences.setOcrLanguage(OcrLanguage.ARABIC, true)
+            preferences.setOcrLanguage(OcrLanguage.FRENCH, false)
+            val reopened = AtelierPreferences(context, name).settings.value
+            assertEquals(listOf(OcrLanguage.ENGLISH, OcrLanguage.JAPANESE, OcrLanguage.ARABIC), reopened.ocrLanguages)
+            assertEquals(false, reopened.showCameraGrid)
+        } finally { context.deleteSharedPreferences(name) }
+    }
+
     @Test fun aNewPreferenceOwnerReadsTheLastSavedNameTemplate() {
         val context = InstrumentationRegistry.getInstrumentation().targetContext
         val name = "test-atelier-${UUID.randomUUID()}"

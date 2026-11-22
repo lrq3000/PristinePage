@@ -15,10 +15,9 @@ import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.selection.selectable
-import androidx.compose.foundation.selection.selectableGroup
-import androidx.compose.foundation.selection.toggleable
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -39,6 +38,7 @@ import androidx.compose.ui.semantics.isTraversalGroup
 import androidx.compose.ui.semantics.selected
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.unit.dp
 import androidx.core.os.ConfigurationCompat
 import androidx.lifecycle.Lifecycle
@@ -48,12 +48,12 @@ import androidx.lifecycle.repeatOnLifecycle
 import app.pristinepage.R
 import app.pristinepage.capture.PhotoImportKind
 import app.pristinepage.data.model.*
+import app.pristinepage.data.repository.AlbumSearchQuery
 import app.pristinepage.design.AtelierPreferences
 import app.pristinepage.design.AtelierStyle
 import app.pristinepage.design.HomeThumbnailLayout
 import app.pristinepage.image.preview.RenderedPreviewBitmap
-import java.text.DateFormat
-import java.util.Date
+import java.time.ZoneId
 import java.util.Locale
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.awaitCancellation
@@ -77,6 +77,7 @@ import kotlinx.coroutines.launch
     batchError: OperationErrorCode? = null,
     thumbnailsCurrent: (DocumentSummary) -> Boolean = { true },
     openAtelier: ((String, DocumentSummary?) -> Unit)? = null,
+    onSettings: () -> Unit,
     onEdit: (DocumentId, PageId) -> Unit,
 ) {
     val state by session.state.collectAsStateWithLifecycle()
@@ -128,6 +129,21 @@ import kotlinx.coroutines.launch
 
         if (state.loading) LinearProgressIndicator(Modifier.fillMaxWidth())
         if (home) {
+            val searching = state.albumSearch.isNotBlank()
+            if (state.canSearchAlbums) OutlinedTextField(
+                value = state.albumSearch,
+                onValueChange = { session.accept(LibraryEvent.SetAlbumSearch(it, ZoneId.systemDefault())) },
+                label = { Text(stringResource(R.string.home_search_scans)) },
+                supportingText = { Text(stringResource(R.string.home_search_available_fields)) },
+                singleLine = true,
+                keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
+                trailingIcon = if (state.albumSearch.isEmpty()) null else {{
+                    TextButton(onClick = { session.accept(LibraryEvent.SetAlbumSearch("", ZoneId.systemDefault())) }) {
+                        Text(stringResource(R.string.home_search_clear))
+                    }
+                }},
+                modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp).testTag("home-album-search"),
+            )
             val creation = when (preferencesState.order) {
                 AlbumOrder.CREATED -> true
                 AlbumOrder.MODIFIED -> false
@@ -139,7 +155,7 @@ import kotlinx.coroutines.launch
                     color = MaterialTheme.colorScheme.onSurfaceVariant) }
                 item { LibraryFeedback(state, session) }
                 if (state.documents.isEmpty() && !state.loading && state.error == null) {
-                    item { Text(stringResource(R.string.atelier_empty), Modifier.padding(vertical = 12.dp)) }
+                    item { Text(stringResource(if (searching) R.string.home_search_no_matches else R.string.atelier_empty), Modifier.padding(vertical = 12.dp)) }
                 }
                 items(state.documents, key = { it.documentId.value }) { album ->
                     AlbumCard(album, creation, preferencesState.homeThumbnailLayout, loadOverview, loadThumbnail,
@@ -157,7 +173,7 @@ import kotlinx.coroutines.launch
                     Icon(painterResource(R.drawable.ic_atelier_plus), stringResource(R.string.atelier_new), Modifier.size(29.dp))
                 }
                 Box(Modifier.weight(1f), contentAlignment = Alignment.CenterEnd) {
-                    AtelierIcon(R.drawable.ic_atelier_settings, R.string.atelier_settings, "atelier-settings") { sheet = "settings" }
+                    AtelierIcon(R.drawable.ic_atelier_settings, R.string.atelier_settings, "atelier-settings", onClick = onSettings)
                 }
             }
         } else {
@@ -178,7 +194,7 @@ import kotlinx.coroutines.launch
                                  TextButton(onClick = closeBatchNotice) { Text(stringResource(R.string.atelier_batch_dismiss)) }
                              }
                             Text(stringResource(R.string.atelier_all_pages), style = MaterialTheme.typography.titleMedium)
-                            overview?.document?.updatedAt?.let { Text(stringResource(R.string.atelier_modified_date, date(Date(it)))) }
+                            overview?.document?.updatedAt?.let { Text(stringResource(R.string.atelier_modified_date, date(it))) }
                             if (overview?.pages?.isEmpty() == true) Text(stringResource(R.string.no_saved_pages))
                         }
                     }
@@ -231,49 +247,6 @@ import kotlinx.coroutines.launch
     }
     val stopSheet = { sheet = null }
     when (sheet) {
-        "settings" -> AtelierSheet(R.string.atelier_settings, stopSheet) {
-            OutlinedButton(onClick = { sheet = "title-template" },
-                modifier = Modifier.fillMaxWidth().heightIn(min = AtelierStyle.touchTarget).testTag("carnet-title-template")) {
-                Text(stringResource(R.string.carnet_title_template))
-            }
-            Text(stringResource(R.string.carnet_home_thumbnails), Modifier.semantics { heading() }, style = MaterialTheme.typography.titleMedium)
-            Column(Modifier.selectableGroup()) {
-                HomeThumbnailLayout.entries.forEach { layout ->
-                    val selected = layout == preferencesState.homeThumbnailLayout
-                    val isStack = layout == HomeThumbnailLayout.STACK
-                    Row(Modifier.fillMaxWidth().heightIn(min = AtelierStyle.touchTarget)
-                        .testTag("home-thumbnails-${layout.name.lowercase(Locale.ROOT)}")
-                        .selectable(selected, role = Role.RadioButton, onClick = { preferences.setHomeThumbnailLayout(layout) }),
-                        verticalAlignment = Alignment.CenterVertically) {
-                        RadioButton(selected, onClick = null)
-                        Column(Modifier.padding(start = 12.dp)) {
-                            Text(stringResource(if (isStack) R.string.carnet_stack else R.string.carnet_row))
-                            Text(stringResource(if (isStack) R.string.carnet_stack_help else R.string.carnet_row_help),
-                                style = MaterialTheme.typography.bodySmall)
-                        }
-                    }
-                }
-            }
-            SwitchRow(R.string.atelier_grid, preferencesState.showCameraGrid, "atelier-grid-setting", preferences::setShowCameraGrid)
-            SwitchRow(R.string.atelier_created, preferencesState.showCreationInNameSort, "atelier-date-setting", preferences::setShowCreationInNameSort)
-            Text(stringResource(R.string.atelier_date_setting_note), style = MaterialTheme.typography.bodySmall)
-        }
-        "title-template" -> AtelierSheet(R.string.carnet_title_template, { sheet = "settings" }) {
-            var pattern by rememberSaveable { mutableStateOf(preferencesState.albumTitleTemplate.pattern) }
-            val parsed = remember(pattern) { AlbumTitleTemplate.parse(pattern) }
-            OutlinedTextField(value = pattern, onValueChange = { value -> if (value.length <= 160) pattern = value },
-                modifier = Modifier.fillMaxWidth().testTag("carnet-title-template-field"),
-                singleLine = true, isError = parsed == null, label = { Text(stringResource(R.string.carnet_title_pattern)) })
-            Text(stringResource(R.string.carnet_title_template_help), style = MaterialTheme.typography.bodySmall)
-            if (parsed == null) Text(stringResource(R.string.carnet_title_template_invalid), color = MaterialTheme.colorScheme.error)
-            else Text(stringResource(R.string.carnet_title_template_preview, defaultAlbumTitle(template = parsed)))
-            TextButton(onClick = { pattern = AlbumTitleTemplate.DEFAULT.pattern },
-                modifier = Modifier.heightIn(min = AtelierStyle.touchTarget)) { Text(stringResource(R.string.carnet_title_template_reset)) }
-            Button(onClick = { parsed?.let(preferences::setAlbumTitleTemplate); sheet = "settings" }, enabled = parsed != null,
-                modifier = Modifier.fillMaxWidth().heightIn(min = AtelierStyle.touchTarget).testTag("carnet-title-template-save")) {
-                Text(stringResource(R.string.carnet_title_template_save))
-            }
-        }
         "sort" -> AtelierSheet(R.string.atelier_sort, stopSheet) {
             AlbumOrder.entries.forEach { order ->
                 val selected = preferencesState.order == order
@@ -397,7 +370,7 @@ import kotlinx.coroutines.launch
         Text(stringResource(R.string.saved_page_count, album.pageCount), style = MaterialTheme.typography.bodySmall)
         val timestamp = if (creation) album.createdAt else album.updatedAt
         if (timestamp != null) {
-            Text(stringResource(if (creation) R.string.atelier_created_date else R.string.atelier_modified_date, date(Date(timestamp))),
+            Text(stringResource(if (creation) R.string.atelier_created_date else R.string.atelier_modified_date, date(timestamp)),
                 style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
     }
@@ -516,21 +489,13 @@ import kotlinx.coroutines.launch
     }
 }
 
-@Composable private fun SwitchRow(label: Int, checked: Boolean, tag: String, change: (Boolean) -> Unit) {
-    Row(Modifier.fillMaxWidth().heightIn(min = AtelierStyle.touchTarget).testTag(tag).toggleable(checked, role = Role.Switch, onValueChange = change),
-        horizontalArrangement = Arrangement.spacedBy(12.dp), verticalAlignment = Alignment.CenterVertically) {
-        Text(stringResource(label), Modifier.weight(1f))
-        Switch(checked, onCheckedChange = null)
-    }
-}
-
 @Composable private fun AtelierIcon(icon: Int, label: Int, tag: String, enabled: Boolean = true, onClick: () -> Unit) {
     IconButton(onClick = onClick, enabled = enabled, modifier = Modifier.size(AtelierStyle.touchTarget).testTag(tag)) {
         Icon(painterResource(icon), stringResource(label))
     }
 }
 
-private fun AlbumOrder.label() = when (this) {
+internal fun AlbumOrder.label() = when (this) {
     AlbumOrder.MODIFIED -> R.string.atelier_sort_modified
     AlbumOrder.CREATED -> R.string.atelier_sort_created
     AlbumOrder.TITLE_AZ -> R.string.atelier_sort_az
@@ -538,4 +503,4 @@ private fun AlbumOrder.label() = when (this) {
 }
 
 // Keep the user’s local time zone, but do not mix non-English month names into app-owned text.
-private fun date(value: Date): String = DateFormat.getDateTimeInstance(DateFormat.MEDIUM, DateFormat.SHORT, Locale.ENGLISH).format(value)
+private fun date(epoch: Long): String = AlbumSearchQuery.displayDate(epoch, ZoneId.systemDefault())

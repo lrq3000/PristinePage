@@ -1,0 +1,9 @@
+# Settings destination and OCR language preferences
+
+`OCR-SETTINGS-05`: the Home gear opens the standalone Settings destination. Home and albums contains the existing album template, sort, thumbnail and date options; Camera contains the grid; Text recognition opens OCR languages. The new preferences store uses the existing private preference file and leaves old keys unchanged. It keeps the ordered language selection across reopen, defaults to English and French, and refuses to remove the last selection. Twenty named choices are available. The screen explicitly says OCR is not active in this build; settings do not claim installation, trigger recognition, remove existing text or modify camera/album content. The Activity routes Back to the parent and retains the library's existing saveable state holder.
+
+Independent source review found no Settings blocker and confirmed old keys remain unchanged. The `SettingsNavigationTest` exercises the actual Home gear, title and OCR subpages, Activity recreation, toolbar Back and the system Back dispatcher. The preference test reads a newly created preference owner in the same process; it is not evidence of a cold restart. Android compilation does not execute these journeys. Populated Home scroll retention, large text and accessibility need device evidence. No device, engine acquisition, APK signing or publication is included in this slice.
+
+The strict offline Gradle run recorded 182 passing app JVM tests, including the three preference cases, and produced the updated `SettingsNavigationTest` Android class before the server restarted during lint. The existing application version remains `0.3.5` (code `6`); no APK was assembled or signed for this work.
+
+The isolated lint continuation completed with zero errors and 21 warnings using the existing SDK and offline cache.

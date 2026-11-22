@@ -1,0 +1,9 @@
+# Fenced OCR result completion — OCR-JOB-03
+
+The internal result coordinator reuses `JobLeaseTransactions.completeGuarded`. Before opening a write transaction it prepares normalized/index text. Within the shared transaction it verifies the exact current generation, derives the admitted job input extent from the expected bindings, checks the job envelope, requires an active owner and lets the existing monotonic lease fence authorize the atomic write. The final verification rejects a missing or different stored result even if the lease CAS reports success. No new owner registry, inference, network, provider access, or filesystem IO is introduced.
+
+Independent review found that the initial `Unit` writer could return normally without writing text. A new case reproduced that as the single failing assertion in a five-case focused run. The source recheck found that exact stored-result verification now refuses the silent write failure, and that a separate post-job-update cancellation test restores an existing result as well as the job state. Both reviews were source-only, not device or test-execution attestations.
+
+After correction, strict offline `:data:testDebugUnitTest` passed all 784 cases with zero failures/errors/skips, including the five completion cases. The independent host SQLite suite passed 150 cases. No native migration, worker, or app results were exercised.
+
+The fixture substitutes a rollback-capable transaction and data ports; it is not a concrete Room worker, native FTS exercise or Home OCR integration. The next consumer needs same-database current-generation and bounded job reads, an exact stored-result proof, capped retry/recovery, source retention and WorkManager wiring. Verified Home OCR results remain unwired. Native migration acceptance and OCR engine acquisition remain separate gates.
