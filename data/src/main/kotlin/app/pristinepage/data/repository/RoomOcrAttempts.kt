@@ -68,10 +68,32 @@ internal class RoomOcrAttempts(
     }
 
     suspend fun fail(request: Request, lease: JobLease, error: OcrError): Boolean {
+        if (error == OcrError.PREPARATION_RESOURCE_LIMIT) refuse(request, OperationErrorCode.INVALID_INPUT, "ocr_preparation_error_after_start")
         if (error == OcrError.INTERRUPTED) refuse(request, OperationErrorCode.INVALID_INPUT, "ocr_interruption_requires_end_proof")
         return finish(request, lease, error) { original ->
             liveness.state(lease.owner) == LeaseOwnerState.ALIVE && JobLeaseFence.current(original, lease, leaseClock()) != null
         }
+    }
+
+    /** No lease or attempted-recognition ordinal is created. This exact unowned generation stops being discoverable until a new saved input or deliberate rerun. */
+    suspend fun blockForIdleBudget(request: Request): Boolean = try {
+        write(request) { before, active ->
+            val job = before.job
+            if (job.state != "PENDING" && job.state != "ADMITTED") return@write false
+            // This transaction already proved the current unleased row. A refused update here is a storage fault, not another owner winning outside the transaction.
+            val next = job.copy(state = "FAILED", errorCode = OcrError.PREPARATION_RESOURCE_LIMIT.name, updatedAt = auditClock())
+            active()
+            if (jobs.updateLease(next, job.leaseGeneration) != 1) refuse(request, OperationErrorCode.STORAGE_FAILED, "ocr_idle_block_write_refused", retryable = true)
+            try { verifyWritten(request, before, next) }
+            catch (failure: RepositoryFailure) {
+                if (failure.error.code != OperationErrorCode.REVISION_CONFLICT) throw failure
+                invalid(request)
+            }
+            true
+        }
+    } catch (failure: RepositoryFailure) {
+        if (failure.error.code != OperationErrorCode.REVISION_CONFLICT) throw failure
+        false
     }
 
     /** The caller can refresh FileOperationOwners outside this transaction. Only its bounded, positive cached/local proof is consulted here. */
@@ -152,12 +174,13 @@ internal class RoomOcrAttempts(
         fun hasConsistentStoredState(job: JobRow): Boolean {
             if (job.leaseGeneration != job.attempt) return false
             val noLease = job.leaseOwner == null && job.leaseUntil == null
-            val hasError = job.errorCode != null && OcrError.entries.any { it.name == job.errorCode }
+            val preparationBlocked = job.errorCode == OcrError.PREPARATION_RESOURCE_LIMIT.name
+            val hasError = !preparationBlocked && job.errorCode != null && OcrError.entries.any { it.name == job.errorCode }
             return when (job.state) {
                 "PENDING" -> noLease && job.attempt == 0L && job.errorCode == null
                 "ADMITTED" -> noLease && job.attempt < MAX_STARTS && (if (job.attempt == 0L) job.errorCode == null else hasError)
                 "RUNNING" -> job.leaseOwner != null && job.leaseUntil != null && job.attempt > 0L && job.errorCode == null
-                "FAILED" -> noLease && job.attempt == MAX_STARTS && hasError
+                "FAILED" -> noLease && (if (preparationBlocked) job.attempt in 0L until MAX_STARTS else job.attempt == MAX_STARTS && hasError)
                 "SUCCEEDED" -> noLease && job.attempt > 0L && job.errorCode == null
                 "CANCELED" -> noLease && (job.errorCode == null || hasError)
                 else -> false

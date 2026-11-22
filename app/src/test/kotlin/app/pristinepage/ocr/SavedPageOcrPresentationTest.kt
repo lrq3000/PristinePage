@@ -39,6 +39,8 @@ class SavedPageOcrPresentationTest {
         assertEquals(R.string.ocr_details_queued, ocrPhaseLabel(PagePhase.QUEUED))
         assertEquals(R.string.ocr_details_ready, ocrPhaseLabel(PagePhase.READY))
         assertEquals(R.string.ocr_details_failed, ocrPhaseLabel(PagePhase.FAILED))
+        assertEquals(R.string.ocr_details_preparation_blocked, ocrPhaseLabel(PagePhase.FAILED, OcrError.PREPARATION_RESOURCE_LIMIT))
+        assertEquals(R.string.ocr_details_input_too_large, ocrErrorLabel(OcrError.PREPARATION_RESOURCE_LIMIT))
         assertEquals(R.string.ocr_details_no_errors, ocrErrorLabel(null))
         assertEquals(R.string.ocr_details_interrupted, ocrErrorLabel(OcrError.INTERRUPTED))
     }

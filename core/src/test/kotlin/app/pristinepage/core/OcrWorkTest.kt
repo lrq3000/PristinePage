@@ -20,6 +20,7 @@ class OcrWorkTest {
     @Test fun interruptionAndFailuresExhaustExactlyThreeStartsAcrossSnapshots() {
         val first = assertNotNull(work().claim(1))
         assertNull(first.claim(2))
+        assertNull(first.failed(first.token, OcrError.PREPARATION_RESOURCE_LIMIT))
         val recovered = assertNotNull(first.interrupted(first.token))
         assertEquals(OcrPhase.QUEUED, recovered.phase)
         val second = assertNotNull(recovered.claim(3))

@@ -17,6 +17,7 @@ import app.pristinepage.data.model.OperationErrorCode
 import app.pristinepage.data.model.PageId
 import app.pristinepage.data.model.RepositoryFailure
 import app.pristinepage.data.model.SourceId
+import app.pristinepage.data.repository.SavedOcrWork
 import app.pristinepage.image.decode.ImageAllocationBudget
 import app.pristinepage.image.render.GeometryEngine
 import kotlinx.coroutines.CancellationException
@@ -82,6 +83,19 @@ class SavedOcrPreparerTest {
             preparer.prepare(page, config.copy(languagePacks = null)) { throw AssertionError("Unbound engine reached handoff") }
         }.exceptionOrNull()
         assertEquals(OperationErrorCode.PROVIDER_UNAVAILABLE, (failure as? RepositoryFailure)?.error?.code)
+    }
+
+    @Test fun aDiagnosticWarningCannotRetireRecognitionWithoutAnActualIdleBudgetCheck() = runBlocking {
+        val renderer = object : RenderCoordinator {
+            override suspend fun render(request: RenderRequest): RenderResult = RenderResult(
+                request, RenderStatus.RESOURCE_LIMIT, null, emptyList(), listOf("ocr_render_exceeds_idle_budget"),
+            )
+        }
+        val preparer = SavedOcrPreparer(renderer, ImageAllocationBudget(64)) { _, _ -> error("No native session expected") }
+        val failure = runCatching { preparer.prepare(page, config) { error("No prepared handoff expected") } }
+            .exceptionOrNull() as? RepositoryFailure
+        assertEquals(OperationErrorCode.RESOURCE_LIMIT, failure?.error?.code)
+        assertFalse(failure is SavedOcrWork.IdleBudgetRefusal)
     }
 
     @Test fun incompatibleSavedGeometryIsNotRetryableAndDoesNotReadTheSource() = runBlocking {

@@ -59,7 +59,14 @@ internal class RoomOcrExecution(
             // Use the same process registry for the entire operation, including preparation and all resource cleanup on cancellation. Do not count a start until preparation succeeded.
             owners.run { owner ->
                 PreparedSlot().use { slot ->
-                    prepare.prepare(saved, input.configuration, slot)
+                    try {
+                        prepare.prepare(saved, input.configuration, slot)
+                    } catch (refusal: SavedOcrWork.IdleBudgetRefusal) {
+                        currentCoroutineContext().ensureActive()
+                        // A claim about pre-start capacity cannot retire a job if a resource already crossed the preparation handoff.
+                        if (slot.hasResource() || refusal.input !== saved) throw refusal
+                        return@use if (attempts.blockForIdleBudget(request)) Outcome.TERMINAL else Outcome.BUSY
+                    }
                     currentCoroutineContext().ensureActive()
                     val prepared = slot.requireResource()
                     if (!attempts.admit(request)) return@use Outcome.BUSY
@@ -92,6 +99,8 @@ internal class RoomOcrExecution(
         }
 
         @Synchronized fun requireResource(): Prepared = checkNotNull(resource) { "The OCR preparation did not hand off a resource" }
+
+        @Synchronized fun hasResource(): Boolean = resource != null
 
         override fun close() {
             val retained = synchronized(this) {

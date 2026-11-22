@@ -24,11 +24,17 @@ class DefaultRenderCoordinator @JvmOverloads constructor(private val decoder: So
 
     override suspend fun render(request: RenderRequest): RenderResult = render(request, null)
 
+    /** Expose the typed preflight refusal only to the OCR preparer using this same image ledger. */
+    internal suspend fun renderForOcrPreparation(request: RenderRequest, ledger: ImageAllocationBudget): RenderResult {
+        require(request.output.purpose == RenderPurpose.OCR)
+        return render(request, null, reportIdleRefusal = ledger === geometry.budget)
+    }
+
     /** Ordinary export only. The binding selects the admitted JOB original, not the frozen consumer's file; the caller retains the job authority. */
     internal suspend fun renderForProducer(request: RenderRequest, expected: ExportSourceBinding): RenderResult =
         render(request, expected)
 
-    private suspend fun render(request: RenderRequest, expected: ExportSourceBinding?): RenderResult {
+    private suspend fun render(request: RenderRequest, expected: ExportSourceBinding?, reportIdleRefusal: Boolean = false): RenderResult {
         var completed: RenderResult? = null
         try {
             return withContext(dispatcher) {
@@ -38,6 +44,10 @@ class DefaultRenderCoordinator @JvmOverloads constructor(private val decoder: So
                     val execution = Execution(request, expected)
                     val result = try { execution.run { context.ensureActive() } }
                     catch (canceled: CancellationException) { throw canceled }
+                    catch (refused: ProvenIdleLimit) {
+                        if (reportIdleRefusal) throw refused
+                        execution.failure(refused)
+                    }
                     catch (failure: RepositoryFailure) { execution.failure(failure) }
                     catch (_: OutOfMemoryError) { execution.failure(RenderStatus.RESOURCE_LIMIT, "render_allocation_failed") }
                     catch (_: Exception) { execution.failure(RenderStatus.PROCESSING_FAILED, "render_processing_failed") }
@@ -138,7 +148,7 @@ class DefaultRenderCoordinator @JvmOverloads constructor(private val decoder: So
             // Parser, decode+geometry, and geometry+appearance are sequential. The app's renderer uses one shared ledger for all three.
             val peak = maxOf(sourceParserBytes(encodedBytes), Math.addExact(decode.bytes, shaped), Math.addExact(shaped, appearance))
             val budget = geometry.budget
-            if (peak > budget.capacityBytes) refuse(OperationErrorCode.RESOURCE_LIMIT, "ocr_render_exceeds_idle_budget")
+            if (peak > budget.capacityBytes) throw ProvenIdleLimit(request)
             ocrGeometryCharge = shaped
             ocrIdleFits = true
             // This is an observation, not a reservation: a later consumer may still take headroom.
@@ -198,6 +208,12 @@ class DefaultRenderCoordinator @JvmOverloads constructor(private val decoder: So
         OperationErrorCode.STORAGE_FAILED, OperationErrorCode.INTEGRITY_FAILED, OperationErrorCode.PERMISSION_LOST, OperationErrorCode.SOURCE_UNAVAILABLE, OperationErrorCode.SESSION_EXPIRED -> RenderStatus.STORAGE_FAILED
     }
     private fun refuse(code: OperationErrorCode, key: String): Nothing = throw RepositoryFailure(OperationError(code, false, key, null))
+
+    private class ProvenIdleLimit(val request: RenderRequest) :
+        RepositoryFailure(OperationError(OperationErrorCode.RESOURCE_LIMIT, false, "ocr_render_exceeds_idle_budget", null))
+
+    internal fun provedImpossibleIdleLimit(failure: RepositoryFailure, request: RenderRequest): Boolean =
+        failure is ProvenIdleLimit && failure.request === request
 }
 
 /** Only a proven idle-fit shared-renderer ledger refusal is eligible for automatic redelivery. */

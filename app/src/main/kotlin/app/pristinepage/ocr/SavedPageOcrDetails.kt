@@ -127,7 +127,7 @@ internal fun SavedPageOcrDetails(panel: SavedPageOcrPanel, page: EditablePage?, 
                     Reading.Unavailable -> Text(stringResource(R.string.ocr_details_unavailable))
                     is Reading.Status -> {
                         val status = shown.value
-                        Text(stringResource(ocrPhaseLabel(status?.phase)))
+                        Text(stringResource(ocrPhaseLabel(status?.phase, status?.lastError)))
                         if (status != null) Text(stringResource(R.string.ocr_details_attempts, status.attemptsStarted))
                         Text(stringResource(ocrErrorLabel(status?.lastError)))
                         if (status != null) {
@@ -198,12 +198,12 @@ internal fun presentOcrText(text: OcrText?, previousGeneration: Boolean): OcrTex
     else -> OcrTextPresentation(R.string.ocr_text_previous.takeIf { previousGeneration }, text.value)
 }
 
-internal fun ocrPhaseLabel(phase: PagePhase?) = when (phase) {
+internal fun ocrPhaseLabel(phase: PagePhase?, error: OcrError? = null) = when (phase) {
     null -> R.string.ocr_details_no_status
     PagePhase.QUEUED -> R.string.ocr_details_queued
     PagePhase.RUNNING -> R.string.ocr_details_running
     PagePhase.READY -> R.string.ocr_details_ready
-    PagePhase.FAILED -> R.string.ocr_details_failed
+    PagePhase.FAILED -> if (error == OcrError.PREPARATION_RESOURCE_LIMIT) R.string.ocr_details_preparation_blocked else R.string.ocr_details_failed
     PagePhase.CANCELED -> R.string.ocr_details_canceled
 }
 
@@ -211,6 +211,7 @@ internal fun ocrErrorLabel(error: OcrError?) = when (error) {
     null -> R.string.ocr_details_no_errors
     OcrError.ENGINE_FAILED -> R.string.ocr_details_engine_failed
     OcrError.RESOURCE_LIMIT -> R.string.ocr_details_resource_limit
+    OcrError.PREPARATION_RESOURCE_LIMIT -> R.string.ocr_details_input_too_large
     OcrError.INVALID_OUTPUT -> R.string.ocr_details_invalid_output
     OcrError.INTERRUPTED -> R.string.ocr_details_interrupted
 }

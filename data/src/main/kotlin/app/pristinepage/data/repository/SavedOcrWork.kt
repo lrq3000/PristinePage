@@ -94,6 +94,10 @@ class SavedOcrWork private constructor(store: PrivateImportStore.OcrComposition)
         suspend fun prepare(page: EditablePage, configuration: OcrConfiguration, handoff: Handoff)
     }
 
+    /** Trusted preparer reports a measured admission decision for the input it was just given. This is not a public renderer warning, a lease, or evidence of native OOM. */
+    class IdleBudgetRefusal(internal val input: EditablePage) :
+        RepositoryFailure(OperationError(OperationErrorCode.RESOURCE_LIMIT, false, "ocr_render_exceeds_idle_budget", null))
+
     enum class Outcome { PUBLISHED, OBSOLETE, TERMINAL, WAITING_FOR_OWNER, BUSY, FAILURE_RECORDED }
 
     /** A non-null config must already refer to a qualified local runtime and verified installed packs. Null allows rediscovery but does not queue a new page generation. */
@@ -192,6 +196,7 @@ class SavedOcrWork private constructor(store: PrivateImportStore.OcrComposition)
     } catch (fault: AdapterFault) {
         throw fault
     } catch (failure: RepositoryFailure) {
+        if (stage == Stage.PREPARE && failure is IdleBudgetRefusal) throw IdleBudgetRefusal(failure.input)
         throw RepositoryFailure(OperationError(failure.error.code, failure.error.retryable, stage.key, null))
     } catch (failure: Exception) {
         val code = if (failure is SQLException || failure is IOException) OperationErrorCode.STORAGE_FAILED else OperationErrorCode.PROCESSING_FAILED

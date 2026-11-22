@@ -12,11 +12,13 @@
     <string name="ocr_details_running">Text recognition has started</string>
     <string name="ocr_details_ready">Text recognition completed</string>
     <string name="ocr_details_failed">Text recognition failed</string>
+    <string name="ocr_details_preparation_blocked">Page preparation stopped</string>
     <string name="ocr_details_canceled">Text recognition was canceled</string>
     <string name="ocr_details_attempts">Recognition attempts started: %1$d</string>
     <string name="ocr_details_no_errors">No errors reported</string>
     <string name="ocr_details_engine_failed">The recognition engine could not process this page.</string>
     <string name="ocr_details_resource_limit">Text recognition exceeded the available resources.</string>
+    <string name="ocr_details_input_too_large">This saved page is too large to prepare for text recognition on this device.</string>
     <string name="ocr_details_invalid_output">The engine returned text that could not be saved.</string>
     <string name="ocr_details_interrupted">The last recognition attempt was interrupted.</string>
     <string name="ocr_details_engine">Engine: %1$s (contract %2$d)</string>

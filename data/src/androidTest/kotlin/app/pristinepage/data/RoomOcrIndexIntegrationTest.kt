@@ -1121,6 +1121,81 @@ class RoomOcrIndexIntegrationTest {
         assertEquals("ocr_store_closed", refusal?.error?.safeMessageKey)
     }
 
+    @Test fun impossibleIdleCapacityStopsRedeliveryWithoutSpendingARecognitionStart() = withOcrAttempts(publicStore = true) { f ->
+        val port = f.ocrPort()
+        val document = DocumentId(DOCUMENT)
+        val target = port.reconcile(null, null, 1).targets.single()
+        var preparations = 0
+        assertEquals(SavedOcrWork.Outcome.TERMINAL, port.execute(target) { page, _, _ ->
+            preparations++
+            throw SavedOcrWork.IdleBudgetRefusal(page)
+        })
+        assertEquals("FAILED:0:0:PREPARATION_RESOURCE_LIMIT",
+            f.sql.scalar("SELECT state||':'||attempt||':'||leaseGeneration||':'||errorCode FROM Job"))
+        assertEquals("0", f.sql.scalar("SELECT COUNT(*) FROM OcrResult"))
+        assertEquals(SavedOcrWork.Outcome.TERMINAL, port.execute(target) { _, _, _ -> preparations++ })
+        assertEquals(1, preparations)
+        assertTrue(port.reconcile(null, null, 1).targets.isEmpty())
+        val status = checkNotNull(port.readStatus(document, target.page))
+        assertEquals(SavedOcrWork.PagePhase.FAILED, status.phase)
+        assertEquals(0, status.attemptsStarted)
+        assertEquals(OcrError.PREPARATION_RESOURCE_LIMIT, status.lastError)
+        val successor = port.requestRerun(status, status.configuration)
+        assertNotEquals(target.job, successor.job)
+        assertEquals(SavedOcrWork.Outcome.PUBLISHED, port.execute(successor) { _, _, handoff ->
+            handoff.retain(preparedText("Recognized after an explicit rerun"))
+        })
+        assertEquals(1, checkNotNull(port.readStatus(document, successor.page)).attemptsStarted)
+    }
+
+    @Test fun onlyExactPreHandoffIdleProofCanBlockTheCurrentGeneration() = withOcrAttempts(publicStore = true) { f ->
+        val port = f.ocrPort()
+        val document = DocumentId(DOCUMENT)
+        val target = port.reconcile(null, null, 1).targets.single()
+        for (code in listOf(OperationErrorCode.PROVIDER_UNAVAILABLE, OperationErrorCode.RESOURCE_LIMIT)) {
+            val refusal = runCatching {
+                port.execute(target) { _, _, _ ->
+                    throw RepositoryFailure(OperationError(code, false, "ocr_render_exceeds_idle_budget", null))
+                }
+            }.exceptionOrNull() as? RepositoryFailure
+            assertEquals(code, refusal?.error?.code)
+            assertEquals("PENDING:0", f.sql.scalar("SELECT state||':'||attempt FROM Job"))
+        }
+        var closed = 0
+        val late = runCatching {
+            port.execute(target) { page, _, handoff ->
+                handoff.retain(object : SavedOcrWork.Prepared {
+                    override suspend fun recognize(): OcrText = error("A refused preparation must not start")
+                    override fun close() { closed++ }
+                })
+                throw SavedOcrWork.IdleBudgetRefusal(page)
+            }
+        }.exceptionOrNull() as? RepositoryFailure
+        assertEquals(OperationErrorCode.RESOURCE_LIMIT, late?.error?.code)
+        assertEquals(1, closed)
+        val wrongBinding = runCatching {
+            port.execute(target) { page, _, _ -> throw SavedOcrWork.IdleBudgetRefusal(page.copy()) }
+        }.exceptionOrNull() as? RepositoryFailure
+        assertEquals(OperationErrorCode.RESOURCE_LIMIT, wrongBinding?.error?.code)
+        assertEquals(SavedOcrWork.PagePhase.QUEUED, port.readStatus(document, target.page)?.phase)
+        assertEquals("PENDING:0", f.sql.scalar("SELECT state||':'||attempt FROM Job"))
+    }
+
+    @Test fun ignoredIdleBlockWriteIsNotACompetingOwnerAndRollsBack() = withOcrAttempts(publicStore = true) { f ->
+        val port = f.ocrPort()
+        val target = port.reconcile(null, null, 1).targets.single()
+        f.sql.execSQL("""CREATE TRIGGER IgnoreOcrIdleRefusal BEFORE UPDATE ON Job WHEN NEW.errorCode='PREPARATION_RESOURCE_LIMIT'
+            BEGIN
+                UPDATE OcrPageWork SET projectionVersion=2 WHERE jobId=OLD.jobId;
+                SELECT RAISE(IGNORE);
+            END""")
+        val refusal = runCatching { port.execute(target) { page, _, _ -> throw SavedOcrWork.IdleBudgetRefusal(page) } }
+            .exceptionOrNull() as? RepositoryFailure
+        assertEquals(OperationErrorCode.STORAGE_FAILED, refusal?.error?.code)
+        assertEquals("PENDING:0", f.sql.scalar("SELECT state||':'||attempt FROM Job"))
+        assertEquals("0", f.sql.scalar("SELECT COUNT(*) FROM OcrPageWork WHERE projectionVersion IS NOT NULL"))
+    }
+
     @Test fun rejectedSearchMatchDoesNotRevealItsPageIdThroughContinuation() = withOcrAttempts(publicStore = true) { f ->
         f.results.publish(f.request, f.start(), OcrText("receipt"))
         f.sql.execSQL("UPDATE OcrPageWork SET projectionVersion=2")

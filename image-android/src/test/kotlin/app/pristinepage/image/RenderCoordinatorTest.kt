@@ -211,7 +211,7 @@ class RenderCoordinatorTest {
     @Test fun ocrRefusesAnImpossibleIdleLedgerBeforeDecodeAndDoesNotRequestRedelivery() = runTest {
         // 1,048,676 decode + 65,572 geometry, one byte beyond this idle ledger.
         val f = Fixture(capacity = 1_114_247L)
-        val failure = ocrPreparationFailure(f, UnconfinedTestDispatcher(testScheduler))
+        val failure = ocrPreparationFailure(f, UnconfinedTestDispatcher(testScheduler), expectIdleRefusal = true)
         assertEquals(OperationErrorCode.RESOURCE_LIMIT, failure.code)
         assertFalse(failure.retryable)
         assertEquals(1, f.loads)
@@ -278,7 +278,7 @@ class RenderCoordinatorTest {
         assertEquals(0L, f.budget.usedBytes)
     }
 
-    private suspend fun ocrPreparationFailure(f: Fixture, dispatcher: CoroutineDispatcher): OperationError {
+    private suspend fun ocrPreparationFailure(f: Fixture, dispatcher: CoroutineDispatcher, expectIdleRefusal: Boolean = false): OperationError {
         val recipe = f.request().recipe
         val saved = EditablePage(DocumentId(UUID.randomUUID().toString()), 1, f.page, f.id, 1, RecipeCodec.hash(recipe), recipe)
         val configuration = OcrConfiguration("fixture", 1, OcrLayout.AUTOMATIC, OcrLanguagePacks(listOf(OcrLanguagePack("eng", "a".repeat(64)))))
@@ -287,7 +287,10 @@ class RenderCoordinatorTest {
                 throw AssertionError("Pre-start resource refusal reached native preparation")
             }.prepare(saved, configuration) { throw AssertionError("Resource refusal transferred a session") }
             throw AssertionError("OCR preparation did not refuse")
-        } catch (failure: RepositoryFailure) { failure.error }
+        } catch (failure: RepositoryFailure) {
+            assertEquals(expectIdleRefusal, failure is SavedOcrWork.IdleBudgetRefusal)
+            failure.error
+        }
     }
 
     @Test fun verifiedDecodedIdentityStillMustMatchTheRequestedRecipeSource() = runTest {

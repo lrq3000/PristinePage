@@ -16,6 +16,7 @@ import app.pristinepage.data.model.RepositoryFailure
 import app.pristinepage.data.repository.SavedOcrWork
 import app.pristinepage.image.decode.ImageAllocationBudget
 import app.pristinepage.image.preview.SrgbPreviewBitmap
+import app.pristinepage.image.render.DefaultRenderCoordinator
 import app.pristinepage.image.render.OCR_RENDER_BUDGET_BUSY
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.currentCoroutineContext
@@ -44,7 +45,13 @@ class SavedOcrPreparer(
             page.recipeRevision, page.recipe, output, 0, null, FallbackPolicy.FAIL)
         val resources = Resources()
         try {
-            renderer.render(request).use { result ->
+            val exactRenderer = renderer as? DefaultRenderCoordinator
+            val rendered = try { exactRenderer?.renderForOcrPreparation(request, budget) ?: renderer.render(request) }
+            catch (failure: RepositoryFailure) {
+                if (exactRenderer?.provedImpossibleIdleLimit(failure, request) == true) throw SavedOcrWork.IdleBudgetRefusal(page)
+                throw failure
+            }
+            rendered.use { result ->
                 active.ensureActive()
                 if (result.request != request) refuse(OperationErrorCode.REVISION_CONFLICT, "ocr_render_binding_changed")
                 if (result.status != RenderStatus.OK) rejectStatus(result)
@@ -82,8 +89,10 @@ class SavedOcrPreparer(
 
     private fun rejectStatus(result: RenderResult): Nothing = when (result.status) {
         RenderStatus.CANCELED -> throw CancellationException("OCR source rendering canceled")
-        RenderStatus.RESOURCE_LIMIT -> refuse(OperationErrorCode.RESOURCE_LIMIT, "ocr_render_resource_limit",
-            retryable = OCR_RENDER_BUDGET_BUSY in result.warnings)
+        RenderStatus.RESOURCE_LIMIT -> when (result.warnings.singleOrNull()) {
+            OCR_RENDER_BUDGET_BUSY -> refuse(OperationErrorCode.RESOURCE_LIMIT, "ocr_render_resource_limit", retryable = true)
+            else -> refuse(OperationErrorCode.RESOURCE_LIMIT, "ocr_render_resource_limit")
+        }
         RenderStatus.STORAGE_FAILED -> refuse(OperationErrorCode.STORAGE_FAILED, "ocr_render_storage_failed", true)
         RenderStatus.UNAVAILABLE -> refuse(OperationErrorCode.PROVIDER_UNAVAILABLE, "ocr_render_unavailable")
         RenderStatus.INVALID_INPUT -> refuse(OperationErrorCode.INVALID_INPUT, "ocr_render_invalid_input")
