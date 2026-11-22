@@ -312,7 +312,7 @@ def run_type(ns):
                 self.lock.rmdir()
             raise RuntimeError("Unverified provisioning/launch; retained the exact allocator cleanup obligation")
 
-        def witness(self, pair, hashes, fresh, files_source, diagnose_work, previous_test):
+        def witness(self, pair, hashes, fresh, files_source, diagnosis, previous_test):
             record = self.owned()
             row = self.exact(self.inventory())
             need([int(row[i]) for i in (5, 6)] == [item[0] for item in record["runtime_processes"]], "Target processes changed")
@@ -334,13 +334,21 @@ def run_type(ns):
             registry = self.command([*target, "shell", "pm", "list", "instrumentation", APP]).splitlines()
             need(registry == [f"instrumentation:{RUNNER} (target={APP})"], "Unexpected registered instrumentation target")
             self.save(self.path("installed.json"), {"sha256": hashes, "runner": registry}, durable=True)
-            if diagnose_work:
+            if diagnosis == "work":
                 self.inspect_saved_wakes(target)
+                return
+            if diagnosis == "files":
+                self.inspect_files_failure(target)
                 return
             if files_source:
                 from local_ocr_files_journey import LocalFilesJourney
                 journey = LocalFilesJourney(self, target, APP, files_source)
-                journey.find_and_reopen(journey.enter())
+                try:
+                    journey.find_and_reopen(journey.enter())
+                except Exception:
+                    # Preserve crash and resolver evidence before shutting down; do not reissue the unsuccessful UI action.
+                    self.inspect_files_failure(target)
+                    raise
                 return
             output = self.command([*target, "shell", "am", "instrument", "-w", "-r", "-e", "class",
                                    "#".join(CASE), RUNNER], timeout=250)
@@ -348,6 +356,17 @@ def run_type(ns):
             need(passed_case(output, CASE),
                  "Ordinary OCR instrumentation failed or skipped; inspect the exact transcript")
             self.save(self.path("outcomes.json"), {"case": "#".join(CASE), "passed": True}, durable=True)
+
+        def inspect_files_failure(self, target):
+            for name, argv in (
+                ("files-resolver", ("shell", "cmd", "package", "resolve-activity", "--brief",
+                                    "-a", "android.intent.action.OPEN_DOCUMENT", "-c", "android.intent.category.OPENABLE", "-t", "image/*")),
+                ("files-crash-buffer", ("logcat", "-b", "crash", "-d", "-t", "120", "-v", "brief", "AndroidRuntime:E", "*:S")),
+                ("files-crash-archive", ("shell", "dumpsys", "dropbox", "--print", "data_app_crash")),
+            ):
+                value = self.command([*target, *argv], timeout=18, allowed=(0, 1, 2))
+                need(len(value) <= 512 * 1024, "Unexpected crash evidence size on the synthetic guest")
+                self.path(name + ".txt").write_text(value, encoding="utf-8")
 
         def inspect_saved_wakes(self, target):
             live = self.command([*target, "shell", "pidof", APP], allowed=(0, 1)).strip()
@@ -388,7 +407,9 @@ def main():
     mode.add_argument("--preflight", action="store_true")
     parser.add_argument("--enable-local-adb", action="store_true")
     parser.add_argument("--files-source", type=Path)
-    parser.add_argument("--diagnose-work", action="store_true")
+    diagnose = parser.add_mutually_exclusive_group()
+    diagnose.add_argument("--diagnose-work", action="store_const", const="work", dest="diagnosis")
+    diagnose.add_argument("--diagnose-files", action="store_const", const="files", dest="diagnosis")
     parser.add_argument("--previous-test-sha")
     parser.add_argument("stage", type=lambda v: Path(v).absolute())
     parser.add_argument("app", type=Path)
@@ -400,11 +421,11 @@ def main():
         parser.error("Local-only ADB diagnosis requires the exact newly provisioned and released guest")
     if args.files_source and not args.existing:
         parser.error("Files UI validation requires the released OCR guest after the initial smoke")
-    if args.diagnose_work and (not args.existing or args.files_source):
-        parser.error("Scheduler diagnosis requires only the released OCR guest")
-    if args.previous_test_sha and (not args.existing or args.diagnose_work or args.files_source
+    if args.diagnosis and (not args.existing or args.files_source or args.enable_local_adb):
+        parser.error("Diagnosis requires only the released OCR guest")
+    if args.previous_test_sha and (not args.existing or args.diagnosis
                                   or not re.fullmatch(r"[0-9a-f]{64}", args.previous_test_sha)):
-        parser.error("An exact installed test digest is accepted only for instrumentation updates on the OCR guest")
+        parser.error("An exact installed test digest is accepted only for test APK updates on the OCR guest")
     root = Path.cwd().resolve()
     need(root.name == "ocr-background-search" and root.parent.name == ".worktrees", "Use the authorized OCR worktree")
     proofs = [exact_apk(args.app, args.app_sha, args.stage, False), exact_apk(args.test, args.test_sha, args.stage, True)]
@@ -426,9 +447,9 @@ def main():
     print(f"Target {guest}; evidence {raw.relative_to(root)}", flush=True)
     try:
         run.prepare(args.new, args.recover_provision[1] if args.recover_provision else None, args.enable_local_adb)
-        run.witness(pair, hashes, args.new or bool(args.recover_provision), args.files_source, args.diagnose_work,
+        run.witness(pair, hashes, args.new or bool(args.recover_provision), args.files_source, args.diagnosis,
                     args.previous_test_sha)
-        if not args.diagnose_work:
+        if not args.diagnosis:
             print("Verified the Files picker journey." if args.files_source else
                   "The real import, background OCR, and exact-page Home smoke passed.", flush=True)
     finally:

@@ -52,6 +52,13 @@ class LocalOcrGuestTest(unittest.TestCase):
             LocalFilesJourney.point(ET.fromstring("<hierarchy>" + button * 2 + "</hierarchy>"), "From files")
         self.assertIsNone(LocalFilesJourney.point(ET.fromstring("<hierarchy/>"), "From files"))
 
+    def test_picker_label_alternatives_do_not_allow_an_ambiguous_tap(self):
+        xml = ('<node clickable="true" enabled="true" bounds="[10,20][40,60]" content-desc="Afficher les racines"/>')
+        labels = ("Show roots", "Afficher les racines")
+        self.assertEqual(("25", "40"), LocalFilesJourney.point(ET.fromstring("<hierarchy>" + xml + "</hierarchy>"), labels))
+        with self.assertRaises(RuntimeError):
+            LocalFilesJourney.point(ET.fromstring("<hierarchy>" + xml + xml.replace(labels[1], labels[0]) + "</hierarchy>"), labels)
+
     def test_guest_debug_setting_changes_only_local_bridge(self):
         self.assertEqual({"basicSettings.rootMode": False, "basicSettings.adbDebug": 1},
                          normalize_config(b'{"basicSettings.rootMode": false}'))

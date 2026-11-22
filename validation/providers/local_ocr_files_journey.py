@@ -50,10 +50,11 @@ class LocalFilesJourney:
 
     @staticmethod
     def point(tree, label):
+        labels = (label,) if isinstance(label, str) else label
         parents = {child: parent for parent in tree.iter() for child in parent}
         actionable = set()
         for node in tree.iter("node"):
-            if label not in (node.get("text"), node.get("content-desc")):
+            if not any(value in (node.get("text"), node.get("content-desc")) for value in labels):
                 continue
             while node.get("clickable") != "true" and node in parents:
                 node = parents[node]
@@ -109,15 +110,26 @@ class LocalFilesJourney:
             "empty" if "Imported: 0" in self.labels(tree) else None))
         if entry == "resume":
             self.tap("Resume scan")
-            self.wait({self.app}, lambda tree, _: True if "Imported: 0" in self.labels(tree) else None)
+            empty = self.wait({self.app}, lambda tree, _: self.labels(tree) if "Imported: 0" in self.labels(tree) else None)
+            if "Cancel unfinished import" in empty:
+                # The only resumable pending request here is the empty synthetic picker batch. Use the app's visible cancellation, not app-data deletion.
+                self.tap("Cancel unfinished import")
         self.tap("Import photos")
         self.tap("From files")
         self.wait({self.app, *FILES}, lambda _, owner: owner if owner in FILES else None)
-        # Downloads root is local and requires no account. Only the freshly pushed exact folder/file may be opened.
-        self.tap("Show roots", FILES)
-        self.tap("Downloads", FILES)
-        self.tap(f"PristinePage-{self.nonce}", FILES)
-        self.tap(self.name, FILES)
+        # Open only the hash-checked uniquely named file, whether the picker exposes it in Recents or under Downloads.
+        drawer = ("Show roots", "Afficher les répertoires racines")
+        def locate_fixture(tree, _):
+            return self.point(tree, self.name) or (("drawer",) if self.point(tree, drawer) else None)
+
+        destination = self.wait(FILES, locate_fixture)
+        if destination == ("drawer",):
+            self.tap(drawer, FILES)
+            self.tap(("Downloads", "Téléchargements"), FILES)
+            self.tap(f"PristinePage-{self.nonce}", FILES)
+            self.tap(self.name, FILES)
+        else:
+            self.command("shell", "input", "tap", *destination)
         self.tap("Review pages")
         self.tap("Finish importing")
         self.tap("Skip perspective")
