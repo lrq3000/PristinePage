@@ -6,6 +6,7 @@ import android.content.ContextWrapper
 import android.content.pm.PackageManager
 import android.database.sqlite.SQLiteDatabase
 import android.graphics.Bitmap
+import android.graphics.Color
 import android.util.Log
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
@@ -46,6 +47,10 @@ import app.pristinepage.image.render.DefaultRenderCoordinator
 import app.pristinepage.image.render.GeometryEngine
 import com.googlecode.leptonica.android.Pix
 import java.io.File
+import java.nio.ByteBuffer
+import java.nio.channels.FileChannel
+import java.nio.file.LinkOption.NOFOLLOW_LINKS
+import java.nio.file.StandardOpenOption.WRITE
 import java.security.MessageDigest
 import java.util.UUID
 import java.util.concurrent.atomic.AtomicReference
@@ -98,23 +103,8 @@ class LocalSavedOcrIntegrationTest {
         val selectedPacks = checkNotNull(PrivateOcrPackOwner.forApplication(context, nativePins.reversed()))
         assertTrue(selectedPacks.install { throw AssertionError("Reopening verified packs must not copy them again") })
         val packRoot = checkNotNull(selectedPacks.acquire(englishOnly)).toFile()
-        val tessdata = File(packRoot, "tessdata")
         assertEquals(context.filesDir.canonicalFile, packRoot.parentFile.parentFile)
         Log.i(TAG, "packOwner=${if (alreadyInstalled) "retained" else "fresh"} copied=${opened.size} reopenCopied=0")
-        // Test corruption on a newly created non-aliased copy; never change the qualified owner directory or retained stage.
-        val corruptRoot = newDirectory(directory, "corrupt-pack-control")
-        val corruptPacks = newDirectory(corruptRoot, "tessdata")
-        File(tessdata, "eng.traineddata").copyTo(File(corruptPacks, "eng.traineddata"))
-        File(corruptPacks, "eng.traineddata").let { copy ->
-            java.io.RandomAccessFile(copy, "rw").use { bytes ->
-                val first = bytes.readUnsignedByte()
-                bytes.seek(0)
-                bytes.write(first xor 1)
-            }
-            assertEquals(english.bytes, copy.length())
-        }
-        val corrupt = VerifiedOcrPackDirectory(corruptRoot.toPath(), listOf(english))
-        assertNull(corrupt.resolveOrdered(listOf("eng")))
         val budget = ImageAllocationBudget.forMemoryClass(checkNotNull(context.getSystemService(ActivityManager::class.java)).memoryClass)
         val runtime = TesseractInstalledOcr(selectedPacks, budget)
         assertNull(runtime.configurationFor(emptyList()))
@@ -130,10 +120,6 @@ class LocalSavedOcrIntegrationTest {
             override fun close() { packLeases-- }
         }
         val sessions = runtime.sessions
-        val changedBytes = TesseractSavedOcrSessions(budget) { requested, checkpoint ->
-            assertFalse("Corrupt pack must not reach lease acquisition", corrupt.verifies(requested, checkpoint))
-            null
-        }
         val missingDataDirectory = newDirectory(directory, "missing-tessdata-control")
         val missingData = TesseractSavedOcrSessions(budget) { _, _ -> lease(missingDataDirectory) }
         val refusedPixAllocation = TesseractSavedOcrSessions(budget, allocatePix = { _, _ ->
@@ -218,6 +204,12 @@ class LocalSavedOcrIntegrationTest {
                 val target = store.savedOcr.reconcile(configuration, null, 50).targets.single { it.page == saved.pageId }
                 if (id == "eng-fra") assertEquals(target, store.savedOcr.reconcilePage(document, saved.pageId, reversed))
                 if (id == "eng") {
+                    val changedOwnedCatalog = corruptFreshCatalog(context, budget, english, packRoot, configuration)
+                    failBeforeStart(store, target, renderer, changedOwnedCatalog, OperationErrorCode.PROVIDER_UNAVAILABLE)
+                    val afterCorruption = checkNotNull(store.savedOcr.readStatus(document, saved.pageId))
+                    assertEquals(SavedOcrWork.PagePhase.QUEUED, afterCorruption.phase)
+                    assertEquals(0, afterCorruption.attemptsStarted)
+                    assertNull(store.savedOcr.readText(document, saved.pageId))
                     var opened = false
                     val unavailable = SavedOcrPreparer(renderer, budget) { config, bitmap, checkpoint ->
                         assertFalse(bitmap.isRecycled)
@@ -231,7 +223,6 @@ class LocalSavedOcrIntegrationTest {
                     assertEquals(0L, budget.usedBytes)
                     assertEquals(0, packLeases)
                     failBeforeStart(store, target, renderer, missingData, OperationErrorCode.PROVIDER_UNAVAILABLE)
-                    failBeforeStart(store, target, renderer, changedBytes, OperationErrorCode.PROVIDER_UNAVAILABLE)
                     failBeforeStart(store, target, renderer, refusedPixAllocation, OperationErrorCode.RESOURCE_LIMIT)
                     val packFailure = runCatching {
                         store.savedOcr.execute(target, SavedOcrPreparer(renderer, budget, failedPackAllocation))
@@ -322,6 +313,56 @@ class LocalSavedOcrIntegrationTest {
         }
         verifyPersistedControls(databaseFile, observed)
         assertTrue("Saved OCR controls not accepted: ${failures.joinToString()}", failures.isEmpty())
+    }
+
+    private suspend fun corruptFreshCatalog(
+        context: Context,
+        budget: ImageAllocationBudget,
+        english: VerifiedOcrPackDirectory.Pin,
+        retainedRoot: File,
+        savedConfiguration: OcrConfiguration,
+    ): SavedOcrPreparer.SessionFactory {
+        // The synthetic bytes are never selected by Tesseract. A per-invocation pin ensures this intentional fault cannot address an earlier catalog.
+        val control = UUID.randomUUID().toString().encodeToByteArray()
+        val digest = LocalTesseractProbeTest.hex(MessageDigest.getInstance("SHA-256").digest(control))
+        val decoy = VerifiedOcrPackDirectory.Pin(OcrLanguagePack("fixture_decoy", digest), control.size.toLong())
+        val owner = checkNotNull(PrivateOcrPackOwner.forApplication(context, listOf(english, decoy)))
+        val ordered = OcrLanguagePacks(listOf(english.identity))
+        assertNull(owner.acquire(ordered))
+        val copied = mutableSetOf<String>()
+        assertTrue(owner.install { code ->
+            assertTrue(copied.add(code))
+            when (code) {
+                "eng" -> context.assets.open("${ROOT}tessdata/eng.traineddata")
+                decoy.identity.code -> control.inputStream()
+                else -> throw AssertionError("Unexpected OCR fixture pack")
+            }
+        })
+        assertEquals(setOf("eng", decoy.identity.code), copied)
+        val freshRoot = checkNotNull(owner.acquire(ordered)).toFile()
+        assertEquals(retainedRoot.parentFile, freshRoot.parentFile)
+        assertNotEquals(retainedRoot, freshRoot)
+        val runtime = TesseractInstalledOcr(owner, budget)
+        val admitted = checkNotNull(runtime.configurationFor(listOf("eng")))
+        assertEquals(savedConfiguration, admitted)
+        val bitmap = Bitmap.createBitmap(32, 32, Bitmap.Config.ARGB_8888)
+        try {
+            bitmap.eraseColor(Color.WHITE)
+            runtime.sessions.open(admitted, bitmap) {}.use { /* Positive open without a recognition start. */ }
+        } finally { bitmap.recycle() }
+        assertEquals(0L, budget.usedBytes)
+        val leaf = File(freshRoot, "tessdata/fixture_decoy.traineddata")
+        assertEquals(leaf, leaf.canonicalFile)
+        assertEquals(control.size.toLong(), leaf.length())
+        assertArrayEquals(control, leaf.readBytes())
+        FileChannel.open(leaf.toPath(), setOf(WRITE, NOFOLLOW_LINKS)).use { file ->
+            assertEquals(1, file.write(ByteBuffer.wrap(byteArrayOf((control[0].toInt() xor 1).toByte()))))
+            file.force(true)
+        }
+        assertEquals(control.size.toLong(), leaf.length())
+        assertNull(runtime.configurationFor(listOf("eng")))
+        // Execute the normal saved-raster preparation with its previously admitted English identity, not the defaults resolver.
+        return runtime.sessions
     }
 
     private suspend fun verifyPrivateBitmapLifecycle(config: OcrConfiguration) = coroutineScope {
