@@ -25,6 +25,8 @@ CASE = ("app.pristinepage.ocr.LocalOcrImportJourneyTest",
         "importedScansAreRecognizedAutomaticallyAndHomeOpensTheSecondPage")
 FILES_CASE = (CASE[0], "coldHomeSearchReopensTheSavedFilesPageAndCreatesJpeg")
 BACKFILL_CASE = ("app.pristinepage.ocr.LocalOcrStartupBackfillTest", "firstActivityLaunchFindsAndIndexesAnExistingUnqueuedPage")
+DEATH_CASE = ("app.pristinepage.ocr.LocalOcrWorkDeathTest", "interruptRealNativeRecognition")
+RECOVER_CASE = (DEATH_CASE[0], "thirdInterruptionIsTerminalAfterOrdinaryLaunch")
 SIGNER = "7ef552d3eab5d93fac15b3d2dd7233f1b50a170d2baf68460b12f6085f8dadee"
 ALLOCATOR = "ebc068885e9e6af8c836fb658edebc245a4b8c3adf52bf6c040fa4fdac263c1d"
 GUEST_PATTERN = r"agent-pristinepage-ocr-[a-f0-9]{12}"
@@ -67,6 +69,19 @@ def passed_case(output, case):
             return False
         observed.append((cls[1], method[1], code))
     return observed == [(*case, "1"), (*case, "0")] and bool(re.search(r"(?m)^OK \(1 test\)[ \r]*$", output))
+
+
+def recovery_pid(output, ordinal):
+    def field(name):
+        return re.findall(rf"(?m)^INSTRUMENTATION_STATUS: {name}=([^\r\n]+)$", output.replace("\r\n", "\n"))
+
+    pid = field("ocrRecoveryPid")
+    need(field("class") == [DEATH_CASE[0]] and field("test") == [DEATH_CASE[1]]
+         and field("ocrRecoveryCheckpoint") == [str(ordinal)] and len(pid) == 1 and re.fullmatch(r"[1-9][0-9]{0,8}", pid[0])
+         and re.findall(r"(?m)^INSTRUMENTATION_STATUS_CODE: (\d+)\s*$", output) == ["1", "64"]
+         and re.search(r"(?m)^INSTRUMENTATION_RESULT: shortMsg=Process crashed\.\s*$", output)
+         and re.search(r"(?m)^INSTRUMENTATION_CODE: 0\s*$", output), "Missing or ambiguous native interruption witness")
+    return int(pid[0])
 
 
 def exact_apk(path, digest, stage, is_test):
@@ -314,7 +329,7 @@ def run_type(ns):
                 self.lock.rmdir()
             raise RuntimeError("Unverified provisioning/launch; retained the exact allocator cleanup obligation")
 
-        def witness(self, pair, hashes, fresh, files_source, saved_album, backfill, diagnosis, previous_test):
+        def witness(self, pair, hashes, fresh, files_source, saved_album, backfill, recovery, diagnosis, previous_test):
             record = self.owned()
             row = self.exact(self.inventory())
             need([int(row[i]) for i in (5, 6)] == [item[0] for item in record["runtime_processes"]], "Target processes changed")
@@ -336,11 +351,14 @@ def run_type(ns):
             registry = self.command([*target, "shell", "pm", "list", "instrumentation", APP]).splitlines()
             need(registry == [f"instrumentation:{RUNNER} (target={APP})"], "Unexpected registered instrumentation target")
             self.save(self.path("installed.json"), {"sha256": hashes, "runner": registry}, durable=True)
-            if diagnosis == "work":
-                self.inspect_saved_wakes(target)
+            if diagnosis and diagnosis != "files":
+                self.inspect_saved_wakes(target, recovery_title=None if diagnosis == "work" else diagnosis)
                 return
             if diagnosis == "files":
                 self.inspect_files_failure(target)
+                return
+            if recovery:
+                self.interrupt_and_recover(target)
                 return
             if files_source:
                 from local_ocr_files_journey import LocalFilesJourney
@@ -360,6 +378,27 @@ def run_type(ns):
                  "Ordinary OCR instrumentation failed or skipped; inspect the exact transcript")
             self.save(self.path("outcomes.json"), {"case": "#".join(case), "passed": True, "filesAlbum": saved_album}, durable=True)
 
+        def interrupt_and_recover(self, target):
+            title = f"OCR recovery {uuid.uuid4().hex[:12]}"
+            # ADB shells receive a single command; escape spaces in this bounded synthetic title.
+            extras = ["-e", "recoveryAlbum", f"'{title}'"]
+            interrupted = []
+            for ordinal in (1, 2, 3):
+                output = self.command([*target, "shell", "am", "instrument", "-w", "-r", "-e", "class",
+                                       "#".join(DEATH_CASE), *extras, "-e", "recoveryOrdinal", str(ordinal), RUNNER],
+                                      timeout=155, allowed=(0, 1))
+                self.path(f"recovery-start-{ordinal}.txt").write_text(output, encoding="utf-8")
+                pid = recovery_pid(output, ordinal)
+                alive = self.command([*target, "shell", "pidof", APP], allowed=(0, 1)).strip()
+                need(not alive, "The observed instrumentation process has not exited; no second launch")
+                interrupted.append({"ordinal": ordinal, "nativeFrameObserved": True, "processExited": True, "pid": pid})
+                self.save(self.path("recovery-interruptions.json"), {"interruptions": interrupted}, durable=True)
+            output = self.command([*target, "shell", "am", "instrument", "-w", "-r", "-e", "class",
+                                   "#".join(RECOVER_CASE), *extras, RUNNER], timeout=155)
+            self.path("recovery-terminal.txt").write_text(output, encoding="utf-8")
+            need(passed_case(output, RECOVER_CASE), "Missing terminal recovery witness")
+            self.save(self.path("recovery-outcome.json"), {"phase": "FAILED", "error": "INTERRUPTED", "starts": 3}, durable=True)
+
         def inspect_files_failure(self, target):
             for name, argv in (
                 ("files-resolver", ("shell", "cmd", "package", "resolve-activity", "--brief",
@@ -371,25 +410,28 @@ def run_type(ns):
                 need(len(value) <= 512 * 1024, "Unexpected crash evidence size on the synthetic guest")
                 self.path(name + ".txt").write_text(value, encoding="utf-8")
 
-        def inspect_saved_wakes(self, target):
+        def copy_scheduler_database(self, target, remote_dir, filename):
             live = self.command([*target, "shell", "pidof", APP], allowed=(0, 1)).strip()
             need(not live, "Do not copy scheduler metadata while the application process is live")
-            local_db = self.raw / "work-diagnostic"
+            local_db = self.raw / ("diagnostic-" + filename)
             local_db.mkdir()
             for suffix in ("", "-wal", "-shm"):
-                name = "androidx.work.workdb" + suffix
-                remote = "no_backup/" + name
+                name = filename + suffix
+                remote = remote_dir + "/" + name
                 extent = self.command([*target, "shell", "run-as", APP, "stat", "-c", "%s", remote], allowed=(0, 1, 2)).strip()
                 if not re.fullmatch(r"[0-9]{1,8}", extent):
                     need(suffix, "Missing WorkManager database")
                     continue
-                need(0 <= int(extent) <= 8 * 1024**2, "Scheduler metadata is over its fixture bound")
+                need(0 <= int(extent) <= 8 * 1024**2, "Diagnostic store is over its fixture bound")
                 path = local_db / name
                 with path.open("xb") as output:
                     subprocess.run([*target, "exec-out", "run-as", APP, "cat", remote],
                                    check=True, timeout=20, stdout=output, stderr=subprocess.PIPE)
                 need(path.stat().st_size == int(extent), "Scheduler metadata changed during readback")
-            path = local_db / "androidx.work.workdb"
+            return local_db / filename
+
+        def inspect_saved_wakes(self, target, recovery_title=None):
+            path = self.copy_scheduler_database(target, "no_backup", "androidx.work.workdb")
             with sqlite3.connect(path.as_uri() + "?mode=ro", uri=True) as database:
                 rows = database.execute("""SELECT state, run_attempt_count, COUNT(*)
                     FROM WorkSpec WHERE worker_class_name = ? GROUP BY state, run_attempt_count
@@ -397,6 +439,16 @@ def run_type(ns):
             need(rows, "No saved OCR wake found in the synthetic guest")
             self.save(self.path("work-state-only.json"), {"stateAttemptAndCount": rows}, durable=True)
             print(f"WorkManager state / run-attempt / count rows: {rows}", flush=True)
+            if recovery_title:
+                path = self.copy_scheduler_database(target, "databases", "pristinepage.db")
+                with sqlite3.connect(path.as_uri() + "?mode=ro", uri=True) as database:
+                    rows = database.execute("""SELECT j.state, j.attempt, j.errorCode, w.resultJobId IS NOT NULL
+                        FROM Document d JOIN Page p ON p.documentId=d.documentId
+                        LEFT JOIN OcrPageWork w ON w.pageId=p.pageId LEFT JOIN Job j ON j.jobId=w.jobId
+                        WHERE d.title=?""", (recovery_title,)).fetchall()
+                need(len(rows) == 1, "Diagnostic must resolve exactly one synthetic recovery page")
+                self.save(self.path("recovery-room-state-only.json"), {"stateAttemptErrorAndResult": rows[0]}, durable=True)
+                print(f"Exact Room recovery state / starts / error / result: {rows[0]}", flush=True)
 
     return Run
 
@@ -413,9 +465,11 @@ def main():
     files.add_argument("--files-source", type=Path)
     files.add_argument("--files-saved-album")
     files.add_argument("--startup-backfill", action="store_true")
+    files.add_argument("--native-recovery", action="store_true")
     diagnose = parser.add_mutually_exclusive_group()
     diagnose.add_argument("--diagnose-work", action="store_const", const="work", dest="diagnosis")
     diagnose.add_argument("--diagnose-files", action="store_const", const="files", dest="diagnosis")
+    diagnose.add_argument("--diagnose-recovery", dest="diagnosis")
     parser.add_argument("--previous-test-sha")
     parser.add_argument("stage", type=lambda v: Path(v).absolute())
     parser.add_argument("app", type=Path)
@@ -429,10 +483,13 @@ def main():
         parser.error("Files UI validation requires the released OCR guest after the initial smoke")
     if args.files_saved_album and not re.fullmatch(r"pristinepage_\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2}", args.files_saved_album):
         parser.error("Only the exact saved synthetic Files album may be resumed")
-    if args.startup_backfill and not args.existing:
-        parser.error("Existing-library backfill validation requires the exact retained OCR guest")
-    if args.diagnosis and (not args.existing or args.files_source or args.files_saved_album or args.startup_backfill or args.enable_local_adb):
+    if (args.startup_backfill or args.native_recovery) and not args.existing:
+        parser.error("Backfill and recovery validation require the exact retained OCR guest")
+    if args.diagnosis and (not args.existing or args.files_source or args.files_saved_album or args.startup_backfill
+                           or args.native_recovery or args.enable_local_adb):
         parser.error("Diagnosis requires only the released OCR guest")
+    if args.diagnosis and args.diagnosis not in ("work", "files") and not re.fullmatch(r"OCR recovery [a-f0-9]{12}", args.diagnosis):
+        parser.error("Recovery diagnosis requires an exact existing synthetic recovery title")
     if args.previous_test_sha and (not args.existing or args.diagnosis
                                   or not re.fullmatch(r"[0-9a-f]{64}", args.previous_test_sha)):
         parser.error("An exact installed test digest is accepted only for test APK updates on the OCR guest")
@@ -458,12 +515,13 @@ def main():
     try:
         run.prepare(args.new, args.recover_provision[1] if args.recover_provision else None, args.enable_local_adb)
         run.witness(pair, hashes, args.new or bool(args.recover_provision), args.files_source, args.files_saved_album,
-                    args.startup_backfill, args.diagnosis,
+                    args.startup_backfill, args.native_recovery, args.diagnosis,
                     args.previous_test_sha)
         if not args.diagnosis:
             print("Verified search, reopen and private JPEG export of the previously saved Files scan." if args.files_saved_album else
                   "Verified the Files picker journey." if args.files_source else
                   "Verified automatic startup backfill and exact Home navigation." if args.startup_backfill else
+                  "Verified terminal recovery after three observed native interruptions." if args.native_recovery else
                   "The real import, background OCR, and exact-page Home smoke passed.", flush=True)
     finally:
         run.close_owned()

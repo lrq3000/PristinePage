@@ -5,7 +5,7 @@ import unittest
 import xml.etree.ElementTree as ET
 
 from local_ocr_files_journey import LocalFilesJourney
-from run_local_ocr_guest import APP, CASE, TEST, install_flags, normalize_config, passed_case
+from run_local_ocr_guest import APP, CASE, TEST, install_flags, normalize_config, passed_case, recovery_pid
 
 
 def block(class_name, method, code):
@@ -14,6 +14,17 @@ def block(class_name, method, code):
 
 
 class LocalOcrGuestTest(unittest.TestCase):
+    def test_recovery_requires_exact_checkpoint_and_android_process_death(self):
+        started = block("app.pristinepage.ocr.LocalOcrWorkDeathTest", "interruptRealNativeRecognition", 1)
+        checkpoint = "INSTRUMENTATION_STATUS: ocrRecoveryCheckpoint=2\nINSTRUMENTATION_STATUS: ocrRecoveryPid=8524\nINSTRUMENTATION_STATUS_CODE: 64\n"
+        crash = "INSTRUMENTATION_RESULT: shortMsg=Process crashed.\nINSTRUMENTATION_CODE: 0\n"
+        self.assertEqual(8524, recovery_pid(started + checkpoint + crash, 2))
+        for invalid in (started + crash, started + checkpoint, started + checkpoint + checkpoint + crash,
+                        started + checkpoint.replace("Checkpoint=2", "Checkpoint=3") + crash,
+                        started.replace("interruptRealNativeRecognition", "other") + checkpoint + crash):
+            with self.subTest(invalid=invalid), self.assertRaises(RuntimeError):
+                recovery_pid(invalid, 2)
+
     def test_slow_ui_read_can_retry_once_without_repeating_input(self):
         class Read:
             def __init__(self, succeeds):
