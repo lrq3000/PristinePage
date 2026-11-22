@@ -39,6 +39,7 @@ import app.pristinepage.data.repository.RoomMetadataAccess
 import app.pristinepage.data.repository.RoomOcrAttempts
 import app.pristinepage.data.repository.RoomOcrCurrentWork
 import app.pristinepage.data.repository.RoomOcrQueue
+import app.pristinepage.data.repository.RoomOcrResults
 import kotlinx.coroutines.async
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.*
@@ -58,32 +59,32 @@ class RoomOcrIndexIntegrationTest {
     @Test fun populatedV1ToV3MigrateWithoutInventingWorkAndRetainTheIndexOnReopen() {
         for (version in 1..3) {
             val name = "ocr-migration-${UUID.randomUUID()}"
+            assertFalse(context.getDatabasePath(name).exists())
             fun open() = Room.databaseBuilder(context, PristineDatabase::class.java, name)
                 .addMigrations(AtelierDraftMigration, OcrIndexMigration, OcrWorkMigration).build()
+            migration.createDatabase(name, version).use { sql ->
+                seed(sql)
+                if (version == 3) insertText(sql)
+            }
+            val database = open()
             try {
-                migration.createDatabase(name, version).use { sql ->
-                    seed(sql)
-                    if (version == 3) insertText(sql)
-                }
-                val database = open()
-                try {
-                    val sql = database.openHelper.writableDatabase
-                    assertEquals(4, sql.version)
-                    assertEquals("010203", sql.scalar("SELECT hex(canonicalRecipe) FROM RecipeRevision"))
-                    assertEquals("Existing album", sql.scalar("SELECT title FROM Document"))
-                    assertEquals("0", sql.scalar("SELECT COUNT(*) FROM OcrPageWork"))
-                    assertEquals("0", sql.scalar("SELECT COUNT(*) FROM Job"))
-                    assertEquals(if (version == 3) "1" else "0", sql.scalar("SELECT COUNT(*) FROM OcrResult"))
-                    if (version < 3) insertText(sql)
-                    assertEquals("1", sql.scalar("SELECT COUNT(*) FROM OcrResultFts WHERE OcrResultFts MATCH 'ecole'"))
-                    sql.execSQL("UPDATE OcrResult SET indexedText='replacement' WHERE pageId=?", arrayOf(PAGE))
-                    assertEquals("0", sql.scalar("SELECT COUNT(*) FROM OcrResultFts WHERE OcrResultFts MATCH 'ecole'"))
-                } finally { database.close() }
-                val reopened = open()
-                try {
-                    assertEquals("1", reopened.openHelper.writableDatabase.scalar("SELECT COUNT(*) FROM OcrResultFts WHERE OcrResultFts MATCH 'replacement'"))
-                } finally { reopened.close() }
-            } finally { context.deleteDatabase(name) }
+                val sql = database.openHelper.writableDatabase
+                assertEquals(4, sql.version)
+                assertEquals("010203", sql.scalar("SELECT hex(canonicalRecipe) FROM RecipeRevision"))
+                assertEquals("Existing album", sql.scalar("SELECT title FROM Document"))
+                assertEquals("0", sql.scalar("SELECT COUNT(*) FROM OcrPageWork"))
+                assertEquals("0", sql.scalar("SELECT COUNT(*) FROM Job"))
+                assertEquals(if (version == 3) "1" else "0", sql.scalar("SELECT COUNT(*) FROM OcrResult"))
+                if (version < 3) insertText(sql)
+                assertEquals("1", sql.scalar("SELECT COUNT(*) FROM OcrResultFts WHERE OcrResultFts MATCH 'ecole'"))
+                sql.execSQL("UPDATE OcrResult SET indexedText='replacement' WHERE pageId=?", arrayOf(PAGE))
+                assertEquals("0", sql.scalar("SELECT COUNT(*) FROM OcrResultFts WHERE OcrResultFts MATCH 'ecole'"))
+            } finally { database.close() }
+            val reopened = open()
+            try {
+                assertEquals("1", reopened.openHelper.writableDatabase.scalar("SELECT COUNT(*) FROM OcrResultFts WHERE OcrResultFts MATCH 'replacement'"))
+            } finally { reopened.close() }
+            // Keep the distinct synthetic database under the self-target test package; device validation never deletes a guest database.
         }
     }
 
@@ -364,13 +365,74 @@ class RoomOcrIndexIntegrationTest {
         assertEquals("Previous recognition", sql.scalar("SELECT COALESCE(verbatimText,indexedText) FROM OcrResult"))
     }
 
+    @Test fun completionReplacesSearchTextAndRecordsTheActualProducingJob() = withOcrAttempts(previousResult = true) { f ->
+        val lease = f.start()
+        val original = "  École 東京都の領収書です\n"
+        assertEquals(listOf(PAGE), f.matches("previous"))
+        f.results.publish(f.request, lease, OcrText(original))
+        assertEquals(original, f.sql.scalar("SELECT COALESCE(verbatimText,indexedText) FROM OcrResult"))
+        assertEquals("${f.request.jobId.value}:1", f.sql.scalar("SELECT resultJobId||':'||projectionVersion FROM OcrPageWork"))
+        assertEquals("SUCCEEDED:1", f.sql.scalar("SELECT state||':'||attempt FROM Job JOIN OcrPageWork USING(jobId)"))
+        assertEquals(listOf(PAGE), f.matches("領収書"))
+        assertEquals(emptyList<String>(), f.matches("previous"))
+    }
+
+    @Test fun completionRollsBackTextIndexAndProvenanceWhenTheFinalReadbackFails() = withOcrAttempts(previousResult = true) { f ->
+        val previous = f.sql.scalar("SELECT resultJobId FROM OcrPageWork")
+        val lease = f.start()
+        f.sql.execSQL("""CREATE TRIGGER hide_result_after_success AFTER UPDATE OF state ON Job WHEN NEW.state='SUCCEEDED'
+            BEGIN UPDATE OcrResult SET indexedText='wrong text'; END""")
+        val failure = runCatching { f.results.publish(f.request, lease, OcrText("Replacement recognition")) }.exceptionOrNull()
+        assertEquals(OperationErrorCode.INTEGRITY_FAILED, (failure as? RepositoryFailure)?.error?.code)
+        assertEquals("Previous recognition", f.sql.scalar("SELECT COALESCE(verbatimText,indexedText) FROM OcrResult"))
+        assertEquals("$previous:1", f.sql.scalar("SELECT resultJobId||':'||projectionVersion FROM OcrPageWork"))
+        assertEquals("RUNNING:1", f.sql.scalar("SELECT state||':'||attempt FROM Job JOIN OcrPageWork USING(jobId)"))
+        assertEquals(listOf(PAGE), f.matches("previous"))
+        assertEquals(emptyList<String>(), f.matches("replacement"))
+        assertEquals(emptyList<String>(), f.matches("wrong"))
+    }
+
+    @Test fun anOldStillLiveLeaseCannotPublishAfterAnExplicitRerun() = withOcrAttempts { f ->
+        val lease = f.start()
+        val next = f.queueAgain()
+        val failure = runCatching { f.results.publish(f.request, lease, OcrText("Superseded recognition")) }.exceptionOrNull()
+        assertEquals(OperationErrorCode.REVISION_CONFLICT, (failure as? RepositoryFailure)?.error?.code)
+        assertEquals("0", f.sql.scalar("SELECT COUNT(*) FROM OcrResult"))
+        assertEquals("0", f.sql.scalar("SELECT COUNT(*) FROM OcrPageWork WHERE resultJobId IS NOT NULL"))
+        assertEquals(next.value, f.sql.scalar("SELECT jobId FROM OcrPageWork"))
+        assertEquals(emptyList<String>(), f.matches("superseded"))
+    }
+
+    @Test fun firstSuccessfulEmptyResultIsStoredAndCannotBeReplayed() = withOcrAttempts { f ->
+        val lease = f.start()
+        assertEquals("0", f.sql.scalar("SELECT COUNT(*) FROM OcrResult"))
+        f.results.publish(f.request, lease, OcrText(""))
+        assertEquals("1", f.sql.scalar("SELECT COUNT(*) FROM OcrResult WHERE indexedText='' AND verbatimText IS NULL"))
+        assertEquals("${f.request.jobId.value}:1", f.sql.scalar("SELECT resultJobId||':'||projectionVersion FROM OcrPageWork"))
+        assertEquals("SUCCEEDED", f.sql.scalar("SELECT state FROM Job"))
+        val replay = runCatching { f.results.publish(f.request, lease, OcrText("Unexpected replay")) }.exceptionOrNull()
+        assertEquals(OperationErrorCode.REVISION_CONFLICT, (replay as? RepositoryFailure)?.error?.code)
+        assertEquals("", f.sql.scalar("SELECT indexedText FROM OcrResult"))
+        assertEquals(emptyList<String>(), f.matches("replay"))
+    }
+
     private data class AttemptFixture(
         val sql: SupportSQLiteDatabase,
         val attempts: RoomOcrAttempts,
         val request: RoomOcrAttempts.Request,
         val owners: ConcurrentHashMap<String, LeaseOwnerState>,
         val clock: AtomicLong,
-    )
+        val results: RoomOcrResults,
+        val matches: (String) -> List<String>,
+        val queueAgain: suspend () -> JobId,
+    ) {
+        suspend fun start(): JobLease {
+            assertTrue(attempts.admit(request))
+            val owner = UUID.randomUUID().toString()
+            owners[owner] = LeaseOwnerState.ALIVE
+            return (attempts.start(request, owner, 500) as AcquireLeaseResult.Granted).lease
+        }
+    }
 
     private fun withOcrAttempts(previousResult: Boolean = false, test: suspend (AttemptFixture) -> Unit) {
         val database = Room.inMemoryDatabaseBuilder(context, PristineDatabase::class.java).build()
@@ -395,7 +457,9 @@ class RoomOcrIndexIntegrationTest {
                 }
                 assertEquals(id, JobId(stored.job.jobId))
                 test(AttemptFixture(sql, RoomOcrAttempts(database, liveness, leaseClock = clock::get),
-                    RoomOcrAttempts.Request(id, stored.intent), owners, clock))
+                    RoomOcrAttempts.Request(id, stored.intent), owners, clock, RoomOcrResults(database, liveness, leaseClock = clock::get),
+                    { query -> database.ocrResults().matchPages(checkNotNull(OcrSearchTerms.create(query)), null, 2).map { it.pageId } },
+                    { queue.enqueue(page, config, rerun = true) }))
             }
         } finally { database.close() }
     }

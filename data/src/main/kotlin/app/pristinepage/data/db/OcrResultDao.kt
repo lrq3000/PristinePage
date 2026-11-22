@@ -7,6 +7,8 @@ import androidx.room.ForeignKey
 import androidx.room.Fts4
 import androidx.room.FtsOptions
 import androidx.room.Index
+import androidx.room.Insert
+import androidx.room.OnConflictStrategy
 import androidx.room.PrimaryKey
 import androidx.room.Query
 import app.pristinepage.core.ocr.OcrConfiguration
@@ -51,6 +53,37 @@ internal data class OcrMatchRow(val documentId: String, val pageId: String)
 
 @Dao
 internal abstract class OcrResultDao {
+    // Use UPDATE for an existing page. The external-content FTS triggers remove the old tokens before indexing the new text at the same rowid.
+    fun writeResult(row: OcrResultRow): Boolean = if (hasResult(row.pageId)) {
+        updateResult(row.pageId, row.recipeRevision, row.sourcePixelSha256, row.engineId, row.engineVersion, row.layout,
+            row.indexedText, row.verbatimText) == 1
+    } else insertResult(row) > 0
+
+    fun matchesResult(row: OcrResultRow): Boolean =
+        matchesResult(row.pageId, row.recipeRevision, row.sourcePixelSha256, row.engineId, row.engineVersion, row.layout,
+            row.indexedText, row.verbatimText)
+
+    @Query("SELECT EXISTS(SELECT 1 FROM OcrResult WHERE pageId=:page)")
+    protected abstract fun hasResult(page: String): Boolean
+
+    @Insert(onConflict = OnConflictStrategy.ABORT)
+    protected abstract fun insertResult(row: OcrResultRow): Long
+
+    @Query("""UPDATE OcrResult SET recipeRevision=:revision,sourcePixelSha256=:sourceSha,engineId=:engine,engineVersion=:engineVersion,
+        layout=:layout,indexedText=:indexed,verbatimText=:verbatim WHERE pageId=:page""")
+    protected abstract fun updateResult(
+        page: String, revision: Long, sourceSha: String, engine: String, engineVersion: Int,
+        layout: String, indexed: String, verbatim: String?,
+    ): Int
+
+    // Bounded expected text is bound to SQL; no untrusted result text is materialized in a readback CursorWindow.
+    @Query("""SELECT EXISTS (SELECT 1 FROM OcrResult WHERE pageId=:page AND recipeRevision=:revision AND sourcePixelSha256=:sourceSha
+        AND engineId=:engine AND engineVersion=:engineVersion AND layout=:layout AND indexedText=:indexed AND verbatimText IS :verbatim)""")
+    protected abstract fun matchesResult(
+        page: String, revision: Long, sourceSha: String, engine: String, engineVersion: Int,
+        layout: String, indexed: String, verbatim: String?,
+    ): Boolean
+
     fun matchPages(terms: OcrSearchTerms, afterPageId: PageId?, limit: Int): List<OcrMatchRow> =
         selectMatches(terms.expression, afterPageId?.value, limit)
 

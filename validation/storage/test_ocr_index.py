@@ -49,7 +49,7 @@ def sync_triggers():
 
 
 def match():
-    pattern = r'@Query\("""(.*?)"""\)\s*protected abstract fun selectMatches\('
+    pattern = r'@Query\("""((?:(?!""").)*)"""\)\s*protected abstract fun selectMatches\('
     clause, = literals(DB / "OcrResultDao.kt", pattern)
     hidden, = literals(DB / "AtelierDraftDao.kt", r'HIDDEN_ATELIER_DOCUMENT = """(.*?)"""')
     return clause.replace("$HIDDEN_ATELIER_DOCUMENT", hidden)

@@ -51,7 +51,7 @@ internal class RoomOcrAttempts(
             request.jobId, owner, durationMillis,
             read = { active ->
                 active()
-                before = read(request)
+                before = readPinnedInTransaction(request)
                 val job = before.job
                 // Never enter the generic RUNNING takeover path. OCR first records the abandoned start and its error, even if the old deadline is expired.
                 if (job.state != "ADMITTED" || job.attempt >= MAX_STARTS) {
@@ -97,7 +97,8 @@ internal class RoomOcrAttempts(
         true
     }
 
-    private fun read(request: Request): RoomOcrCurrentWork.Current {
+    /** For attempt and completion writers using this same Room database; not proof of source bytes or resolved engine assets. */
+    fun readPinnedInTransaction(request: Request): RoomOcrCurrentWork.Current {
         val saved = current.readInTransaction(request.page)
         if (saved == null || saved.intent != request.binding || saved.job.jobId != request.jobId.value) {
             refuse(request, OperationErrorCode.REVISION_CONFLICT, "ocr_job_no_longer_current")
@@ -128,7 +129,7 @@ internal class RoomOcrAttempts(
     }
 
     private fun verifyWritten(request: Request, before: RoomOcrCurrentWork.Current, expected: JobRow): JobRow {
-        val after = read(request)
+        val after = readPinnedInTransaction(request)
         if (after.resultJobId != before.resultJobId || after.projectionVersion != before.projectionVersion) invalid(request)
         val actual = after.job
         // Room copies BLOBs on read, so compare their contents, not their array identities. OCR never stores a checkpoint.
@@ -141,7 +142,7 @@ internal class RoomOcrAttempts(
         try {
             active()
             metadata.transaction {
-                val result = change(read(request), active)
+                val result = change(readPinnedInTransaction(request), active)
                 active()
                 result
             }

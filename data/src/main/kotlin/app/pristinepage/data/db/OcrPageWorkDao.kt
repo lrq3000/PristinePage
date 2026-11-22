@@ -57,4 +57,12 @@ internal abstract class OcrPageWorkDao {
     @Query("""SELECT EXISTS (SELECT 1 FROM Source WHERE sourceId=:source AND typeof(refCount)='integer' AND refCount=:expected)
         AND (SELECT COUNT(*) FROM SourceReference WHERE sourceId=:source)=:expected""")
     abstract fun sourcePinCountMatches(source: String, expected: Long): Boolean
+
+    @Query("""UPDATE OcrPageWork SET resultJobId=:job,projectionVersion=:version
+        WHERE pageId=:page AND jobId=:job AND generation=:generation AND inputSha256=:digest AND inputBytes=:extent
+          AND resultJobId IS :previousJob AND projectionVersion IS :previousVersion""")
+    abstract fun publishResult(
+        page: String, job: String, generation: Long, digest: String, extent: Int,
+        previousJob: String?, previousVersion: Int?, version: Int,
+    ): Int
 }
