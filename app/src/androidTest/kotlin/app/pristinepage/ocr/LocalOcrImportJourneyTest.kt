@@ -7,9 +7,12 @@ import android.graphics.Paint
 import android.graphics.Typeface
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.compose.ui.test.onAllNodesWithText
+import androidx.compose.ui.test.onAllNodesWithTag
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
+import androidx.compose.ui.test.assertIsEnabled
 import androidx.compose.ui.test.performClick
+import androidx.compose.ui.test.performScrollTo
 import androidx.compose.ui.test.performTextInput
 import androidx.lifecycle.ViewModelProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
@@ -19,6 +22,7 @@ import androidx.work.WorkManager
 import app.pristinepage.MainActivity
 import app.pristinepage.PristinePageApplication
 import app.pristinepage.R
+import app.pristinepage.core.recipe.AppearanceRecipe
 import app.pristinepage.data.model.IngestResult
 import app.pristinepage.data.repository.SavedOcrWork
 import app.pristinepage.editor.EditorViewModel
@@ -35,6 +39,7 @@ import kotlinx.coroutines.withTimeout
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
 import org.junit.Assume.assumeTrue
 import org.junit.Rule
 import org.junit.Test
@@ -100,6 +105,43 @@ class LocalOcrImportJourneyTest {
         val editor = compose.runOnUiThread { ViewModelProvider(compose.activity)[EditorViewModel::class.java] }
         compose.waitUntil(15_000) { editor.session.value?.state?.value?.page != null }
         assertEquals(saved[1].pageId, editor.session.value?.state?.value?.page?.pageId)
+    }
+
+    @Test
+    fun coldHomeSearchReopensTheSavedFilesPageAndCreatesJpeg(): Unit = runBlocking {
+        val instrumentation = InstrumentationRegistry.getInstrumentation()
+        val context = instrumentation.targetContext
+        val app = context.applicationContext as PristinePageApplication
+        val title = InstrumentationRegistry.getArguments().getString("filesSavedAlbum")
+        assumeTrue("Requires the exact album from the separate real Files picker and correction run", app.hasBundledOcr && title != null)
+        val name = checkNotNull(title)
+        val graph = app.services.imports()
+        val document = graph.store.catalog.list(null, 50).single { it.title == name }
+        val page = graph.store.catalog.load(document.documentId).pages.single()
+        val saved = graph.store.editablePages.load(document.documentId, page.pageId)
+        assertTrue("The wizard's Natural lightness correction was saved", saved.recipe.appearance is AppearanceRecipe.NaturalLV1)
+        val text = withTimeout(120_000) {
+            waitFor { graph.store.savedOcr.readText(document.documentId, page.pageId, saved.recipeRevision) }
+        }
+        assertFalse(text.previousGeneration)
+        assertTrue("Expected fixture words in the saved OCR result", text.text.value.contains("customer paid", ignoreCase = true))
+        val hit = context.getString(R.string.home_matching_page, name, 1)
+        compose.onNodeWithTag("home-album-search").performTextInput("customer")
+        compose.waitUntil(15_000) { compose.onAllNodesWithText(hit).fetchSemanticsNodes().size == 1 }
+        compose.onNodeWithText(hit).performClick()
+        val editor = compose.runOnUiThread { ViewModelProvider(compose.activity)[EditorViewModel::class.java] }
+        compose.waitUntil(15_000) { editor.session.value?.state?.value?.page != null }
+        assertEquals(page.pageId, editor.session.value?.state?.value?.page?.pageId)
+        compose.onNodeWithTag("editor-tool-ocr-text").performScrollTo().performClick()
+        compose.waitUntil(15_000) { compose.onAllNodesWithText(text.text.value).fetchSemanticsNodes().size == 1 }
+        compose.onNodeWithText(context.getString(R.string.atelier_close)).performClick()
+        compose.onNodeWithTag("editor-back").performClick()
+        compose.waitUntil(15_000) { compose.onAllNodesWithTag("album-export-all").fetchSemanticsNodes().size == 1 }
+        compose.onNodeWithTag("album-export-all").performClick()
+        compose.onNodeWithText("${name}_1.jpg").assertExists()
+        compose.onNodeWithTag("album-export-generate").assertIsEnabled().performClick()
+        compose.waitUntil(45_000) { compose.onAllNodesWithTag("album-export-save-as").fetchSemanticsNodes().size == 1 }
+        compose.onNodeWithTag("album-export-save-as").assertIsEnabled()
     }
 
     private suspend fun <T : Any> waitFor(read: suspend () -> T?): T {

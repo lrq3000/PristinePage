@@ -108,6 +108,11 @@ class LocalFilesJourney:
     def labels(tree):
         return {node.get("text") for node in tree.iter("node") if node.get("text")}
 
+    def launch(self):
+        result = self.command("shell", "am", "start", "-W", "-n", f"{self.app}/app.pristinepage.MainActivity", timeout=30)
+        if "Status: ok" not in result:
+            raise RuntimeError("Could not launch the verified app")
+
     def enter(self):
         path = Path(self.source)
         verify_file(path.absolute(), path.stat().st_size, CONTROL_SHA256)
@@ -117,9 +122,7 @@ class LocalFilesJourney:
         self.command("push", path, guest_file)
         if self.command("shell", "sha256sum", guest_file).split()[0] != CONTROL_SHA256:
             raise RuntimeError("The staged synthetic scan does not match")
-        result = self.command("shell", "am", "start", "-W", "-n", f"{self.app}/app.pristinepage.MainActivity", timeout=30)
-        if "Status: ok" not in result:
-            raise RuntimeError("Could not launch the verified app")
+        self.launch()
         self.tap("New scan")
         entry = self.wait({self.app}, lambda tree, _: (
             "resume" if "Resume an unfinished scan?" in self.labels(tree) else
@@ -164,34 +167,7 @@ class LocalFilesJourney:
             return candidates[0] if "All pages" in labels and len(candidates) == 1 else None
 
         title = self.wait({self.app}, album_title, seconds=35)
+        self.run.save(self.run.path("files-saved-album.json"), {"album": title, "fixtureSha256": CONTROL_SHA256,
+                                                                "correction": "Natural lightness"}, durable=True)
         self.tap("Back to my scans")
         return title
-
-    def find_and_reopen(self, title):
-        def search_box(tree, _):
-            fields = [node for node in tree.iter("node") if node.get("class") == "android.widget.EditText"]
-            if len(fields) != 1:
-                return None
-            box = re.fullmatch(r"\[(\d+),(\d+)\]\[(\d+),(\d+)\]", fields[0].get("bounds", ""))
-            if not box:
-                return None
-            x1, y1, x2, y2 = map(int, box.groups())
-            return str((x1 + x2)//2), str((y1 + y2)//2)
-
-        x, y = self.wait({self.app}, search_box)
-        self.command("shell", "input", "tap", x, y)
-        self.command("shell", "input", "text", "customer")
-        # This keyword belongs only to the imported retained English scan, not to the two direct-import smoke pages.
-        label = f"{title} - Page 1"
-        def result(tree, _):
-            labels = self.labels(tree)
-            return True if label in labels and "Matching pages" in labels else None
-
-        self.wait({self.app}, result, seconds=90)
-        self.tap(label)
-        self.tap("OCR text")
-        self.wait({self.app}, lambda tree, _: True if any("customer" in text.lower() and text != "customer"
-                                                        for text in self.labels(tree)) else None)
-        self.run.save(self.run.path("files-journey.json"), {"fixtureSha256": CONTROL_SHA256, "source": "system-files",
-                                                            "ocrQuery": "customer", "matchedPage": 1, "reopenedPanel": True},
-                      durable=True)
