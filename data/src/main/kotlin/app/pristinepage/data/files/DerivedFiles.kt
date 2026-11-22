@@ -21,6 +21,9 @@ import java.util.Base64
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
 
+// Match the verbatim Room boundary: 131,072 UTF-16 units require at most three UTF-8 bytes per unit.
+internal const val MAX_OCR_TEXT_BYTES = 393_216L
+
 @Serializable
 enum class DerivedKind { RENDER, EXPORT, OCR_TEXT }
 
@@ -509,8 +512,6 @@ class DerivedFiles internal constructor(
         const val METADATA_LIMIT = 524_288
         const val SEAL_LIMIT = METADATA_LIMIT * 2
         const val BUFFER_SIZE = 65_536
-        // Match the verbatim Room boundary: 131,072 UTF-16 units require at most three UTF-8 bytes per unit.
-        const val MAX_OCR_TEXT_BYTES = 393_216L
         val JSON = Json { encodeDefaults = true; ignoreUnknownKeys = false }
 
         fun admitsExtent(kind: DerivedKind, bytes: Long): Boolean =
