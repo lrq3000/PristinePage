@@ -1,6 +1,7 @@
 package app.pristinepage.data
 
 import androidx.room.Room
+import androidx.room.RoomDatabase
 import androidx.room.testing.MigrationTestHelper
 import androidx.sqlite.db.SupportSQLiteDatabase
 import androidx.test.ext.junit.runners.AndroidJUnit4
@@ -35,22 +36,30 @@ import app.pristinepage.data.repository.AcquireLeaseResult
 import app.pristinepage.data.repository.JobLease
 import app.pristinepage.data.repository.LeaseOwnerLiveness
 import app.pristinepage.data.repository.LeaseOwnerState
+import app.pristinepage.data.repository.OperationOwnerProof
 import app.pristinepage.data.repository.RoomMetadataAccess
 import app.pristinepage.data.repository.RoomOcrAttempts
 import app.pristinepage.data.repository.RoomOcrBackfill
 import app.pristinepage.data.repository.RoomOcrCurrentWork
+import app.pristinepage.data.repository.RoomOcrDispatch
 import app.pristinepage.data.repository.RoomOcrQueue
 import app.pristinepage.data.repository.RoomOcrResults
 import app.pristinepage.data.repository.RoomOcrSearch
 import kotlinx.coroutines.async
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withContext
 import org.junit.Assert.*
 import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.Executor
 import java.util.concurrent.atomic.AtomicLong
+import java.util.concurrent.atomic.AtomicReference
 
 @RunWith(AndroidJUnit4::class)
 class RoomOcrIndexIntegrationTest {
@@ -567,6 +576,145 @@ class RoomOcrIndexIntegrationTest {
         } finally { database.close() }
     }
 
+    @Test fun dispatchRequiresPositiveOwnerProofAndRetainsTheStoredConfiguration() = withOcrAttempts(
+        configuration = OcrConfiguration("fixture", 1, OcrLayout.SPARSE_TEXT, OcrLanguagePacks(listOf(
+            OcrLanguagePack("fra", "f".repeat(64)), OcrLanguagePack("eng", "d".repeat(64)),
+        ))),
+    ) { f ->
+        val lease = f.start()
+        f.owners.remove(lease.owner)
+        var result = LeaseOwnerState.UNKNOWN
+        var probes = 0
+        val dispatch = f.dispatch(object : OperationOwnerProof {
+            override suspend fun refresh(owner: String): LeaseOwnerState {
+                assertFalse(f.sql.inTransaction())
+                assertEquals(lease.owner, owner)
+                probes++
+                if (result == LeaseOwnerState.ENDED) f.owners[owner] = result
+                return result
+            }
+        })
+        assertEquals(RoomOcrDispatch.Decision.WaitingForOwner, dispatch.resolve(f.request.page, f.request.jobId))
+        result = LeaseOwnerState.ALIVE
+        assertEquals(RoomOcrDispatch.Decision.WaitingForOwner, dispatch.resolve(f.request.page, f.request.jobId))
+        assertEquals("RUNNING:1", f.sql.scalar("SELECT state||':'||attempt FROM Job"))
+        result = LeaseOwnerState.ENDED
+        val resumed = dispatch.resolve(f.request.page, f.request.jobId) as RoomOcrDispatch.Decision.Ready
+        assertEquals(f.request, resumed.request)
+        assertEquals(listOf("fra", "eng"), resumed.request.binding.configuration.languagePacks?.ordered?.map { it.code })
+        assertEquals("ADMITTED:1:INTERRUPTED", f.sql.scalar("SELECT state||':'||attempt||':'||errorCode FROM Job"))
+        assertEquals(3, probes)
+        assertNotEquals(f.request.jobId, f.queueAgain())
+        assertEquals(RoomOcrDispatch.Decision.Obsolete, dispatch.resolve(f.request.page, f.request.jobId))
+        assertEquals(3, probes)
+    }
+
+    @Test fun dispatchNeverStartsOrOffersAFourthAttemptAfterRecoveringTheThird() = withOcrAttempts { f ->
+        repeat(2) { assertTrue(f.attempts.fail(f.request, f.start(), OcrError.ENGINE_FAILED)) }
+        val third = f.start()
+        f.owners[third.owner] = LeaseOwnerState.ENDED
+        val dispatch = f.dispatch(object : OperationOwnerProof {
+            override suspend fun refresh(owner: String): LeaseOwnerState = error("Already proved locally")
+        })
+        assertEquals(RoomOcrDispatch.Decision.Terminal, dispatch.resolve(f.request.page, f.request.jobId))
+        assertEquals(RoomOcrDispatch.Decision.Terminal, dispatch.resolve(f.request.page, f.request.jobId))
+        assertEquals("FAILED:3:INTERRUPTED", f.sql.scalar("SELECT state||':'||attempt||':'||errorCode FROM Job"))
+    }
+
+    @Test fun ownerProofCannotResumeAGenerationSupersededWhileTheProbeWasOutsideRoom() = withOcrAttempts { f ->
+        val lease = f.start()
+        f.owners.remove(lease.owner)
+        var successor: JobId? = null
+        val dispatch = f.dispatch(object : OperationOwnerProof {
+            override suspend fun refresh(owner: String): LeaseOwnerState {
+                assertEquals(lease.owner, owner)
+                successor = f.queueAgain()
+                f.owners[owner] = LeaseOwnerState.ENDED
+                return LeaseOwnerState.ENDED
+            }
+        })
+        assertEquals(RoomOcrDispatch.Decision.Obsolete, dispatch.resolve(f.request.page, f.request.jobId))
+        val next = dispatch.resolve(f.request.page, checkNotNull(successor)) as RoomOcrDispatch.Decision.Ready
+        assertEquals(2L, next.request.binding.generation)
+        assertEquals("PENDING:0", f.sql.scalar("SELECT state||':'||attempt FROM Job JOIN OcrPageWork USING(jobId)"))
+        assertEquals("RUNNING:1", f.sql.scalar("SELECT state||':'||attempt FROM Job WHERE state='RUNNING'"))
+    }
+
+    @Test fun refusedRecoveryOfTheSameEndedLeaseIsNotAnOwnerWait() = withOcrAttempts { f ->
+        val lease = f.start()
+        f.owners[lease.owner] = LeaseOwnerState.ENDED
+        val dispatch = f.dispatch(noProofExpected())
+        f.sql.execSQL("""CREATE TRIGGER refuse_finished_owner BEFORE UPDATE OF state ON Job
+            WHEN OLD.state='RUNNING' AND NEW.state='ADMITTED' BEGIN SELECT RAISE(IGNORE); END""")
+        val refusal = runCatching { dispatch.resolve(f.request.page, f.request.jobId) }.exceptionOrNull() as? RepositoryFailure
+        assertEquals(OperationErrorCode.STORAGE_FAILED, refusal?.error?.code)
+        assertEquals("ocr_dispatch_recovery_refused", refusal?.error?.safeMessageKey)
+        assertEquals("RUNNING:1:${lease.owner}", f.sql.scalar("SELECT state||':'||attempt||':'||leaseOwner FROM Job"))
+        assertEquals("1", f.sql.scalar("SELECT COUNT(*) FROM SourceReference WHERE ownerType='JOB'"))
+    }
+
+    @Test fun dispatchReadStorageFailureIsStructuredAndRetryable() = withOcrAttempts { f ->
+        val dispatch = f.dispatch(noProofExpected())
+        f.sql.execSQL("ALTER TABLE OcrPageWork RENAME TO UnavailableWorkFixture")
+        val failure = runCatching { dispatch.resolve(f.request.page, f.request.jobId) }.exceptionOrNull() as? RepositoryFailure
+        assertEquals(OperationErrorCode.STORAGE_FAILED, failure?.error?.code)
+        assertTrue(failure?.error?.retryable == true)
+        assertEquals("ocr_dispatch_read_failed", failure?.error?.safeMessageKey)
+    }
+
+    @Test fun cancellationDuringAnObsoleteLookupDoesNotDeliverADecision() {
+        val cancelOnRead = AtomicReference<Job?>()
+        withOcrAttempts(onQuery = { sql ->
+            if (sql.startsWith("SELECT CASE WHEN") && "FROM OcrPageWork WHERE pageId=" in sql) {
+                cancelOnRead.getAndSet(null)?.cancel()
+            }
+        }) { f ->
+            val dispatch = f.dispatch(noProofExpected())
+            var returned: RoomOcrDispatch.Decision? = null
+            val failure = runCatching {
+                withContext(Dispatchers.IO) {
+                    cancelOnRead.set(checkNotNull(coroutineContext[Job]))
+                    returned = dispatch.resolve(PageId(UUID.randomUUID().toString()), f.request.jobId)
+                }
+            }.exceptionOrNull()
+            assertNull("The cancellation did not run inside the Room read", cancelOnRead.get())
+            assertTrue(failure is CancellationException)
+            assertNull("An obsolete decision crossed the cancellation fence", returned)
+        }
+    }
+
+    @Test fun hiddenSavedBindingIsObsoleteEvenWhenItsJobAndPinStillExist() = withOcrAttempts { f ->
+        val receipt = "atelier-publish-v1\n1\n$DOCUMENT\n$PAGE,0,${"c".repeat(64)},$PAGE"
+        f.sql.execSQL("""INSERT INTO AtelierDraft (draftId,stagingDocumentId,state,generation,step,createdAt,committedDocumentId,receiptPageIds)
+            VALUES (?,?,'COMMITTED',2,2,0,?,?)""", arrayOf(DRAFT, DOCUMENT, DOCUMENT, receipt))
+        assertEquals(RoomOcrDispatch.Decision.Obsolete, f.dispatch(noProofExpected()).resolve(f.request.page, f.request.jobId))
+        assertEquals("PENDING:0", f.sql.scalar("SELECT state||':'||attempt FROM Job"))
+    }
+
+    @Test fun readyWorkRequiresExactlyItsOwnJobSourcePin() = withOcrAttempts { f ->
+        val dispatch = f.dispatch(noProofExpected())
+        assertEquals(RoomOcrDispatch.Decision.Ready(f.request), dispatch.resolve(f.request.page, f.request.jobId))
+        val otherSource = UUID.randomUUID().toString()
+        f.sql.execSQL("INSERT INTO Source VALUES (?,?,?,3,2,1,'other-conversion-v1',NULL,1,'READY',0)",
+            arrayOf(otherSource, BLOB, PIXELS))
+        f.sql.execSQL("INSERT INTO SourceReference VALUES ('JOB',?,?,0)", arrayOf(f.request.jobId.value, otherSource))
+        suspend fun assertRefused() {
+            val failure = runCatching { dispatch.resolve(f.request.page, f.request.jobId) }.exceptionOrNull() as? RepositoryFailure
+            assertEquals(OperationErrorCode.INTEGRITY_FAILED, failure?.error?.code)
+        }
+        assertRefused() // Valid pin plus an extra pin.
+        f.sql.execSQL("DELETE FROM SourceReference WHERE ownerType='JOB' AND ownerId=? AND sourceId=?",
+            arrayOf(f.request.jobId.value, SOURCE))
+        assertRefused() // Only the wrong pin.
+        f.sql.execSQL("DELETE FROM SourceReference WHERE ownerType='JOB' AND ownerId=?", arrayOf(f.request.jobId.value))
+        assertRefused() // No pin.
+        assertEquals("PENDING:0", f.sql.scalar("SELECT state||':'||attempt FROM Job"))
+    }
+
+    private fun noProofExpected() = object : OperationOwnerProof {
+        override suspend fun refresh(owner: String): LeaseOwnerState = error("This scenario must not invoke external proof")
+    }
+
     private data class AttemptFixture(
         val sql: SupportSQLiteDatabase,
         val attempts: RoomOcrAttempts,
@@ -577,6 +725,7 @@ class RoomOcrIndexIntegrationTest {
         val matches: (String) -> List<String>,
         val queueAgain: suspend () -> JobId,
         val search: RoomOcrSearch,
+        val dispatch: (OperationOwnerProof) -> RoomOcrDispatch,
     ) {
         suspend fun start(): JobLease {
             assertTrue(attempts.admit(request))
@@ -586,8 +735,15 @@ class RoomOcrIndexIntegrationTest {
         }
     }
 
-    private fun withOcrAttempts(previousResult: Boolean = false, test: suspend (AttemptFixture) -> Unit) {
-        val database = Room.inMemoryDatabaseBuilder(context, PristineDatabase::class.java).build()
+    private fun withOcrAttempts(
+        previousResult: Boolean = false,
+        configuration: OcrConfiguration = queueConfig(OcrLayout.AUTOMATIC),
+        onQuery: ((String) -> Unit)? = null,
+        test: suspend (AttemptFixture) -> Unit,
+    ) {
+        val builder = Room.inMemoryDatabaseBuilder(context, PristineDatabase::class.java)
+        if (onQuery != null) builder.setQueryCallback(RoomDatabase.QueryCallback { sql, _ -> onQuery(sql) }, Executor { it.run() })
+        val database = builder.build()
         try {
             val sql = database.openHelper.writableDatabase
             val page = seedQueuePage(sql)
@@ -596,13 +752,12 @@ class RoomOcrIndexIntegrationTest {
             val liveness = LeaseOwnerLiveness { owners[it] ?: LeaseOwnerState.UNKNOWN }
             runBlocking {
                 val queue = RoomOcrQueue(database)
-                val config = queueConfig(OcrLayout.AUTOMATIC)
-                val initial = queue.enqueue(page, config, rerun = false)
+                val initial = queue.enqueue(page, configuration, rerun = false)
                 val id = if (previousResult) {
                     insertRecognition(sql, "Previous recognition")
                     sql.execSQL("UPDATE Job SET state='SUCCEEDED',attempt=1,leaseGeneration=1 WHERE jobId=?", arrayOf(initial.value))
                     sql.execSQL("UPDATE OcrPageWork SET resultJobId=?,projectionVersion=1 WHERE jobId=?", arrayOf(initial.value, initial.value))
-                    queue.enqueue(page, config, rerun = true)
+                    queue.enqueue(page, configuration, rerun = true)
                 } else initial
                 val stored = RoomMetadataAccess(database).transaction {
                     checkNotNull(RoomOcrCurrentWork(database).readInTransaction(page.pageId))
@@ -611,7 +766,8 @@ class RoomOcrIndexIntegrationTest {
                 test(AttemptFixture(sql, RoomOcrAttempts(database, liveness, leaseClock = clock::get),
                     RoomOcrAttempts.Request(id, stored.intent), owners, clock, RoomOcrResults(database, liveness, leaseClock = clock::get),
                     { query -> database.ocrResults().matchPages(checkNotNull(OcrSearchTerms.create(query)), null, 2).map { it.pageId } },
-                    { queue.enqueue(page, config, rerun = true) }, RoomOcrSearch(database)))
+                    { queue.enqueue(page, configuration, rerun = true) }, RoomOcrSearch(database),
+                    { proof -> RoomOcrDispatch(database, liveness, proof, leaseClock = clock::get) }))
             }
         } finally { database.close() }
     }
