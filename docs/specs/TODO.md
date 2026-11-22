@@ -91,6 +91,13 @@ Segmentation landed locally in `7773457`: 787 data JVM and 153 host storage chec
 
 Next U-06 prerequisite: bind ordered installed language-pack identities into the versioned job input; then add the same-database current job pointer, capped lease starts/recovery and exact result readback. Before enabling OCR results in Home, version the index projection and verify the live page, source and Atelier promotion receipt before navigating. Leave real OCR activation gated on exact runtime/pack qualification.
 
+`OCR-JOB-06`, coordinator continuation on `7501902`, owns only the core OCR configuration and language-pack identity tests, data `OcrJobInput` and its tests, and linked OCR specification/evidence. First prove v2 identity changes with pack order or byte digest, refuses malformed/duplicate/over-limit inputs, detaches caller lists, and cannot consume v1 as v2. Keep the existing v1 golden byte-identical. Run focused offline RED, implement, run affected core/data JVM suites and obtain independent boundary review. No schema, source ownership, scheduler, engine acquisition, UI, signing, device or publication changes.
+
+- [x] Write tests for ordered immutable pack identities and for the independent 429-byte v2 golden, without changing the existing v1 expectation.
+- [x] Observe the focused missing-contract RED before implementation. Add the immutable typed pack list and the versioned encoding, preserving the v1 key and bytes. Both Kotlin test compilation tasks identified the absent pack types in the retained run; neither reached JUnit at RED.
+- [x] Review the boundary and reproduce the snapshot count defect. The pre-fix JVM admitted zero and 33 entries when the caller's reported size disagreed with iteration. The correction bounds the copy itself; keep the regression and the v2 payload-byte tampering test.
+- [x] Verify affected core and data suites and record the independent review. The resumed strict offline build passed 283 core and 788 data tests; see the [job v2 receipt](../../validation/storage/ocr-job-v2-receipt.md). Qualification of actual installed pack files and binding to durable current jobs are not covered by these tests.
+
 ### Carnet release boundary — T-11 / CARNET-SHARE-LEASE-01
 
 Input is the audited public copy of the 16 Carnet corrective commits, through the JPEG/ZIP follow-up. Scope: guard provider display-name and size metadata by the same durable lease as file reads, verify the provider boundary, and retain live-share, Save as and frozen-name semantics. Post-revocation readability of already opened descriptors, external copies, and native acceptance are separate. The [operational plan](OPERATIONAL_PLAN.md) governs integration, public branches and the v0.3.0 bump.

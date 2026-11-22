@@ -3,6 +3,8 @@ package app.pristinepage.data
 import app.pristinepage.core.ocr.OcrConfiguration
 import app.pristinepage.core.ocr.OcrInput
 import app.pristinepage.core.ocr.OcrLayout
+import app.pristinepage.core.ocr.OcrLanguagePack
+import app.pristinepage.core.ocr.OcrLanguagePacks
 import app.pristinepage.data.db.JobRow
 import app.pristinepage.data.model.DocumentId
 import app.pristinepage.data.model.JobId
@@ -54,6 +56,27 @@ class OcrJobInputTest {
             assertEquals(job.value, failure.error.affectedId)
         }
         assertThrows(RepositoryFailure::class.java) { input.copy(generation = 3).verify(job, row) }
+    }
+
+    @Test fun versionTwoPinsOrderedPackBytesAndCannotConsumeVersionOne() {
+        val jpn = OcrLanguagePack("jpn", "c".repeat(64))
+        val eng = OcrLanguagePack("eng", "d".repeat(64))
+        fun binding(vararg packs: OcrLanguagePack) =
+            input.copy(configuration = input.configuration.copy(languagePacks = OcrLanguagePacks(packs.toList())))
+        val v2 = binding(jpn, eng)
+        val golden = "b1605df44ae36f68e89b42e11a31fdc1b63430d0a1fa63767956dbf13af7606f"
+        assertEquals("ocr-page-v2/$page/2", v2.key)
+        assertEquals(429, v2.encode().size)
+        assertEquals(golden, v2.digest)
+        val stored = validRow().copy(idempotenceKey = "ocr-page-v2/$page/2", canonicalInputSha256 = golden, input = v2.encode())
+        v2.verify(job, stored)
+        val wrongBytes = stored.input.copyOf().also { it[it.lastIndex] = 'e'.code.toByte() }
+        assertThrows(RepositoryFailure::class.java) { v2.verify(job, stored.copy(input = wrongBytes)) }
+        for (other in listOf(input, binding(eng, jpn), binding(jpn, eng.copy(sha256 = "e".repeat(64))))) {
+            assertNotEquals(v2.digest, other.digest)
+            assertThrows(RepositoryFailure::class.java) { other.verify(job, stored) }
+        }
+        assertThrows(RepositoryFailure::class.java) { v2.verify(job, validRow()) }
     }
 
     private fun validRow() = JobRow(job.value, "PAGE_OCR", "ocr-page-v1/$page/2", digest, null, null,

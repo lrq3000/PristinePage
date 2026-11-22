@@ -6,6 +6,7 @@ import java.util.UUID
 import kotlinx.coroutines.runBlocking
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
 import kotlin.test.assertNotNull
 import kotlin.test.assertNull
@@ -72,5 +73,44 @@ class OcrWorkTest {
         assertNull(replacement.succeeded(old.token, OcrText("stale")))
         assertNull(replacement.failed(old.token, OcrError.ENGINE_FAILED))
         assertNotNull(replacement.succeeded(replacement.token, OcrText("current")))
+    }
+
+    @Test fun aQueuedConfigurationDetachesAndFreezesTheRecognitionOrder() {
+        val first = OcrLanguagePack("chi_sim", "a".repeat(64))
+        val second = OcrLanguagePack("fra", "b".repeat(64))
+        val supplied = mutableListOf(first, second)
+        val packed = settings.copy(languagePacks = OcrLanguagePacks(supplied))
+        val queued = work().rerun(packed)
+        supplied.reverse()
+        val snapshot = checkNotNull(queued.configuration.languagePacks).ordered
+        assertEquals(listOf(first, second), snapshot)
+        assertFailsWith<UnsupportedOperationException> { (snapshot as MutableList<OcrLanguagePack>).clear() }
+        assertEquals(packed, settings.copy(languagePacks = OcrLanguagePacks(listOf(first, second))))
+        assertTrue(packed != settings.copy(languagePacks = OcrLanguagePacks(supplied)))
+    }
+
+    @Test fun installedPackIdentitiesAreBoundedAndNeverSilentlyDeduplicated() {
+        val jpn = OcrLanguagePack("jpn", "a".repeat(64))
+        assertFailsWith<IllegalArgumentException> { OcrLanguagePacks(emptyList()) }
+        assertFailsWith<IllegalArgumentException> { OcrLanguagePacks(listOf(jpn, jpn.copy(sha256 = "b".repeat(64)))) }
+        assertEquals(32, OcrLanguagePacks(List(32) { OcrLanguagePack("p$it", "a".repeat(64)) }).ordered.size)
+        assertFailsWith<IllegalArgumentException> { OcrLanguagePacks(List(33) { OcrLanguagePack("p$it", "a".repeat(64)) }) }
+        for (badCode in listOf("", "JPN", "../jpn", "x".repeat(33), "eng\u0000jpn")) {
+            assertFailsWith<IllegalArgumentException> { OcrLanguagePack(badCode, "a".repeat(64)) }
+        }
+        assertFailsWith<IllegalArgumentException> { OcrLanguagePack("jpn", "A".repeat(64)) }
+        assertFailsWith<IllegalArgumentException> { OcrLanguagePack("jpn", "a".repeat(63)) }
+    }
+
+    @Test fun packCountIsBoundedByTheSnapshotEvenIfCallerSizeIsStale() {
+        // Simulates a list mutated between reading size and consuming its elements, without a timed race.
+        for (actual in listOf(emptyList(), List(33) { OcrLanguagePack("p$it", "a".repeat(64)) })) {
+            val changing = object : AbstractList<OcrLanguagePack>() {
+                override val size: Int = 1
+                override fun get(index: Int): OcrLanguagePack = actual[index]
+                override fun iterator(): Iterator<OcrLanguagePack> = actual.iterator()
+            }
+            assertFailsWith<IllegalArgumentException> { OcrLanguagePacks(changing) }
+        }
     }
 }

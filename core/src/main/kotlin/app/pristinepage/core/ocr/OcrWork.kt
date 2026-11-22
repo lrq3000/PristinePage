@@ -17,7 +17,13 @@ data class OcrInput(val pageId: String, val recipeRevision: Long, val sourcePixe
 
 enum class OcrLayout { AUTOMATIC, SINGLE_BLOCK, SPARSE_TEXT }
 
-data class OcrConfiguration(val engineId: String, val engineVersion: Int, val layout: OcrLayout) {
+data class OcrConfiguration(
+    val engineId: String,
+    val engineVersion: Int,
+    val layout: OcrLayout,
+    // Null preserves the engine-neutral test configuration. A real worker must resolve exact pack identities.
+    val languagePacks: OcrLanguagePacks? = null,
+) {
     init { require(engineId.matches(ENGINE_ID) && engineVersion > 0) }
 
     private companion object { val ENGINE_ID = Regex("[a-z][a-z0-9-]{0,62}") }

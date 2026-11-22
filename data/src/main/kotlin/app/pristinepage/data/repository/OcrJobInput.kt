@@ -25,15 +25,26 @@ internal data class OcrJobInput(
         requireSha256(recipeSha256)
     }
 
-    // Every component is bounded canonical ASCII with no NUL; explicit field order and domain distinguish this input from other Job kinds.
+    private val version: Int get() = if (configuration.languagePacks == null) 1 else 2
+
+    // Every component is bounded canonical ASCII with no NUL. V1 remains byte-identical; v2 appends ordered pack identities.
     private val canonical by lazy {
-        listOf(
-            "pristinepage-ocr-page-v1", documentId.value, input.pageId, sourceId.value,
-            input.recipeRevision.toString(), recipeSha256, input.sourcePixelSha256,
-            generation.toString(), configuration.engineId, configuration.engineVersion.toString(), configuration.layout.name,
-        ).joinToString("\u0000").encodeToByteArray()
+        buildList {
+            addAll(listOf(
+                "pristinepage-ocr-page-v$version", documentId.value, input.pageId, sourceId.value,
+                input.recipeRevision.toString(), recipeSha256, input.sourcePixelSha256,
+                generation.toString(), configuration.engineId, configuration.engineVersion.toString(), configuration.layout.name,
+            ))
+            configuration.languagePacks?.ordered?.let { packs ->
+                add(packs.size.toString())
+                for (pack in packs) {
+                    add(pack.code)
+                    add(pack.sha256)
+                }
+            }
+        }.joinToString("\u0000").encodeToByteArray()
     }
-    val key: String get() = "ocr-page-v1/${input.pageId}/$generation"
+    val key: String get() = "ocr-page-v$version/${input.pageId}/$generation"
     val digest: String by lazy { ExportAssemblyInput.digest(canonical) }
     fun encode(): ByteArray = canonical.copyOf()
 
