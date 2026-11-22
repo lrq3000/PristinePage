@@ -1,17 +1,18 @@
 package app.pristinepage.data.repository
 
 import android.os.SystemClock
-import app.pristinepage.core.ocr.OcrConfiguration
 import app.pristinepage.core.ocr.OcrError
-import app.pristinepage.core.ocr.OcrText
 import app.pristinepage.data.db.OcrProjectionLimit
 import app.pristinepage.data.db.PristineDatabase
-import app.pristinepage.data.model.EditablePage
 import app.pristinepage.data.model.JobId
 import app.pristinepage.data.model.OperationError
 import app.pristinepage.data.model.OperationErrorCode
 import app.pristinepage.data.model.PageId
 import app.pristinepage.data.model.RepositoryFailure
+import app.pristinepage.data.repository.SavedOcrWork.Handoff
+import app.pristinepage.data.repository.SavedOcrWork.Outcome
+import app.pristinepage.data.repository.SavedOcrWork.Prepared
+import app.pristinepage.data.repository.SavedOcrWork.Preparer
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.currentCoroutineContext
@@ -30,22 +31,10 @@ internal class RoomOcrExecution(
     private val attempts = RoomOcrAttempts(database, owners, leaseClock = leaseClock, dispatcher = dispatcher)
     private val results = RoomOcrResults(database, owners, leaseClock = leaseClock, dispatcher = dispatcher)
 
-    /** A prepared, budgeted recognition session bound by the caller to the supplied saved page and exact installed config. Close ends all use of its resources. Neither preparation nor close may run recognition. */
-    interface Prepared : AutoCloseable {
-        suspend fun recognize(): OcrText
-    }
-
-    /** Transfer a complete resource synchronously where it was allocated, before a dispatcher hop can cancel delivery. The producer retains anything not successfully handed off. */
-    fun interface Preparation {
-        fun retain(resource: Prepared)
-    }
-
-    enum class Outcome { PUBLISHED, OBSOLETE, TERMINAL, WAITING_FOR_OWNER, BUSY, FAILURE_RECORDED }
-
     suspend fun run(
         page: PageId,
         job: JobId,
-        prepare: suspend (EditablePage, OcrConfiguration, Preparation) -> Unit,
+        prepare: Preparer,
     ): Outcome = withContext(dispatcher) {
         owners.tryOcrExecutionLane { runInLane(page, job, prepare) } ?: Outcome.BUSY
     }
@@ -53,7 +42,7 @@ internal class RoomOcrExecution(
     private suspend fun runInLane(
         page: PageId,
         job: JobId,
-        prepare: suspend (EditablePage, OcrConfiguration, Preparation) -> Unit,
+        prepare: Preparer,
     ): Outcome {
         val request = when (val decision = dispatch.resolve(page, job)) {
             RoomOcrDispatch.Decision.Obsolete -> return Outcome.OBSOLETE
@@ -70,7 +59,7 @@ internal class RoomOcrExecution(
             // Use the same process registry for the entire operation, including preparation and all resource cleanup on cancellation. Do not count a start until preparation succeeded.
             owners.run { owner ->
                 PreparedSlot().use { slot ->
-                    prepare(saved, input.configuration, slot)
+                    prepare.prepare(saved, input.configuration, slot)
                     currentCoroutineContext().ensureActive()
                     val prepared = slot.requireResource()
                     if (!attempts.admit(request)) return@use Outcome.BUSY
@@ -93,7 +82,7 @@ internal class RoomOcrExecution(
         try { dispatch.isObsolete(page, job) }
         catch (_: RepositoryFailure) { false } // If the read cannot establish obsolescence, report the original failure.
 
-    private class PreparedSlot : Preparation, AutoCloseable {
+    private class PreparedSlot : Handoff, AutoCloseable {
         private var resource: Prepared? = null
         private var closed = false
 

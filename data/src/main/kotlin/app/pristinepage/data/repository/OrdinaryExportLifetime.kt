@@ -6,15 +6,21 @@ import app.pristinepage.data.model.RepositoryFailure
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.ensureActive
 
-/** One private-store lifetime, not the rooted file lane or a requester registry. Closing never waits for an active export. */
+/** One private-store lifetime, not the rooted file lane or a requester registry. Closing never waits for a retained operation. */
 internal class OrdinaryExportLifetime(private val closeDatabase: () -> Unit) {
     private val monitor = Any()
     private var active = 0
     private var closeClaimed = false
 
-    suspend fun <T> retain(affectedId: String, block: suspend () -> T): T {
+    suspend fun <T> retain(affectedId: String, block: suspend () -> T): T =
+        retain(affectedId, "ordinary_export_store_closed", block)
+
+    suspend fun <T> retainOcr(affectedId: String?, block: suspend () -> T): T =
+        retain(affectedId, "ocr_store_closed", block)
+
+    private suspend fun <T> retain(affectedId: String?, closedKey: String, block: suspend () -> T): T {
         synchronized(monitor) {
-            if (closeClaimed) throw RepositoryFailure(OperationError(OperationErrorCode.STORAGE_FAILED, false, "ordinary_export_store_closed", affectedId))
+            if (closeClaimed) throw RepositoryFailure(OperationError(OperationErrorCode.STORAGE_FAILED, false, closedKey, affectedId))
             active++
         }
         try {

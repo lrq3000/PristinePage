@@ -1,5 +1,7 @@
 package app.pristinepage.data
 
+import android.content.Context
+import android.content.ContextWrapper
 import androidx.room.Room
 import androidx.room.RoomDatabase
 import androidx.room.testing.MigrationTestHelper
@@ -23,6 +25,7 @@ import app.pristinepage.data.db.OcrIndexMigration
 import app.pristinepage.data.db.OcrResultRow
 import app.pristinepage.data.db.OcrWorkMigration
 import app.pristinepage.data.db.PristineDatabase
+import app.pristinepage.data.files.SourceInspector
 import app.pristinepage.data.model.DocumentId
 import app.pristinepage.data.model.EditablePage
 import app.pristinepage.data.model.JobId
@@ -48,6 +51,9 @@ import app.pristinepage.data.repository.FileOperationOwners
 import app.pristinepage.data.repository.RoomOcrQueue
 import app.pristinepage.data.repository.RoomOcrResults
 import app.pristinepage.data.repository.RoomOcrSearch
+import app.pristinepage.data.repository.SavedOcrWork
+import app.pristinepage.data.repository.PrivateImportStore
+import app.pristinepage.data.repository.SourceInput
 import kotlinx.coroutines.async
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
@@ -745,7 +751,7 @@ class RoomOcrIndexIntegrationTest {
             assertEquals(PageId(PAGE), page.pageId)
             assertEquals(f.request.binding.configuration, config)
             assertEquals("PENDING:0", f.sql.scalar("SELECT state||':'||attempt FROM Job"))
-            handoff.retain(object : RoomOcrExecution.Prepared {
+            handoff.retain(object : SavedOcrWork.Prepared {
                 override suspend fun recognize(): OcrText {
                     assertEquals("RUNNING:1", f.sql.scalar("SELECT state||':'||attempt FROM Job"))
                     return OcrText(" École 東京都の領収書です\n")
@@ -753,7 +759,7 @@ class RoomOcrIndexIntegrationTest {
                 override fun close() { closed++ }
             })
         }
-        assertEquals(RoomOcrExecution.Outcome.PUBLISHED, outcome)
+        assertEquals(SavedOcrWork.Outcome.PUBLISHED, outcome)
         assertEquals(1, closed)
         assertEquals("SUCCEEDED:1", f.sql.scalar("SELECT state||':'||attempt FROM Job"))
         assertEquals(" École 東京都の領収書です\n", f.sql.scalar("SELECT COALESCE(verbatimText,indexedText) FROM OcrResult"))
@@ -766,12 +772,12 @@ class RoomOcrIndexIntegrationTest {
         val worker = f.execution()
         val outcome = worker.run(f.request.page, f.request.jobId) { _, _, handoff ->
             assertNotEquals(f.request.jobId, f.queueAgain())
-            handoff.retain(object : RoomOcrExecution.Prepared {
+            handoff.retain(object : SavedOcrWork.Prepared {
                 override suspend fun recognize(): OcrText { recognized++; return OcrText("must not index") }
                 override fun close() { closed++ }
             })
         }
-        assertEquals(RoomOcrExecution.Outcome.OBSOLETE, outcome)
+        assertEquals(SavedOcrWork.Outcome.OBSOLETE, outcome)
         assertEquals(0, recognized)
         assertEquals(1, closed)
         assertEquals("0", f.sql.scalar("SELECT SUM(attempt) FROM Job"))
@@ -783,8 +789,8 @@ class RoomOcrIndexIntegrationTest {
         var closed = 0
         val worker = f.execution()
         repeat(3) {
-            assertEquals(RoomOcrExecution.Outcome.FAILURE_RECORDED, worker.run(f.request.page, f.request.jobId) { _, _, handoff ->
-                handoff.retain(object : RoomOcrExecution.Prepared {
+            assertEquals(SavedOcrWork.Outcome.FAILURE_RECORDED, worker.run(f.request.page, f.request.jobId) { _, _, handoff ->
+                handoff.retain(object : SavedOcrWork.Prepared {
                     override suspend fun recognize(): OcrText {
                         started++
                         throw RepositoryFailure(OperationError(OperationErrorCode.PROCESSING_FAILED, true, "fixture_ocr_engine_failed", null))
@@ -793,7 +799,7 @@ class RoomOcrIndexIntegrationTest {
                 })
             })
         }
-        assertEquals(RoomOcrExecution.Outcome.TERMINAL, worker.run(f.request.page, f.request.jobId) { _, _, _ ->
+        assertEquals(SavedOcrWork.Outcome.TERMINAL, worker.run(f.request.page, f.request.jobId) { _, _, _ ->
             error("Terminal job must not prepare the engine")
         })
         assertEquals(3, started)
@@ -812,7 +818,7 @@ class RoomOcrIndexIntegrationTest {
         coroutineScope {
             val pending = async {
                 first.run(f.request.page, f.request.jobId) { _, _, handoff ->
-                    handoff.retain(object : RoomOcrExecution.Prepared {
+                    handoff.retain(object : SavedOcrWork.Prepared {
                         override suspend fun recognize() = OcrText("first")
                         override fun close() {
                             closing.complete(Unit)
@@ -829,8 +835,8 @@ class RoomOcrIndexIntegrationTest {
                     handoff.retain(preparedText("second"))
                 }
             } finally { release.countDown() }
-            assertEquals(RoomOcrExecution.Outcome.PUBLISHED, pending.await())
-            assertEquals(RoomOcrExecution.Outcome.BUSY, other)
+            assertEquals(SavedOcrWork.Outcome.PUBLISHED, pending.await())
+            assertEquals(SavedOcrWork.Outcome.BUSY, other)
             assertFalse(secondPrepared)
             assertEquals("1", f.sql.scalar("SELECT SUM(attempt) FROM Job"))
         }
@@ -843,7 +849,7 @@ class RoomOcrIndexIntegrationTest {
     private fun assertWorkerInfrastructureFailure(code: OperationErrorCode) = withOcrAttempts { f ->
         val failure = runCatching {
             f.execution().run(f.request.page, f.request.jobId) { _, _, handoff ->
-                handoff.retain(object : RoomOcrExecution.Prepared {
+                handoff.retain(object : SavedOcrWork.Prepared {
                     override suspend fun recognize(): OcrText {
                         throw RepositoryFailure(OperationError(code, false, "fixture_infrastructure_fault", null))
                     }
@@ -861,7 +867,7 @@ class RoomOcrIndexIntegrationTest {
         val failure = runCatching {
             f.execution().run(f.request.page, f.request.jobId) { _, _, handoff ->
                 withContext(Dispatchers.Default) {
-                    val ready = object : RoomOcrExecution.Prepared {
+                    val ready = object : SavedOcrWork.Prepared {
                         override suspend fun recognize(): OcrText = error("Preparation was canceled")
                         override fun close() { closed++ }
                     }
@@ -881,7 +887,7 @@ class RoomOcrIndexIntegrationTest {
         val result = runCatching {
             f.execution().run(f.request.page, f.request.jobId) { _, _, handoff -> handoff.retain(preparedText("\uFB2C".repeat(131_072))) }
         }
-        assertEquals(RoomOcrExecution.Outcome.FAILURE_RECORDED, result.getOrNull())
+        assertEquals(SavedOcrWork.Outcome.FAILURE_RECORDED, result.getOrNull())
         assertEquals("ADMITTED:1:INVALID_OUTPUT", f.sql.scalar("SELECT state||':'||attempt||':'||errorCode FROM Job"))
         assertEquals("0", f.sql.scalar("SELECT COUNT(*) FROM OcrResult"))
     }
@@ -889,7 +895,7 @@ class RoomOcrIndexIntegrationTest {
     @Test fun lostPublicationLeaseDoesNotRecoverAsASideEffectOfCheckingObsolescence() = withOcrAttempts { f ->
         val failure = runCatching {
             f.execution().run(f.request.page, f.request.jobId) { _, _, handoff ->
-                handoff.retain(object : RoomOcrExecution.Prepared {
+                handoff.retain(object : SavedOcrWork.Prepared {
                     override suspend fun recognize(): OcrText {
                         f.clock.addAndGet(900_000)
                         return OcrText("too late")
@@ -903,9 +909,110 @@ class RoomOcrIndexIntegrationTest {
         assertEquals("0", f.sql.scalar("SELECT COUNT(*) FROM OcrResult"))
     }
 
-    private fun preparedText(text: String) = object : RoomOcrExecution.Prepared {
+    private fun preparedText(text: String) = object : SavedOcrWork.Prepared {
         override suspend fun recognize() = OcrText(text)
         override fun close() = Unit
+    }
+
+    @Test fun storeOcrPortConnectsDurableTargetsToVerifiedSearch() = withOcrAttempts(publicStore = true) { f ->
+        val port = f.ocrPort()
+        val batch = port.reconcile(null, null, limit = 1)
+        val target = batch.targets.single()
+        assertEquals(PageId(PAGE), target.page)
+        assertEquals(f.request.jobId, target.job)
+        assertNotNull(batch.nextAfter)
+        val wrongCursor = runCatching { port.find("receipt", batch.nextAfter, 1) }.exceptionOrNull() as? RepositoryFailure
+        assertEquals("ocr_invalid_continuation", wrongCursor?.error?.safeMessageKey)
+        assertNull(wrongCursor?.error?.affectedId)
+        assertEquals(SavedOcrWork.Outcome.PUBLISHED, port.execute(target) { page, config, handoff ->
+            assertEquals(PageId(PAGE), page.pageId)
+            assertEquals(f.request.binding.configuration, config)
+            handoff.retain(object : SavedOcrWork.Prepared {
+                override suspend fun recognize() = OcrText("Receipt 東京都の領収書です")
+                override fun close() = Unit
+            })
+        })
+        val hit = port.find("領収書", null, 1).hits.single()
+        assertEquals(PageId(PAGE), hit.page)
+        assertEquals(DocumentId(DOCUMENT), hit.document)
+        assertTrue(port.canOpen(hit))
+        f.queueAgain()
+        assertTrue(port.canOpen(hit))
+    }
+
+    @Test fun storeOcrPortRetainsDatabaseUntilPreparedResourcesAreClosed() = withOcrAttempts(publicStore = true) { f ->
+        val port = f.ocrPort()
+        val target = port.reconcile(null, null, 1).targets.single()
+        var closeBlocked = false
+        val result = port.execute(target) { _, _, handoff ->
+            handoff.retain(object : SavedOcrWork.Prepared {
+                override suspend fun recognize() = OcrText("")
+                override fun close() {
+                    val failure = runCatching { f.closeStore() }.exceptionOrNull() as? RepositoryFailure
+                    closeBlocked = failure?.error?.code == OperationErrorCode.REVISION_CONFLICT
+                }
+            })
+        }
+        assertEquals(SavedOcrWork.Outcome.PUBLISHED, result)
+        assertTrue(closeBlocked)
+        f.closeStore()
+        val refusal = runCatching { port.reconcile(null, null, 1) }.exceptionOrNull() as? RepositoryFailure
+        assertEquals(OperationErrorCode.STORAGE_FAILED, refusal?.error?.code)
+        assertEquals("ocr_store_closed", refusal?.error?.safeMessageKey)
+    }
+
+    @Test fun rejectedSearchMatchDoesNotRevealItsPageIdThroughContinuation() = withOcrAttempts(publicStore = true) { f ->
+        f.results.publish(f.request, f.start(), OcrText("receipt"))
+        f.sql.execSQL("UPDATE OcrPageWork SET projectionVersion=2")
+        val port = f.ocrPort()
+        val rejected = port.find("receipt", null, 1)
+        assertTrue(rejected.hits.isEmpty())
+        val cursor: Any? = rejected.nextAfter
+        assertNotNull(cursor)
+        assertFalse(cursor is PageId)
+        assertFalse(cursor.toString().contains(PAGE))
+        assertNull(port.find("receipt", rejected.nextAfter, 1).nextAfter)
+    }
+
+    @Test fun hiddenBackfillLocatorDoesNotRevealItsPageIdThroughContinuation() = withOcrAttempts(publicStore = true) { f ->
+        val receipt = "atelier-publish-v1\n1\n$DOCUMENT\n$PAGE,0,${"c".repeat(64)},$PAGE"
+        f.sql.execSQL("""INSERT INTO AtelierDraft (draftId,stagingDocumentId,state,generation,step,createdAt,committedDocumentId,receiptPageIds)
+            VALUES (?,?,'COMMITTED',2,2,0,?,?)""", arrayOf(DRAFT, DOCUMENT, DOCUMENT, receipt))
+        val port = f.ocrPort()
+        val rejected = port.reconcile(null, null, 1)
+        assertTrue(rejected.targets.isEmpty())
+        val cursor: Any? = rejected.nextAfter
+        assertNotNull(cursor)
+        assertFalse(cursor is PageId)
+        assertFalse(cursor.toString().contains(PAGE))
+        assertNull(port.reconcile(null, rejected.nextAfter, 1).nextAfter)
+    }
+
+    @Test fun rawAdapterFailuresAndSuppressedCleanupDoNotCrossTheStorePort() = withOcrAttempts(publicStore = true) { f ->
+        val port = f.ocrPort()
+        val target = port.reconcile(null, null, 1).targets.single()
+        val failure = runCatching {
+            port.execute(target) { _, _, handoff ->
+                handoff.retain(object : SavedOcrWork.Prepared {
+                    override suspend fun recognize(): OcrText = error("private synthetic OCR output and path")
+                    override fun close() { error("private synthetic cleanup path") }
+                })
+            }
+        }.exceptionOrNull() as? RepositoryFailure
+        assertEquals(OperationErrorCode.PROCESSING_FAILED, failure?.error?.code)
+        assertEquals("ocr_recognition_fault", failure?.error?.safeMessageKey)
+        assertNull(failure?.cause)
+        assertTrue(failure?.suppressed?.isEmpty() == true)
+        assertEquals("RUNNING:1:none", f.sql.scalar("SELECT state||':'||attempt||':'||COALESCE(errorCode,'none') FROM Job"))
+    }
+
+    @Test fun rawBackfillSqlFailureDoesNotCrossTheStorePort() = withOcrAttempts(publicStore = true) { f ->
+        f.sql.execSQL("ALTER TABLE OcrPageWork RENAME TO UnavailableOcrWorkFixture")
+        val failure = runCatching { f.ocrPort().reconcile(null, null, 1) }.exceptionOrNull() as? RepositoryFailure
+        assertEquals(OperationErrorCode.STORAGE_FAILED, failure?.error?.code)
+        assertEquals("ocr_store_read_failed", failure?.error?.safeMessageKey)
+        assertNull(failure?.cause)
+        assertTrue(failure?.suppressed?.isEmpty() == true)
     }
 
     private data class AttemptFixture(
@@ -921,6 +1028,8 @@ class RoomOcrIndexIntegrationTest {
         val dispatch: (OperationOwnerProof) -> RoomOcrDispatch,
         val execution: () -> RoomOcrExecution,
         val additionalWork: suspend () -> Pair<PageId, JobId>,
+        val ocrPort: () -> SavedOcrWork,
+        val closeStore: () -> Unit,
     ) {
         suspend fun start(): JobLease {
             assertTrue(attempts.admit(request))
@@ -934,13 +1043,18 @@ class RoomOcrIndexIntegrationTest {
         previousResult: Boolean = false,
         configuration: OcrConfiguration = queueConfig(OcrLayout.AUTOMATIC),
         onQuery: ((String) -> Unit)? = null,
+        publicStore: Boolean = false,
         test: suspend (AttemptFixture) -> Unit,
     ) {
-        val builder = Room.inMemoryDatabaseBuilder(context, PristineDatabase::class.java)
+        val isolated = if (publicStore) isolatedOcrStoreContext() else null
+        val builder = if (isolated == null) Room.inMemoryDatabaseBuilder(context, PristineDatabase::class.java)
+            else Room.databaseBuilder(isolated, PristineDatabase::class.java, "pristinepage.db")
         if (onQuery != null) builder.setQueryCallback(RoomDatabase.QueryCallback { sql, _ -> onQuery(sql) }, Executor { it.run() })
         val database = builder.build()
+        var store: PrivateImportStore? = null
         try {
             val sql = database.openHelper.writableDatabase
+            if (isolated != null) assertEquals(isolated.getDatabasePath("pristinepage.db").absolutePath, sql.path)
             val page = seedQueuePage(sql)
             val owners = ConcurrentHashMap<String, LeaseOwnerState>()
             val clock = AtomicLong(10)
@@ -959,6 +1073,12 @@ class RoomOcrIndexIntegrationTest {
                 }
                 assertEquals(id, JobId(stored.job.jobId))
                 val executionRoot by lazy { File(context.filesDir, "ocr-execution-${UUID.randomUUID()}") }
+                if (isolated != null) {
+                    val opened = PrivateImportStore.open(isolated, SourceInput { error("Unexpected provider access in OCR port test") },
+                        SourceInspector { _, _ -> error("Unexpected source inspection in OCR port test") })
+                    store = opened
+                    assertSame(opened.savedOcr, opened.savedOcr)
+                }
                 test(AttemptFixture(sql, RoomOcrAttempts(database, liveness, leaseClock = clock::get),
                     RoomOcrAttempts.Request(id, stored.intent), owners, clock, RoomOcrResults(database, liveness, leaseClock = clock::get),
                     { query -> database.ocrResults().matchPages(checkNotNull(OcrSearchTerms.create(query)), null, 2).map { it.pageId } },
@@ -968,9 +1088,27 @@ class RoomOcrIndexIntegrationTest {
                     {
                         val additional = seedAdditionalQueuePage(sql, page)
                         additional.pageId to queue.enqueue(additional, configuration, rerun = false)
-                    }))
+                    }, { checkNotNull(store).savedOcr }, { checkNotNull(store).close() }))
             }
-        } finally { database.close() }
+        } finally {
+            try { store?.close() } finally { database.close() }
+        }
+    }
+
+    /** Use the same Context API as the production store, but never the application's persisted database or file root. */
+    private fun isolatedOcrStoreContext(): Context {
+        val root = File(context.filesDir, "ocr-port-fixture-${UUID.randomUUID()}")
+        check(root.mkdir())
+        val databaseDir = File(root, "databases").also { check(it.mkdir()) }
+        val fileDir = File(root, "files").also { check(it.mkdir()) }
+        return object : ContextWrapper(context) {
+            override fun getApplicationContext(): Context = this
+            override fun getFilesDir(): File = fileDir
+            override fun getDatabasePath(name: String): File {
+                check(name == "pristinepage.db")
+                return File(databaseDir, name)
+            }
+        }
     }
 
     @Test fun findsAnOrderedPhraseInsideUnspacedCjkWithoutMatchingSkippedCharacters() {

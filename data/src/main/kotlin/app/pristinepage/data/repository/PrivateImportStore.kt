@@ -42,6 +42,7 @@ class PrivateImportStore private constructor(
     val albums: AlbumCatalog get() = documentCatalog
     val albumSearch: SearchableAlbumCatalog get() = documentCatalog
     private val exportLifetime = OrdinaryExportLifetime(database::close)
+    val savedOcr: SavedOcrWork by lazy { SavedOcrWork.bind(OcrComposition.from(this)) }
 
     override fun close() = exportLifetime.close()
 
@@ -77,6 +78,18 @@ class PrivateImportStore private constructor(
         companion object {
             internal fun bind(store: PrivateImportStore): OrdinaryExport = OrdinaryExport.from(ExportComposition(store))
             internal fun bindNamed(store: PrivateImportStore): NamedAlbumExports = NamedAlbumExports(ExportComposition(store))
+        }
+    }
+
+    /** Only an opened store can supply this paired database, lifetime and ownership registry. */
+    internal class OcrComposition private constructor(store: PrivateImportStore) {
+        internal val database = store.database
+        internal val owners = store.owners
+        internal val lifetime = store.exportLifetime
+
+        companion object {
+            @JvmSynthetic
+            internal fun from(store: PrivateImportStore): OcrComposition = OcrComposition(store)
         }
     }
 
