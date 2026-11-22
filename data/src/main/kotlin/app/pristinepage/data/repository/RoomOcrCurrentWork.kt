@@ -21,6 +21,15 @@ internal class RoomOcrCurrentWork(private val database: PristineDatabase) {
     )
 
     fun readInTransaction(page: PageId): Current? {
+        val current = readStoredInTransaction(page) ?: return null
+        if (!isSavedInputInTransaction(current.intent)) throw RepositoryFailure(
+            OperationError(OperationErrorCode.REVISION_CONFLICT, false, "ocr_job_no_longer_current", page.value),
+        )
+        return current
+    }
+
+    /** Only generation replacement may use a previously valid pointer whose input is no longer current. */
+    fun readStoredInTransaction(page: PageId): Current? {
         check(database.inTransaction()) { "OCR current work requires the owning Room transaction" }
         val work = database.ocrPageWork()
         when (work.pointerIsBounded(page.value)) {
@@ -32,13 +41,16 @@ internal class RoomOcrCurrentWork(private val database: PristineDatabase) {
         val (jobId, resultJobId) = try { JobId(row.jobId) to row.resultJobId?.let(::JobId) }
         catch (_: IllegalArgumentException) { invalid(page) }
         val (intent, job) = jobs.recoverInTransaction(jobId, page, row.generation, row.inputSha256, row.inputBytes)
-        val source = intent.sourceId.value
-        val document = intent.documentId.value
-        if (!work.liveInputMatches(
-                page.value, document, source, intent.input.recipeRevision, intent.recipeSha256, intent.input.sourcePixelSha256,
-            ) || metadata.isHiddenAtelierDraft(document)
-        ) throw RepositoryFailure(OperationError(OperationErrorCode.REVISION_CONFLICT, false, "ocr_job_no_longer_current", page.value))
         return Current(intent, job, resultJobId, row.projectionVersion)
+    }
+
+    fun isSavedInputInTransaction(intent: OcrJobInput): Boolean {
+        check(database.inTransaction()) { "OCR page verification requires the owning Room transaction" }
+        val document = intent.documentId.value
+        return database.ocrPageWork().liveInputMatches(
+            intent.input.pageId, document, intent.sourceId.value, intent.input.recipeRevision, intent.recipeSha256,
+            intent.input.sourcePixelSha256,
+        ) && !metadata.isHiddenAtelierDraft(document)
     }
 
     private fun invalid(page: PageId): Nothing = throw RepositoryFailure(

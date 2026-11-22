@@ -11,12 +11,18 @@ import app.pristinepage.core.ocr.OcrLanguagePack
 import app.pristinepage.core.ocr.OcrLanguagePacks
 import app.pristinepage.core.ocr.OcrLayout
 import app.pristinepage.core.ocr.OcrText
+import app.pristinepage.core.pipeline.PixelSize
+import app.pristinepage.core.pipeline.Recipe
+import app.pristinepage.core.recipe.GeometryRecipe
+import app.pristinepage.core.recipe.RecipeCodec
+import app.pristinepage.core.recipe.SourceBinding
 import app.pristinepage.data.db.AtelierDraftMigration
 import app.pristinepage.data.db.OcrIndexMigration
 import app.pristinepage.data.db.OcrResultRow
 import app.pristinepage.data.db.OcrWorkMigration
 import app.pristinepage.data.db.PristineDatabase
 import app.pristinepage.data.model.DocumentId
+import app.pristinepage.data.model.EditablePage
 import app.pristinepage.data.model.OperationErrorCode
 import app.pristinepage.data.model.PageId
 import app.pristinepage.data.model.RepositoryFailure
@@ -25,6 +31,9 @@ import app.pristinepage.data.repository.OcrJobInput
 import app.pristinepage.data.repository.OcrSearchTerms
 import app.pristinepage.data.repository.RoomMetadataAccess
 import app.pristinepage.data.repository.RoomOcrCurrentWork
+import app.pristinepage.data.repository.RoomOcrQueue
+import kotlinx.coroutines.async
+import kotlinx.coroutines.runBlocking
 import org.junit.Assert.*
 import org.junit.Rule
 import org.junit.Test
@@ -145,6 +154,108 @@ class RoomOcrIndexIntegrationTest {
         } finally { database.close() }
     }
 
+    @Test fun queueDeduplicatesTheSavedInputAndExplicitRerunRetainsItsProducingJob() {
+        val database = Room.inMemoryDatabaseBuilder(context, PristineDatabase::class.java).build()
+        try {
+            val sql = database.openHelper.writableDatabase
+            val page = seedQueuePage(sql)
+            val queue = RoomOcrQueue(database)
+            val config = queueConfig(OcrLayout.AUTOMATIC)
+            val newDefault = queueConfig(OcrLayout.SINGLE_BLOCK)
+            val first = runBlocking {
+                val signals = List(2) { async { queue.enqueue(page, config, rerun = false) } }
+                val ids = signals.map { it.await() }
+                assertEquals(ids[0], ids[1])
+                assertEquals(ids[0], queue.enqueue(page, newDefault, rerun = false))
+                ids[0]
+            }
+            assertEquals("1", sql.scalar("SELECT COUNT(*) FROM Job"))
+            assertEquals("1", sql.scalar("SELECT COUNT(*) FROM SourceReference WHERE ownerType='JOB'"))
+            assertEquals("3", sql.scalar("SELECT refCount FROM Source"))
+            sql.execSQL("UPDATE Job SET state='SUCCEEDED' WHERE jobId=?", arrayOf(first.value))
+            sql.execSQL("UPDATE OcrPageWork SET resultJobId=?,projectionVersion=1 WHERE pageId=?", arrayOf(first.value, PAGE))
+            val second = runBlocking { queue.enqueue(page, newDefault, rerun = true) }
+            assertNotEquals(first, second)
+            val current = RoomMetadataAccess(database).transaction { RoomOcrCurrentWork(database).readInTransaction(PageId(PAGE)) }
+            assertEquals(2L, current?.intent?.generation)
+            assertEquals(newDefault, current?.intent?.configuration)
+            assertEquals(first, current?.resultJobId)
+            assertEquals(1, current?.projectionVersion)
+            assertEquals("2", sql.scalar("SELECT COUNT(*) FROM SourceReference WHERE ownerType='JOB'"))
+            assertEquals("4", sql.scalar("SELECT refCount FROM Source"))
+            assertEquals("2", sql.scalar("SELECT COUNT(*) FROM SourceReference WHERE ownerType IN ('PAGE','RECIPE_HISTORY')"))
+        } finally { database.close() }
+    }
+
+    @Test fun queueDoesNotCommitAJobOrItsPinAfterThePointerWriteIsRefused() {
+        val database = Room.inMemoryDatabaseBuilder(context, PristineDatabase::class.java).build()
+        try {
+            val sql = database.openHelper.writableDatabase
+            val page = seedQueuePage(sql)
+            sql.execSQL("""CREATE TRIGGER refuse_ocr_pointer BEFORE INSERT ON OcrPageWork
+                BEGIN SELECT RAISE(ABORT,'test_pointer_refusal'); END""")
+            val error = assertThrows(RepositoryFailure::class.java) {
+                runBlocking { RoomOcrQueue(database).enqueue(page, queueConfig(OcrLayout.AUTOMATIC), rerun = false) }
+            }
+            assertEquals(OperationErrorCode.STORAGE_FAILED, error.error.code)
+            for (table in listOf("OcrPageWork", "Job")) {
+                assertEquals("0", sql.scalar("SELECT COUNT(*) FROM $table"))
+            }
+            assertEquals("0", sql.scalar("SELECT COUNT(*) FROM SourceReference WHERE ownerType='JOB'"))
+            assertEquals("2", sql.scalar("SELECT COUNT(*) FROM SourceReference"))
+            assertEquals("2", sql.scalar("SELECT refCount FROM Source"))
+        } finally { database.close() }
+    }
+
+    @Test fun queueRollsBackWhenTheFinalPointerWriteRestoresAnIncorrectRefCount() {
+        val database = Room.inMemoryDatabaseBuilder(context, PristineDatabase::class.java).build()
+        try {
+            val sql = database.openHelper.writableDatabase
+            val page = seedQueuePage(sql)
+            sql.execSQL("""CREATE TRIGGER revert_count AFTER INSERT ON OcrPageWork
+                BEGIN UPDATE Source SET refCount=2; END""")
+            val error = assertThrows(RepositoryFailure::class.java) {
+                runBlocking { RoomOcrQueue(database).enqueue(page, queueConfig(OcrLayout.AUTOMATIC), rerun = false) }
+            }
+            assertEquals(OperationErrorCode.INTEGRITY_FAILED, error.error.code)
+            assertEquals("0", sql.scalar("SELECT COUNT(*) FROM OcrPageWork"))
+            assertEquals("0", sql.scalar("SELECT COUNT(*) FROM Job"))
+            assertEquals("0", sql.scalar("SELECT COUNT(*) FROM SourceReference WHERE ownerType='JOB'"))
+            assertEquals("2", sql.scalar("SELECT COUNT(*) FROM SourceReference"))
+            assertEquals("2", sql.scalar("SELECT refCount FROM Source"))
+        } finally { database.close() }
+    }
+
+    @Test fun queueRefusesHiddenAndStaleInputsAndAdvancesOnceAfterASave() {
+        val database = Room.inMemoryDatabaseBuilder(context, PristineDatabase::class.java).build()
+        try {
+            val sql = database.openHelper.writableDatabase
+            val page = seedQueuePage(sql)
+            val queue = RoomOcrQueue(database)
+            val config = queueConfig(OcrLayout.AUTOMATIC)
+            fun queueSaved(candidate: EditablePage) = runBlocking { queue.enqueue(candidate, config, rerun = false) }
+            sql.execSQL("""INSERT INTO AtelierDraft (draftId,stagingDocumentId,state,generation,step,createdAt)
+                VALUES (?,?,'EDITING',1,1,0)""", arrayOf(DRAFT, DOCUMENT))
+            assertEquals(OperationErrorCode.REVISION_CONFLICT, assertThrows(RepositoryFailure::class.java) { queueSaved(page) }.error.code)
+            assertEquals("0", sql.scalar("SELECT COUNT(*) FROM Job"))
+            sql.execSQL("DELETE FROM AtelierDraft WHERE draftId=?", arrayOf(DRAFT))
+            val original = queueSaved(page)
+            sql.execSQL("INSERT INTO RecipeRevision VALUES (?,2,?,1,?,?,1,0)",
+                arrayOf<Any>(PAGE, SOURCE, RecipeCodec.encode(page.recipe), page.recipeHash))
+            sql.execSQL("INSERT INTO SourceReference VALUES ('RECIPE_HISTORY',?,?,0)", arrayOf("recipe-v1/$PAGE/2", SOURCE))
+            sql.execSQL("UPDATE Source SET refCount=4")
+            sql.execSQL("UPDATE Page SET currentRecipeRevision=2")
+            assertEquals(OperationErrorCode.REVISION_CONFLICT, assertThrows(RepositoryFailure::class.java) { queueSaved(page) }.error.code)
+            assertEquals("1", sql.scalar("SELECT COUNT(*) FROM Job"))
+            val latest = page.copy(recipeRevision = 2)
+            val next = queueSaved(latest)
+            assertNotEquals(original, next)
+            assertEquals(next, queueSaved(latest))
+            assertEquals("2", sql.scalar("SELECT COUNT(*) FROM Job"))
+            assertEquals("2", sql.scalar("SELECT generation FROM OcrPageWork"))
+        } finally { database.close() }
+    }
+
     @Test fun findsAnOrderedPhraseInsideUnspacedCjkWithoutMatchingSkippedCharacters() {
         val database = Room.inMemoryDatabaseBuilder(context, PristineDatabase::class.java).build()
         try {
@@ -197,6 +308,21 @@ class RoomOcrIndexIntegrationTest {
             sql.setTransactionSuccessful()
         } finally { sql.endTransaction() }
     }
+
+    private fun seedQueuePage(sql: SupportSQLiteDatabase): EditablePage {
+        seed(sql)
+        val recipe = Recipe(geometry = GeometryRecipe.None(SourceBinding(PIXELS, PixelSize(3, 2), "srgb-v1")))
+        val hash = RecipeCodec.hash(recipe)
+        sql.execSQL("UPDATE RecipeRevision SET canonicalRecipe=?,recipeSha256=? WHERE pageId=?",
+            arrayOf(RecipeCodec.encode(recipe), hash, PAGE))
+        sql.execSQL("INSERT INTO SourceReference VALUES ('PAGE',?,?,0)", arrayOf(PAGE, SOURCE))
+        sql.execSQL("INSERT INTO SourceReference VALUES ('RECIPE_HISTORY',?,?,0)", arrayOf("recipe-v1/$PAGE/1", SOURCE))
+        sql.execSQL("UPDATE Source SET refCount=2")
+        return EditablePage(DocumentId(DOCUMENT), 1, PageId(PAGE), SourceId(SOURCE), 1, hash, recipe)
+    }
+
+    private fun queueConfig(layout: OcrLayout) = OcrConfiguration("fixture", 1, layout,
+        OcrLanguagePacks(listOf(OcrLanguagePack("eng", "d".repeat(64)))))
 
     private fun insertText(sql: SupportSQLiteDatabase) {
         sql.execSQL("""INSERT INTO OcrResult (pageId,recipeRevision,sourcePixelSha256,engineId,engineVersion,layout,indexedText)
