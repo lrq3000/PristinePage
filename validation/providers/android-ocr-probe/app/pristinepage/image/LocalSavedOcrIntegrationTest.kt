@@ -5,30 +5,40 @@ import android.content.Context
 import android.content.ContextWrapper
 import android.content.pm.PackageManager
 import android.database.sqlite.SQLiteDatabase
+import android.graphics.Bitmap
 import android.util.Log
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
-import app.pristinepage.core.geometry.GeometrySizing
+import app.pristinepage.core.image.RgbImage
 import app.pristinepage.core.ocr.OcrConfiguration
 import app.pristinepage.core.ocr.OcrLanguagePack
 import app.pristinepage.core.ocr.OcrLanguagePacks
 import app.pristinepage.core.ocr.OcrLayout
 import app.pristinepage.core.ocr.OcrText
-import app.pristinepage.core.pipeline.FallbackPolicy
-import app.pristinepage.core.pipeline.OutputSpec
-import app.pristinepage.core.pipeline.RenderPurpose
+import app.pristinepage.core.pipeline.PixelSize
+import app.pristinepage.core.pipeline.Recipe
+import app.pristinepage.core.pipeline.RenderCoordinator
 import app.pristinepage.core.pipeline.RenderRequest
+import app.pristinepage.core.pipeline.RenderResult
 import app.pristinepage.core.pipeline.RenderStatus
+import app.pristinepage.core.recipe.GeometryRecipe
+import app.pristinepage.core.recipe.RecipeCodec
+import app.pristinepage.core.recipe.SourceBinding
 import app.pristinepage.data.model.DocumentId
+import app.pristinepage.data.model.EditablePage
 import app.pristinepage.data.model.IngestResult
+import app.pristinepage.data.model.OperationError
+import app.pristinepage.data.model.OperationErrorCode
 import app.pristinepage.data.model.PageId
+import app.pristinepage.data.model.RepositoryFailure
+import app.pristinepage.data.model.SourceId
 import app.pristinepage.data.repository.PrivateImportStore
 import app.pristinepage.data.repository.SavedOcrWork
 import app.pristinepage.data.repository.SourceInput
 import app.pristinepage.image.decode.AndroidSourceInspector
 import app.pristinepage.image.decode.ImageAllocationBudget
 import app.pristinepage.image.decode.SourceDecoder
-import app.pristinepage.image.preview.SrgbPreviewBitmap
+import app.pristinepage.image.ocr.SavedOcrPreparer
 import app.pristinepage.image.render.AppearanceEngine
 import app.pristinepage.image.render.ClassicalRecipeAdmission
 import app.pristinepage.image.render.DefaultRenderCoordinator
@@ -38,8 +48,11 @@ import java.io.File
 import java.security.MessageDigest
 import java.util.UUID
 import java.util.concurrent.atomic.AtomicReference
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.currentCoroutineContext
-import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import org.json.JSONObject
 import org.junit.Assert.*
@@ -73,6 +86,8 @@ class LocalSavedOcrIntegrationTest {
             code to OcrLanguagePack(code, row.getString("sha256"))
         }
         assertEquals(anchors.keys, pins.keys)
+        verifyPrivateBitmapLifecycle(OcrConfiguration("tesseract-local-probe", 1, OcrLayout.SINGLE_BLOCK,
+            OcrLanguagePacks(listOf(pins.getValue("eng")))))
         val budget = ImageAllocationBudget.forMemoryClass(checkNotNull(context.getSystemService(ActivityManager::class.java)).memoryClass)
         val inspector = AndroidSourceInspector(budget)
         val activeInput = AtomicReference<Pair<String, ByteArray>?>()
@@ -120,45 +135,49 @@ class LocalSavedOcrIntegrationTest {
                     findAll(store, probe.query).any { it.page == saved.pageId }
                 })
                 val target = store.savedOcr.reconcile(configuration, null, 50).targets.single { it.page == saved.pageId }
+                if (id == "eng") {
+                    var opened = false
+                    val unavailable = SavedOcrPreparer(renderer, budget) { _, bitmap ->
+                        assertFalse(bitmap.isRecycled)
+                        assertTrue(budget.usedBytes > 0)
+                        opened = true
+                        throw RepositoryFailure(OperationError(OperationErrorCode.PROVIDER_UNAVAILABLE, false, "fixture_runtime_unavailable", null))
+                    }
+                    val failure = runCatching { store.savedOcr.execute(target, unavailable) }.exceptionOrNull()
+                    assertTrue(opened)
+                    assertEquals(OperationErrorCode.PROVIDER_UNAVAILABLE, (failure as? RepositoryFailure)?.error?.code)
+                    assertEquals(0L, budget.usedBytes)
+                    assertEquals(target, store.savedOcr.reconcilePage(document, saved.pageId, null))
+                }
                 var score: Score? = null
+                val prepare = SavedOcrPreparer(renderer, budget) { config, bitmap ->
+                    assertEquals(configuration, config)
+                    val local = TessBaseAPI()
+                    var transferred = false
+                    try {
+                        assertEquals("5.5.1", local.version)
+                        val effective = checkNotNull(config.languagePacks).ordered.joinToString("+") { it.code }
+                        assertTrue(local.init(packRoot.absolutePath, effective, TessBaseAPI.OEM_LSTM_ONLY))
+                        assertTrue(local.setVariable("user_defined_dpi", "300"))
+                        local.setPageSegMode(if (config.layout == OcrLayout.SPARSE_TEXT) TessBaseAPI.PageSegMode.PSM_SPARSE_TEXT
+                            else TessBaseAPI.PageSegMode.PSM_SINGLE_BLOCK)
+                        local.setImage(bitmap)
+                        object : SavedOcrWork.Prepared {
+                            override suspend fun recognize(): OcrText {
+                                val raw = checkNotNull(local.getUTF8Text())
+                                val text = OcrText(raw)
+                                score = grade(id, row.getString("expected"), raw)
+                                return text
+                            }
+                            override fun close() = local.recycle()
+                        }.also { transferred = true }
+                    } finally {
+                        if (!transferred) local.recycle()
+                    }
+                }
                 val outcome = store.savedOcr.execute(target) { page, config, handoff ->
                     assertEquals(saved.sourceId, page.sourceId)
-                    assertEquals(configuration, config)
-                    val output = OutputSpec(GeometrySizing.target(page.recipe.geometry), RenderPurpose.EXPORT)
-                    val request = RenderRequest(page.sourceId.value, page.recipe.geometry.source.sourcePixelHash, page.pageId.value,
-                        page.recipeRevision, page.recipe, output, 0, null, FallbackPolicy.FAIL)
-                    renderer.render(request).use { rendered ->
-                        assertTrue("Saved raster unavailable: $id (${rendered.status})", rendered.status == RenderStatus.OK)
-                        assertEquals(request, rendered.request)
-                        val active = currentCoroutineContext()
-                        val bitmap = SrgbPreviewBitmap.convert(checkNotNull(rendered.image), budget) { active.ensureActive() }
-                        var engine: TessBaseAPI? = null
-                        var transferred = false
-                        try {
-                            val local = TessBaseAPI().also { engine = it }
-                            assertEquals("5.5.1", local.version)
-                            val effective = checkNotNull(config.languagePacks).ordered.joinToString("+") { it.code }
-                            assertTrue(local.init(packRoot.absolutePath, effective, TessBaseAPI.OEM_LSTM_ONLY))
-                            assertTrue(local.setVariable("user_defined_dpi", "300"))
-                            local.setPageSegMode(if (config.layout == OcrLayout.SPARSE_TEXT) TessBaseAPI.PageSegMode.PSM_SPARSE_TEXT
-                                else TessBaseAPI.PageSegMode.PSM_SINGLE_BLOCK)
-                            local.setImage(bitmap.bitmap)
-                            handoff.retain(object : SavedOcrWork.Prepared {
-                                override suspend fun recognize(): OcrText {
-                                    val raw = checkNotNull(local.getUTF8Text())
-                                    val text = OcrText(raw)
-                                    score = grade(id, row.getString("expected"), raw)
-                                    return text
-                                }
-                                override fun close() {
-                                    try { local.recycle() } finally { bitmap.discardUndelivered() }
-                                }
-                            })
-                            transferred = true
-                        } finally {
-                            if (!transferred) try { engine?.recycle() } finally { bitmap.discardUndelivered() }
-                        }
-                    }
+                    prepare.prepare(page, config, handoff)
                 }
                 assertEquals("Fenced publication: $id", SavedOcrWork.Outcome.PUBLISHED, outcome)
                 assertEquals(0L, budget.usedBytes)
@@ -178,8 +197,69 @@ class LocalSavedOcrIntegrationTest {
                 if (terminal != SavedOcrWork.Outcome.TERMINAL) failures.add("$id:reopen")
             }
         }
-        verifyPersistedBlank(databaseFile, observed.getValue("blank"))
+        verifyPersistedControls(databaseFile, observed)
         assertTrue("Saved OCR controls not accepted: ${failures.joinToString()}", failures.isEmpty())
+    }
+
+    private suspend fun verifyPrivateBitmapLifecycle(config: OcrConfiguration) = coroutineScope {
+        val sourceHash = "a".repeat(64)
+        val recipe = Recipe(geometry = GeometryRecipe.None(SourceBinding(sourceHash, PixelSize(2, 3), "ocr-probe-v1")))
+        val page = EditablePage(DocumentId(UUID.randomUUID().toString()), 2, PageId(UUID.randomUUID().toString()),
+            SourceId(UUID.randomUUID().toString()), 2, RecipeCodec.hash(recipe), recipe)
+        for (cancelDuringOpen in listOf(false, true)) {
+            val budget = ImageAllocationBudget(128)
+            var renderReleased = false
+            var sessionCloses = 0
+            var borrowed: Bitmap? = null // Test-only observation of the borrowed pointer; this is never delivered to UI or used after recycle.
+            val renderer = object : RenderCoordinator {
+                override suspend fun render(request: RenderRequest): RenderResult {
+                    val rgb = ByteArray(18).apply { this[1] = 128.toByte(); this[2] = 255.toByte() }
+                    val permit = budget.reserve(18)
+                    return RenderResult(request, RenderStatus.OK, RgbImage(2, 3, 6, rgb), emptyList(), emptyList(),
+                        AutoCloseable { renderReleased = true; permit.close() })
+                }
+            }
+            val child = launch {
+                val active = currentCoroutineContext()
+                val preparer = SavedOcrPreparer(renderer, budget) { _, input ->
+                    assertTrue("Full render still owned during session open", renderReleased)
+                    assertEquals(56L, budget.usedBytes) // 8 * (2 * 3) + 4 * 2: the bitmap-only reservation.
+                    assertFalse(input.isRecycled)
+                    assertEquals(0xff0080ff.toInt(), input.getPixel(0, 0))
+                    borrowed = input
+                    if (cancelDuringOpen) active.cancel(CancellationException("Synthetic session-open cancellation"))
+                    object : SavedOcrWork.Prepared {
+                        override suspend fun recognize(): OcrText = throw AssertionError("Preparation or close attempted OCR")
+                        override fun close() {
+                            sessionCloses++
+                            assertFalse("Bitmap recycled before engine close", input.isRecycled)
+                            assertEquals(56L, budget.usedBytes)
+                            assertEquals(0xff0080ff.toInt(), input.getPixel(0, 0))
+                        }
+                    }
+                }
+                var retained: SavedOcrWork.Prepared? = null
+                try {
+                    preparer.prepare(page, config) {
+                        if (cancelDuringOpen) throw AssertionError("Canceled session reached handoff")
+                        retained = it
+                    }
+                    assertFalse("Expected cancellation after session open", cancelDuringOpen)
+                    assertEquals(0, sessionCloses)
+                    assertFalse(checkNotNull(borrowed).isRecycled)
+                    assertEquals(56L, budget.usedBytes)
+                } catch (failure: CancellationException) {
+                    if (!cancelDuringOpen) throw failure
+                } finally { retained?.close() }
+            }
+            child.join()
+            assertEquals(cancelDuringOpen, child.isCancelled)
+            assertTrue(renderReleased)
+            assertEquals(1, sessionCloses)
+            assertTrue("Private bitmap was not recycled", checkNotNull(borrowed).isRecycled)
+            assertEquals(0L, budget.usedBytes)
+        }
+        Log.i(TAG, "ownership=render-before-session-and-session-before-recycle")
     }
 
     private suspend fun findAll(store: PrivateImportStore, query: String): List<SavedOcrWork.Hit> {
@@ -201,9 +281,17 @@ class LocalSavedOcrIntegrationTest {
         }
     }
 
-    private fun verifyPersistedBlank(file: File, blank: SavedOcrWork.Target) {
-        // TERMINAL alone cannot distinguish a retained successful empty string from a failed or canceled job. Read no OCR text.
+    private fun verifyPersistedControls(file: File, targets: Map<String, SavedOcrWork.Target>) {
+        // The first failed factory open never spent a start. TERMINAL alone also cannot distinguish a durable empty result from failure.
         SQLiteDatabase.openDatabase(file.absolutePath, null, SQLiteDatabase.OPEN_READONLY).use { database ->
+            val english = targets.getValue("eng")
+            database.rawQuery("""SELECT COUNT(*) FROM OcrPageWork w JOIN Job j ON j.jobId=w.resultJobId
+                WHERE w.pageId=? AND w.jobId=? AND w.resultJobId=w.jobId AND j.state='SUCCEEDED' AND j.attempt=1""",
+                arrayOf(english.page.value, english.job.value)).use {
+                assertTrue(it.moveToFirst())
+                assertEquals("Preparation refusal must not spend a recognition start", 1L, it.getLong(0))
+            }
+            val blank = targets.getValue("blank")
             database.rawQuery("""SELECT COUNT(*) FROM OcrPageWork w JOIN Job j ON j.jobId=w.resultJobId JOIN OcrResult r ON r.pageId=w.pageId
                 WHERE w.pageId=? AND w.jobId=? AND w.resultJobId=w.jobId AND w.projectionVersion=1
                 AND j.state='SUCCEEDED' AND typeof(r.indexedText)='text' AND r.indexedText='' AND r.verbatimText IS NULL""",
