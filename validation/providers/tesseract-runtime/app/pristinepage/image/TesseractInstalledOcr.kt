@@ -10,7 +10,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.withContext
 
-/** Read-only binding to the already published private catalog. This candidate lives in the receipt-gated test source set until ordinary packaging and diagnostics are cleared. */
+/** Read-only binding to a published private catalog, compiled only into explicitly qualified local candidates. */
 internal class TesseractInstalledOcr(private val packs: PrivateOcrPackOwner, budget: ImageAllocationBudget) {
     suspend fun configurationFor(codes: List<String>, layout: OcrLayout = OcrLayout.AUTOMATIC): OcrConfiguration? = withContext(Dispatchers.IO) {
         val ordered = packs.resolveOrdered(codes) { coroutineContext.ensureActive() } ?: return@withContext null

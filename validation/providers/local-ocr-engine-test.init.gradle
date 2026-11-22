@@ -30,6 +30,7 @@ gradle.beforeProject { project ->
         def test = project.extensions.getByName("android").sourceSets.getByName("androidTest")
         test.assets.srcDir(assets)
         test.java.srcDir(new File(project.rootDir, "validation/providers/android-ocr-probe"))
+        test.java.srcDir(new File(project.rootDir, "validation/providers/tesseract-runtime"))
         project.dependencies.add("androidTestImplementation", project.files(aar))
     }
 }

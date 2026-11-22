@@ -8,15 +8,23 @@ import app.pristinepage.ocr.SavedOcrScheduling
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.asStateFlow
 
 /** Process lifetime owns the service root. No eager camera permission, provider read, database open or background-completion promise is attached to Application.onCreate. */
-class PristinePageApplication : Application() {
+open class PristinePageApplication : Application() {
     val services: ApplicationServices by lazy { ApplicationServices(this) }
     internal val atelierPreferences by lazy { AtelierPreferences(this) }
+    private val runtimeReady = MutableStateFlow(false)
+    internal val ocrRuntimeReady = runtimeReady.asStateFlow()
+
+    // Normal builds have no runtime. The local qualification source set is the only override.
+    internal open val hasBundledOcr: Boolean get() = false
+    internal open suspend fun installedSavedOcrRuntime(): SavedOcrApplication.Runtime? = null
+
     internal val savedOcr by lazy {
         SavedOcrApplication(
-            // The private qualifications do not authorize packaging the runtime or weights in ordinary APKs.
-            installed = { null },
+            installed = { installedSavedOcrRuntime().also { runtimeReady.value = it != null } },
             orderedDefaults = { atelierPreferences.settings.value.ocrLanguages.map { it.packCode } },
             graph = { SavedOcrApplication.bind(services.imports()) },
         )

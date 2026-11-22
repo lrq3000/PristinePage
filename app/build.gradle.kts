@@ -22,6 +22,7 @@ android {
         versionName = libs.versions.appVersionName.get()
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         buildConfigField("int", "MIN_API", minimumApi.toString())
+        manifestPlaceholders["pristinePageApplication"] = "app.pristinepage.PristinePageApplication"
         ndk.abiFilters += "arm64-v8a"
     }
     buildFeatures {

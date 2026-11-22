@@ -38,9 +38,14 @@ internal enum class SettingsPage(val title: Int, val parent: SettingsPage?) {
 }
 
 @Composable
-internal fun AtelierSettingsScreen(page: SettingsPage, preferences: AtelierPreferences, navigate: (SettingsPage?) -> Unit) {
+internal fun AtelierSettingsScreen(page: SettingsPage, preferences: AtelierPreferences, ocrBundled: Boolean, ocrReady: Boolean, navigate: (SettingsPage?) -> Unit) {
     val settings by preferences.settings.collectAsStateWithLifecycle()
     val back = { navigate(page.parent) }
+    val ocrStatus = when {
+        !ocrBundled -> R.string.settings_ocr_not_active
+        !ocrReady -> R.string.settings_ocr_not_ready
+        else -> R.string.settings_ocr_offline
+    }
     BackHandler(onBack = back)
     Column(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background).safeDrawingPadding()
         .testTag("settings-screen-${page.name.lowercase(Locale.ROOT)}")) {
@@ -80,7 +85,7 @@ internal fun AtelierSettingsScreen(page: SettingsPage, preferences: AtelierPrefe
                     }
                     SettingsPage.CAMERA -> SettingsSwitch(R.string.atelier_grid, settings.showCameraGrid, "atelier-grid-setting", preferences::setShowCameraGrid)
                     SettingsPage.OCR -> {
-                        Text(stringResource(R.string.settings_ocr_not_active))
+                        Text(stringResource(ocrStatus))
                         SettingsLink(SettingsPage.OCR_LANGUAGES, navigate)
                     }
                     SettingsPage.TITLE -> AlbumTemplateSettings(settings.albumTitleTemplate) { template ->
@@ -88,7 +93,7 @@ internal fun AtelierSettingsScreen(page: SettingsPage, preferences: AtelierPrefe
                         back()
                     }
                     SettingsPage.OCR_LANGUAGES -> {
-                        Text(stringResource(R.string.settings_ocr_not_active))
+                        Text(stringResource(ocrStatus))
                         Text(stringResource(R.string.settings_ocr_languages_help), style = MaterialTheme.typography.bodySmall)
                         val names = settings.ocrLanguages.map { stringResource(it.label) }
                         Text(stringResource(R.string.settings_ocr_language_order, names.joinToString(", ")), style = MaterialTheme.typography.bodySmall)

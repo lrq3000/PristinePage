@@ -28,7 +28,7 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 
 /** An explicit application-owned composition, not an Activity-scoped allowance or a global lookup registry. Construction opens no DB/provider; the first suspending request serializes initialization and actual recovery. A failed/canceled initialization is not cached as a clean startup. */
-class ApplicationServices(context: Context, private val budget: ImageAllocationBudget, private val provider: SourceInput) {
+class ApplicationServices(context: Context, internal val budget: ImageAllocationBudget, private val provider: SourceInput) {
     private val context = context.applicationContext
     private val initialization = Mutex()
     private var initialized: ApplicationImports? = null

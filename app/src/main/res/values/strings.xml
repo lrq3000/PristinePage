@@ -44,6 +44,8 @@
     <string name="ocr_text_previous_blank">No text was detected in the previous recognition run on this saved revision.</string>
     <string name="settings_ocr_languages">OCR languages</string>
     <string name="settings_ocr_not_active">Text recognition is not active in this build. Your language choices will be saved.</string>
+    <string name="settings_ocr_not_ready">Text recognition is not ready. Your language choices will be saved.</string>
+    <string name="settings_ocr_offline">Text recognition runs on this device after you save scans.</string>
     <string name="settings_ocr_languages_help">Choose the languages you want to recognize. New selections are added to the end of the list. Keep at least one language selected.</string>
     <string name="settings_ocr_language_order">Recognition order: %1$s</string>
     <string name="ocr_language_arabic">Arabic</string>
