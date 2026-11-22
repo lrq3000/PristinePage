@@ -133,6 +133,7 @@ filesDir/store/staging/<transactionId>/seal.json
 filesDir/store/sources/<sourceBlobId>/original.bin
 filesDir/store/renders/<renderId>/page.bin
 filesDir/store/exports/<snapshotId>/<artifactId>.bin
+filesDir/store/ocr-text-exports/<artifactId>/text.bin
 filesDir/store/masks/<maskId>/mask.bin
 filesDir/store/quarantine/<transactionId>/...
 filesDir/shared-exports/<shareId>/<neutral-name>.<approved-extension>
@@ -140,6 +141,8 @@ cacheDir/preview/<complete-cache-key>.bin
 ```
 
 Use opaque validated IDs and a fixed extension allowlist; titles/provider display names never become path components. Resolve canonical paths beneath the expected app-owned root and reject traversal, symlink escape, mismatched transaction IDs and unexpected preexisting targets. A dedup collision path never overwrites. `seal.json` is bounded canonical metadata with format version, transaction/session IDs, source byte hash/length, normalized identity/dimensions and intended ownership; it contains no external source URI/title. Its hash is journaled. It is recovery data, not an untrusted command.
+
+The private `OCR_TEXT` derived-file kind reserves a separate path using a fresh opaque artifact ID, not a live page ID, OCR producer ID or album export snapshot. Its staged and sealed extent is 0–393,216 bytes; zero requires a present regular file and the exact empty SHA-256. The file protocol verifies byte identity, not UTF-8 provenance, journaling, readiness, or destination consent. A future consumer must journal first, retain exclusive target and transaction ownership, and bind the exact verified OCR observation to the byte count and digest. Do not store OCR text itself in seal metadata. Render and album-export files still require nonempty bytes and retain their existing seal encoding and paths.
 
 The v2 ingest seal and commit codec can additionally carry an allowlisted source capture-date projection. `captureDate.epochDay` is a proleptic Gregorian calendar day relative to 1970-01-01, not an epoch timestamp or an inferred zone; the allowed years are 0001–9999. A v2 projection with a null day records that no usable date was found, while v1 omits the projection entirely and retains its exact canonical bytes. The seal/commit versions must agree, and the intent remains v1. The date does not enter normalized inspection, the pixel hash, recipes, rendered exports or diagnostics. The codec alone does not inspect staged bytes, enable a v2 writer, change Room schema or make the date searchable.
 
