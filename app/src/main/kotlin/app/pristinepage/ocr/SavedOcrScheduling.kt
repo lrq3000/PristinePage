@@ -7,6 +7,7 @@ import app.pristinepage.core.ocr.OcrConfiguration
 import app.pristinepage.data.model.DocumentId
 import app.pristinepage.data.model.PageId
 import app.pristinepage.data.repository.SavedOcrWork
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.Flow
@@ -21,6 +22,33 @@ internal class SavedOcrScheduling(
     interface QualifiedSession {
         suspend fun reconcilePage(document: DocumentId, page: PageId): SavedOcrWork.Target?
         fun pendingPages(): Flow<SavedOcrWork.Target>
+    }
+
+    enum class RerunOutcome { UNAVAILABLE, ENROLLED, WAKE_DEFERRED }
+
+    /** Explicit command only. A wake failure cannot undo a committed rerun or turn it into a recognition error. */
+    suspend fun requestRerun(
+        qualify: suspend () -> OcrConfiguration?,
+        commit: suspend (OcrConfiguration) -> SavedOcrWork.Target,
+    ): RerunOutcome {
+        val active = currentCoroutineContext()
+        active.ensureActive()
+        val configuration = qualify()
+        active.ensureActive()
+        if (configuration == null) return RerunOutcome.UNAVAILABLE
+        val target = commit(configuration)
+        active.ensureActive()
+        val outcome = try {
+            enqueue(target)
+            RerunOutcome.ENROLLED
+        } catch (canceled: CancellationException) {
+            throw canceled
+        } catch (_: Exception) {
+            // Launch reconciliation can rediscover the exact Room job; never create a second generation here.
+            RerunOutcome.WAKE_DEFERRED
+        }
+        active.ensureActive()
+        return outcome
     }
 
     /** Call outside the save transaction and its coroutine lifetime; interruption is recovered by a later startup scan. */

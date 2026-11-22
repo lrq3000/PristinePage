@@ -4,6 +4,8 @@ import app.pristinepage.data.model.DocumentId
 import app.pristinepage.data.model.JobId
 import app.pristinepage.data.model.PageId
 import app.pristinepage.data.repository.SavedOcrWork
+import app.pristinepage.core.ocr.OcrConfiguration
+import app.pristinepage.core.ocr.OcrLayout
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.awaitCancellation
 import kotlinx.coroutines.cancelAndJoin
@@ -107,6 +109,39 @@ class SavedOcrSchedulingTest {
         val failure = IllegalStateException("Fixture scheduler failed")
         val schedule = SavedOcrScheduling(resolve = { onlyFirst() }) { throw failure }
         assertSame(failure, runCatching { schedule.onStartup() }.exceptionOrNull())
+    }
+
+    @Test fun unqualifiedRerunDoesNotCommitOrOfferAWake() = runBlocking {
+        val schedule = SavedOcrScheduling(resolve = { error("Must not reconcile") }) { error("Must not wake") }
+        assertEquals(SavedOcrScheduling.RerunOutcome.UNAVAILABLE,
+            schedule.requestRerun({ null }) { error("Must not commit") })
+    }
+
+    @Test fun committedRerunOffersOnlyItsExactTargetAndDistinguishesDeferredEnrollment() = runBlocking {
+        val configuration = OcrConfiguration("fixture", 1, OcrLayout.SPARSE_TEXT)
+        val events = mutableListOf<String>()
+        var denyWake = false
+        val schedule = SavedOcrScheduling(resolve = { error("Must not reconcile instead") }) { target ->
+            assertEquals(second, target)
+            events += "wake"
+            if (denyWake) throw IllegalStateException("Fixture enrollment failure")
+        }
+        suspend fun request() = schedule.requestRerun({ configuration }) {
+            assertSame(configuration, it)
+            events += "commit"
+            second
+        }
+        assertEquals(SavedOcrScheduling.RerunOutcome.ENROLLED, request())
+        denyWake = true
+        assertEquals(SavedOcrScheduling.RerunOutcome.WAKE_DEFERRED, request())
+        assertEquals(listOf("commit", "wake", "commit", "wake"), events)
+    }
+
+    @Test fun failedRerunCommitCannotOfferAWakeOrLookQueued() = runBlocking {
+        val error = IllegalStateException("Fixture commit refused")
+        val configuration = OcrConfiguration("fixture", 1, OcrLayout.SPARSE_TEXT)
+        val schedule = SavedOcrScheduling(resolve = { error("Must not reconcile") }) { throw AssertionError("Must not wake") }
+        assertSame(error, runCatching { schedule.requestRerun({ configuration }) { throw error } }.exceptionOrNull())
     }
 
     private fun onlyFirst(): SavedOcrScheduling.QualifiedSession =
