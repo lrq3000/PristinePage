@@ -26,7 +26,7 @@ class SavedOcrSchedulingTest {
 
     @Test fun missingRuntimeLeavesBothSignalsDormant() = runBlocking {
         val schedule = SavedOcrScheduling(resolve = { null }) { throw AssertionError("No runtime, no WorkManager enrollment") }
-        schedule.onPageSaved(document, page)
+        schedule.onPagesSaved(document, listOf(page))
         schedule.onStartup()
     }
 
@@ -42,8 +42,7 @@ class SavedOcrSchedulingTest {
             override fun pendingPages(): Flow<SavedOcrWork.Target> = throw AssertionError("Save must not scan the library")
         }
         val schedule = SavedOcrScheduling(resolve = { store }) { targets.add(it) }
-        schedule.onPageSaved(document, page)
-        schedule.onPageSaved(document, second.page)
+        schedule.onPagesSaved(document, listOf(page, second.page))
         assertEquals(listOf(document to page, document to second.page), seen)
         assertEquals(listOf(first), targets)
     }

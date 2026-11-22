@@ -51,12 +51,25 @@ internal class SavedOcrScheduling(
         return outcome
     }
 
-    /** Call outside the save transaction and its coroutine lifetime; interruption is recovered by a later startup scan. */
-    suspend fun onPageSaved(document: DocumentId, page: PageId) {
-        currentCoroutineContext().ensureActive()
-        val target = resolve()?.reconcilePage(document, page) ?: return
-        currentCoroutineContext().ensureActive()
-        enqueue(target)
+    /** One qualified defaults snapshot for this committed notification, not a persistent cache or a batch transaction. */
+    suspend fun onPagesSaved(document: DocumentId, pages: List<PageId>) {
+        val active = currentCoroutineContext()
+        active.ensureActive()
+        if (pages.isEmpty()) return
+        val qualified = resolve() ?: return
+        for (page in pages) {
+            active.ensureActive()
+            try {
+                val target = qualified.reconcilePage(document, page) ?: continue
+                active.ensureActive()
+                enqueue(target)
+            } catch (canceled: CancellationException) {
+                throw canceled
+            } catch (_: Exception) {
+                // The accepted page and any committed job remain discoverable. A single failure must not drop the rest of this notification.
+            }
+        }
+        active.ensureActive()
     }
 
     /** Serial enrollment keeps each scan bounded in memory and exposes failures without misreporting a recognition start. */

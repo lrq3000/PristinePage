@@ -36,7 +36,7 @@ internal class SavedOcrAppSignals(
         val committed = pages.toList()
         if (committed.isEmpty()) return
         processScope.launch {
-            for (page in committed) deliver { scheduling.onPageSaved(document, page) }
+            deliver { scheduling.onPagesSaved(document, committed) }
         }
     }
 

@@ -86,6 +86,27 @@ class SavedOcrAppSignalsTest {
         assertEquals(listOf(first), seen)
     }
 
+    @Test fun oneSavedNotificationReusesOneQualificationButTheNextReadsFreshDefaults() = runTest {
+        var resolutions = 0
+        val observed = mutableListOf<Pair<PageId, Int>>()
+        val signals = SavedOcrAppSignals(backgroundScope, SavedOcrScheduling({
+            val snapshot = ++resolutions
+            session(saved = { album, page ->
+                assertEquals(document, album)
+                observed += page to snapshot
+                null
+            })
+        }) { fail("No eligible wake") })
+        signals.onPagesSaved(document, emptyList())
+        runCurrent()
+        assertEquals(0, resolutions)
+        signals.onPagesSaved(document, listOf(first, next))
+        runCurrent()
+        signals.onPagesSaved(document, listOf(next))
+        runCurrent()
+        assertEquals(listOf(first to 1, next to 1, next to 2), observed)
+    }
+
     @Test fun synchronousNotificationFailureCannotEscapeTheCommittedSaveBoundary() {
         val seen = mutableListOf<Pair<DocumentId, List<PageId>>>()
         sendCommittedOcrHint(document, listOf(first, next)) { album, pages ->
