@@ -63,7 +63,21 @@ class SavedOcrWork private constructor(store: PrivateImportStore.OcrComposition)
     data class SearchPage(val hits: List<Hit>, val nextAfter: Continuation?)
 
     /** Private on-device display/export value. Keep it out of store diagnostics and scheduler/search payloads. */
-    class ReadText internal constructor(val text: OcrText, val configuration: OcrConfiguration, val previousGeneration: Boolean)
+    class ReadText internal constructor(val text: OcrText, val configuration: OcrConfiguration, val previousGeneration: Boolean,
+        val exportObservation: TextExportObservation,
+    )
+
+    /** Opaque process-local identity, not plaintext, destination consent, or a permission to reopen a provider. */
+    class TextExportObservation private constructor(private val issuer: SavedOcrWork, private val binding: RoomOcrSearch.TextBinding) {
+        @JvmSynthetic
+        internal fun bindingFor(owner: SavedOcrWork): RoomOcrSearch.TextBinding? = binding.takeIf { issuer === owner }
+
+        companion object {
+            @JvmSynthetic
+            internal fun issue(owner: SavedOcrWork, binding: RoomOcrSearch.TextBinding): TextExportObservation =
+                TextExportObservation(owner, binding)
+        }
+    }
 
     enum class PagePhase { QUEUED, RUNNING, READY, FAILED, CANCELED }
 
@@ -146,7 +160,17 @@ class SavedOcrWork private constructor(store: PrivateImportStore.OcrComposition)
     }
 
     suspend fun readText(document: DocumentId, page: PageId, expectedRevision: Long? = null): ReadText? =
-        retained(page.value, "ocr_store_read_failed") { search.readText(document, page, expectedRevision) }
+        retained(page.value, "ocr_store_read_failed") {
+            search.readText(document, page, expectedRevision)?.let {
+                ReadText(it.text, it.configuration, it.previousGeneration, TextExportObservation.issue(this, it.binding))
+            }
+        }
+
+    /** Empty bytes are a verified blank. Null means the observed result no longer authorizes copying any text. */
+    suspend fun resolveTextExport(observation: TextExportObservation): ByteArray? {
+        val binding = observation.bindingFor(this) ?: return null
+        return retained(binding.producer.page.value, "ocr_store_read_failed") { search.resolveTextExport(binding) }
+    }
 
     /** Metadata only: observing a live page's status does not load recognition text, grant a job lease or touch its original. */
     suspend fun readStatus(document: DocumentId, page: PageId, expectedRevision: Long? = null): PageStatus? =

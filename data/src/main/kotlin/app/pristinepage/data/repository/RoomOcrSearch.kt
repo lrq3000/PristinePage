@@ -1,5 +1,6 @@
 package app.pristinepage.data.repository
 
+import app.pristinepage.core.ocr.OcrConfiguration
 import app.pristinepage.core.ocr.OcrError
 import app.pristinepage.core.ocr.OcrText
 import app.pristinepage.data.db.PristineDatabase
@@ -12,6 +13,7 @@ import app.pristinepage.data.model.RepositoryFailure
 import app.pristinepage.data.model.SourceId
 import app.pristinepage.data.repository.SavedOcrWork.PagePhase
 import java.nio.charset.CharacterCodingException
+import java.security.MessageDigest
 import java.util.Collections
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers
@@ -32,6 +34,15 @@ internal class RoomOcrSearch(
     data class Hit(val document: DocumentId, val page: PageId, val source: SourceId, val recipeRevision: Long, val producingJob: JobId)
     data class Page(val hits: List<Hit>, val nextAfter: PageId?)
     class Status(val phase: PagePhase, val attemptsStarted: Int, val lastError: OcrError?, val binding: OcrRerunBinding)
+    class TextSnapshot(val text: OcrText, val configuration: OcrConfiguration, val previousGeneration: Boolean, val binding: TextBinding)
+
+    /** Capture a digest of the exact UTF-8 seen by the panel without retaining plaintext in its export token. */
+    class TextBinding(val producer: Hit, private val inputDigest: String, reviewedBytes: ByteArray) {
+        private val digest = sha256(reviewedBytes)
+        fun matchesInput(hit: Hit, intent: OcrJobInput): Boolean = producer == hit && inputDigest == intent.digest
+        fun matches(bytes: ByteArray): Boolean = MessageDigest.isEqual(digest, sha256(bytes))
+        private fun sha256(bytes: ByteArray): ByteArray = MessageDigest.getInstance("SHA-256").digest(bytes)
+    }
 
     suspend fun find(query: String, after: PageId?, limit: Int): Page = withContext(dispatcher) {
         require(limit in 1..50)
@@ -61,21 +72,38 @@ internal class RoomOcrSearch(
         }
     }
 
-    suspend fun readText(document: DocumentId, page: PageId, expectedRevision: Long? = null): SavedOcrWork.ReadText? = withContext(dispatcher) {
+    suspend fun readText(document: DocumentId, page: PageId, expectedRevision: Long? = null): TextSnapshot? = withContext(dispatcher) {
         val active = coroutineContext
         metadata.transaction {
             active.ensureActive()
             val producing = checkedProducer(page)?.takeIf {
                 it.hit.document == document && (expectedRevision == null || it.hit.recipeRevision == expectedRevision)
             } ?: return@transaction null
-            val intent = producing.intent
-            val config = intent.configuration
-            val raw = results.selectVerbatim(page.value, intent.input.recipeRevision, intent.input.sourcePixelSha256,
-                config.engineId, config.engineVersion, config.layout.name)?.recognizedUtf8 ?: return@transaction null
+            val raw = selectVerbatim(producing) ?: return@transaction null
             val text = decodeStoredOcrText(raw) ?: return@transaction null
+            val binding = TextBinding(producing.hit, producing.intent.digest, raw)
             active.ensureActive()
-            SavedOcrWork.ReadText(text, config, producing.previousGeneration)
+            TextSnapshot(text, producing.intent.configuration, producing.previousGeneration, binding)
         }
+    }
+
+    suspend fun resolveTextExport(binding: TextBinding): ByteArray? = withContext(dispatcher) {
+        val active = coroutineContext
+        val payload = metadata.transaction {
+            active.ensureActive()
+            val producer = checkedProducer(binding.producer.page)?.takeIf { binding.matchesInput(it.hit, it.intent) } ?: return@transaction null
+            // Equality with the digest of the previously accepted bytes authenticates their encoding as well as their content.
+            selectVerbatim(producer)?.takeIf(binding::matches)
+        }
+        active.ensureActive()
+        payload
+    }
+
+    private fun selectVerbatim(producing: Producer): ByteArray? {
+        val intent = producing.intent
+        val config = intent.configuration
+        return results.selectVerbatim(producing.hit.page.value, intent.input.recipeRevision, intent.input.sourcePixelSha256,
+            config.engineId, config.engineVersion, config.layout.name)?.recognizedUtf8
     }
 
     suspend fun readStatus(document: DocumentId, page: PageId, expectedRevision: Long? = null): Status? = withContext(dispatcher) {

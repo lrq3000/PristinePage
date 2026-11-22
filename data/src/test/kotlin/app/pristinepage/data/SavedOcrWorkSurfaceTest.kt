@@ -33,4 +33,11 @@ class SavedOcrWorkSurfaceTest {
                 setOf("getPhase", "getAttemptsStarted", "getLastError", "getConfiguration")
         })
     }
+
+    @Test fun textExportObservationExposesNeitherTextNorItsBinding() {
+        val type = SavedOcrWork.TextExportObservation::class.java
+        assertTrue(type.declaredConstructors.all { it.isSynthetic || Modifier.isPrivate(it.modifiers) })
+        assertTrue(type.declaredMethods.all { it.isSynthetic || Modifier.isPrivate(it.modifiers) })
+        assertTrue(type.declaredFields.filterNot { Modifier.isStatic(it.modifiers) }.all { Modifier.isPrivate(it.modifiers) })
+    }
 }

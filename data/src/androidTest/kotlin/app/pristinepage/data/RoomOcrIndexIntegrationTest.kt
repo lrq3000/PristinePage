@@ -499,6 +499,47 @@ class RoomOcrIndexIntegrationTest {
         assertEquals("", f.search.readText(document, page)?.text?.value)
     }
 
+    @Test fun textExportObservationAllowsTheRetainedProducerButNeverAnUnseenReplacement() = withOcrAttempts(publicStore = true) { f ->
+        val work = f.ocrPort()
+        val page = PageId(PAGE)
+        val document = DocumentId(DOCUMENT)
+        val original = "  École\r\n領収書 · إيصال  \n"
+        f.results.publish(f.request, f.start(), OcrText(original))
+        val observed = checkNotNull(work.readText(document, page, 1)).exportObservation
+        val payload = checkNotNull(work.resolveTextExport(observed))
+        assertArrayEquals(original.encodeToByteArray(), payload)
+        payload.fill(0)
+        assertArrayEquals(original.encodeToByteArray(), work.resolveTextExport(observed))
+        val other = PrivateImportStore.open(isolatedOcrStoreContext(), SourceInput { error("Unexpected provider access") },
+            SourceInspector { _, _ -> error("Unexpected decode") })
+        val foreignWork = other.use { it.savedOcr }
+        assertNull(foreignWork.resolveTextExport(observed))
+        f.sql.execSQL("UPDATE OcrResult SET verbatimText=? WHERE pageId=?", arrayOf(original.replace('É', 'È'), PAGE))
+        assertNull(work.resolveTextExport(observed))
+        f.sql.execSQL("UPDATE OcrResult SET verbatimText=? WHERE pageId=?", arrayOf(original, PAGE))
+        val status = checkNotNull(work.readStatus(document, page, 1))
+        val successor = work.requestRerun(status, status.configuration)
+        assertArrayEquals(original.encodeToByteArray(), work.resolveTextExport(observed))
+        assertEquals(SavedOcrWork.Outcome.PUBLISHED, work.execute(successor) { _, _, handoff ->
+            handoff.retain(preparedText(original))
+        })
+        assertNull(work.resolveTextExport(observed))
+        val fresh = checkNotNull(work.readText(document, page, 1)).exportObservation
+        assertArrayEquals(original.encodeToByteArray(), work.resolveTextExport(fresh))
+        f.sql.execSQL("UPDATE Page SET state='REMOVED',ordinal=NULL,removedAt=10 WHERE pageId=?", arrayOf(PAGE))
+        assertNull(work.resolveTextExport(fresh))
+    }
+
+    @Test fun textExportObservationResolvesSuccessfulBlankWithoutManufacturingAResult() = withOcrAttempts(publicStore = true) { f ->
+        val work = f.ocrPort()
+        val page = PageId(PAGE)
+        val document = DocumentId(DOCUMENT)
+        assertNull(work.readText(document, page, 1))
+        f.results.publish(f.request, f.start(), OcrText(""))
+        val observed = checkNotNull(work.readText(document, page, 1)).exportObservation
+        assertArrayEquals(byteArrayOf(), work.resolveTextExport(observed))
+    }
+
     @Test fun liveOcrStatusSeparatesQueuedRunningAndTerminalFailure() = withOcrAttempts(publicStore = true) { f ->
         val work = f.ocrPort()
         val page = PageId(PAGE)
