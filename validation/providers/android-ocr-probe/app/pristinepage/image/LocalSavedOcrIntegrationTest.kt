@@ -140,6 +140,12 @@ class LocalSavedOcrIntegrationTest {
             assertEquals(1, packLeases)
             Pix(0L) // The pinned dimension constructor can contain a zero pointer. Do not deliberately exhaust the device heap.
         }) { _, _ -> lease(packRoot) }
+        val failedPackAllocation = TesseractSavedOcrSessions(budget) { requested, checkpoint ->
+            selectedPacks.acquire(requested) {
+                checkpoint()
+                throw OutOfMemoryError("Synthetic OCR pack verification allocation failure")
+            }?.toFile()?.let(::lease)
+        }
         var canceledPix: Pix? = null
         val canceledDuringPixCopy = TesseractSavedOcrSessions(budget, allocatePix = { width, height ->
             assertEquals(1, packLeases)
@@ -227,6 +233,18 @@ class LocalSavedOcrIntegrationTest {
                     failBeforeStart(store, target, renderer, missingData, OperationErrorCode.PROVIDER_UNAVAILABLE)
                     failBeforeStart(store, target, renderer, changedBytes, OperationErrorCode.PROVIDER_UNAVAILABLE)
                     failBeforeStart(store, target, renderer, refusedPixAllocation, OperationErrorCode.RESOURCE_LIMIT)
+                    val packFailure = runCatching {
+                        store.savedOcr.execute(target, SavedOcrPreparer(renderer, budget, failedPackAllocation))
+                    }.exceptionOrNull() as? RepositoryFailure
+                    assertEquals("Pack allocation must be a structured pre-start refusal", OperationErrorCode.RESOURCE_LIMIT, packFailure?.error?.code)
+                    assertEquals(false, packFailure?.error?.retryable)
+                    assertNull(packFailure?.cause)
+                    assertEquals(0, packLeases)
+                    assertEquals(0L, budget.usedBytes)
+                    val pendingAfterAllocation = checkNotNull(store.savedOcr.readStatus(document, saved.pageId))
+                    assertEquals(SavedOcrWork.PagePhase.QUEUED, pendingAfterAllocation.phase)
+                    assertEquals(0, pendingAfterAllocation.attemptsStarted)
+                    assertNull(pendingAfterAllocation.lastError)
                     var borrowed: Bitmap? = null
                     var openCheckpointsAfterAllocation = 0
                     var checkpointObservedCancellation = false

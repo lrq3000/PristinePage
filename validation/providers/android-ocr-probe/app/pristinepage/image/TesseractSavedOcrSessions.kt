@@ -32,7 +32,12 @@ internal class TesseractSavedOcrSessions(
         checkpoint()
         if (configuration.engineId != ENGINE_ID || configuration.engineVersion != CONTRACT_VERSION) unavailable()
         val packs = configuration.languagePacks ?: unavailable()
-        val lease = acquirePacks(packs, checkpoint) ?: unavailable()
+        val lease = try {
+            acquirePacks(packs, checkpoint) ?: unavailable()
+        } catch (_: OutOfMemoryError) {
+            // Catalog verification can allocate before there is a native session or durable recognition start.
+            throw error(OperationErrorCode.RESOURCE_LIMIT, "tesseract_pack_verification_allocation_failed")
+        }
         var engine: TessBaseAPI? = null
         var reservation: AutoCloseable? = null
         try {
