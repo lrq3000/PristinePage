@@ -27,7 +27,6 @@ import app.pristinepage.core.recipe.SourceBinding
 import app.pristinepage.data.model.DocumentId
 import app.pristinepage.data.model.EditablePage
 import app.pristinepage.data.model.IngestResult
-import app.pristinepage.data.model.OperationError
 import app.pristinepage.data.model.OperationErrorCode
 import app.pristinepage.data.model.PageId
 import app.pristinepage.data.model.RepositoryFailure
@@ -43,7 +42,7 @@ import app.pristinepage.image.render.AppearanceEngine
 import app.pristinepage.image.render.ClassicalRecipeAdmission
 import app.pristinepage.image.render.DefaultRenderCoordinator
 import app.pristinepage.image.render.GeometryEngine
-import com.googlecode.tesseract.android.TessBaseAPI
+import com.googlecode.leptonica.android.Pix
 import java.io.File
 import java.security.MessageDigest
 import java.util.UUID
@@ -86,9 +85,33 @@ class LocalSavedOcrIntegrationTest {
             code to OcrLanguagePack(code, row.getString("sha256"))
         }
         assertEquals(anchors.keys, pins.keys)
-        verifyPrivateBitmapLifecycle(OcrConfiguration("tesseract-local-probe", 1, OcrLayout.SINGLE_BLOCK,
-            OcrLanguagePacks(listOf(pins.getValue("eng")))))
         val budget = ImageAllocationBudget.forMemoryClass(checkNotNull(context.getSystemService(ActivityManager::class.java)).memoryClass)
+        var packLeases = 0
+        fun lease(directory: File): TesseractSavedOcrSessions.PackLease = object : TesseractSavedOcrSessions.PackLease {
+            init { packLeases++ }
+            override val root = directory
+            override fun close() { packLeases-- }
+        }
+        val sessions = TesseractSavedOcrSessions(budget) { requested ->
+            if (requested.ordered.any { pins[it.code] != it }) null else lease(packRoot)
+        }
+        val missingDataDirectory = newDirectory(directory, "missing-tessdata-control")
+        val missingData = TesseractSavedOcrSessions(budget) { lease(missingDataDirectory) }
+        val refusedPixAllocation = TesseractSavedOcrSessions(budget, allocatePix = { _, _ ->
+            assertEquals(1, packLeases)
+            Pix(0L) // The pinned dimension constructor can contain a zero pointer. Do not deliberately exhaust the device heap.
+        }) { lease(packRoot) }
+        suspend fun failBeforeStart(store: PrivateImportStore, target: SavedOcrWork.Target, renderer: RenderCoordinator,
+            factory: SavedOcrPreparer.SessionFactory, expected: OperationErrorCode) {
+            val failed = runCatching {
+                store.savedOcr.execute(target, SavedOcrPreparer(renderer, budget, factory))
+            }.exceptionOrNull() as? RepositoryFailure
+            assertEquals(expected, failed?.error?.code)
+            assertEquals(0, packLeases)
+            assertEquals(0L, budget.usedBytes)
+        }
+        verifyPrivateBitmapLifecycle(OcrConfiguration(TesseractSavedOcrSessions.ENGINE_ID, TesseractSavedOcrSessions.CONTRACT_VERSION, OcrLayout.SINGLE_BLOCK,
+            OcrLanguagePacks(listOf(pins.getValue("eng")))))
         val inspector = AndroidSourceInspector(budget)
         val activeInput = AtomicReference<Pair<String, ByteArray>?>()
         val provider = SourceInput { reference ->
@@ -113,8 +136,12 @@ class LocalSavedOcrIntegrationTest {
                 assertEquals(id, row.getString("id"))
                 val selected = orderedLanguages(id)
                 assertEquals(selected.joinToString("+"), row.getString("languages"))
-                val configuration = OcrConfiguration("tesseract-local-probe", 1,
-                    if (id == "jpn") OcrLayout.SPARSE_TEXT else OcrLayout.SINGLE_BLOCK,
+                val layout = when (id) {
+                    "eng" -> OcrLayout.AUTOMATIC
+                    "jpn" -> OcrLayout.SPARSE_TEXT
+                    else -> OcrLayout.SINGLE_BLOCK
+                }
+                val configuration = OcrConfiguration(TesseractSavedOcrSessions.ENGINE_ID, TesseractSavedOcrSessions.CONTRACT_VERSION, layout,
                     OcrLanguagePacks(selected.map(pins::getValue)))
                 val png = LocalTesseractProbeTest.load(context, "${ROOT}controls/$id.png", 1_048_576)
                 assertEquals(row.getInt("imageBytes"), png.size)
@@ -137,42 +164,31 @@ class LocalSavedOcrIntegrationTest {
                 val target = store.savedOcr.reconcile(configuration, null, 50).targets.single { it.page == saved.pageId }
                 if (id == "eng") {
                     var opened = false
-                    val unavailable = SavedOcrPreparer(renderer, budget) { _, bitmap ->
+                    val unavailable = SavedOcrPreparer(renderer, budget) { config, bitmap ->
                         assertFalse(bitmap.isRecycled)
                         assertTrue(budget.usedBytes > 0)
                         opened = true
-                        throw RepositoryFailure(OperationError(OperationErrorCode.PROVIDER_UNAVAILABLE, false, "fixture_runtime_unavailable", null))
+                        sessions.open(config.copy(languagePacks = OcrLanguagePacks(listOf(OcrLanguagePack("eng", "0".repeat(64))))), bitmap)
                     }
                     val failure = runCatching { store.savedOcr.execute(target, unavailable) }.exceptionOrNull()
                     assertTrue(opened)
                     assertEquals(OperationErrorCode.PROVIDER_UNAVAILABLE, (failure as? RepositoryFailure)?.error?.code)
                     assertEquals(0L, budget.usedBytes)
+                    assertEquals(0, packLeases)
+                    failBeforeStart(store, target, renderer, missingData, OperationErrorCode.PROVIDER_UNAVAILABLE)
+                    failBeforeStart(store, target, renderer, refusedPixAllocation, OperationErrorCode.RESOURCE_LIMIT)
                     assertEquals(target, store.savedOcr.reconcilePage(document, saved.pageId, null))
                 }
                 var score: Score? = null
                 val prepare = SavedOcrPreparer(renderer, budget) { config, bitmap ->
                     assertEquals(configuration, config)
-                    val local = TessBaseAPI()
-                    var transferred = false
-                    try {
-                        assertEquals("5.5.1", local.version)
-                        val effective = checkNotNull(config.languagePacks).ordered.joinToString("+") { it.code }
-                        assertTrue(local.init(packRoot.absolutePath, effective, TessBaseAPI.OEM_LSTM_ONLY))
-                        assertTrue(local.setVariable("user_defined_dpi", "300"))
-                        local.setPageSegMode(if (config.layout == OcrLayout.SPARSE_TEXT) TessBaseAPI.PageSegMode.PSM_SPARSE_TEXT
-                            else TessBaseAPI.PageSegMode.PSM_SINGLE_BLOCK)
-                        local.setImage(bitmap)
-                        object : SavedOcrWork.Prepared {
-                            override suspend fun recognize(): OcrText {
-                                val raw = checkNotNull(local.getUTF8Text())
-                                val text = OcrText(raw)
-                                score = grade(id, row.getString("expected"), raw)
-                                return text
-                            }
-                            override fun close() = local.recycle()
-                        }.also { transferred = true }
-                    } finally {
-                        if (!transferred) local.recycle()
+                    val native = sessions.open(config, bitmap)
+                    object : SavedOcrWork.Prepared {
+                        override suspend fun recognize(): OcrText = native.recognize().also { text ->
+                            assertEquals(1, packLeases)
+                            score = grade(id, row.getString("expected"), text.value)
+                        }
+                        override fun close() = native.close()
                     }
                 }
                 val outcome = store.savedOcr.execute(target) { page, config, handoff ->
@@ -181,6 +197,7 @@ class LocalSavedOcrIntegrationTest {
                 }
                 assertEquals("Fenced publication: $id", SavedOcrWork.Outcome.PUBLISHED, outcome)
                 assertEquals(0L, budget.usedBytes)
+                assertEquals(0, packLeases)
                 val result = checkNotNull(score)
                 if (!result.accepted) failures.add(id)
                 Log.i(TAG, "case=$id edits=${result.edits} length=${result.length} exact=${result.edits == 0}")
