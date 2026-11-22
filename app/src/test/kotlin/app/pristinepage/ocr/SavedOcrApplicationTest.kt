@@ -70,4 +70,40 @@ class SavedOcrApplicationTest {
         val app = SavedOcrApplication({ runtime }, { error("Worker must not read Settings") }, { graph })
         assertEquals(SavedOcrWork.Outcome.PUBLISHED, app.executeSavedOcr(target))
     }
+
+    @Test fun rerunWithSavedSettingsReverifiesExactPacksAndKeepsTheSavedLayout() = runBlocking {
+        val saved = config.copy(layout = OcrLayout.SPARSE_TEXT)
+        var available = config
+        val runtime = SavedOcrApplication.Runtime(factory) { requested ->
+            assertEquals(listOf("fra", "eng"), requested)
+            available
+        }
+        val app = SavedOcrApplication({ runtime }, { error("Saved configuration cannot consult current defaults") }, { error("Resolving a rerun must not open the library") })
+        assertEquals(saved, app.resolveRerunConfiguration(saved, useDefaults = false))
+        available = config.copy(engineVersion = 2)
+        assertNull(app.resolveRerunConfiguration(saved, useDefaults = false))
+        available = config.copy(languagePacks = OcrLanguagePacks(listOf(
+            OcrLanguagePack("fra", "3".repeat(64)), OcrLanguagePack("eng", "2".repeat(64)))))
+        assertNull(app.resolveRerunConfiguration(saved, useDefaults = false))
+    }
+
+    @Test fun rerunWithDefaultsUsesTheCurrentOrderedConfigurationWithoutOpeningTheLibrary() = runBlocking {
+        val reversed = OcrLanguagePacks(checkNotNull(config.languagePacks).ordered.reversed())
+        val current = config.copy(layout = OcrLayout.SINGLE_BLOCK, languagePacks = reversed)
+        var available = current
+        val runtime = SavedOcrApplication.Runtime(factory) { requested ->
+            assertEquals(listOf("eng", "fra"), requested)
+            available
+        }
+        val app = SavedOcrApplication({ runtime }, { listOf("eng", "fra") }, { error("Resolving a rerun must not open the library") })
+        assertEquals(current, app.resolveRerunConfiguration(config, useDefaults = true))
+        available = config
+        assertNull(app.resolveRerunConfiguration(config, useDefaults = true))
+    }
+
+    @Test fun dormantRuntimeDoesNotResolveEitherRerunMode() = runBlocking {
+        val app = SavedOcrApplication({ null }, { error("Dormant runtime must not read Settings") }, { error("Must not open library") })
+        assertNull(app.resolveRerunConfiguration(config, useDefaults = true))
+        assertNull(app.resolveRerunConfiguration(config, useDefaults = false))
+    }
 }

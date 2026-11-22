@@ -26,12 +26,20 @@ internal class SavedOcrApplication(
 
     suspend fun reconciliation(): SavedOcrScheduling.QualifiedSession? {
         val runtime = activeRuntime() ?: return null
-        val codes = orderedDefaults().toList()
-        // Validate against a snapshot the resolver cannot sort or otherwise mutate.
-        val defaults = runtime.configurationFor(ArrayList(codes))?.takeIf { spec -> spec.languagePacks?.ordered?.map { it.code } == codes }
-        currentCoroutineContext().ensureActive()
+        val defaults = resolveOrdered(runtime, orderedDefaults())
         // Unresolved defaults must not hide work whose original packs are still available.
         return graph().reconcile(defaults)
+    }
+
+    suspend fun resolveRerunConfiguration(saved: OcrConfiguration, useDefaults: Boolean): OcrConfiguration? {
+        val runtime = activeRuntime() ?: return null
+        if (useDefaults) return resolveOrdered(runtime, orderedDefaults())
+        val packs = saved.languagePacks ?: return null
+        val verified = resolveOrdered(runtime, packs.ordered.map { it.code }) ?: return null
+        // The same engine contract admits the saved layout; the resolver's layout is only the default for new work.
+        return saved.takeIf {
+            verified.engineId == saved.engineId && verified.engineVersion == saved.engineVersion && verified.languagePacks == packs
+        }
     }
 
     override suspend fun executeSavedOcr(target: SavedOcrWork.Target): SavedOcrWork.Outcome? {
@@ -44,6 +52,14 @@ internal class SavedOcrApplication(
         val active = currentCoroutineContext()
         active.ensureActive()
         return installed().also { active.ensureActive() }
+    }
+
+    private suspend fun resolveOrdered(runtime: Runtime, requested: List<String>): OcrConfiguration? {
+        val expected = requested.toList()
+        // Validate against a snapshot the resolver cannot sort or otherwise mutate.
+        val resolved = runtime.configurationFor(ArrayList(expected))
+        currentCoroutineContext().ensureActive()
+        return resolved?.takeIf { it.languagePacks?.ordered?.map { pack -> pack.code } == expected }
     }
 
     companion object {
