@@ -552,6 +552,10 @@ class RoomOcrIndexIntegrationTest {
         assertEquals("90b8051d4594a1f0bb3715981105bf56cf5854bd0602e4e483d0520e3f8025f8", ready.byteSha256)
         val relative = f.sql.scalar("SELECT finalPath FROM FileTransaction WHERE kind='OCR_TEXT' AND state='COMMITTED'")
         assertPrivateOcrFile(f.sql, relative, text.encodeToByteArray())
+        val bytes = checkNotNull(work.readPreparedTextExport(ready))
+        assertArrayEquals(text.encodeToByteArray(), bytes)
+        bytes.fill(0)
+        assertArrayEquals(text.encodeToByteArray(), work.readPreparedTextExport(ready))
         assertEquals("0", f.sql.scalar("SELECT COUNT(*) FROM ExportSnapshot"))
         assertEquals("0", f.sql.scalar("SELECT COUNT(*) FROM Publication"))
 
@@ -559,11 +563,35 @@ class RoomOcrIndexIntegrationTest {
         val successor = work.requestRerun(status, status.configuration)
         assertEquals(SavedOcrWork.Outcome.PUBLISHED, work.execute(successor) { _, _, handoff -> handoff.retain(preparedText("")) })
         assertNull(work.prepareTextExport(observed))
+        assertArrayEquals(text.encodeToByteArray(), work.readPreparedTextExport(ready))
         val blank = checkNotNull(work.prepareTextExport(checkNotNull(work.readText(document, page, 1)).exportObservation))
         assertEquals(0L, blank.byteCount)
         assertEquals("e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", blank.byteSha256)
         val blankPath = f.sql.scalar("SELECT finalPath FROM FileTransaction WHERE kind='OCR_TEXT' AND state='COMMITTED' AND expectedByteCount=0")
         assertPrivateOcrFile(f.sql, blankPath, byteArrayOf())
+        assertArrayEquals(byteArrayOf(), work.readPreparedTextExport(blank))
+    }
+
+    @Test fun preparedOcrTextReadbackRefusesForeignHandlesAndChangedPrivateProof() = withOcrAttempts(publicStore = true) { f ->
+        val work = f.ocrPort()
+        val text = "Synthetic text"
+        f.results.publish(f.request, f.start(), OcrText(text))
+        val observed = checkNotNull(work.readText(DocumentId(DOCUMENT), PageId(PAGE), 1)).exportObservation
+        val ready = checkNotNull(work.prepareTextExport(observed))
+        PrivateImportStore.open(f.storeContext(), SourceInput { error("Unexpected provider access") },
+            SourceInspector { _, _ -> error("Unexpected decode") }).use { other ->
+            assertNull(other.savedOcr.readPreparedTextExport(ready))
+        }
+        f.sql.execSQL("UPDATE FileTransaction SET expectedByteCount=0 WHERE kind='OCR_TEXT'")
+        val drift = runCatching { work.readPreparedTextExport(ready) }.exceptionOrNull() as? RepositoryFailure
+        assertEquals(OperationErrorCode.INTEGRITY_FAILED, drift?.error?.code)
+        f.sql.execSQL("UPDATE FileTransaction SET expectedByteCount=? WHERE kind='OCR_TEXT'", arrayOf(text.length))
+        assertArrayEquals(text.encodeToByteArray(), work.readPreparedTextExport(ready))
+        val relative = f.sql.scalar("SELECT finalPath FROM FileTransaction WHERE kind='OCR_TEXT' AND state='COMMITTED'")
+        val file = checkedPrivateOcrFile(f.sql, relative)
+        file.writeBytes("synthetic text".encodeToByteArray())
+        val changed = runCatching { work.readPreparedTextExport(ready) }.exceptionOrNull() as? RepositoryFailure
+        assertEquals(OperationErrorCode.INTEGRITY_FAILED, changed?.error?.code)
     }
 
     @Test fun ignoredPrivateOcrTextCompletionNeverReturnsReady() =
@@ -592,11 +620,7 @@ class RoomOcrIndexIntegrationTest {
     }
 
     private fun assertPrivateOcrFile(sql: SupportSQLiteDatabase, relative: String, expected: ByteArray) {
-        assertTrue(relative.matches(Regex("ocr-text-exports/[0-9a-f-]{36}/text\\.bin")))
-        val root = File(File(sql.path!!).parentFile!!.parentFile!!, "files/store").canonicalFile
-        val file = File(root, relative)
-        assertEquals(file, file.canonicalFile)
-        assertTrue(file.isFile)
+        val file = checkedPrivateOcrFile(sql, relative)
         assertEquals(expected.size.toLong(), file.length())
         java.io.DataInputStream(file.inputStream()).use { source ->
             val actual = ByteArray(expected.size)
@@ -604,6 +628,15 @@ class RoomOcrIndexIntegrationTest {
             assertEquals(-1, source.read())
             assertArrayEquals(expected, actual)
         }
+    }
+
+    private fun checkedPrivateOcrFile(sql: SupportSQLiteDatabase, relative: String): File {
+        assertTrue(relative.matches(Regex("ocr-text-exports/[0-9a-f-]{36}/text\\.bin")))
+        val root = File(File(sql.path!!).parentFile!!.parentFile!!, "files/store").canonicalFile
+        val file = File(root, relative)
+        assertEquals(file, file.canonicalFile)
+        assertTrue(file.isFile)
+        return file
     }
 
     @Test fun liveOcrStatusSeparatesQueuedRunningAndTerminalFailure() = withOcrAttempts(publicStore = true) { f ->
@@ -1446,6 +1479,7 @@ class RoomOcrIndexIntegrationTest {
         val seedUnqueuedPage: () -> PageId,
         val ocrPort: () -> SavedOcrWork,
         val closeStore: () -> Unit,
+        val storeContext: () -> Context,
     ) {
         suspend fun start(): JobLease {
             assertTrue(attempts.admit(request))
@@ -1614,7 +1648,8 @@ class RoomOcrIndexIntegrationTest {
                     {
                         val additional = seedAdditionalQueuePage(sql, page)
                         additional.pageId to queue.enqueue(additional, configuration, rerun = false)
-                    }, { seedAdditionalQueuePage(sql, page).pageId }, { checkNotNull(store).savedOcr }, { checkNotNull(store).close() }))
+                     }, { seedAdditionalQueuePage(sql, page).pageId }, { checkNotNull(store).savedOcr }, { checkNotNull(store).close() },
+                    { checkNotNull(isolated) }))
             }
         } finally {
             try { store?.close() } finally { database.close() }

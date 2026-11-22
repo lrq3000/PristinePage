@@ -85,6 +85,9 @@ class SavedOcrWork private constructor(store: PrivateImportStore.OcrComposition)
         val byteCount: Long get() = receipt.intent.byteCount
         val byteSha256: String get() = receipt.intent.textSha256
 
+        @JvmSynthetic
+        internal fun receiptFor(owner: SavedOcrWork): RoomOcrTextExport.Receipt? = receipt.takeIf { issuer === owner }
+
         companion object {
             @JvmSynthetic
             internal fun issue(owner: SavedOcrWork, receipt: RoomOcrTextExport.Receipt): PreparedTextExport = PreparedTextExport(owner, receipt)
@@ -190,6 +193,12 @@ class SavedOcrWork private constructor(store: PrivateImportStore.OcrComposition)
         return retained(binding.producer.page.value, "ocr_text_export_failed") {
             textExport.prepare(binding)?.let { PreparedTextExport.issue(this, it) }
         }
+    }
+
+    /** A detached private read, not permission to write an external destination. */
+    suspend fun readPreparedTextExport(prepared: PreparedTextExport): ByteArray? {
+        val receipt = prepared.receiptFor(this) ?: return null
+        return retained(null, "ocr_text_export_read_failed") { textExport.read(receipt) }
     }
 
     /** Metadata only: observing a live page's status does not load recognition text, grant a job lease or touch its original. */

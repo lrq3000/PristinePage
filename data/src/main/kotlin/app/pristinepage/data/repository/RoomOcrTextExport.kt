@@ -8,6 +8,10 @@ import app.pristinepage.data.model.OperationError
 import app.pristinepage.data.model.OperationErrorCode
 import app.pristinepage.data.model.RepositoryFailure
 import app.pristinepage.data.model.TransactionId
+import java.io.DataInputStream
+import java.io.EOFException
+import java.nio.file.Files
+import java.nio.file.LinkOption.NOFOLLOW_LINKS
 import java.util.UUID
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.currentCoroutineContext
@@ -73,6 +77,41 @@ internal class RoomOcrTextExport(
             metadata.transaction { advance(attempt, Phase.MOVED, Phase.COMMITTED, seal, seal, active) }
             active()
             Receipt(attempt.intent, seal)
+        }
+    }
+
+    /** A ready receipt freezes an export, not a pointer to the current result. Check the exact file and journal, never re-run OCR. */
+    suspend fun read(receipt: Receipt): ByteArray = withContext(Dispatchers.IO) {
+        val attempt = Attempt(receipt.intent)
+        val seal = receipt.sealSha256
+        store.owners.withOrdinaryDerivedLane(attempt.intent.producer) {
+            val context = currentCoroutineContext()
+            val active = { context.ensureActive() }
+            fun proveJournal() = metadata.transaction { verify(attempt, Phase.COMMITTED, seal, active) }
+            proveJournal()
+            val bytes = ByteArray(attempt.intent.byteCount.toInt())
+            try {
+                val inspected = files.inspectBoundFinal(attempt.tx, seal, attempt.target, attempt.intent.byteCount, active,
+                    authenticate = { hash, length, metadata ->
+                        if (hash != attempt.intent.textSha256 || length != attempt.intent.byteCount ||
+                            !metadata.contentEquals(attempt.payload)) invalid()
+                    },
+                    readback = { file, _ ->
+                        DataInputStream(Files.newInputStream(file.toPath(), NOFOLLOW_LINKS)).use { input ->
+                            input.readFully(bytes)
+                            active()
+                            if (input.read() != -1 || ExportAssemblyInput.digest(bytes) != attempt.intent.textSha256) invalid()
+                        }
+                    },
+                )
+                if (inspected == null) invalid()
+            } catch (_: IllegalArgumentException) {
+                invalid()
+            } catch (_: EOFException) {
+                invalid()
+            }
+            proveJournal()
+            bytes
         }
     }
 
