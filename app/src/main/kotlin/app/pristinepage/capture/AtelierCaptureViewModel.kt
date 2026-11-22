@@ -178,7 +178,7 @@ internal class AtelierCaptureViewModel(context: Context, private val graph: susp
             val pages = snapshot.pages.map { api.load(snapshot, it.pageId) }
             val saved = api.save(snapshot, pages, app.renderer)
             current.value.editor?.close()
-            current.value = AtelierCaptureState(saved = saved)
+            current.value = AtelierCaptureState(saved = saved.document)
         }
     }
 

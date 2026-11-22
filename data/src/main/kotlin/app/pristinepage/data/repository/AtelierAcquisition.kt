@@ -4,6 +4,7 @@ import app.pristinepage.core.pipeline.Recipe
 import app.pristinepage.core.pipeline.RenderCoordinator
 import app.pristinepage.data.db.AtelierDraftDao
 import app.pristinepage.data.model.*
+import java.util.Collections
 
 data class AtelierDraftView(
     val id: String,
@@ -15,6 +16,11 @@ data class AtelierDraftView(
     val pending: ImportSessionId?,
     val pages: List<DocumentPage>,
 )
+
+/** A post-commit hint, not a live membership or recipe lease. Append returns destination IDs, not staging IDs. */
+class AtelierSavedPages internal constructor(val document: DocumentId, pageIds: List<PageId>) {
+    val pageIds: List<PageId> = Collections.unmodifiableList(pageIds.toList())
+}
 
 /** A draft-scoped port: the application receives opaque identities, never Room, private filenames or a way around the source renderer. */
 class AtelierAcquisition internal constructor(
@@ -46,9 +52,10 @@ class AtelierAcquisition internal constructor(
     suspend fun load(view: AtelierDraftView, page: PageId): EditablePage = pages.loadForDraft(view.id, view.generation, page)
     suspend fun checkpoint(view: AtelierDraftView, page: PageId, expectedRevision: Long, recipe: Recipe, renderer: RenderCoordinator): SaveRecipeResult =
         documents.checkpointDraftRecipe(view.id, view.generation, page, expectedRevision, recipe, renderer)
-    suspend fun save(view: AtelierDraftView, reviewed: List<EditablePage>, renderer: RenderCoordinator): DocumentId =
+    suspend fun save(view: AtelierDraftView, reviewed: List<EditablePage>, renderer: RenderCoordinator): AtelierSavedPages =
         documents.publishAtelierDraft(rows, view.id, view.generation,
-            reviewed.map { AtelierPageWitness(it.pageId, it.recipeRevision, it.recipeHash) }, renderer).document
+            reviewed.map { AtelierPageWitness(it.pageId, it.recipeRevision, it.recipeHash) }, renderer)
+            .let { AtelierSavedPages(it.document, it.saved) }
 
     private fun missing(): Nothing = throw RepositoryFailure(OperationError(OperationErrorCode.SESSION_EXPIRED, false, "draft_unavailable", null))
 }
