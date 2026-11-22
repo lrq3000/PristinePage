@@ -53,6 +53,11 @@ internal class OcrResultRow(
 internal class OcrResultFtsRow(val indexedText: String)
 
 internal data class OcrMatchRow(val documentId: String, val pageId: String)
+internal class OcrVerbatimRow(val recognizedUtf8: ByteArray)
+
+private const val OCR_TEXT_STORAGE_BOUNDS =
+    "(typeof(indexedText)='text' AND length(CAST(indexedText AS BLOB))<=786432 AND instr(indexedText,char(0))=0) AND " +
+    "(verbatimText IS NULL OR (typeof(verbatimText)='text' AND length(CAST(verbatimText AS BLOB))<=393216 AND instr(verbatimText,char(0))=0))"
 
 @Dao
 internal abstract class OcrResultDao {
@@ -90,10 +95,16 @@ internal abstract class OcrResultDao {
     // The UTF-8 byte ceilings conservatively follow the 262,144/131,072 UTF-16-unit writer limits. Return a scalar, never either text field.
     @Query("""SELECT EXISTS (SELECT 1 FROM OcrResult WHERE pageId=:page AND recipeRevision=:revision AND sourcePixelSha256=:sourceSha
         AND engineId=:engine AND engineVersion=:engineVersion AND layout=:layout
-        AND (typeof(indexedText)='text' AND length(CAST(indexedText AS BLOB))<=786432 AND instr(indexedText,char(0))=0)
-        AND (verbatimText IS NULL OR (typeof(verbatimText)='text' AND length(CAST(verbatimText AS BLOB))<=393216
-            AND instr(verbatimText,char(0))=0)))""")
+        AND $OCR_TEXT_STORAGE_BOUNDS)""")
     abstract fun matchesProducerMetadata(page: String, revision: Long, sourceSha: String, engine: String, engineVersion: Int, layout: String): Boolean
+
+    // Admit only the actual result bytes into the CursorWindow; converting it to a String in Room could hide malformed UTF-8.
+    @Query("""SELECT CAST(COALESCE(verbatimText,indexedText) AS BLOB) AS recognizedUtf8 FROM OcrResult
+        WHERE pageId=:page AND recipeRevision=:revision AND sourcePixelSha256=:sourceSha
+          AND engineId=:engine AND engineVersion=:engineVersion AND layout=:layout
+          AND $OCR_TEXT_STORAGE_BOUNDS
+          AND (verbatimText IS NOT NULL OR length(CAST(indexedText AS BLOB))<=393216)""")
+    abstract fun selectVerbatim(page: String, revision: Long, sourceSha: String, engine: String, engineVersion: Int, layout: String): OcrVerbatimRow?
 
     fun matchPages(terms: OcrSearchTerms, afterPageId: PageId?, limit: Int): List<OcrMatchRow> =
         selectMatches(terms.expression, afterPageId?.value, limit)

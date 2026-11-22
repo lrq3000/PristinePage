@@ -461,6 +461,37 @@ class RoomOcrIndexIntegrationTest {
         assertNull(f.search.find("領収書", rejected.nextAfter, limit = 1).nextAfter)
     }
 
+    @Test fun guardedVerbatimReadReturnsTheActualProducerAndRefusesAnotherAlbumOrCorruptText() = withOcrAttempts { f ->
+        val original = "  École 東京都の領収書です\n"
+        val page = PageId(PAGE)
+        val document = DocumentId(DOCUMENT)
+        assertNull(f.search.readText(document, page))
+        f.results.publish(f.request, f.start(), OcrText(original))
+        val current = checkNotNull(f.search.readText(document, page))
+        assertEquals(original, current.text.value)
+        assertEquals(f.request.binding.configuration, current.configuration)
+        assertFalse(current.previousGeneration)
+        assertNull(f.search.readText(DocumentId(UUID.randomUUID().toString()), page))
+        val successorConfig = f.request.binding.configuration.copy(layout = OcrLayout.SPARSE_TEXT)
+        f.queueWithConfig(successorConfig)
+        val retained = checkNotNull(f.search.readText(document, page))
+        assertTrue(retained.previousGeneration)
+        assertEquals(original, retained.text.value)
+        assertEquals(f.request.binding.configuration, retained.configuration)
+        f.sql.execSQL("UPDATE OcrResult SET verbatimText=CAST(X'61FF62' AS TEXT)")
+        assertNull(f.search.readText(document, page))
+        f.sql.execSQL("UPDATE OcrResult SET verbatimText=CAST(X'610062' AS TEXT)")
+        assertNull(f.search.readText(document, page))
+    }
+
+    @Test fun guardedVerbatimReadDistinguishesSuccessfulBlankFromAbsent() = withOcrAttempts { f ->
+        val page = PageId(PAGE)
+        val document = DocumentId(DOCUMENT)
+        assertNull(f.search.readText(document, page))
+        f.results.publish(f.request, f.start(), OcrText(""))
+        assertEquals("", f.search.readText(document, page)?.text?.value)
+    }
+
     @Test fun noTextHitCanOpenAfterTheSavedRevisionChangesOrItsProjectionIsUnsupported() = withOcrAttempts { f ->
         val lease = f.start()
         f.results.publish(f.request, lease, OcrText("Receipt only for revision one"))
@@ -1063,6 +1094,7 @@ class RoomOcrIndexIntegrationTest {
         val results: RoomOcrResults,
         val matches: (String) -> List<String>,
         val queueAgain: suspend () -> JobId,
+        val queueWithConfig: suspend (OcrConfiguration) -> JobId,
         val search: RoomOcrSearch,
         val dispatch: (OperationOwnerProof) -> RoomOcrDispatch,
         val execution: () -> RoomOcrExecution,
@@ -1122,7 +1154,7 @@ class RoomOcrIndexIntegrationTest {
                 test(AttemptFixture(sql, RoomOcrAttempts(database, liveness, leaseClock = clock::get),
                     RoomOcrAttempts.Request(id, stored.intent), owners, clock, RoomOcrResults(database, liveness, leaseClock = clock::get),
                     { query -> database.ocrResults().matchPages(checkNotNull(OcrSearchTerms.create(query)), null, 2).map { it.pageId } },
-                    { queue.enqueue(page, configuration, rerun = true) }, RoomOcrSearch(database),
+                     { queue.enqueue(page, configuration, rerun = true) }, { settings -> queue.enqueue(page, settings, rerun = true) }, RoomOcrSearch(database),
                     { proof -> RoomOcrDispatch(database, liveness, proof, leaseClock = clock::get) },
                     { RoomOcrExecution(database, FileOperationOwners(executionRoot), leaseClock = clock::get) },
                     {

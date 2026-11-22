@@ -1,5 +1,6 @@
 package app.pristinepage.data.repository
 
+import app.pristinepage.core.ocr.OcrText
 import app.pristinepage.data.db.PristineDatabase
 import app.pristinepage.data.model.DocumentId
 import app.pristinepage.data.model.JobId
@@ -8,6 +9,7 @@ import app.pristinepage.data.model.OperationErrorCode
 import app.pristinepage.data.model.PageId
 import app.pristinepage.data.model.RepositoryFailure
 import app.pristinepage.data.model.SourceId
+import java.nio.charset.CharacterCodingException
 import java.util.Collections
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers
@@ -36,7 +38,7 @@ internal class RoomOcrSearch(
             val candidates = results.matchPages(terms, after, limit)
             val hits = candidates.mapNotNull { row ->
                 active.ensureActive()
-                checkedHit(pageId(row.pageId))?.takeIf { it.document.value == row.documentId }
+                checkedProducer(pageId(row.pageId))?.hit?.takeIf { it.document.value == row.documentId }
             }
             // Progress follows the SQL candidates, not the accepted matches. A rejected candidate cannot starve later IDs.
             val next = if (candidates.size == limit) pageId(candidates.last().pageId) else null
@@ -49,20 +51,37 @@ internal class RoomOcrSearch(
         val active = coroutineContext
         metadata.transaction {
             active.ensureActive()
-            val fresh = checkedHit(hit.page)
+            val fresh = checkedProducer(hit.page)?.hit
             active.ensureActive()
             fresh == hit
         }
     }
 
-    private fun checkedHit(page: PageId): Hit? = try {
+    suspend fun readText(document: DocumentId, page: PageId): SavedOcrWork.ReadText? = withContext(dispatcher) {
+        val active = coroutineContext
+        metadata.transaction {
+            active.ensureActive()
+            val producing = checkedProducer(page)?.takeIf { it.hit.document == document } ?: return@transaction null
+            val intent = producing.intent
+            val config = intent.configuration
+            val raw = results.selectVerbatim(page.value, intent.input.recipeRevision, intent.input.sourcePixelSha256,
+                config.engineId, config.engineVersion, config.layout.name)?.recognizedUtf8 ?: return@transaction null
+            val text = decodeStoredOcrText(raw) ?: return@transaction null
+            active.ensureActive()
+            SavedOcrWork.ReadText(text, config, producing.previousGeneration)
+        }
+    }
+
+    private class Producer(val hit: Hit, val intent: OcrJobInput, val previousGeneration: Boolean)
+
+    private fun checkedProducer(page: PageId): Producer? = try {
         verifyProducer(page)
     } catch (failure: RepositoryFailure) {
         if (failure.error.code !in setOf(OperationErrorCode.INTEGRITY_FAILED, OperationErrorCode.REVISION_CONFLICT)) throw failure
         null
     }
 
-    private fun verifyProducer(page: PageId): Hit? {
+    private fun verifyProducer(page: PageId): Producer? {
         val current = work.readStoredInTransaction(page) ?: return null
         val distinctProducer = current.resultJobId ?: return null
         if (current.projectionVersion != RoomOcrResults.PROJECTION_VERSION) return null
@@ -78,11 +97,20 @@ internal class RoomOcrSearch(
         if (!results.matchesProducerMetadata(page.value, intent.input.recipeRevision, intent.input.sourcePixelSha256,
                 config.engineId, config.engineVersion, config.layout.name)
         ) return null
-        return Hit(intent.documentId, page, intent.sourceId, intent.input.recipeRevision, distinctProducer)
+        return Producer(Hit(intent.documentId, page, intent.sourceId, intent.input.recipeRevision, distinctProducer), intent, !sameJob)
     }
 
     private fun pageId(value: String): PageId = try { PageId(value) }
     catch (_: IllegalArgumentException) {
         throw RepositoryFailure(OperationError(OperationErrorCode.INTEGRITY_FAILED, false, "ocr_candidate_identity_invalid", null))
     }
+}
+
+/** Internal second admission after the raw SQL byte bound. Never replace invalid sequences or normalize the displayed text. */
+internal fun decodeStoredOcrText(raw: ByteArray): OcrText? = try {
+    OcrText(raw.decodeToString(throwOnInvalidSequence = true))
+} catch (_: CharacterCodingException) {
+    null
+} catch (_: IllegalArgumentException) {
+    null
 }

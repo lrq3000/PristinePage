@@ -55,6 +55,15 @@ def match():
     return clause.replace("$HIDDEN_ATELIER_DOCUMENT", hidden)
 
 
+def result_query(method):
+    src = DB / "OcrResultDao.kt"
+    pattern = rf'@Query\("""((?:(?!""").)*)"""\)\s*abstract fun {method}\('
+    clause, = literals(src, pattern)
+    fragments = literals(src, r'private const val OCR_TEXT_STORAGE_BOUNDS =\s*"([^"\n]*)"\s*\+\s*"([^"\n]*)"')
+    bounds = "".join(fragments[0])
+    return clause.replace("$OCR_TEXT_STORAGE_BOUNDS", bounds)
+
+
 class OcrIndexSqlTest(unittest.TestCase):
     def run_sql(self, statements):
         cli = shutil.which("sqlite3")
@@ -84,7 +93,7 @@ class OcrIndexSqlTest(unittest.TestCase):
         ]))
 
     def test_producer_metadata_guard_rejects_malformed_result_storage(self):
-        sql, = literals(DB / "OcrResultDao.kt", r'@Query\("""((?:(?!""").)*)"""\)\s*abstract fun matchesProducerMetadata\(')
+        sql = result_query("matchesProducerMetadata")
         for name, value in (
             ("page", f"'{PAGE}'"), ("revision", "1"), ("sourceSha", f"'{'b' * 64}'"),
             ("engineVersion", "1"), ("engine", "'fixture'"), ("layout", "'AUTOMATIC'"),
@@ -103,6 +112,29 @@ class OcrIndexSqlTest(unittest.TestCase):
                     "PRAGMA foreign_keys=ON", *create_tables(3), *sync_triggers(), SEED, INSERT_TEXT, sql,
                     "BEGIN", f"UPDATE OcrResult SET {field}={bad}", sql, "ROLLBACK", sql,
                 ]))
+
+    def test_guarded_verbatim_projection_uses_exact_bytes_without_materializing_corrupt_text(self):
+        sql = result_query("selectVerbatim")
+        for token, value in (
+            (":page", f"'{PAGE}'"), (":revision", "1"), (":sourceSha", f"'{'b' * 64}'"),
+            (":engineVersion", "1"), (":engine", "'fixture'"), (":layout", "'AUTOMATIC'"),
+        ):
+            sql = sql.replace(token, value)
+        query = f"SELECT hex(recognizedUtf8) FROM ({sql})"
+        mark = "SELECT 'boundary'"
+        original = "  École 東京都の領収書です" + "\n"
+        hextext = original.encode("utf-8").hex().upper()
+        self.assertEqual([hextext, "", "boundary", "393216", "boundary"], self.run_sql([
+            *create_tables(3), *sync_triggers(), SEED, INSERT_TEXT,
+            f"UPDATE OcrResult SET verbatimText=CAST(X'{hextext}' AS TEXT)", query,
+            "UPDATE OcrResult SET verbatimText=NULL,indexedText=''", query, mark,
+            "UPDATE OcrResult SET verbatimText=CAST(X'610062' AS TEXT)", query,
+            "UPDATE OcrResult SET verbatimText=CAST('not text storage' AS BLOB)", query,
+            "UPDATE OcrResult SET verbatimText=NULL, indexedText=replace(hex(zeroblob(131072)), '00', '界')",
+            f"SELECT length(recognizedUtf8) FROM ({sql})",
+            "UPDATE OcrResult SET indexedText=replace(hex(zeroblob(131073)), '00', '界')", query,
+            "UPDATE OcrResult SET indexedText='old',recipeRevision=2", query, mark,
+        ]))
 
     def test_populated_v2_upgrade_preserves_recipe_and_has_no_invented_text(self):
         migration = DB / "OcrIndexMigration.kt"

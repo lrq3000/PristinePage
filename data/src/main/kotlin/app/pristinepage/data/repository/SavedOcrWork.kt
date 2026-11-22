@@ -56,6 +56,9 @@ class SavedOcrWork private constructor(store: PrivateImportStore.OcrComposition)
 
     data class SearchPage(val hits: List<Hit>, val nextAfter: Continuation?)
 
+    /** Private on-device display/export value. Keep it out of store diagnostics and scheduler/search payloads. */
+    class ReadText internal constructor(val text: OcrText, val configuration: OcrConfiguration, val previousGeneration: Boolean)
+
     /** Own every budgeted resource needed to recognize the supplied saved page and exact installed configuration. Close must finish all use. Preparation and closure may not perform recognition. */
     interface Prepared : AutoCloseable {
         suspend fun recognize(): OcrText
@@ -113,6 +116,9 @@ class SavedOcrWork private constructor(store: PrivateImportStore.OcrComposition)
         val binding = hit.bindingFor(this) ?: return false
         return retained(hit.page.value, "ocr_store_read_failed") { search.canOpen(binding) }
     }
+
+    suspend fun readText(document: DocumentId, page: PageId): ReadText? =
+        retained(page.value, "ocr_store_read_failed") { search.readText(document, page) }
 
     private fun Continuation?.position(scan: Scan): PageId? =
         this?.let { cursor -> cursor.positionFor(this@SavedOcrWork, scan) ?: invalid("ocr_invalid_continuation") }
