@@ -79,6 +79,10 @@ Continuation `OCR-JOB-03`, input `abe9b06`, same worktree and U-06 claim. First 
 
 The pure job-input sub-slice has an independent 289-byte golden, missing-type RED and 779 passing data JVM cases, two for this contract. Matching the job envelope grants no lease and does not validate storage before materialization. Next: record and fence the current per-page generation, handle repeated and interrupted attempts with the existing registry, and commit the latest result/index using the transactional lease fence. Do not add application scheduling or reveal OCR matches until those guards have consumers and independent persistence review.
 
+Continuation of `OCR-JOB-03` on `0445d67`: prepare the result-side transaction with `RoomOcrJobCompletion.kt` and a focused host test. It consumes bounded current-job read and liveness ports and uses `JobLeaseTransactions.completeGuarded` to commit a current result with the exact same lease. No second owner, scheduler, raw-DAO export, Android action or test fixtures entering app search. The production current-generation store and its WorkManager/Home consumers remain separate.
+
+[Completion evidence](../../validation/storage/ocr-job-completion-receipt.md): verified internal callback contract, a reproduced no-op write refusal, post-CAS rollback, 784 passing data JVM tests and 150 host storage tests. The actual Room current-generation/read/write ports, WorkManager lifecycle, multilingual configuration identity and Home consumer are still open.
+
 ### Carnet release boundary — T-11 / CARNET-SHARE-LEASE-01
 
 Input is the audited public copy of the 16 Carnet corrective commits, through the JPEG/ZIP follow-up. Scope: guard provider display-name and size metadata by the same durable lease as file reads, verify the provider boundary, and retain live-share, Save as and frozen-name semantics. Post-revocation readability of already opened descriptors, external copies, and native acceptance are separate. The [operational plan](OPERATIONAL_PLAN.md) governs integration, public branches and the v0.3.0 bump.
