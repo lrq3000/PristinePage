@@ -105,18 +105,7 @@ internal class RoomOcrAttempts(
         }
         val job = saved.job
         if (!pins.hasExactJobPin(job.jobId, saved.intent.sourceId.value)) invalid(request)
-        val noLease = job.leaseOwner == null && job.leaseUntil == null
-        val hasError = job.errorCode != null && OcrError.entries.any { it.name == job.errorCode }
-        val valid = when (job.state) {
-            "PENDING" -> noLease && job.attempt == 0L && job.errorCode == null
-            "ADMITTED" -> noLease && job.attempt < MAX_STARTS && (if (job.attempt == 0L) job.errorCode == null else hasError)
-            "RUNNING" -> job.leaseOwner != null && job.leaseUntil != null && job.attempt > 0L && job.errorCode == null
-            "FAILED" -> noLease && job.attempt == MAX_STARTS && hasError
-            "SUCCEEDED" -> noLease && job.attempt > 0L && job.errorCode == null
-            "CANCELED" -> noLease && (job.errorCode == null || hasError)
-            else -> false
-        }
-        if (!valid || job.leaseGeneration != job.attempt) invalid(request)
+        if (!hasConsistentStoredState(job)) invalid(request)
         return saved
     }
 
@@ -156,7 +145,23 @@ internal class RoomOcrAttempts(
     private fun refuse(request: Request, code: OperationErrorCode, key: String, retryable: Boolean = false): Nothing =
         throw RepositoryFailure(OperationError(code, retryable, key, request.jobId.value))
 
-    private companion object {
-        const val MAX_STARTS = 3L
+    companion object {
+        private const val MAX_STARTS = 3L
+
+        /** Applies only to a raw-admitted, binding-verified row. Shared by writers and discovery; it grants neither a lease nor proof that an owner ended. */
+        fun hasConsistentStoredState(job: JobRow): Boolean {
+            if (job.leaseGeneration != job.attempt) return false
+            val noLease = job.leaseOwner == null && job.leaseUntil == null
+            val hasError = job.errorCode != null && OcrError.entries.any { it.name == job.errorCode }
+            return when (job.state) {
+                "PENDING" -> noLease && job.attempt == 0L && job.errorCode == null
+                "ADMITTED" -> noLease && job.attempt < MAX_STARTS && (if (job.attempt == 0L) job.errorCode == null else hasError)
+                "RUNNING" -> job.leaseOwner != null && job.leaseUntil != null && job.attempt > 0L && job.errorCode == null
+                "FAILED" -> noLease && job.attempt == MAX_STARTS && hasError
+                "SUCCEEDED" -> noLease && job.attempt > 0L && job.errorCode == null
+                "CANCELED" -> noLease && (job.errorCode == null || hasError)
+                else -> false
+            }
+        }
     }
 }

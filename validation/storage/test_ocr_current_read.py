@@ -4,6 +4,7 @@ from pathlib import Path
 import re
 import sqlite3
 import unittest
+from uuid import UUID
 
 import test_ocr_index as fixture
 import test_ocr_work_migration as work
@@ -27,6 +28,10 @@ class OcrCurrentReadTest(unittest.TestCase):
     def scalar(self, method, **args):
         pattern = rf'@Query\("""((?:(?!""").)*)"""\)\s*abstract fun {method}\('
         sql, = re.findall(pattern, SRC.read_text(encoding="utf-8"), re.S)
+        hidden = r'HIDDEN_ATELIER_DOCUMENT = """(.*?)"""'
+        if "$HIDDEN_ATELIER_DOCUMENT" in sql:
+            clause, = fixture.literals(fixture.DB / "AtelierDraftDao.kt", hidden)
+            sql = sql.replace("$HIDDEN_ATELIER_DOCUMENT", clause)
         return self.db.execute(sql, args).fetchall()
 
     def guard(self, page=fixture.PAGE):
@@ -71,3 +76,52 @@ class OcrCurrentReadTest(unittest.TestCase):
                 self.assertEqual([(0,)], self.live())
                 self.db.execute(f"UPDATE {table} SET {field}=?", (original,))
         self.assertEqual([(1,)], self.live())
+
+    def test_backfill_discovery_is_keyset_bounded_and_excludes_hidden_or_removed_pages(self):
+        later = "bbbbbbbb-bbbb-4bbb-8bbb-000000000001"
+        for ordinal, page in enumerate(("0" * 36, later), 1):
+            self.db.execute("INSERT INTO Page VALUES (?,?,?,1,'ACTIVE',?,NULL,0)", (page, fixture.DOC, fixture.SOURCE, ordinal))
+            self.db.execute("INSERT INTO RecipeRevision VALUES (?,1,?,1,X'010203',?,NULL,0)", (page, fixture.SOURCE, "c" * 64))
+
+        def discover(after, limit):
+            return self.scalar("scanSavedPages", after=after, limit=limit)
+
+        self.assertEqual([(fixture.DOC, fixture.PAGE)], discover(None, 1))
+        self.assertEqual([(fixture.DOC, later)], discover(fixture.PAGE, 1))
+        self.assertEqual([], discover(later, 1))
+        for oversize in (0, -1, 51):
+            self.assertEqual([], discover(None, oversize))
+        self.db.execute("UPDATE Page SET state='REMOVED',ordinal=NULL,removedAt=10 WHERE pageId=?", (fixture.PAGE,))
+        self.assertEqual([(fixture.DOC, later)], discover(None, 5))
+        self.db.execute("""INSERT INTO AtelierDraft (draftId,stagingDocumentId,state,generation,step,createdAt)
+            VALUES (?,?,'EDITING',1,1,0)""", (fixture.DRAFT, fixture.DOC))
+        self.assertEqual([], discover(None, 5))
+
+    def test_backfill_continuation_seeks_near_end_without_growing_with_earlier_albums(self):
+        def last_page_work(total):
+            for number in range(previous[0] + 1, total + 1):
+                page, document = str(UUID(int=number)), str(UUID(int=10_000 + number))
+                self.db.execute("INSERT INTO Document VALUES (?,'Synthetic',1,'ACTIVE',0,0,NULL)", (document,))
+                self.db.execute("INSERT INTO Page VALUES (?,?,?,1,'ACTIVE',0,NULL,0)", (page, document, fixture.SOURCE))
+                self.db.execute("INSERT INTO RecipeRevision VALUES (?,1,?,1,X'010203',?,NULL,0)", (page, fixture.SOURCE, "c" * 64))
+            previous[0] = total
+            steps = 0
+
+            def count():
+                nonlocal steps
+                steps += 1
+                return 0
+
+            self.db.set_progress_handler(count, 1)
+            try:
+                hit = self.scalar("scanSavedPages", after=str(UUID(int=total - 1)), limit=1)
+            finally:
+                self.db.set_progress_handler(None, 0)
+            self.assertEqual([(str(UUID(int=10_000 + total)), str(UUID(int=total)))], hit)
+            return steps
+
+        previous = [0]
+        near_end_of_small_corpus = last_page_work(10)
+        near_end_of_large_corpus = last_page_work(1000)
+        self.assertLessEqual(near_end_of_large_corpus, near_end_of_small_corpus * 3 + 100,
+                             "Continuation did work proportional to albums preceding its cursor")

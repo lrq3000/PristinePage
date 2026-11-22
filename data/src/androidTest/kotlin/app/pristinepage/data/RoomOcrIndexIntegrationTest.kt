@@ -37,6 +37,7 @@ import app.pristinepage.data.repository.LeaseOwnerLiveness
 import app.pristinepage.data.repository.LeaseOwnerState
 import app.pristinepage.data.repository.RoomMetadataAccess
 import app.pristinepage.data.repository.RoomOcrAttempts
+import app.pristinepage.data.repository.RoomOcrBackfill
 import app.pristinepage.data.repository.RoomOcrCurrentWork
 import app.pristinepage.data.repository.RoomOcrQueue
 import app.pristinepage.data.repository.RoomOcrResults
@@ -491,6 +492,79 @@ class RoomOcrIndexIntegrationTest {
         assertFalse(f.search.canOpen(hit))
         f.sql.execSQL("UPDATE OcrResult SET verbatimText=NULL")
         assertTrue(f.search.canOpen(hit))
+    }
+
+    @Test fun backfillQueuesMissingAndChangedSavedRevisionsButNotNewDefaults() = withBackfill { sql, backfill ->
+        assertTrue(backfill.reconcile(configuration = null, after = null, limit = 1).targets.isEmpty())
+        assertEquals("0", sql.scalar("SELECT COUNT(*) FROM Job"))
+        val first = backfill.reconcile(queueConfig(OcrLayout.AUTOMATIC), after = null, limit = 1)
+        val original = first.targets.single()
+        assertEquals(PageId(PAGE), original.page)
+        assertEquals(PageId(PAGE), first.nextAfter)
+        assertNull(backfill.reconcile(null, first.nextAfter, limit = 1).nextAfter)
+        assertEquals(original, backfill.reconcile(null, null, 1).targets.single())
+        assertEquals(original, backfill.reconcile(queueConfig(OcrLayout.SPARSE_TEXT), null, 1).targets.single())
+        assertEquals("1", sql.scalar("SELECT COUNT(*) FROM Job"))
+        assertEquals("0", sql.scalar("SELECT attempt FROM Job"))
+
+        sql.execSQL("""INSERT INTO RecipeRevision SELECT pageId,2,sourceId,recipeSchemaVersion,canonicalRecipe,
+            recipeSha256,1,createdAt FROM RecipeRevision WHERE pageId=? AND recipeRevision=1""", arrayOf(PAGE))
+        sql.execSQL("UPDATE Page SET currentRecipeRevision=2 WHERE pageId=?", arrayOf(PAGE))
+        assertTrue(backfill.reconcile(null, null, 1).targets.isEmpty())
+        val revised = backfill.reconcile(queueConfig(OcrLayout.SPARSE_TEXT), null, 1).targets.single()
+        assertEquals(original.page, revised.page)
+        assertNotEquals(original.job, revised.job)
+        assertEquals("2", sql.scalar("SELECT generation FROM OcrPageWork"))
+        assertEquals("0", sql.scalar("SELECT SUM(attempt) FROM Job"))
+        assertEquals("0", sql.scalar("SELECT COUNT(*) FROM OcrResult"))
+    }
+
+    @Test fun backfillDoesNotSignalTerminalWorkOrExposedStagingRows() = withBackfill { sql, backfill ->
+        sql.execSQL("""INSERT INTO AtelierDraft (draftId,stagingDocumentId,state,generation,step,createdAt)
+            VALUES (?,?,'EDITING',1,1,0)""", arrayOf(DRAFT, DOCUMENT))
+        assertTrue(backfill.reconcile(queueConfig(OcrLayout.AUTOMATIC), null, 5).targets.isEmpty())
+        assertEquals("0", sql.scalar("SELECT COUNT(*) FROM Job"))
+        sql.execSQL("DELETE FROM AtelierDraft WHERE draftId=?", arrayOf(DRAFT))
+        val current = backfill.reconcile(queueConfig(OcrLayout.AUTOMATIC), null, 5).targets.single()
+        sql.execSQL("""UPDATE Job SET state='FAILED',attempt=3,leaseGeneration=3,errorCode='ENGINE_FAILED' WHERE jobId=?""",
+            arrayOf(current.job.value))
+        assertTrue(backfill.reconcile(queueConfig(OcrLayout.SPARSE_TEXT), null, 5).targets.isEmpty())
+        assertEquals("FAILED:3:ENGINE_FAILED", sql.scalar("SELECT state||':'||attempt||':'||errorCode FROM Job"))
+    }
+
+    @Test fun malformedCappedAdmissionIsNotSignaledButAThirdRunningAttemptRemainsDiscoverable() = withBackfill { sql, backfill ->
+        val config = queueConfig(OcrLayout.AUTOMATIC)
+        val target = backfill.reconcile(config, null, 1).targets.single()
+        sql.execSQL("""UPDATE Job SET state='ADMITTED',attempt=3,leaseGeneration=3,errorCode='ENGINE_FAILED' WHERE jobId=?""",
+            arrayOf(target.job.value))
+        val refused = backfill.reconcile(config, null, 1)
+        assertTrue(refused.targets.isEmpty())
+        assertEquals(target.page, refused.nextAfter)
+        assertEquals("ADMITTED:3:ENGINE_FAILED", sql.scalar("SELECT state||':'||attempt||':'||errorCode FROM Job"))
+        sql.execSQL("""UPDATE Job SET state='RUNNING',leaseOwner=?,leaseUntil=100,errorCode=NULL WHERE jobId=?""",
+            arrayOf(UUID.randomUUID().toString(), target.job.value))
+        assertEquals(target, backfill.reconcile(null, null, 1).targets.single())
+        assertEquals("RUNNING:3", sql.scalar("SELECT state||':'||attempt FROM Job"))
+    }
+
+    @Test fun invalidDecodedAtelierReceiptAdvancesOnlyTheInternalCursor() = withBackfill { sql, backfill ->
+        val receipt = "atelier-publish-v1\n1\n$DOCUMENT\n$PAGE,0,${"c".repeat(64)},$PAGE"
+        sql.execSQL("""INSERT INTO AtelierDraft (draftId,stagingDocumentId,state,generation,step,createdAt,committedDocumentId,receiptPageIds)
+            VALUES (?,?,'COMMITTED',2,2,0,?,?)""", arrayOf(DRAFT, DOCUMENT, DOCUMENT, receipt))
+        val batch = backfill.reconcile(queueConfig(OcrLayout.AUTOMATIC), null, 1)
+        assertTrue(batch.targets.isEmpty())
+        assertEquals(PageId(PAGE), batch.nextAfter)
+        assertNull(backfill.reconcile(null, batch.nextAfter, 1).nextAfter)
+        assertEquals("0", sql.scalar("SELECT COUNT(*) FROM Job"))
+    }
+
+    private fun withBackfill(test: suspend (SupportSQLiteDatabase, RoomOcrBackfill) -> Unit) {
+        val database = Room.inMemoryDatabaseBuilder(context, PristineDatabase::class.java).build()
+        try {
+            val sql = database.openHelper.writableDatabase
+            seedQueuePage(sql)
+            runBlocking { test(sql, RoomOcrBackfill(database)) }
+        } finally { database.close() }
     }
 
     private data class AttemptFixture(

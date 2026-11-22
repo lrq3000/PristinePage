@@ -5,8 +5,27 @@ import androidx.room.Insert
 import androidx.room.OnConflictStrategy
 import androidx.room.Query
 
+internal data class OcrSavedPageLocator(val documentId: String, val pageId: String)
+
 @Dao
 internal abstract class OcrPageWorkDao {
+    // Keep Page as the outer index seek so a later cursor does not sort or revisit earlier album pages. The row limit bounds returned locators, not the length of a rejected range.
+    @Query("""SELECT Page.documentId,Page.pageId FROM Page
+        WHERE Page.pageId>COALESCE(:after,'')
+          AND (Page.state='ACTIVE' AND Page.removedAt IS NULL AND typeof(Page.ordinal)='integer' AND Page.ordinal BETWEEN 0 AND 99)
+          AND (typeof(Page.pageId)='text' AND length(CAST(Page.pageId AS BLOB))=36
+            AND Page.pageId GLOB '????????-????-????-????-????????????' AND length(replace(Page.pageId,'-',''))=32
+            AND Page.pageId NOT GLOB '*[^0-9a-f-]*')
+          AND EXISTS (SELECT 1 FROM Document WHERE Document.documentId=Page.documentId
+            AND (Document.lifecycle='ACTIVE' AND Document.deletedAt IS NULL AND NOT $HIDDEN_ATELIER_DOCUMENT)
+            AND (typeof(Document.documentId)='text' AND length(CAST(Document.documentId AS BLOB))=36
+              AND Document.documentId GLOB '????????-????-????-????-????????????' AND length(replace(Document.documentId,'-',''))=32
+              AND Document.documentId NOT GLOB '*[^0-9a-f-]*'))
+          AND EXISTS (SELECT 1 FROM Source JOIN SourceBlob ON SourceBlob.sourceBlobId=Source.sourceBlobId
+            WHERE Source.sourceId=Page.sourceId AND Source.state='READY' AND SourceBlob.state='READY')
+        ORDER BY Page.pageId LIMIT CASE WHEN :limit BETWEEN 1 AND 50 THEN :limit ELSE 0 END""")
+    abstract fun scanSavedPages(after: String?, limit: Int): List<OcrSavedPageLocator>
+
     // Keep a corrupt present row distinguishable from absence and check raw fields before any Room narrowing or string materialization.
     @Query("""SELECT CASE WHEN
         (typeof(pageId)='text' AND length(CAST(pageId AS BLOB))=36)
