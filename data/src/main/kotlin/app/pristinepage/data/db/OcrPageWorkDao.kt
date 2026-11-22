@@ -80,6 +80,9 @@ internal abstract class OcrPageWorkDao {
         AND NOT EXISTS (SELECT 1 FROM SourceReference WHERE ownerType='JOB' AND ownerId=:job AND sourceId IS NOT :source)""")
     abstract fun hasExactJobPin(job: String, source: String): Boolean
 
+    @Query("SELECT EXISTS (SELECT 1 FROM SourceReference WHERE ownerType='JOB' AND ownerId=:job)")
+    abstract fun hasAnyJobPin(job: String): Boolean
+
     @Query("""SELECT EXISTS (SELECT 1 FROM Source WHERE sourceId=:source AND typeof(refCount)='integer' AND refCount=:expected)
         AND (SELECT COUNT(*) FROM SourceReference WHERE sourceId=:source)=:expected""")
     abstract fun sourcePinCountMatches(source: String, expected: Long): Boolean

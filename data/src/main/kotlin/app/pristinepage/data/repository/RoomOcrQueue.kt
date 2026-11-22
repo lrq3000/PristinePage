@@ -22,6 +22,13 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.withContext
 
+/** An observed current job, not a lease. The exact job and intent must still match inside enqueue. */
+internal data class OcrRerunBinding(val job: JobId, val intent: OcrJobInput)
+
+/** Recheck the full stored successor, including zero starts and lease, and the observed pin state. Room detaches BLOB arrays on read. */
+internal fun ocrRerunReadbackMatches(expected: JobRow, actual: JobRow, wasPinned: Boolean, isPinned: Boolean): Boolean =
+    wasPinned == isPinned && expected.input.contentEquals(actual.input) && expected == actual.copy(input = expected.input)
+
 /** The caller supplies the effective configuration from its verified asset registry; the queue neither resolves files nor grants an attempt. */
 internal class RoomOcrQueue(
     database: PristineDatabase,
@@ -33,7 +40,7 @@ internal class RoomOcrQueue(
     private val catalog = database.catalog()
     private val current = RoomOcrCurrentWork(database)
 
-    suspend fun enqueue(page: EditablePage, configuration: OcrConfiguration, rerun: Boolean): JobId = withContext(dispatcher) {
+    suspend fun enqueue(page: EditablePage, configuration: OcrConfiguration, rerun: Boolean, observed: OcrRerunBinding? = null): JobId = withContext(dispatcher) {
         val active = coroutineContext
         val id = page.pageId
         try {
@@ -60,6 +67,17 @@ internal class RoomOcrQueue(
                 ) invalid(id)
 
                 val old = current.readStoredInTransaction(id)
+                val predecessorPinned = if (observed != null) {
+                    if (!rerun || old == null || old.job.jobId != observed.job.value ||
+                        old.intent != observed.intent || !current.isSavedInputInTransaction(old.intent)
+                    ) refuse(OperationErrorCode.REVISION_CONFLICT, "ocr_rerun_observation_changed", id)
+                    val pinned = work.hasAnyJobPin(old.job.jobId)
+                    if (!RoomOcrAttempts.hasConsistentStoredState(old.job) ||
+                        (pinned && !work.hasExactJobPin(old.job.jobId, sourceId)) ||
+                        (!pinned && old.job.state in setOf("PENDING", "ADMITTED", "RUNNING"))
+                    ) invalid(id)
+                    pinned
+                } else false
                 if (old != null && !rerun &&
                     old.intent.documentId == base.documentId && old.intent.sourceId == base.sourceId &&
                     old.intent.input == base.input && old.intent.recipeSha256 == base.recipeSha256
@@ -79,8 +97,9 @@ internal class RoomOcrQueue(
                 val payload = intent.encode()
                 val job = JobId(UUID.randomUUID().toString())
                 val now = auditClock()
-                work.insertJob(JobRow(job.value, OcrJobInput.KIND, intent.key, intent.digest, null, null, payload,
-                    "PENDING", 0, null, null, 0, null, null, now, now))
+                val inserted = JobRow(job.value, OcrJobInput.KIND, intent.key, intent.digest, null, null, payload,
+                    "PENDING", 0, null, null, 0, null, null, now, now)
+                work.insertJob(inserted)
                 if (catalog.insertReference(SourceReferenceRow("JOB", job.value, sourceId, now)) == -1L ||
                     !work.hasExactJobPin(job.value, sourceId)
                 ) invalid(id)
@@ -99,6 +118,12 @@ internal class RoomOcrQueue(
                     written.resultJobId != old?.resultJobId || written.projectionVersion != old?.projectionVersion ||
                     !work.hasExactJobPin(job.value, sourceId) || !work.sourcePinCountMatches(sourceId, newCount)
                 ) invalid(id)
+                if (observed != null) {
+                    val pinned = work.hasAnyJobPin(observed.job.value)
+                    if (!ocrRerunReadbackMatches(inserted, written.job, predecessorPinned, pinned) ||
+                        (pinned && !work.hasExactJobPin(observed.job.value, sourceId))
+                    ) invalid(id)
+                }
                 active.ensureActive()
                 job
             }

@@ -24,4 +24,13 @@ class SavedOcrWorkSurfaceTest {
         assertTrue(type.declaredConstructors.all { it.isSynthetic || Modifier.isPrivate(it.modifiers) })
         assertTrue(type.declaredMethods.all { it.isSynthetic || Modifier.isPrivate(it.modifiers) })
     }
+
+    @Test fun statusDoesNotExposeOrAllowJavaConstructionOfRerunBindings() {
+        val type = SavedOcrWork.PageStatus::class.java
+        assertTrue(type.declaredConstructors.all { it.isSynthetic || Modifier.isPrivate(it.modifiers) })
+        assertTrue(type.declaredMethods.none {
+            !it.isSynthetic && !Modifier.isPrivate(it.modifiers) && it.name !in
+                setOf("getPhase", "getAttemptsStarted", "getLastError", "getConfiguration")
+        })
+    }
 }

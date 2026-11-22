@@ -555,6 +555,72 @@ class RoomOcrIndexIntegrationTest {
         assertEquals("", previous.text.value)
     }
 
+    @Test fun explicitOcrRerunConsumesOnlyOneObservedGenerationAndKeepsProducingText() = withOcrAttempts(publicStore = true) { f ->
+        val work = f.ocrPort()
+        val page = PageId(PAGE)
+        val document = DocumentId(DOCUMENT)
+        val prior = "Receipt from the first run"
+        f.results.publish(f.request, f.start(), OcrText(prior))
+        val observed = checkNotNull(work.readStatus(document, page, 1))
+        val effective = observed.configuration.copy(layout = OcrLayout.SPARSE_TEXT)
+        val next = work.requestRerun(observed, effective)
+        assertEquals(page, next.page)
+        assertNotEquals(f.request.jobId, next.job)
+        val retry = checkNotNull(work.readStatus(document, page, 1))
+        assertEquals(SavedOcrWork.PagePhase.QUEUED, retry.phase)
+        assertEquals(0, retry.attemptsStarted)
+        assertEquals(effective, retry.configuration)
+        val retained = checkNotNull(work.readText(document, page, 1))
+        assertTrue(retained.previousGeneration)
+        assertEquals(observed.configuration, retained.configuration)
+        assertEquals(prior, retained.text.value)
+        val replay = runCatching { work.requestRerun(observed, effective) }.exceptionOrNull() as? RepositoryFailure
+        assertEquals(OperationErrorCode.REVISION_CONFLICT, replay?.error?.code)
+        assertEquals("2", f.sql.scalar("SELECT COUNT(*) FROM Job WHERE kind='PAGE_OCR'"))
+        assertEquals("2", f.sql.scalar("SELECT COUNT(*) FROM SourceReference WHERE ownerType='JOB'"))
+    }
+
+    @Test fun explicitOcrRerunCannotUseAnObservationAfterTheAcceptedRecipeChanges() = withOcrAttempts(publicStore = true) { f ->
+        val work = f.ocrPort()
+        val page = PageId(PAGE)
+        val document = DocumentId(DOCUMENT)
+        val observed = checkNotNull(work.readStatus(document, page, 1))
+        f.sql.execSQL("""INSERT INTO RecipeRevision SELECT pageId,2,sourceId,recipeSchemaVersion,canonicalRecipe,
+            recipeSha256,1,createdAt FROM RecipeRevision WHERE pageId=? AND recipeRevision=1""", arrayOf(PAGE))
+        f.sql.execSQL("UPDATE Page SET currentRecipeRevision=2 WHERE pageId=?", arrayOf(PAGE))
+        val stale = runCatching { work.requestRerun(observed, observed.configuration) }.exceptionOrNull() as? RepositoryFailure
+        assertEquals(OperationErrorCode.REVISION_CONFLICT, stale?.error?.code)
+        assertEquals("1", f.sql.scalar("SELECT COUNT(*) FROM Job WHERE kind='PAGE_OCR'"))
+        assertEquals("1", f.sql.scalar("SELECT COUNT(*) FROM SourceReference WHERE ownerType='JOB'"))
+    }
+
+    @Test fun explicitOcrRerunRollsBackWhenALateWriteMovesTheRunningPredecessorsPin() = withOcrAttempts(publicStore = true) { f ->
+        val work = f.ocrPort()
+        f.start()
+        val observed = checkNotNull(work.readStatus(DocumentId(DOCUMENT), PageId(PAGE), 1))
+        f.sql.execSQL("""CREATE TRIGGER move_old_ocr_pin AFTER UPDATE OF jobId ON OcrPageWork BEGIN
+            UPDATE SourceReference SET ownerId='$DRAFT' WHERE ownerType='JOB' AND ownerId=OLD.jobId;
+            END""")
+        val refusal = runCatching { work.requestRerun(observed, observed.configuration) }.exceptionOrNull() as? RepositoryFailure
+        assertEquals(OperationErrorCode.INTEGRITY_FAILED, refusal?.error?.code)
+        assertEquals(f.request.jobId.value, f.sql.scalar("SELECT jobId FROM OcrPageWork"))
+        assertEquals("${f.request.jobId.value}:$SOURCE", f.sql.scalar("SELECT ownerId||':'||sourceId FROM SourceReference WHERE ownerType='JOB'"))
+        assertEquals("1", f.sql.scalar("SELECT COUNT(*) FROM Job WHERE kind='PAGE_OCR'"))
+    }
+
+    @Test fun explicitOcrRerunRollsBackWhenALateWriteSpendsTheSuccessorsFirstStart() = withOcrAttempts(publicStore = true) { f ->
+        val work = f.ocrPort()
+        val observed = checkNotNull(work.readStatus(DocumentId(DOCUMENT), PageId(PAGE), 1))
+        f.sql.execSQL("""CREATE TRIGGER spend_new_ocr_start AFTER UPDATE OF jobId ON OcrPageWork BEGIN
+            UPDATE Job SET attempt=1 WHERE jobId=NEW.jobId;
+            END""")
+        val refusal = runCatching { work.requestRerun(observed, observed.configuration) }.exceptionOrNull() as? RepositoryFailure
+        assertEquals(OperationErrorCode.INTEGRITY_FAILED, refusal?.error?.code)
+        assertEquals(f.request.jobId.value, f.sql.scalar("SELECT jobId FROM OcrPageWork"))
+        assertEquals("PENDING:0", f.sql.scalar("SELECT state||':'||attempt FROM Job WHERE kind='PAGE_OCR'"))
+        assertEquals("${f.request.jobId.value}:$SOURCE", f.sql.scalar("SELECT ownerId||':'||sourceId FROM SourceReference WHERE ownerType='JOB'"))
+    }
+
     @Test fun noTextHitCanOpenAfterTheSavedRevisionChangesOrItsProjectionIsUnsupported() = withOcrAttempts { f ->
         val lease = f.start()
         f.results.publish(f.request, lease, OcrText("Receipt only for revision one"))

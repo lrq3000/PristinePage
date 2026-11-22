@@ -21,6 +21,8 @@ class SavedOcrWork private constructor(store: PrivateImportStore.OcrComposition)
     private val backfill = RoomOcrBackfill(store.database)
     private val execution = RoomOcrExecution(store.database, store.owners)
     private val search = RoomOcrSearch(store.database)
+    private val editable = RoomEditablePages(RoomMetadataAccess(store.database), store.database.catalog())
+    private val queue = RoomOcrQueue(store.database)
 
     /** IDs only, suitable for a scheduler hint. They are re-resolved before any work. */
     data class Target(val page: PageId, val job: JobId)
@@ -63,9 +65,20 @@ class SavedOcrWork private constructor(store: PrivateImportStore.OcrComposition)
     enum class PagePhase { QUEUED, RUNNING, READY, FAILED, CANCELED }
 
     /** Snapshot of the current durable generation. QUEUED/RUNNING do not prove scheduler or owner liveness. READY verifies producer metadata; a separate readText also decodes/validates the payload and may see a newer generation. */
-    class PageStatus internal constructor(
-        val phase: PagePhase, val attemptsStarted: Int, val lastError: OcrError?, val configuration: OcrConfiguration,
-    )
+    class PageStatus private constructor(private val issuer: SavedOcrWork, private val snapshot: RoomOcrSearch.Status) {
+        val phase: PagePhase get() = snapshot.phase
+        val attemptsStarted: Int get() = snapshot.attemptsStarted
+        val lastError: OcrError? get() = snapshot.lastError
+        val configuration: OcrConfiguration get() = snapshot.binding.intent.configuration
+
+        @JvmSynthetic
+        internal fun bindingFor(owner: SavedOcrWork): OcrRerunBinding? = snapshot.binding.takeIf { issuer === owner }
+
+        companion object {
+            @JvmSynthetic
+            internal fun issue(owner: SavedOcrWork, snapshot: RoomOcrSearch.Status): PageStatus = PageStatus(owner, snapshot)
+        }
+    }
 
     /** Own every budgeted resource needed to recognize the supplied saved page and exact installed configuration. Close must finish all use. Preparation and closure may not perform recognition. */
     interface Prepared : AutoCloseable {
@@ -130,7 +143,22 @@ class SavedOcrWork private constructor(store: PrivateImportStore.OcrComposition)
 
     /** Metadata only: observing a live page's status does not load recognition text, grant a job lease or touch its original. */
     suspend fun readStatus(document: DocumentId, page: PageId, expectedRevision: Long? = null): PageStatus? =
-        retained(page.value, "ocr_store_read_failed") { search.readStatus(document, page, expectedRevision) }
+        retained(page.value, "ocr_store_read_failed") { search.readStatus(document, page, expectedRevision)?.let { PageStatus.issue(this, it) } }
+
+    /** Queue a successor to the observed job, not whatever happens to be current at delivery. The caller resolves a qualified local configuration before invoking this explicit command, then offers the returned ID-only wake. */
+    suspend fun requestRerun(observed: PageStatus, configuration: OcrConfiguration): Target {
+        val binding = observed.bindingFor(this) ?: invalid("ocr_rerun_invalid_observation")
+        val input = binding.intent
+        val page = PageId(input.input.pageId)
+        return retained(page.value, "ocr_store_rerun_failed") {
+            if (configuration.languagePacks == null) invalid("ocr_rerun_invalid_configuration")
+            val saved = editable.load(input.documentId, page)
+            if (saved.recipeRevision != input.input.recipeRevision || saved.sourceId != input.sourceId ||
+                saved.recipeHash != input.recipeSha256 || saved.recipe.geometry.source.sourcePixelHash != input.input.sourcePixelSha256
+            ) throw RepositoryFailure(OperationError(OperationErrorCode.REVISION_CONFLICT, false, "ocr_rerun_observation_changed", page.value))
+            Target(page, queue.enqueue(saved, configuration, rerun = true, observed = binding))
+        }
+    }
 
     private fun Continuation?.position(scan: Scan): PageId? =
         this?.let { cursor -> cursor.positionFor(this@SavedOcrWork, scan) ?: invalid("ocr_invalid_continuation") }

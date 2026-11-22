@@ -11,7 +11,6 @@ import app.pristinepage.data.model.PageId
 import app.pristinepage.data.model.RepositoryFailure
 import app.pristinepage.data.model.SourceId
 import app.pristinepage.data.repository.SavedOcrWork.PagePhase
-import app.pristinepage.data.repository.SavedOcrWork.PageStatus
 import java.nio.charset.CharacterCodingException
 import java.util.Collections
 import kotlinx.coroutines.CoroutineDispatcher
@@ -32,6 +31,7 @@ internal class RoomOcrSearch(
 
     data class Hit(val document: DocumentId, val page: PageId, val source: SourceId, val recipeRevision: Long, val producingJob: JobId)
     data class Page(val hits: List<Hit>, val nextAfter: PageId?)
+    class Status(val phase: PagePhase, val attemptsStarted: Int, val lastError: OcrError?, val binding: OcrRerunBinding)
 
     suspend fun find(query: String, after: PageId?, limit: Int): Page = withContext(dispatcher) {
         require(limit in 1..50)
@@ -78,7 +78,7 @@ internal class RoomOcrSearch(
         }
     }
 
-    suspend fun readStatus(document: DocumentId, page: PageId, expectedRevision: Long? = null): PageStatus? = withContext(dispatcher) {
+    suspend fun readStatus(document: DocumentId, page: PageId, expectedRevision: Long? = null): Status? = withContext(dispatcher) {
         val active = coroutineContext
         val status = metadata.transaction {
             active.ensureActive()
@@ -102,7 +102,7 @@ internal class RoomOcrSearch(
             }
             if ((phase == PagePhase.QUEUED || phase == PagePhase.RUNNING) &&
                 !pageWork.hasExactJobPin(job.jobId, current.intent.sourceId.value)) invalidStatus(page)
-            PageStatus(phase, job.attempt.toInt(), job.errorCode?.let(OcrError::valueOf), current.intent.configuration)
+            Status(phase, job.attempt.toInt(), job.errorCode?.let(OcrError::valueOf), OcrRerunBinding(JobId(job.jobId), current.intent))
         }
         active.ensureActive()
         status
