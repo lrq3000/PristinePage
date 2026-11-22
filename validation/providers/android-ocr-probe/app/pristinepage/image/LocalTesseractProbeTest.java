@@ -122,7 +122,7 @@ public final class LocalTesseractProbeTest {
         } finally { bitmap.recycle(); }
     }
 
-    private static void stagePack(Context context, File tessdata, String code, JSONObject pack) throws Exception {
+    static void stagePack(Context context, File tessdata, String code, JSONObject pack) throws Exception {
         assertEquals(code, pack.getString("code"));
         String fileName = code + ".traineddata";
         int expected = pack.getInt("bytes");
@@ -186,7 +186,7 @@ public final class LocalTesseractProbeTest {
         return bitmap;
     }
 
-    private static byte[] load(Context context, String name, int maximum) throws Exception {
+    static byte[] load(Context context, String name, int maximum) throws Exception {
         try (InputStream input = context.getAssets().open(name); ByteArrayOutputStream output = new ByteArrayOutputStream()) {
             byte[] buffer = new byte[16384];
             int n;
@@ -198,20 +198,20 @@ public final class LocalTesseractProbeTest {
         }
     }
 
-    private static String hex(byte[] digest) {
+    static String hex(byte[] digest) {
         StringBuilder code = new StringBuilder();
         for (byte value : digest) code.append(String.format(Locale.ROOT, "%02x", value & 0xff));
         return code.toString();
     }
 
-    private static String normalize(String text) {
+    static String normalize(String text) {
         StringBuilder folded = new StringBuilder();
         Normalizer.normalize(text.toLowerCase(Locale.ROOT), Normalizer.Form.NFC).codePoints()
             .filter(cp -> !Character.isWhitespace(cp) && !Character.isSpaceChar(cp)).forEach(folded::appendCodePoint);
         return folded.toString();
     }
 
-    private static int distance(String a, String b) {
+    static int distance(String a, String b) {
         int[] previous = new int[b.length() + 1], current = new int[b.length() + 1];
         for (int j = 0; j <= b.length(); j++) previous[j] = j;
         for (int i = 1; i <= a.length(); i++) {
