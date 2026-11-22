@@ -60,6 +60,10 @@ import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
@@ -1276,6 +1280,32 @@ class RoomOcrIndexIntegrationTest {
         })
         assertNull(port.reconcilePage(document, fresh, queueConfig(OcrLayout.SPARSE_TEXT)))
         assertEquals("2", f.sql.scalar("SELECT COUNT(*) FROM Job WHERE kind='PAGE_OCR'"))
+    }
+
+    @Test fun pendingTileTracksOnlyItsExactSavedRevisionAndClearsAfterPublication() = withOcrAttempts(publicStore = true) { f ->
+        val port = f.ocrPort()
+        val document = DocumentId(DOCUMENT)
+        val target = port.reconcile(null, null, 1).targets.single()
+        val revision = f.request.binding.input.recipeRevision
+        assertNull(withTimeout(5_000) { port.observePendingTarget(document, target.page, revision + 1).first() })
+        assertNull(withTimeout(5_000) { port.observePendingTarget(DocumentId(UUID.randomUUID().toString()), target.page, revision).first() })
+        coroutineScope {
+            val states = Channel<SavedOcrWork.Target?>(capacity = 8)
+            val observing = launch { port.observePendingTarget(document, target.page, revision).distinctUntilChanged().collect { states.send(it) } }
+            try {
+                assertEquals(target, withTimeout(5_000) { states.receive() })
+                val observed = checkNotNull(port.readStatus(document, target.page, revision))
+                val next = port.requestRerun(observed, observed.configuration)
+                assertNotEquals(target, next)
+                assertEquals(next, withTimeout(5_000) { states.receive() })
+                assertEquals(SavedOcrWork.Outcome.PUBLISHED, port.execute(next) { _, _, handoff ->
+                    handoff.retain(preparedText("A completed page no longer needs the OCR overlay"))
+                })
+                assertNull(withTimeout(5_000) { states.receive() })
+            } finally {
+                observing.cancel()
+            }
+        }
     }
 
     @Test fun exactSavedPageSignalRefusesHiddenAtelierWithoutCreatingWork() = withOcrAttempts(publicStore = true) { f ->

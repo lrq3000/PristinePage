@@ -18,6 +18,8 @@ import java.util.concurrent.TimeUnit
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
@@ -70,6 +72,25 @@ class OcrWorkManagerIntegrationTest {
         } finally {
             cancelUnfinished(manager, invalid.id, valid.request.id)
         }
+        assertFalse(context.getDatabasePath("pristinepage.db").exists())
+    }
+
+    @Test fun pendingTileUsesOnlyTheLiveWakeForItsSuppliedGeneration() = runBlocking {
+        val context = dormantTarget()
+        val manager = WorkManager.getInstance(context)
+        val target = newTarget()
+        val held = OneTimeWorkRequest.Builder(SavedOcrPageWorker::class.java)
+            .setInputData(OcrPageDelivery.encode(target))
+            .setInitialDelay(3, TimeUnit.MINUTES)
+            .build()
+        val observed = MutableStateFlow<SavedOcrWork.Target?>(target)
+        try {
+            manager.enqueueUniqueWork(OcrPageDelivery.uniqueName(target), ExistingWorkPolicy.KEEP, held).result.awaitBounded()
+            assertEquals(AlbumOcrPending.State.QUEUED, withTimeout(5_000) { AlbumOcrPending.withWorkManager(context, observed).first { it != null } })
+        } finally {
+            cancelUnfinished(manager, held.id)
+        }
+        assertEquals(WorkInfo.State.CANCELLED, manager.getWorkInfoById(held.id).awaitBounded()?.state)
         assertFalse(context.getDatabasePath("pristinepage.db").exists())
     }
 

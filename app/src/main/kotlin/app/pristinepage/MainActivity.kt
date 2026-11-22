@@ -62,6 +62,7 @@ import app.pristinepage.library.AtelierThumbnailLoader
 import app.pristinepage.library.OriginalPagePreview
 import app.pristinepage.library.LibrarySession
 import app.pristinepage.library.ImportPhase
+import app.pristinepage.ocr.AlbumOcrPending
 import app.pristinepage.ocr.SavedPageOcrReader
 import app.pristinepage.image.preview.OriginalPreviewBitmap
 import app.pristinepage.image.preview.RenderedPreviewBitmap
@@ -178,6 +179,7 @@ class MainActivity : ComponentActivity() {
                 AtelierSettingsScreen(checkNotNull(settingsPage), app.atelierPreferences) { settingsPage = it }
             }
             else if (host.identity == null) libraryState.SaveableStateProvider("atelier-library") {
+                val observeOcrPending = remember(app) { AlbumOcrPending.forSavedPage(app) { services.imports().store.savedOcr } }
                 val loadThumbnail: suspend (DocumentSummary, DocumentPage) -> RenderedPreviewBitmap = { album, tile ->
                     // Lazy tiles retain only their small displays. Serialize expensive full-source decoding; the existing process-owned budget still governs every allocation.
                     thumbnailPermit.withPermit {
@@ -191,7 +193,8 @@ class MainActivity : ComponentActivity() {
                      onExport = { exportOwner.review(it, null) },
                      batchUndo = batch.undo?.takeIf { batch.savedDocument == library.selectedId },
                      undoBatch = batchOwner::undoSaved, closeBatchNotice = batchOwner::clearNotice,
-                     batchBusy = batch.saving, batchError = batch.error?.takeIf { batch.savedDocument == library.selectedId },
+                      batchBusy = batch.saving, batchError = batch.error?.takeIf { batch.savedDocument == library.selectedId },
+                      observeOcrPending = observeOcrPending,
                      thumbnailsCurrent = { album ->
                          batch.savedDocument != album.documentId ||
                              (!batch.saving && album.documentRevision >= (batch.savedRevision ?: 0L))

@@ -14,6 +14,8 @@ import app.pristinepage.data.model.RepositoryFailure
 import java.io.IOException
 import java.util.Collections
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.map
 
 /** Store-owned OCR boundary for the application graph. Construction does not schedule work, resolve assets, read files or enable an engine. */
 class SavedOcrWork private constructor(store: PrivateImportStore.OcrComposition) {
@@ -23,6 +25,7 @@ class SavedOcrWork private constructor(store: PrivateImportStore.OcrComposition)
     private val search = RoomOcrSearch(store.database)
     private val editable = RoomEditablePages(RoomMetadataAccess(store.database), store.database.catalog())
     private val queue = RoomOcrQueue(store.database)
+    private val invalidation = store.database.invalidationTracker
 
     /** IDs only, suitable for a scheduler hint. They are re-resolved before any work. */
     data class Target(val page: PageId, val job: JobId)
@@ -148,6 +151,15 @@ class SavedOcrWork private constructor(store: PrivateImportStore.OcrComposition)
     /** Metadata only: observing a live page's status does not load recognition text, grant a job lease or touch its original. */
     suspend fun readStatus(document: DocumentId, page: PageId, expectedRevision: Long? = null): PageStatus? =
         retained(page.value, "ocr_store_read_failed") { search.readStatus(document, page, expectedRevision)?.let { PageStatus.issue(this, it) } }
+
+    /** A lazy album tile can observe only its exact accepted revision; neither Room state nor this opaque hint proves the wake is active. */
+    fun observePendingTarget(document: DocumentId, page: PageId, revision: Long): Flow<Target?> =
+        invalidation.createFlow("Page", "Document", "AtelierDraft", "RecipeRevision", "Source", "SourceBlob", "OcrPageWork", "Job", "SourceReference")
+            .map {
+                // Clear uncertain evidence, but keep listening for a committed change that can revalidate this same tile.
+                try { retained(page.value, "ocr_store_read_failed") { search.pendingTarget(document, page, revision) } }
+                catch (_: RepositoryFailure) { null }
+            }
 
     /** Queue a successor to the observed job, not whatever happens to be current at delivery. The caller resolves a qualified local configuration before invoking this explicit command, then offers the returned ID-only wake. */
     suspend fun requestRerun(observed: PageStatus, configuration: OcrConfiguration): Target {

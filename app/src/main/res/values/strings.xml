@@ -13,6 +13,8 @@
     <string name="ocr_details_ready">Text recognition completed</string>
     <string name="ocr_details_failed">Text recognition failed</string>
     <string name="ocr_details_preparation_blocked">Page preparation stopped</string>
+    <string name="ocr_tile_pending">Text recognition pending</string>
+    <string name="ocr_tile_queued">Text recognition queued</string>
     <string name="ocr_details_canceled">Text recognition was canceled</string>
     <string name="ocr_details_attempts">Recognition attempts started: %1$d</string>
     <string name="ocr_details_no_errors">No errors reported</string>

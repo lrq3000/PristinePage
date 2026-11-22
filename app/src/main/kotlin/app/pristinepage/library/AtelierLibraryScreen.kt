@@ -53,12 +53,14 @@ import app.pristinepage.design.AtelierPreferences
 import app.pristinepage.design.AtelierStyle
 import app.pristinepage.design.HomeThumbnailLayout
 import app.pristinepage.image.preview.RenderedPreviewBitmap
+import app.pristinepage.ocr.AlbumOcrPending
 import java.time.ZoneId
 import java.util.Locale
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.awaitCancellation
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.launch
 
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
@@ -76,6 +78,7 @@ import kotlinx.coroutines.launch
     batchBusy: Boolean = false,
     batchError: OperationErrorCode? = null,
     thumbnailsCurrent: (DocumentSummary) -> Boolean = { true },
+    observeOcrPending: ((DocumentId, DocumentPage) -> Flow<AlbumOcrPending.State?>)? = null,
     openAtelier: ((String, DocumentSummary?) -> Unit)? = null,
     onSettings: () -> Unit,
     onEdit: (DocumentId, PageId) -> Unit,
@@ -237,7 +240,7 @@ import kotlinx.coroutines.launch
                             Column(Modifier.padding(6.dp)) {
                                  val album = checkNotNull(overview).document
                                  val thumbnailSize = Modifier.fillMaxWidth().aspectRatio(1.18f)
-                                 if (thumbnailsCurrent(album)) AtelierThumbnail(album, page, loadThumbnail, thumbnailSize)
+                                  if (thumbnailsCurrent(album)) AlbumPageThumbnail(album, page, loadThumbnail, thumbnailSize, observeOcrPending)
                                  else Box(thumbnailSize.background(AtelierStyle.canvas, RoundedCornerShape(4.dp)))
                                 Text(stringResource(R.string.page_number, page.ordinal + 1), Modifier.padding(6.dp))
                             }
@@ -291,6 +294,37 @@ import kotlinx.coroutines.launch
         }
         "rename" -> overview?.document?.let { album ->
             RenameSheet(album, state, session) { stopSheet() }
+        }
+    }
+}
+
+@Composable
+private fun AlbumPageThumbnail(
+    album: DocumentSummary, page: DocumentPage,
+    load: suspend (DocumentSummary, DocumentPage) -> RenderedPreviewBitmap, modifier: Modifier,
+    observePending: ((DocumentId, DocumentPage) -> Flow<AlbumOcrPending.State?>)?,
+) {
+    val lifecycle = LocalLifecycleOwner.current.lifecycle
+    var status by remember(album.documentId, page.pageId, page.recipeRevision, observePending) {
+        mutableStateOf<AlbumOcrPending.State?>(null)
+    }
+    LaunchedEffect(album.documentId, page.pageId, page.recipeRevision, observePending, lifecycle) {
+        if (observePending == null) return@LaunchedEffect
+        lifecycle.repeatOnLifecycle(Lifecycle.State.STARTED) {
+            try { observePending(album.documentId, page).collect { status = it } }
+            catch (canceled: CancellationException) { throw canceled }
+            catch (_: Exception) { /* Optional status cannot prevent displaying the saved page. */ }
+            finally { status = null }
+        }
+    }
+    Box(modifier) {
+        val pending = status
+        AtelierThumbnail(album, page, load, Modifier.matchParentSize().graphicsLayer { alpha = if (pending == null) 1f else 0.45f })
+        if (pending != null) Column(Modifier.align(Alignment.BottomCenter).fillMaxWidth()
+            .background(MaterialTheme.colorScheme.surface).padding(4.dp)) {
+            LinearProgressIndicator(Modifier.fillMaxWidth())
+            Text(stringResource(if (pending == AlbumOcrPending.State.ACTIVE_WAKE) R.string.ocr_tile_pending else R.string.ocr_tile_queued),
+                style = MaterialTheme.typography.labelSmall)
         }
     }
 }

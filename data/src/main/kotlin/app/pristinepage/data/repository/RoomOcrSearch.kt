@@ -108,6 +108,24 @@ internal class RoomOcrSearch(
         status
     }
 
+    /** Only an unfinished exact saved generation can name a wake for an album tile. Do not authenticate or read a completed result for this observation. */
+    suspend fun pendingTarget(document: DocumentId, page: PageId, revision: Long): SavedOcrWork.Target? = withContext(dispatcher) {
+        val active = coroutineContext
+        val target = metadata.transaction {
+            active.ensureActive()
+            if (!pageWork.visibleStatusPage(page.value, document.value) || metadata.isHiddenAtelierDraft(document.value)) return@transaction null
+            val current = work.readStoredInTransaction(page) ?: return@transaction null
+            val job = current.job
+            if (current.intent.documentId != document || current.intent.input.recipeRevision != revision ||
+                job.state !in setOf("PENDING", "ADMITTED", "RUNNING") || !work.isSavedInputInTransaction(current.intent)
+            ) return@transaction null
+            if (!RoomOcrAttempts.hasConsistentStoredState(job) || !pageWork.hasExactJobPin(job.jobId, current.intent.sourceId.value)) invalidStatus(page)
+            SavedOcrWork.Target(page, JobId(job.jobId))
+        }
+        active.ensureActive()
+        target
+    }
+
     private fun invalidStatus(page: PageId): Nothing =
         throw RepositoryFailure(OperationError(OperationErrorCode.INTEGRITY_FAILED, false, "ocr_status_invalid", page.value))
 
