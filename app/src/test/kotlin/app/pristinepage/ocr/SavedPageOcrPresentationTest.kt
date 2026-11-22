@@ -42,4 +42,10 @@ class SavedPageOcrPresentationTest {
         assertEquals(R.string.ocr_details_no_errors, ocrErrorLabel(null))
         assertEquals(R.string.ocr_details_interrupted, ocrErrorLabel(OcrError.INTERRUPTED))
     }
+
+    @Test fun rerunPresentationSeparatesUnavailableFromCommittedButUnscheduled() {
+        assertEquals(R.string.ocr_rerun_unavailable, ocrRerunLabel(SavedOcrScheduling.RerunOutcome.UNAVAILABLE))
+        assertEquals(R.string.ocr_rerun_enrolled, ocrRerunLabel(SavedOcrScheduling.RerunOutcome.ENROLLED))
+        assertEquals(R.string.ocr_rerun_deferred, ocrRerunLabel(SavedOcrScheduling.RerunOutcome.WAKE_DEFERRED))
+    }
 }

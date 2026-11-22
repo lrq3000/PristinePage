@@ -26,6 +26,14 @@
     <string name="ocr_layout_automatic">Automatic</string>
     <string name="ocr_layout_block">Single block</string>
     <string name="ocr_layout_sparse">Sparse text</string>
+    <string name="ocr_rerun_defaults">Rerun with defaults</string>
+    <string name="ocr_rerun_saved">Rerun with saved settings</string>
+    <string name="ocr_rerun_submitting">Requesting text recognition…</string>
+    <string name="ocr_rerun_unavailable">These settings need a compatible installed recognition engine and language packs.</string>
+    <string name="ocr_rerun_enrolled">Text recognition was queued.</string>
+    <string name="ocr_rerun_deferred">The request was saved, but background scheduling could not be confirmed.</string>
+    <string name="ocr_rerun_busy">Another rerun request is in progress.</string>
+    <string name="ocr_rerun_refused">The request could not be confirmed. Check the current status before trying again.</string>
     <string name="ocr_text_not_available">No recognized text is available for this saved revision.</string>
     <string name="ocr_text_blank">No text was detected.</string>
     <string name="ocr_text_previous">Showing text from a previous recognition run on this saved revision.</string>

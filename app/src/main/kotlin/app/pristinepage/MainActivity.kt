@@ -225,15 +225,27 @@ class MainActivity : ComponentActivity() {
                         }
                     }
                 }
-                 if (selected != null) key(identity) {
-                     val savedOcr = remember(services) { SavedPageOcrReader { services.imports().store.savedOcr } }
-                     PageEditorScreen(loadOriginal = loadOriginal, savedOcr = savedOcr,
-                    pageNumber = fallback?.ordinal?.plus(1), albumPageCount = orderedPages.size,
-                    previousPage = destination(-1), nextPage = destination(1), originalOnLoadFailure = {
-                    if (fallback != null) key(fallback) {
-                        OriginalPagePreview(fallback, loadOriginal)
+                if (selected != null) key(identity) {
+                    val savedOcr = remember(app) {
+                        SavedPageOcrReader(
+                            open = { services.imports().store.savedOcr },
+                            rerunInFlight = app.savedOcrSignals.rerunInFlight,
+                            requestRerun = { observed, defaults ->
+                                app.savedOcrSignals.onRerun(
+                                    qualify = { app.savedOcr.resolveRerunConfiguration(observed.configuration, defaults) },
+                                    commit = { services.imports().store.savedOcr.requestRerun(observed, it) },
+                                )
+                            },
+                        )
                     }
-                }).Content(selected, ::leaveEditor) }
+                    PageEditorScreen(loadOriginal = loadOriginal, savedOcr = savedOcr,
+                        pageNumber = fallback?.ordinal?.plus(1), albumPageCount = orderedPages.size,
+                        previousPage = destination(-1), nextPage = destination(1), originalOnLoadFailure = {
+                            if (fallback != null) key(fallback) {
+                                OriginalPagePreview(fallback, loadOriginal)
+                            }
+                        }).Content(selected, ::leaveEditor)
+                }
                 else {
                     BackHandler { leaveEditor() }
                     Column(Modifier.fillMaxSize().safeDrawingPadding().padding(24.dp)) {

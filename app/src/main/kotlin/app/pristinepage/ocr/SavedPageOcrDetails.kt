@@ -1,8 +1,11 @@
 package app.pristinepage.ocr
 
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.relocation.BringIntoViewRequester
+import androidx.compose.foundation.relocation.bringIntoViewRequester
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.MaterialTheme
@@ -11,10 +14,14 @@ import androidx.compose.material3.TextButton
 import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.semantics.LiveRegionMode
+import androidx.compose.ui.semantics.liveRegion
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.style.TextDirection
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.compose.LocalLifecycleOwner
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.repeatOnLifecycle
 import app.pristinepage.R
 import app.pristinepage.core.ocr.OcrConfiguration
@@ -25,22 +32,34 @@ import app.pristinepage.data.model.EditablePage
 import app.pristinepage.data.repository.SavedOcrWork
 import app.pristinepage.data.repository.SavedOcrWork.PagePhase
 import app.pristinepage.design.OcrLanguage
+import app.pristinepage.ocr.SavedOcrScheduling.RerunOutcome
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.awaitCancellation
 import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.launch
 
 /** Read only the chosen private panel. The view never combines a status and a separate result as if they were one snapshot. */
-class SavedPageOcrReader(private val open: suspend () -> SavedOcrWork) {
+class SavedPageOcrReader internal constructor(
+    private val open: suspend () -> SavedOcrWork,
+    internal val rerunInFlight: StateFlow<Boolean>,
+    internal val requestRerun: suspend (SavedOcrWork.PageStatus, Boolean) -> RerunOutcome,
+) {
     internal suspend fun status(page: EditablePage) = open().readStatus(page.documentId, page.pageId, page.recipeRevision)
     internal suspend fun text(page: EditablePage) = open().readText(page.documentId, page.pageId, page.recipeRevision)
 }
 
 internal enum class SavedPageOcrPanel(val title: Int) { PROCESSING(R.string.ocr_processing_details), TEXT(R.string.ocr_text) }
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 internal fun SavedPageOcrDetails(panel: SavedPageOcrPanel, page: EditablePage?, reader: SavedPageOcrReader, dismiss: () -> Unit) {
     val lifecycle = LocalLifecycleOwner.current.lifecycle
+    val ui = rememberCoroutineScope()
     var refresh by remember { mutableIntStateOf(0) }
+    var submitting by remember(panel, page, reader) { mutableStateOf(false) }
+    var notice by remember(panel, page, reader) { mutableStateOf<Int?>(null) }
+    val processBusy by reader.rerunInFlight.collectAsStateWithLifecycle()
     var result by remember(panel, page, reader, lifecycle, refresh) {
         mutableStateOf<Reading>(if (page == null) Reading.Unavailable else Reading.Loading)
     }
@@ -68,11 +87,41 @@ internal fun SavedPageOcrDetails(panel: SavedPageOcrPanel, page: EditablePage?, 
             }
         }
     }
+    fun submit(status: SavedOcrWork.PageStatus, defaults: Boolean) {
+        if (submitting || reader.rerunInFlight.value || !lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED)) return
+        submitting = true
+        notice = R.string.ocr_rerun_submitting
+        ui.launch {
+            try {
+                val outcome = reader.requestRerun(status, defaults)
+                ensureActive()
+                notice = ocrRerunLabel(outcome)
+                if (outcome == RerunOutcome.ENROLLED || outcome == RerunOutcome.WAKE_DEFERRED) {
+                    result = Reading.Loading
+                    refresh++
+                }
+            } catch (canceled: CancellationException) {
+                throw canceled
+            } catch (_: Exception) {
+                ensureActive()
+                notice = R.string.ocr_rerun_refused
+                result = Reading.Loading
+                refresh++
+            } finally {
+                submitting = false
+            }
+        }
+    }
     AlertDialog(
         onDismissRequest = dismiss,
         title = { Text(stringResource(panel.title)) },
         text = {
             Column(Modifier.verticalScroll(rememberScrollState())) {
+                (notice ?: R.string.ocr_rerun_busy.takeIf { panel == SavedPageOcrPanel.PROCESSING && processBusy })?.let { label ->
+                    val focus = remember { BringIntoViewRequester() }
+                    LaunchedEffect(label) { focus.bringIntoView() }
+                    Text(stringResource(label), modifier = Modifier.bringIntoViewRequester(focus).semantics { liveRegion = LiveRegionMode.Polite })
+                }
                 when (val shown = result) {
                     Reading.Loading -> Text(stringResource(R.string.ocr_details_loading))
                     Reading.Unavailable -> Text(stringResource(R.string.ocr_details_unavailable))
@@ -81,7 +130,15 @@ internal fun SavedPageOcrDetails(panel: SavedPageOcrPanel, page: EditablePage?, 
                         Text(stringResource(ocrPhaseLabel(status?.phase)))
                         if (status != null) Text(stringResource(R.string.ocr_details_attempts, status.attemptsStarted))
                         Text(stringResource(ocrErrorLabel(status?.lastError)))
-                        status?.configuration?.let { OcrSettingsSummary(it) }
+                        if (status != null) {
+                            OcrSettingsSummary(status.configuration)
+                            TextButton(onClick = { submit(status, defaults = true) }, enabled = !submitting && !processBusy, modifier = Modifier.heightIn(min = 48.dp)) {
+                                Text(stringResource(R.string.ocr_rerun_defaults))
+                            }
+                            TextButton(onClick = { submit(status, defaults = false) }, enabled = !submitting && !processBusy, modifier = Modifier.heightIn(min = 48.dp)) {
+                                Text(stringResource(R.string.ocr_rerun_saved))
+                            }
+                        }
                     }
                     is Reading.TextValue -> {
                         val item = shown.value
@@ -98,7 +155,8 @@ internal fun SavedPageOcrDetails(panel: SavedPageOcrPanel, page: EditablePage?, 
         },
         confirmButton = { TextButton(onClick = dismiss, modifier = Modifier.heightIn(min = 48.dp)) { Text(stringResource(R.string.atelier_close)) } },
         dismissButton = {
-            TextButton(onClick = { refresh++ }, enabled = page != null && result != Reading.Loading, modifier = Modifier.heightIn(min = 48.dp)) {
+            TextButton(onClick = { notice = null; refresh++ }, enabled = !submitting && page != null && result != Reading.Loading,
+                modifier = Modifier.heightIn(min = 48.dp)) {
                 Text(stringResource(R.string.ocr_details_refresh))
             }
         },
@@ -155,4 +213,11 @@ internal fun ocrErrorLabel(error: OcrError?) = when (error) {
     OcrError.RESOURCE_LIMIT -> R.string.ocr_details_resource_limit
     OcrError.INVALID_OUTPUT -> R.string.ocr_details_invalid_output
     OcrError.INTERRUPTED -> R.string.ocr_details_interrupted
+}
+
+internal fun ocrRerunLabel(outcome: RerunOutcome) = when (outcome) {
+    RerunOutcome.UNAVAILABLE -> R.string.ocr_rerun_unavailable
+    RerunOutcome.ENROLLED -> R.string.ocr_rerun_enrolled
+    RerunOutcome.WAKE_DEFERRED -> R.string.ocr_rerun_deferred
+    RerunOutcome.BUSY -> R.string.ocr_rerun_busy
 }

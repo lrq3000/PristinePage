@@ -1,5 +1,7 @@
 package app.pristinepage.ocr
 
+import app.pristinepage.core.ocr.OcrConfiguration
+import app.pristinepage.core.ocr.OcrLayout
 import app.pristinepage.data.model.DocumentId
 import app.pristinepage.data.model.JobId
 import app.pristinepage.data.model.PageId
@@ -9,6 +11,7 @@ import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.flow
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.*
@@ -96,6 +99,59 @@ class SavedOcrAppSignalsTest {
         val cancellation = CancellationException("Synthetic canceled notification")
         val thrown = runCatching { sendCommittedOcrHint(document, listOf(first)) { _, _ -> throw cancellation } }.exceptionOrNull()
         assertSame(cancellation, thrown)
+    }
+
+    @Test fun closingTheCallerDoesNotCancelTheAlreadyCommittedRerunWake() = runTest {
+        val target = SavedOcrWork.Target(first, job)
+        val configuration = OcrConfiguration("fixture", 1, OcrLayout.SPARSE_TEXT)
+        val entered = CompletableDeferred<Unit>()
+        val release = CompletableDeferred<Unit>()
+        val delivered = mutableListOf<SavedOcrWork.Target>()
+        val signals = SavedOcrAppSignals(backgroundScope, SavedOcrScheduling({ error("No reconciliation expected") }) {
+            entered.complete(Unit)
+            release.await()
+            delivered += it
+        })
+        var returnedToCaller = false
+        val panel = launch {
+            signals.onRerun({ configuration }) { target }
+            returnedToCaller = true
+        }
+        runCurrent()
+        assertTrue(entered.isCompleted)
+        panel.cancel()
+        release.complete(Unit)
+        runCurrent()
+        assertEquals(listOf(target), delivered)
+        assertFalse(returnedToCaller)
+    }
+
+    @Test fun reopeningThePageCannotCommitAnotherRerunWhileTheFirstWakeIsPending() = runTest {
+        val target = SavedOcrWork.Target(first, job)
+        val configuration = OcrConfiguration("fixture", 1, OcrLayout.SPARSE_TEXT)
+        val release = CompletableDeferred<Unit>()
+        var commits = 0
+        val signals = SavedOcrAppSignals(backgroundScope, SavedOcrScheduling({ error("No reconciliation expected") }) {
+            release.await()
+        })
+        val firstPanel = launch { signals.onRerun({ configuration }) { commits++; target } }
+        runCurrent()
+        assertEquals(1, commits)
+        assertTrue(signals.rerunInFlight.value)
+        firstPanel.cancel()
+        var reopenedOutcome: SavedOcrScheduling.RerunOutcome? = null
+        val reopened = launch { reopenedOutcome = signals.onRerun({ configuration }) { commits++; target } }
+        runCurrent()
+        try {
+            assertEquals(1, commits)
+            assertEquals(SavedOcrScheduling.RerunOutcome.BUSY, reopenedOutcome)
+            assertTrue(signals.rerunInFlight.value)
+        } finally {
+            release.complete(Unit)
+            reopened.join()
+        }
+        runCurrent()
+        assertFalse(signals.rerunInFlight.value)
     }
 
     private fun session(

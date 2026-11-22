@@ -24,7 +24,7 @@ internal class SavedOcrScheduling(
         fun pendingPages(): Flow<SavedOcrWork.Target>
     }
 
-    enum class RerunOutcome { UNAVAILABLE, ENROLLED, WAKE_DEFERRED }
+    enum class RerunOutcome { UNAVAILABLE, ENROLLED, WAKE_DEFERRED, BUSY }
 
     /** Explicit command only. A wake failure cannot undo a committed rerun or turn it into a recognition error. */
     suspend fun requestRerun(
