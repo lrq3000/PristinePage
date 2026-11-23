@@ -7,6 +7,7 @@ import android.graphics.Paint
 import android.graphics.Typeface
 import android.os.Bundle
 import android.os.ParcelFileDescriptor
+import android.os.SystemClock
 import android.graphics.Rect
 import android.view.accessibility.AccessibilityNodeInfo
 import androidx.compose.ui.test.assertIsEnabled
@@ -32,6 +33,7 @@ import androidx.work.WorkManager
 import app.pristinepage.MainActivity
 import app.pristinepage.PristinePageApplication
 import app.pristinepage.R
+import app.pristinepage.core.ocr.OcrLayout
 import app.pristinepage.core.recipe.AppearanceRecipe
 import app.pristinepage.core.recipe.BinaryRecipe
 import app.pristinepage.data.model.IngestResult
@@ -46,9 +48,14 @@ import java.util.UUID
 import java.util.concurrent.TimeUnit
 import kotlin.random.Random
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.TimeoutCancellationException
+import kotlinx.coroutines.async
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.filterNotNull
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
@@ -461,6 +468,117 @@ class LocalOcrStartupBackfillTest {
             lateinit var editor: EditorViewModel
             it.onActivity { activity -> editor = ViewModelProvider(activity)[EditorViewModel::class.java] }
             compose.waitUntil(15_000) { editor.state.value.identity?.pageId == saved.pageId }
+        }
+    }
+
+    @Test
+    fun largerSavedPageCompletesItsExactWakeAndOpensFromTheFooter(): Unit = runBlocking {
+        val instrumentation = InstrumentationRegistry.getInstrumentation()
+        val context = instrumentation.targetContext
+        val app = context.applicationContext as PristinePageApplication
+        assumeTrue("Explicit larger-page qualification on the local OCR build only",
+            app.hasBundledOcr && InstrumentationRegistry.getArguments().getString("ocrLargePage") == "1")
+        val settings = app.atelierPreferences.settings.value
+        assertEquals(listOf("eng", "fra"), settings.ocrLanguages.map { it.packCode })
+        assertEquals(OcrLayout.AUTOMATIC, settings.ocrLayout)
+        val graph = app.services.imports()
+        val work = graph.store.savedOcr
+        val title = "Larger OCR control ${UUID.randomUUID()}"
+        val document = graph.store.documents.createDocument(title)
+        val dir = File(context.cacheDir, "editor-journey-fixtures")
+        check(dir.isDirectory || dir.mkdirs())
+        val id = UUID.randomUUID().toString()
+        makeDensePage(File(dir, "$id.png"))
+        val actions = ApplicationLibraryActions(context, app.services::imports)
+        val request = actions.begin(graph.store.catalog.load(document).document)
+        val pageId = (actions.deliver(request, LibraryPhotoResult.Selected(
+            listOf("content://${context.packageName}.editor-fixtures/$id"), 0,
+        )).single() as IngestResult.Committed).pageId
+        val saved = graph.store.editablePages.load(document, pageId)
+        val revision = saved.recipeRevision
+        assertNull(work.readStatus(document, pageId, revision))
+        assertFalse(work.find("ELDERFLOWER", null, 20).hits.any { it.document == document })
+
+        coroutineScope {
+            // Subscribe before the first ordinary Activity starts backfill; querying only after READY has lost the pending hint.
+            val target = async(start = CoroutineStart.UNDISPATCHED) {
+                withTimeout(35_000) { work.observePendingTarget(document, pageId, revision).filterNotNull().first() }
+            }
+            val startedAt = SystemClock.elapsedRealtime()
+            ActivityScenario.launch(MainActivity::class.java).use { scenario ->
+                val admitted = target.await()
+                assertEquals(pageId, admitted.page)
+                val manager = WorkManager.getInstance(context)
+                val name = OcrPageDelivery.uniqueName(admitted)
+                var lastSample: String? = null
+                val ready = withTimeout(125_000) {
+                    waitFor {
+                        val wakes = withContext(Dispatchers.IO) {
+                            manager.getWorkInfosForUniqueWork(name).get(5, TimeUnit.SECONDS)
+                        }
+                        val status = work.readStatus(document, pageId, revision)
+                        val observed = wakes.map { "${it.state}:${it.runAttemptCount}" }.sorted().joinToString(",")
+                        val sample = "phase=${status?.phase};starts=${status?.attemptsStarted};error=${status?.lastError};wakes=$observed"
+                        if (sample != lastSample) {
+                            instrumentation.sendStatus(66, Bundle().apply { putString("ocrLargePageSample", sample) })
+                            lastSample = sample
+                        }
+                        assertTrue("The exact synthetic page stopped before READY: $sample",
+                            status?.phase !in setOf(SavedOcrWork.PagePhase.FAILED, SavedOcrWork.PagePhase.CANCELED) &&
+                                !(wakes.isNotEmpty() && wakes.all { it.state == WorkInfo.State.FAILED }))
+                        status?.takeIf { it.phase == SavedOcrWork.PagePhase.READY &&
+                            wakes.any { wake -> wake.state == WorkInfo.State.SUCCEEDED } }
+                    }
+                }
+                assertEquals(1, ready.attemptsStarted)
+                assertEquals("tesseract-android", ready.configuration.engineId)
+                assertEquals(OcrLayout.AUTOMATIC, ready.configuration.layout)
+                assertEquals(listOf("eng", "fra"), ready.configuration.languagePacks?.ordered?.map { it.code })
+                assertNull(ready.lastError)
+                val readyMs = SystemClock.elapsedRealtime() - startedAt
+                val text = checkNotNull(work.readText(document, pageId, revision))
+                assertFalse(text.previousGeneration)
+                assertTrue("Header anchor was not read", text.text.value.contains("IRONWOOD", ignoreCase = true))
+                assertTrue("Footer anchor was not read", text.text.value.contains("ELDERFLOWER", ignoreCase = true))
+                val label = context.getString(R.string.home_matching_page, title, 1)
+                lateinit var library: ImportLibraryViewModel
+                scenario.onActivity { activity -> library = ViewModelProvider(activity)[ImportLibraryViewModel::class.java] }
+                compose.onNodeWithTag("home-album-search").performTextInput("elderflower")
+                compose.waitUntil(15_000) { library.session.state.value.pageMatches.any { it.document == document && it.page == pageId } }
+                compose.onNodeWithTag("atelier-album-list").performScrollToNode(hasText(label))
+                compose.onNodeWithText(label).performClick()
+                lateinit var editor: EditorViewModel
+                scenario.onActivity { activity -> editor = ViewModelProvider(activity)[EditorViewModel::class.java] }
+                compose.waitUntil(15_000) { editor.session.value?.state?.value?.page?.let {
+                    it.pageId == pageId && it.recipeRevision == revision
+                } == true }
+                instrumentation.addResults(Bundle().apply {
+                    putString("ocrLargePageWitness", "EXACT_DENSE_PAGE_WAKE_AND_REOPEN")
+                    putLong("ocrLargePageReadyMs", readyMs)
+                })
+            }
+        }
+    }
+
+    private fun makeDensePage(file: File) {
+        check(file.createNewFile())
+        val bitmap = Bitmap.createBitmap(1_600, 2_200, Bitmap.Config.ARGB_8888)
+        try {
+            bitmap.eraseColor(Color.WHITE)
+            val canvas = Canvas(bitmap)
+            val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                color = Color.BLACK
+                textSize = 28f
+                typeface = Typeface.create(Typeface.SANS_SERIF, Typeface.NORMAL)
+            }
+            canvas.drawText("IRONWOOD   Office supplies inventory", 42f, 60f, paint)
+            for (line in 1..52) {
+                canvas.drawText("Entry $line. Document supplies, archive shelves, and stock recorded for inspection.", 42f, 114f + 38f * line, paint)
+            }
+            canvas.drawText("ELDERFLOWER   End of inventory", 42f, 2_160f, paint)
+            file.outputStream().use { check(bitmap.compress(Bitmap.CompressFormat.PNG, 100, it)) }
+        } finally {
+            bitmap.recycle()
         }
     }
 }
