@@ -39,14 +39,10 @@ internal enum class SettingsPage(val title: Int, val parent: SettingsPage?) {
 }
 
 @Composable
-internal fun AtelierSettingsScreen(page: SettingsPage, preferences: AtelierPreferences, ocrBundled: Boolean, ocrReady: Boolean, navigate: (SettingsPage?) -> Unit) {
+internal fun AtelierSettingsScreen(page: SettingsPage, preferences: AtelierPreferences, ocrReady: Boolean, navigate: (SettingsPage?) -> Unit) {
     val settings by preferences.settings.collectAsStateWithLifecycle()
     val back = { navigate(page.parent) }
-    val ocrStatus = when {
-        !ocrBundled -> R.string.settings_ocr_not_active
-        !ocrReady -> R.string.settings_ocr_not_ready
-        else -> R.string.settings_ocr_offline
-    }
+    val ocrStatus = if (ocrReady) R.string.settings_ocr_offline else R.string.settings_ocr_not_ready
     BackHandler(onBack = back)
     Column(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background).safeDrawingPadding()
         .testTag("settings-screen-${page.name.lowercase(Locale.ROOT)}")) {

@@ -85,7 +85,6 @@ class LocalOcrImportJourneyTest {
     fun importedScansAreRecognizedAutomaticallyAndHomeOpensTheSecondPage() = runBlocking {
         val context = InstrumentationRegistry.getInstrumentation().targetContext
         val app = context.applicationContext as PristinePageApplication
-        assumeTrue("Only run with the private OCR-enabled application candidate", app.hasBundledOcr)
         val graph = app.services.imports()
         val nonce = UUID.randomUUID().toString()
         val title = "Synthetic OCR import $nonce"
@@ -197,7 +196,7 @@ class LocalOcrImportJourneyTest {
         val context = instrumentation.targetContext
         val app = context.applicationContext as PristinePageApplication
         val title = InstrumentationRegistry.getArguments().getString("filesSavedAlbum")
-        assumeTrue("Requires the exact album from the separate real Files picker and correction run", app.hasBundledOcr && title != null)
+        assumeTrue("Requires the exact album from the separate real Files picker and correction run", title != null)
         val name = checkNotNull(title)
         val graph = app.services.imports()
         val document = graph.store.catalog.list(null, 50).single { it.title == name }
@@ -372,7 +371,7 @@ class LocalOcrImportJourneyTest {
         val context = instrumentation.targetContext
         val app = context.applicationContext as PristinePageApplication
         assumeTrue("The blank save requires a guarded host-side DocumentsUI driver",
-            app.hasBundledOcr && InstrumentationRegistry.getArguments().getString("ocrBlankTextSave") == "1")
+            InstrumentationRegistry.getArguments().getString("ocrBlankTextSave") == "1")
         val graph = app.services.imports()
         val document = graph.store.documents.createDocument("Blank OCR text control ${UUID.randomUUID()}")
         val dir = File(context.cacheDir, "editor-journey-fixtures")
@@ -507,7 +506,7 @@ class LocalOcrTextDeathTest {
         val app = context.applicationContext as PristinePageApplication
         val token = InstrumentationRegistry.getArguments().getString("ocrTextOwnedFile")
         val album = InstrumentationRegistry.getArguments().getString("filesSavedAlbum")
-        assumeTrue("Requires an explicit synthetic readback interruption", app.hasBundledOcr && token != null && album != null)
+        assumeTrue("Requires an explicit synthetic readback interruption", token != null && album != null)
         val key = checkNotNull(token)
         val file = controlledTextFile(context, key)
         val graph = app.services.imports()
@@ -554,7 +553,7 @@ class LocalOcrTextDeathTest {
         val args = InstrumentationRegistry.getArguments()
         val token = args.getString("ocrTextOwnedFile")
         val id = args.getString("ocrTextDeathConsent")
-        assumeTrue("Requires the exact previously interrupted controlled text transfer", app.hasBundledOcr && token != null && id != null)
+        assumeTrue("Requires the exact previously interrupted controlled text transfer", token != null && id != null)
         val exactConsent = checkNotNull(id)
         require(UUID.fromString(exactConsent).toString() == exactConsent)
         val file = controlledTextFile(context, checkNotNull(token))
@@ -592,7 +591,7 @@ class LocalOcrTextDeathTest {
         val context = instrumentation.targetContext
         val app = context.applicationContext as PristinePageApplication
         val consent = InstrumentationRegistry.getArguments().getString("ocrTextDeathConsent")
-        assumeTrue("Only run after the named synthetic OCR chooser interruption", app.hasBundledOcr && consent != null)
+        assumeTrue("Only run after the named synthetic OCR chooser interruption", consent != null)
         val exactConsent = checkNotNull(consent)
         require(UUID.fromString(exactConsent).toString() == exactConsent)
         val owner = compose.runOnUiThread { ViewModelProvider(compose.activity)[OcrTextSaveViewModel::class.java] }
@@ -646,7 +645,6 @@ class LocalOcrStartupBackfillTest {
     fun firstActivityLaunchFindsAndIndexesAnExistingUnqueuedPage(): Unit = runBlocking {
         val context = InstrumentationRegistry.getInstrumentation().targetContext
         val app = context.applicationContext as PristinePageApplication
-        assumeTrue("Only run with the private OCR-enabled application candidate", app.hasBundledOcr)
         val graph = app.services.imports()
         val title = "Startup backfill ${UUID.randomUUID()}"
         val document = graph.store.documents.createDocument(title)
@@ -685,8 +683,8 @@ class LocalOcrStartupBackfillTest {
         val instrumentation = InstrumentationRegistry.getInstrumentation()
         val context = instrumentation.targetContext
         val app = context.applicationContext as PristinePageApplication
-        assumeTrue("Explicit larger-page qualification on the local OCR build only",
-            app.hasBundledOcr && InstrumentationRegistry.getArguments().getString("ocrLargePage") == "1")
+        assumeTrue("Requires explicit larger-page qualification on a synthetic fixture guest",
+            InstrumentationRegistry.getArguments().getString("ocrLargePage") == "1")
         val settings = app.atelierPreferences.settings.value
         assertEquals(listOf("eng", "fra"), settings.ocrLanguages.map { it.packCode })
         assertEquals(OcrLayout.AUTOMATIC, settings.ocrLayout)

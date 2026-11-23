@@ -16,7 +16,7 @@ import uuid
 from zipfile import ZipFile
 
 from prepare_ocr_android_probe import verify_file, verify_stage
-from prepare_ocr_local_app import verify_candidate, verify_ocr_members
+from prepare_ocr_local_app import verify_candidate, verify_ocr_members, verify_standard_manifest
 
 
 APP = "app.pristinepage.debug"
@@ -159,9 +159,12 @@ def exact_apk(path, digest, stage, is_test):
         with ZipFile(path) as archive:
             verify_ocr_members(archive, {})
     else:
-        need(re.search(r"versionName='[^']+-debug-ocr-local'", badging) and
-             "app.pristinepage.LocalOcrApplication" in manifest and "androidx.work.WorkManagerInitializer" in manifest,
-             "Not the OCR-enabled debug app")
+        # Retain replay of historical test pairs. The new normal-build route is checked separately and must contain the same OCR payload.
+        if re.search(r"versionName='[^']+-debug-ocr-local'", badging):
+            need("app.pristinepage.LocalOcrApplication" in manifest and "androidx.work.WorkManagerInitializer" in manifest,
+                 "Not the historical OCR development app")
+        else:
+            verify_standard_manifest(badging, manifest)
         verify_candidate(stage, path)
     return {"package": package, "sha256": digest, "manifest": manifest, "badging": badging}
 
@@ -634,7 +637,8 @@ def main():
             or not re.fullmatch(r"[0-9a-f]{64}", args.previous_app_sha)):
         parser.error("An app successor needs exact prior app and test digests and the primary Home OCR witness on the retained guest")
     root = Path.cwd().resolve()
-    need(root.name == "ocr-background-search" and root.parent.name == ".worktrees", "Use the authorized OCR worktree")
+    need(root.name in ("ocr-background-search", "ocr-current-validation") and root.parent.name == ".worktrees",
+         "Use the authorized OCR worktree")
     if args.language_controls:
         raw = root / "validation/raw/providers"
         need(args.language_controls.is_dir() and args.language_controls.is_relative_to(raw)

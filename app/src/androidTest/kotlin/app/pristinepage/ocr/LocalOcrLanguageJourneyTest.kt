@@ -77,7 +77,7 @@ class LocalOcrLanguageJourneyTest {
         val context = instrumentation.targetContext
         val app = context.applicationContext as PristinePageApplication
         val fixture = InstrumentationRegistry.getArguments().getString("ocrFixture")
-        assumeTrue("Requires the local OCR candidate and an exact synthetic fixture directory", app.hasBundledOcr && fixture != null)
+        assumeTrue("Requires an exact synthetic fixture directory", fixture != null)
         val prefix = checkNotNull(fixture)
         check(prefix.matches(Regex("[a-f0-9]{12}")))
         val graph = app.services.imports()

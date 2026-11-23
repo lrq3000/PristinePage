@@ -9,6 +9,7 @@ plugins {
 }
 
 val minimumApi = libs.versions.minSdk.get().toInt()
+val bundledOcr = rootProject.layout.projectDirectory.dir("validation/raw/providers/ocr-app-standard")
 
 android {
     namespace = "app.pristinepage"
@@ -22,13 +23,13 @@ android {
         versionName = libs.versions.appVersionName.get()
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         buildConfigField("int", "MIN_API", minimumApi.toString())
-        manifestPlaceholders["pristinePageApplication"] = "app.pristinepage.PristinePageApplication"
         ndk.abiFilters += "arm64-v8a"
     }
     buildFeatures {
         compose = true
         buildConfig = true
     }
+    sourceSets.getByName("main").assets.srcDir(bundledOcr.dir("assets"))
     // Pure validation-only scope checks execute identically in host regressions and instrumentation, never in either production or debug application artifacts.
     sourceSets.getByName("test").java.srcDir("src/sharedTest/kotlin")
     sourceSets.getByName("androidTest").java.srcDir("src/sharedTest/kotlin")
@@ -61,6 +62,7 @@ android {
         checkReleaseBuilds = true
     }
 }
+tasks.named("preBuild") { dependsOn(rootProject.tasks.named("verifyBundledOcr")) }
 kotlin {
     jvmToolchain(21)
     compilerOptions.jvmTarget.set(JvmTarget.JVM_17)
@@ -88,6 +90,7 @@ dependencies {
     implementation(project(":core"))
     implementation(project(":data"))
     implementation(project(":image-android"))
+    implementation(files(bundledOcr.file("tesseract4android.aar")))
     implementation(platform(libs.compose.bom))
     implementation(libs.androidx.core.ktx)
     implementation(libs.androidx.activity.compose)

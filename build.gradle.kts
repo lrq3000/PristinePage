@@ -1,4 +1,5 @@
 import org.gradle.api.artifacts.dsl.LockMode
+import org.gradle.api.tasks.Exec
 
 plugins {
     alias(libs.plugins.android.application) apply false
@@ -8,6 +9,13 @@ plugins {
     alias(libs.plugins.kotlin.serialization) apply false
     alias(libs.plugins.kotlin.compose) apply false
     alias(libs.plugins.ksp) apply false
+}
+
+// Same exact input for every APK variant. Keep build credentials and provider binaries outside the source tree.
+tasks.register<Exec>("verifyBundledOcr") {
+    workingDir(rootDir)
+    commandLine("python", "-B", "validation/providers/prepare_ocr_local_app.py",
+        layout.projectDirectory.dir("validation/raw/providers/ocr-app-standard").asFile.absolutePath)
 }
 
 allprojects {

@@ -185,7 +185,7 @@ class MainActivity : ComponentActivity() {
             }
             else if (atHome && settingsPage != null) {
                 val ocrReady by app.ocrRuntimeReady.collectAsStateWithLifecycle()
-                AtelierSettingsScreen(checkNotNull(settingsPage), app.atelierPreferences, app.hasBundledOcr, ocrReady) { settingsPage = it }
+                AtelierSettingsScreen(checkNotNull(settingsPage), app.atelierPreferences, ocrReady) { settingsPage = it }
             }
             else if (host.identity == null) libraryState.SaveableStateProvider("atelier-library") {
                 val observeOcrPending = remember(app) { AlbumOcrPending.forSavedPage(app) { services.imports().store.savedOcr } }

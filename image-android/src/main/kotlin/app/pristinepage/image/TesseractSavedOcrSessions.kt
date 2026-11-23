@@ -17,7 +17,7 @@ import java.io.File
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
 
-/** Native recognition for the selected, byte-qualified runtime; never compiled into a default build. */
+/** Native recognition for the selected, byte-qualified runtime. */
 internal class TesseractSavedOcrSessions(
     private val budget: ImageAllocationBudget,
     private val allocatePix: (Int, Int) -> Pix? = { width, height -> Pix(width, height, 32) },

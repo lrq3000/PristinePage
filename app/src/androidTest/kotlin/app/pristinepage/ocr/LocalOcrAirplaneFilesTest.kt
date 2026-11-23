@@ -51,7 +51,7 @@ class LocalOcrAirplaneFilesTest {
         val context = instrumentation.targetContext
         val app = context.applicationContext as PristinePageApplication
         val token = InstrumentationRegistry.getArguments().getString("offlineOcrFixture")
-        assumeTrue("Only run on the exact OCR candidate with a staged fixture and reversible guest isolation", app.hasBundledOcr && token != null)
+        assumeTrue("Requires a staged fixture and reversible guest isolation", token != null)
         val fixture = checkNotNull(token)
         require(fixture.matches(Regex("[a-f0-9]{12}")))
         verifyIsolation("cold activity")

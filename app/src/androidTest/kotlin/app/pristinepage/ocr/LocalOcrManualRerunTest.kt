@@ -38,7 +38,7 @@ class LocalOcrManualRerunTest {
         val context = InstrumentationRegistry.getInstrumentation().targetContext
         val app = context.applicationContext as PristinePageApplication
         val argument = InstrumentationRegistry.getArguments().getString("recoveryAlbum")
-        assumeTrue("Requires the exact failed synthetic recovery album", app.hasBundledOcr && argument != null)
+        assumeTrue("Requires the exact failed synthetic recovery album", argument != null)
         val title = checkNotNull(argument)
         check(title.matches(Regex("OCR recovery [a-f0-9]{12}")))
         val graph = app.services.imports()

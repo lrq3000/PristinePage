@@ -5,6 +5,8 @@ plugins {
     alias(libs.plugins.kotlin.android)
 }
 
+val bundledOcr = rootProject.layout.projectDirectory.dir("validation/raw/providers/ocr-app-standard")
+
 android {
     namespace = "app.pristinepage.image"
     compileSdk = libs.versions.compileSdk.get().toInt()
@@ -15,6 +17,7 @@ android {
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         ndk.abiFilters += "arm64-v8a"
     }
+    sourceSets.getByName("main").java.srcDir(bundledOcr.dir("catalog"))
     val localDevelopmentSigning = signingConfigs.create("localDevelopment") {
         // Reuse the exact S-01/I-01 key/test package, like data's self-target test APK. Never generate a global key; only one module's test APK is installed at a time on the owned P-04 instance.
         storeFile = rootProject.file(".local-signing/debug.keystore")
@@ -33,11 +36,14 @@ android {
     }
     testOptions.unitTests.isReturnDefaultValues = false
 }
+tasks.named("preBuild") { dependsOn(rootProject.tasks.named("verifyBundledOcr")) }
 kotlin {
     jvmToolchain(21)
     compilerOptions.jvmTarget.set(JvmTarget.JVM_17)
 }
 dependencies {
+    // AGP cannot package a local AAR from this library. The app packages the exact AAR behind these classes.
+    compileOnly(files(bundledOcr.file("classes.jar")))
     implementation(project(":core"))
     implementation(project(":data"))
     implementation(libs.kotlinx.coroutines.android)
