@@ -1,5 +1,6 @@
 package app.pristinepage.ocr
 
+import android.database.sqlite.SQLiteDatabase
 import android.graphics.Bitmap
 import android.graphics.Canvas
 import android.graphics.Color
@@ -13,6 +14,7 @@ import android.graphics.Rect
 import android.util.Log
 import android.view.accessibility.AccessibilityNodeInfo
 import androidx.compose.ui.test.assertIsEnabled
+import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.hasText
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.compose.ui.test.junit4.createEmptyComposeRule
@@ -199,7 +201,7 @@ class LocalOcrImportJourneyTest {
         val saved = graph.store.editablePages.load(document.documentId, page.pageId)
         val inspectPicker = InstrumentationRegistry.getArguments().getString("filesInspectPicker") == "1"
         val textChooserMode = InstrumentationRegistry.getArguments().getString("filesInspectTextChooser")
-        require(textChooserMode == null || textChooserMode in setOf("1", "2"))
+        require(textChooserMode == null || textChooserMode in setOf("1", "2", "3", "4"))
         val inspectTextChooser = textChooserMode != null
         require(!inspectPicker || !inspectTextChooser)
         if (inspectPicker || inspectTextChooser) {
@@ -245,6 +247,22 @@ class LocalOcrImportJourneyTest {
                 compose.onNodeWithTag("ocr-text-save-as").performScrollTo().assertIsEnabled().performClick()
                 compose.waitUntil(15_000) { owner.state.value.let { it.consent != null && !it.launchRequested || !it.busy } }
                 assertTrue(owner.state.value.let { it.busy && it.consent != null && !it.launchRequested })
+                if (textChooserMode == "4") {
+                    // The separately scoped host verifies the actual picker and destination. Do not attach a second
+                    // UiAutomation client while the host is observing the system window; only test the app result here.
+                    val expected = text.text.value.encodeToByteArray()
+                    require(expected.isNotEmpty())
+                    val digest = java.security.MessageDigest.getInstance("SHA-256").digest(expected).joinToString("") { "%02x".format(it) }
+                    instrumentation.sendStatus(68, Bundle().apply {
+                        putString("ocrTextExpectedSha", digest)
+                        putInt("ocrTextExpectedBytes", expected.size)
+                    })
+                    withTimeout(165_000) { waitFor { owner.state.value.takeIf { !it.busy && it.consent == null } } }
+                    assertEquals(R.string.ocr_save_text_verified, owner.state.value.notice)
+                    compose.onNodeWithText(context.getString(R.string.ocr_save_text_verified)).assertExists()
+                    instrumentation.addResults(Bundle().apply { putString("filesWitness", "LOCAL_TEXT_APP_VERIFIED") })
+                    return@runBlocking
+                }
                 val automation = instrumentation.uiAutomation
                 withTimeout(15_000) { waitFor { automation.rootInActiveWindow?.packageName?.toString()?.takeIf { it in FILES_PACKAGES } } }
                 if (textChooserMode == "1") {
@@ -254,6 +272,18 @@ class LocalOcrImportJourneyTest {
                     compose.waitUntil(15_000) { owner.state.value.let { !it.busy && it.consent == null } }
                     assertNull(owner.state.value.notice)
                     instrumentation.addResults(Bundle().apply { putString("filesWitness", "LOCAL_TEXT_CHOOSER_CANCELED") })
+                } else if (textChooserMode == "3") {
+                    // Stop this app process after durable consent and before giving the system chooser any input.
+                    val consent = checkNotNull(owner.state.value.consent)
+                    val row = readTextConsent(context, consent)
+                    assertEquals("WAITING_DESTINATION" to true, row)
+                    check(automation.rootInActiveWindow?.packageName?.toString() in FILES_PACKAGES)
+                    instrumentation.sendStatus(67, Bundle().apply {
+                        putString("ocrTextDeathConsent", consent)
+                        putInt("ocrTextDeathPid", Process.myPid())
+                    })
+                    Process.killProcess(Process.myPid())
+                    error("The exact app process did not exit")
                 } else {
                     val outputToken = checkNotNull(InstrumentationRegistry.getArguments().getString("filesTextOutput"))
                     check(outputToken.matches(Regex("[a-f0-9]{12}")))
@@ -429,6 +459,59 @@ class LocalOcrImportJourneyTest {
         }
     }
 }
+
+/** Uses a real cold start after the owning application/test process ended with the system chooser open. */
+@RunWith(AndroidJUnit4::class)
+class LocalOcrTextDeathTest {
+    @get:Rule val compose = createAndroidComposeRule<MainActivity>()
+
+    @Test fun coldLaunchReportsInterruptedChooserWithoutReopeningIt(): Unit = runBlocking {
+        val instrumentation = InstrumentationRegistry.getInstrumentation()
+        val context = instrumentation.targetContext
+        val app = context.applicationContext as PristinePageApplication
+        val consent = InstrumentationRegistry.getArguments().getString("ocrTextDeathConsent")
+        assumeTrue("Only run after the named synthetic OCR chooser interruption", app.hasBundledOcr && consent != null)
+        val exactConsent = checkNotNull(consent)
+        require(UUID.fromString(exactConsent).toString() == exactConsent)
+        val owner = compose.runOnUiThread { ViewModelProvider(compose.activity)[OcrTextSaveViewModel::class.java] }
+        compose.waitUntil(20_000) { owner.state.value.pastWriteNeedsVerification }
+        val recovered = owner.state.value
+        assertNull(recovered.consent)
+        assertNull(recovered.destination)
+        assertFalse(recovered.busy)
+        assertFalse(recovered.launchRequested)
+        assertTrue(recovered.mayRetry)
+        assertEquals("NEEDS_VERIFICATION" to true, readTextConsent(context, exactConsent))
+        compose.onNodeWithText(context.getString(R.string.ocr_save_text_interrupted)).assertIsDisplayed()
+        compose.onNodeWithText(context.getString(R.string.ocr_save_text_retry)).assertIsEnabled()
+        compose.onNodeWithText(context.getString(R.string.atelier_close)).performClick()
+        compose.onNodeWithTag("home-album-search").assertIsDisplayed()
+        // Closing the Compose recovery dialog changes window focus asynchronously. Check the actual app Activity,
+        // not a single potentially stale or absent accessibility root during the window handoff.
+        compose.waitUntil(10_000) {
+            var focused = false
+            instrumentation.runOnMainSync { focused = compose.activity.hasWindowFocus() }
+            focused
+        }
+        assertNull(owner.state.value.consent)
+        assertFalse(owner.state.value.launchRequested)
+        instrumentation.addResults(Bundle().apply {
+            putString("ocrTextRecoveryWitness", "ENDED_CHOOSER_NO_AUTOMATIC_DESTINATION")
+            putInt("ocrTextRecoveryPid", Process.myPid())
+        })
+    }
+}
+
+/** Bound a scalar test read to the consent observed in-process; do not open the provider or materialize a destination. */
+private fun readTextConsent(context: android.content.Context, consent: String): Pair<String, Boolean> =
+    SQLiteDatabase.openDatabase(context.getDatabasePath("pristinepage.db").path, null, SQLiteDatabase.OPEN_READONLY).use { db ->
+        db.rawQuery("SELECT state, targetUri IS NULL FROM OcrTextPublication WHERE consentId = ?", arrayOf(consent)).use { cursor ->
+            check(cursor.moveToFirst())
+            val result = cursor.getString(0) to (cursor.getInt(1) == 1)
+            check(!cursor.moveToNext())
+            result
+        }
+    }
 
 /** Start from a real saved page with no OCR binding, not from an injected recognizer, wake, or result. */
 @RunWith(AndroidJUnit4::class)
