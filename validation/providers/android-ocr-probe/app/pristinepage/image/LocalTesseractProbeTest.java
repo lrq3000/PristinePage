@@ -34,6 +34,61 @@ public final class LocalTesseractProbeTest {
     private static final List<String> CODES = Arrays.asList("eng", "fra", "spa", "deu", "ita", "por", "nld", "pol", "tur", "rus", "ukr", "ell",
         "ara", "heb", "hin", "chi_sim", "jpn", "kor", "vie", "ind");
 
+    @Test public void readsTwentyCommittedSyntheticScans() throws Exception {
+        var instrumentation = InstrumentationRegistry.getInstrumentation();
+        Context context = instrumentation.getTargetContext();
+        assertEquals("app.pristinepage.debug.test", context.getPackageName());
+        assertEquals(context.getPackageName(), instrumentation.getContext().getPackageName());
+        String[] permissions = context.getPackageManager().getPackageInfo(context.getPackageName(), PackageManager.GET_PERMISSIONS).requestedPermissions;
+        assertTrue(permissions == null || !Arrays.asList(permissions).contains("android.permission.INTERNET"));
+        String folder = ROOT + "smoke/";
+        JSONArray cases = new JSONArray(new String(load(context, folder + "references.json", 32768), StandardCharsets.UTF_8));
+        String[] languages = {"eng", "fra", "jpn", "chi_sim"};
+        String[] styles = {"clean", "receipt", "tint", "tilt", "perspective"};
+        assertEquals(languages.length * styles.length, cases.length());
+        JSONArray packs = new JSONObject(new String(load(context, ROOT + "manifest.json", 32768), StandardCharsets.UTF_8)).getJSONArray("packs");
+        File directory = new File(context.getFilesDir(), "ocr-smoke-" + UUID.randomUUID());
+        assertTrue(directory.mkdir());
+        File tessdata = new File(directory, "tessdata");
+        assertTrue(tessdata.mkdir());
+        List<String> failures = new ArrayList<>();
+        JSONArray metrics = new JSONArray();
+        for (int group = 0; group < languages.length; group++) {
+            String language = languages[group];
+            stagePack(context, tessdata, language, packs.getJSONObject(CODES.indexOf(language)));
+            for (int variant = 0; variant < styles.length; variant++) {
+                JSONObject fixture = cases.getJSONObject(group * styles.length + variant);
+                String id = language + "-" + styles[variant];
+                assertEquals(id, fixture.getString("id"));
+                assertEquals(language, fixture.getString("language"));
+                String expected = normalize(fixture.getString("text"));
+                String anchor = normalize(fixture.getString("anchor"));
+                String identifier = fixture.getString("identifier");
+                assertTrue(expected.length() >= 12 && expected.length() <= 150 &&
+                    !anchor.isEmpty() && expected.contains(anchor) && identifier.matches("[0-9]{4}") && expected.contains(identifier));
+                byte[] image = load(context, folder + id + ".png", 128 * 1024);
+                assertEquals(fixture.getInt("bytes"), image.length);
+                assertEquals(fixture.getString("sha256"), hex(MessageDigest.getInstance("SHA-256").digest(image)));
+                Bitmap bitmap = decodeControl(image, 1100, 480);
+                String raw;
+                try { raw = recognize(directory, language, TessBaseAPI.PageSegMode.PSM_SINGLE_BLOCK, bitmap); }
+                finally { bitmap.recycle(); }
+                String actual = raw == null || raw.length() > 512 ? "" : normalize(raw);
+                int edits = distance(expected, actual);
+                boolean anchorFound = actual.contains(anchor);
+                boolean identifierFound = !actual.isEmpty() && java.util.regex.Pattern
+                    .compile("(?<![0-9])" + identifier + "(?![0-9])").matcher(raw).find();
+                metrics.put(id + ":" + edits + "/" + expected.length() + ":" + (anchorFound ? 1 : 0) + (identifierFound ? 1 : 0));
+                if (!anchorFound || !identifierFound || 100 * edits > 15 * expected.length()) failures.add(id);
+            }
+        }
+        var results = new android.os.Bundle();
+        results.putString("ocrSmokeMetrics", metrics.toString());
+        instrumentation.addResults(results);
+        // Finish all 20 cases before failing so the operator gets the complete smoke result in one run.
+        assertTrue("Synthetic OCR smoke failures: " + failures + "; metrics=" + metrics, failures.isEmpty());
+    }
+
     @Test public void recognizesTheTwentyPinnedLanguagesAndCrossScriptControls() throws Exception {
         Context context = InstrumentationRegistry.getInstrumentation().getTargetContext();
         String[] permissions = context.getPackageManager().getPackageInfo(context.getPackageName(), PackageManager.GET_PERMISSIONS).requestedPermissions;
@@ -173,15 +228,19 @@ public final class LocalTesseractProbeTest {
     }
 
     private static Bitmap decodeControl(byte[] image, int height) {
+        return decodeControl(image, 1500, height);
+    }
+
+    private static Bitmap decodeControl(byte[] image, int width, int height) {
         BitmapFactory.Options bounds = new BitmapFactory.Options();
         bounds.inJustDecodeBounds = true;
         BitmapFactory.decodeByteArray(image, 0, image.length, bounds);
-        assertEquals(1500, bounds.outWidth);
+        assertEquals(width, bounds.outWidth);
         assertEquals(height, bounds.outHeight);
         assertEquals("image/png", bounds.outMimeType);
         Bitmap bitmap = BitmapFactory.decodeByteArray(image, 0, image.length);
         assertNotNull(bitmap);
-        assertEquals(1500, bitmap.getWidth());
+        assertEquals(width, bitmap.getWidth());
         assertEquals(height, bitmap.getHeight());
         return bitmap;
     }
