@@ -7,6 +7,8 @@ import android.graphics.Paint
 import android.graphics.Typeface
 import android.os.Bundle
 import android.os.ParcelFileDescriptor
+import android.graphics.Rect
+import android.view.accessibility.AccessibilityNodeInfo
 import androidx.compose.ui.test.assertIsEnabled
 import androidx.compose.ui.test.hasText
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
@@ -187,7 +189,11 @@ class LocalOcrImportJourneyTest {
         val page = graph.store.catalog.load(document.documentId).pages.single()
         val saved = graph.store.editablePages.load(document.documentId, page.pageId)
         val inspectPicker = InstrumentationRegistry.getArguments().getString("filesInspectPicker") == "1"
-        if (inspectPicker) {
+        val textChooserMode = InstrumentationRegistry.getArguments().getString("filesInspectTextChooser")
+        require(textChooserMode == null || textChooserMode in setOf("1", "2"))
+        val inspectTextChooser = textChooserMode != null
+        require(!inspectPicker || !inspectTextChooser)
+        if (inspectPicker || inspectTextChooser) {
             val original = graph.store.committedSources.load(saved.sourceId)
             assertEquals("Save as is permitted only for the exact synthetic Files input",
                 "f4585967198db8a51a7d8afae50e449bdead2ad3b4122d1478afffc5fbd5608f", original.sourceByteHash)
@@ -224,6 +230,33 @@ class LocalOcrImportJourneyTest {
                 compose.waitUntil(15_000) { compose.onAllNodesWithText(text.text.value).fetchSemanticsNodes().size == 1 }
             } catch (miss: androidx.compose.ui.test.ComposeTimeoutException) {
                 throw AssertionError("Saved OCR panel: close=${observed(R.string.atelier_close)}, loading=${observed(R.string.ocr_details_loading)}, unavailable=${observed(R.string.ocr_details_unavailable)}, noText=${observed(R.string.ocr_text_not_available)}", miss)
+            }
+            if (inspectTextChooser) {
+                val owner = compose.runOnUiThread { ViewModelProvider(compose.activity)[OcrTextSaveViewModel::class.java] }
+                compose.onNodeWithTag("ocr-text-save-as").performScrollTo().assertIsEnabled().performClick()
+                compose.waitUntil(15_000) { owner.state.value.let { it.consent != null && !it.launchRequested || !it.busy } }
+                assertTrue(owner.state.value.let { it.busy && it.consent != null && !it.launchRequested })
+                val automation = instrumentation.uiAutomation
+                withTimeout(15_000) { waitFor { automation.rootInActiveWindow?.packageName?.toString()?.takeIf { it in FILES_PACKAGES } } }
+                if (textChooserMode == "1") {
+                    // No destination is selected. Back cancels the authenticated foreground system window.
+                    check(automation.rootInActiveWindow?.packageName?.toString() in FILES_PACKAGES)
+                    ParcelFileDescriptor.AutoCloseInputStream(automation.executeShellCommand("input keyevent KEYCODE_BACK")).use { it.readBytes() }
+                    compose.waitUntil(15_000) { owner.state.value.let { !it.busy && it.consent == null } }
+                    assertNull(owner.state.value.notice)
+                    instrumentation.addResults(Bundle().apply { putString("filesWitness", "LOCAL_TEXT_CHOOSER_CANCELED") })
+                } else {
+                    val outputToken = checkNotNull(InstrumentationRegistry.getArguments().getString("filesTextOutput"))
+                    check(outputToken.matches(Regex("[a-f0-9]{12}")))
+                    val save = SyntheticTextDestination(automation, outputToken)
+                    save.confirmNewLocalFile()
+                    compose.waitUntil(30_000) { owner.state.value.let { !it.busy && it.consent == null } }
+                    assertEquals(R.string.ocr_save_text_verified, owner.state.value.notice)
+                    compose.onNodeWithText(context.getString(R.string.ocr_save_text_verified)).assertExists()
+                    save.verifyBytes(text.text.value.encodeToByteArray())
+                    instrumentation.addResults(Bundle().apply { putString("filesWitness", "LOCAL_TEXT_DESTINATION_READBACK") })
+                }
+                return@runBlocking
             }
             compose.onNodeWithText(context.getString(R.string.atelier_close)).performClick()
         }
@@ -291,6 +324,100 @@ class LocalOcrImportJourneyTest {
     private companion object {
         val FILES_PACKAGES = setOf("com.android.documentsui", "com.google.android.documentsui")
         val RESUMED_COMPONENT = Regex("""(?:mResumedActivity:|topResumedActivity=)\s+ActivityRecord\{[^}\r\n]*?\bu\d+\s+([A-Za-z0-9_.]+/[A-Za-z0-9_.$]+)\s""")
+    }
+
+    /** Only the exact new guest Downloads folder supplied by the exclusive host driver can authorize the Save button in this test. */
+    private class SyntheticTextDestination(private val ui: android.app.UiAutomation, token: String) {
+        private val folder = "PristinePage-Export-$token"
+        private val local = "/sdcard/Download/$folder"
+        private val leaf = "recognized-text.txt"
+
+        private fun command(cmd: String) = ParcelFileDescriptor.AutoCloseInputStream(ui.executeShellCommand(cmd))
+            .bufferedReader().use { it.readText() }
+
+        private fun picker(): AccessibilityNodeInfo? = ui.rootInActiveWindow
+            ?.takeIf { it.packageName?.toString() in FILES_PACKAGES }
+
+        private fun match(root: AccessibilityNodeInfo, predicate: (AccessibilityNodeInfo) -> Boolean): AccessibilityNodeInfo? {
+            val queue = ArrayDeque<AccessibilityNodeInfo>().apply { add(root) }
+            val found = mutableListOf<AccessibilityNodeInfo>()
+            var visited = 0
+            while (queue.isNotEmpty()) {
+                check(++visited <= 1_000)
+                val node = queue.removeFirst()
+                repeat(node.childCount) { node.getChild(it)?.let(queue::addLast) }
+                if (node.packageName == root.packageName && node.isVisibleToUser && node.isEnabled && predicate(node)) found += node
+            }
+            check(found.size <= 1)
+            return found.singleOrNull()
+        }
+
+        private suspend fun control(check: (AccessibilityNodeInfo) -> Boolean): AccessibilityNodeInfo =
+            withTimeout(15_000) { waitFor { picker()?.let { match(it, check) } } }
+
+        private suspend fun tapLabels(labels: Set<String>, directory: Boolean = false) {
+            val node = control {
+                if (directory) it.viewIdResourceName == "android:id/title" && it.text?.toString() in labels
+                else (it.text?.toString() in labels || it.contentDescription?.toString() in labels) && it.isClickable
+            }
+            check(picker()?.windowId == node.windowId && node.refresh())
+            if (!directory) {
+                check(node.performAction(AccessibilityNodeInfo.ACTION_CLICK))
+                return
+            }
+            val row = generateSequence(node) { it.parent }.first {
+                it.parent?.viewIdResourceName?.endsWith(":id/dir_list") == true
+            }
+            check(row.isFocusable && row.isEnabled && row.isVisibleToUser)
+            val bounds = Rect().also(row::getBoundsInScreen)
+            check(!bounds.isEmpty)
+            command("input tap ${bounds.centerX()} ${bounds.centerY()}")
+        }
+
+        suspend fun confirmNewLocalFile() {
+            val real = command("cd $local && pwd -P").trim()
+            check(real.matches(Regex("/(?:storage/emulated/0|mnt/shell/emulated/0)/Download/$folder")))
+            check(command("ls -A $local").isBlank())
+            tapLabels(setOf("Show roots", "Afficher les répertoires racines"))
+            tapLabels(setOf("Downloads", "Téléchargements"))
+            tapLabels(setOf(folder), directory = true)
+            control { it.viewIdResourceName == "android:id/title" && it.className == "android.widget.TextView" && it.text == folder }
+            val title = control {
+                it.viewIdResourceName == "android:id/title" && it.className == "android.widget.EditText" && it.text == leaf
+            }
+            val button = control {
+                it.viewIdResourceName == "android:id/button1" && it.isClickable && it.text?.toString()?.lowercase(java.util.Locale.ROOT) in setOf("save", "enregistrer")
+            }
+            val owner = checkNotNull(picker()).packageName.toString()
+            val activity = command("dumpsys activity top -a")
+            val component = Regex("(?m)^  ACTIVITY ${Regex.escape(owner)}/(?:\\.|${Regex.escape(owner)}\\.)picker\\.PickActivity ").findAll(activity).toList().single()
+            val block = activity.substring(component.range.last).substringBefore("\n  ACTIVITY ")
+            val active = block.substringAfter("Active Fragments in ", "").substringBefore("Added Fragments:")
+            val added = block.substringAfter("Added Fragments:", "").substringBefore("FragmentManager misc state:")
+            val fragment = Regex("(?m)^        #\\d+: DirectoryFragment\\{([^}\\r\\n]+)}$")
+            val identity = fragment.findAll(added).single().groupValues[1]
+            val activeFragment = fragment.findAll(active).single { it.groupValues[1] == identity }
+            val body = active.substring(activeFragment.range.last).split(Regex("(?m)^        #\\d+:"), limit = 2).first()
+            val directory = body.lineSequence().single { it.contains("mArguments=Bundle[") && it.contains("document=DocumentInfo{") }
+            val authority = "com.android.providers.downloads.documents"
+            require(body.contains("mAdded=true mRemoving=false") && body.contains("mHidden=false mDetached=false") &&
+                directory.contains("authority=$authority, rootId=downloads,") &&
+                directory.contains("content://$authority/root/downloads") &&
+                directory.contains("docId=raw:$real, name=$folder,") &&
+                android.net.Uri.decode(directory).contains("content://$authority/document/raw:$real") &&
+                directory.contains("isCreateSupported=true"))
+            check(command("ls -A $local").isBlank() && picker()?.windowId == button.windowId &&
+                title.windowId == button.windowId && title.refresh() && title.text == leaf &&
+                button.refresh() && button.isVisibleToUser && button.isEnabled)
+            check(button.performAction(AccessibilityNodeInfo.ACTION_CLICK))
+        }
+
+        fun verifyBytes(expected: ByteArray) {
+            check(command("ls -A $local").trim() == leaf)
+            val digest = java.security.MessageDigest.getInstance("SHA-256").digest(expected).joinToString("") { "%02x".format(it) }
+            check(command("stat -c %s $local/$leaf").trim().toLong() == expected.size.toLong())
+            check(command("sha256sum $local/$leaf").substringBefore(' ') == digest)
+        }
     }
 }
 

@@ -25,6 +25,7 @@ class SavedOcrWork private constructor(store: PrivateImportStore.OcrComposition)
     private val execution = RoomOcrExecution(store.database, store.owners)
     private val search = RoomOcrSearch(store.database)
     private val textExport by lazy { RoomOcrTextExport(store, search) }
+    private val textPublication by lazy { RoomOcrTextPublication(store, textExport) }
     private val editable = RoomEditablePages(RoomMetadataAccess(store.database), store.database.catalog())
     private val queue = RoomOcrQueue(store.database)
     private val invalidation = store.database.invalidationTracker
@@ -208,6 +209,25 @@ class SavedOcrWork private constructor(store: PrivateImportStore.OcrComposition)
         val receipt = prepared.receiptFor(this) ?: return null
         return retained(null, "ocr_text_export_read_failed") { textExport.read(receipt) }
     }
+
+    enum class TextSaveOutcome { CANCELED, READBACK_VERIFIED, OUTPUT_COMPLETED, PARTIAL_EXTERNAL, NEEDS_VERIFICATION, DESTINATION_REFUSED, PERMISSION_LOST }
+
+    /** Private presentation only, never Activity state or a substitute for a new destination grant. */
+    class TextSaveRecovery internal constructor(val needsVerification: Boolean, val priorDestination: String?, val retry: PreparedTextExport?)
+
+    /** The app supplies the exactly correlated document result and owns the temporary grant and provider verification. */
+    suspend fun publishPreparedText(prepared: PreparedTextExport, choose: suspend (consentId: String) -> String?,
+        transfer: suspend (target: String, bytes: ByteArray) -> TextSaveOutcome): TextSaveOutcome {
+        val receipt = prepared.receiptFor(this) ?: invalid("ocr_text_publication_invalid_receipt")
+        return retained(null, "ocr_text_publication_failed") { textPublication.publish(receipt, choose, transfer) }
+    }
+
+    /** Only metadata is reconciled; an ended writer's target is never reopened or rewritten. */
+    suspend fun recoverTextPublications(): TextSaveRecovery =
+        retained(null, "ocr_text_publication_recovery_failed") {
+            val result = textPublication.recover()
+            TextSaveRecovery(result != null, result?.target, result?.retry?.let { PreparedTextExport.issue(this, it) })
+        }
 
     /** Metadata only: observing a live page's status does not load recognition text, grant a job lease or touch its original. */
     suspend fun readStatus(document: DocumentId, page: PageId, expectedRevision: Long? = null): PageStatus? =

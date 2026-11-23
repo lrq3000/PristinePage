@@ -13,6 +13,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.LiveRegionMode
 import androidx.compose.ui.semantics.liveRegion
@@ -49,6 +50,7 @@ class SavedPageOcrReader internal constructor(
     private val open: suspend () -> SavedOcrWork,
     internal val rerunInFlight: StateFlow<Boolean>,
     internal val requestRerun: suspend (SavedOcrWork.PageStatus, Boolean) -> RerunOutcome,
+    internal val requestSave: ((SavedOcrWork.TextExportObservation) -> Boolean)? = null,
 ) {
     internal suspend fun status(page: EditablePage) = open().readStatus(page.documentId, page.pageId, page.recipeRevision)
     internal suspend fun text(page: EditablePage) = open().readText(page.documentId, page.pageId, page.recipeRevision)
@@ -120,6 +122,8 @@ internal fun SavedPageOcrDetails(panel: SavedPageOcrPanel, page: EditablePage?, 
             }
         }
     }
+    // Read the snapshot in the host composition, not only in the dialog's separate window composition.
+    val displayed = result
     AlertDialog(
         onDismissRequest = dismiss,
         title = { Text(stringResource(panel.title)) },
@@ -130,7 +134,7 @@ internal fun SavedPageOcrDetails(panel: SavedPageOcrPanel, page: EditablePage?, 
                     LaunchedEffect(label) { focus.bringIntoView() }
                     Text(stringResource(label), modifier = Modifier.bringIntoViewRequester(focus).semantics { liveRegion = LiveRegionMode.Polite })
                 }
-                when (val shown = result) {
+                when (val shown = displayed) {
                     Reading.Loading -> Text(stringResource(R.string.ocr_details_loading))
                     Reading.Unavailable -> Text(stringResource(R.string.ocr_details_unavailable))
                     is Reading.Status -> {
@@ -162,13 +166,20 @@ internal fun SavedPageOcrDetails(panel: SavedPageOcrPanel, page: EditablePage?, 
                             // Do not pass private OCR to platform text classification or clipboard via selectable text.
                             Text(original, style = MaterialTheme.typography.bodyMedium.copy(textDirection = TextDirection.Content))
                         }
+                        val save = reader.requestSave
+                        if (item != null && save != null) TextButton(
+                            onClick = {
+                                if (lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED) && save(item.exportObservation)) dismiss()
+                            },
+                            modifier = Modifier.heightIn(min = 48.dp).testTag("ocr-text-save-as"),
+                        ) { Text(stringResource(R.string.ocr_save_text)) }
                     }
                 }
             }
         },
         confirmButton = { TextButton(onClick = dismiss, modifier = Modifier.heightIn(min = 48.dp)) { Text(stringResource(R.string.atelier_close)) } },
         dismissButton = {
-            TextButton(onClick = { notice = null; refresh++ }, enabled = !submitting && page != null && result != Reading.Loading,
+            TextButton(onClick = { notice = null; refresh++ }, enabled = !submitting && page != null && displayed != Reading.Loading,
                 modifier = Modifier.heightIn(min = 48.dp)) {
                 Text(stringResource(R.string.ocr_details_refresh))
             }

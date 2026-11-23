@@ -115,6 +115,10 @@ internal class RoomOcrTextExport(
         }
     }
 
+    /** Metadata assertion inside the consumer's transaction, not a file proof or a byte read. */
+    internal fun verifyCommitted(receipt: Receipt, active: () -> Unit) =
+        verify(Attempt(receipt.intent), Phase.COMMITTED, receipt.sealSha256, active)
+
     private fun verify(attempt: Attempt, phase: Phase, seal: String?, active: () -> Unit) {
         active()
         if (!dao.ocrTextJournalMatches(attempt.tx, attempt.artifact, attempt.stage, attempt.final, attempt.payload,

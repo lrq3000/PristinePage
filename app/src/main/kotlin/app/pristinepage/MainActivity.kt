@@ -64,6 +64,8 @@ import app.pristinepage.library.LibrarySession
 import app.pristinepage.library.ImportPhase
 import app.pristinepage.ocr.AlbumOcrPending
 import app.pristinepage.ocr.SavedPageOcrReader
+import app.pristinepage.ocr.OcrTextSaveHost
+import app.pristinepage.ocr.OcrTextSaveViewModel
 import app.pristinepage.image.preview.OriginalPreviewBitmap
 import app.pristinepage.image.preview.RenderedPreviewBitmap
 import app.pristinepage.image.preview.RenderedPreviewBitmapLoader
@@ -127,6 +129,12 @@ class MainActivity : ComponentActivity() {
                 return AlbumExportViewModel(app, services::imports) as T
             }
         })[AlbumExportViewModel::class.java]
+        val textSave = ViewModelProvider(this, object : ViewModelProvider.Factory {
+            @Suppress("UNCHECKED_CAST") override fun <T : ViewModel> create(modelClass: Class<T>): T {
+                require(modelClass == OcrTextSaveViewModel::class.java)
+                return OcrTextSaveViewModel(app) { services.imports().store.savedOcr } as T
+            }
+        })[OcrTextSaveViewModel::class.java]
         val acquisition = ViewModelProvider(this, object : ViewModelProvider.Factory {
             @Suppress("UNCHECKED_CAST") override fun <T : ViewModel> create(modelClass: Class<T>): T {
                 require(modelClass == AtelierCaptureViewModel::class.java)
@@ -240,6 +248,7 @@ class MainActivity : ComponentActivity() {
                                     commit = { services.imports().store.savedOcr.requestRerun(observed, it) },
                                 )
                             },
+                            requestSave = textSave::save,
                         )
                     }
                      PageEditorScreen(loadOriginal = loadOriginal, savedOcr = savedOcr, showOcrDiagnostics = settings.ocrDiagnostics,
@@ -264,6 +273,7 @@ class MainActivity : ComponentActivity() {
                 }
             }
             AlbumExportDialog(exportOwner)
+            OcrTextSaveHost(textSave, activityResultRegistry)
         } }
     }
 

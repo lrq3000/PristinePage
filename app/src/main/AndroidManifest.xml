@@ -3,6 +3,14 @@
     <uses-permission android:name="android.permission.INTERNET" tools:node="remove" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" tools:node="remove" />
     <uses-feature android:name="android.hardware.camera.any" android:required="false" />
+    <queries>
+        <intent>
+            <action android:name="android.intent.action.CREATE_DOCUMENT" />
+            <category android:name="android.intent.category.OPENABLE" />
+            <data android:mimeType="text/plain" />
+        </intent>
+        <provider android:authorities="com.android.externalstorage.documents;com.android.providers.downloads.documents" />
+    </queries>
     <application android:name="${pristinePageApplication}" android:label="@string/app_name" android:icon="@mipmap/pristinepage_launcher" android:roundIcon="@mipmap/pristinepage_launcher" android:allowBackup="false" android:fullBackupContent="@xml/backup_rules" android:dataExtractionRules="@xml/data_extraction_rules" android:supportsRtl="true" android:theme="@android:style/Theme.Material.NoActionBar">
         <provider android:name=".capture.CaptureStageProvider" android:authorities="${applicationId}.capture-staging" android:exported="false" android:grantUriPermissions="false" />
         <provider android:name=".export.FinishedExportProvider" android:authorities="${applicationId}.finished-exports" android:exported="false" android:grantUriPermissions="true">
