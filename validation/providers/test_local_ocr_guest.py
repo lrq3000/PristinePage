@@ -16,6 +16,51 @@ def block(class_name, method, code):
 
 
 class LocalOcrGuestTest(unittest.TestCase):
+    def test_airplane_verification_requires_no_connected_network_or_default_route(self):
+        from local_ocr_airplane import disconnected
+
+        offline = "NetworkFactories for: WIFI\nActive default network: none\nCurrent Networks:\nNetwork Requests:\n"
+        self.assertTrue(disconnected(offline))
+        for invalid in (
+            offline.replace("none", "100"),
+            offline.replace("Network Requests:", "  NetworkAgentInfo [ETHERNET () - 100] CONNECTED/CONNECTED\nNetwork Requests:"),
+            offline.replace("Network Requests:", "  NetworkAgentInfo{ni{[type: WIFI[], state: CONNECTING/CONNECTING]}}\nNetwork Requests:"),
+            offline.replace("Network Requests:", "  output truncated before the first network\nNetwork Requests:"),
+            offline.removesuffix("Network Requests:\n"),
+            "Permission Denial: missing dump access",
+            offline + "Active default network: none\n",
+        ):
+            with self.subTest(invalid=invalid):
+                self.assertFalse(disconnected(invalid))
+
+    def test_airplane_and_save_as_are_independent_journeys(self):
+        runner = Path(__file__).with_name("run_local_ocr_guest.py")
+        for flags, message in (
+            (["--airplane", "--save-as"], "Choose airplane-mode search or external JPEG Save as, not both"),
+            (["--airplane"], "Unattended radio switching is disabled"),
+            (["--save-as"], "Unattended Save as is disabled"),
+            (["--inspect-save-as"], "Save as inspection requires the retained exact synthetic Files album"),
+        ):
+            with self.subTest(flags=flags):
+                completed = subprocess.run(
+                    [sys.executable, "-B", runner, "--existing", "unused", *flags,
+                     "--files-source", "unused", "unused", "unused", "unused", "unused", "unused"],
+                    capture_output=True, text=True, timeout=15,
+                )
+                self.assertEqual(2, completed.returncode, completed.stderr)
+                self.assertIn(message, completed.stderr)
+
+    def test_radio_isolation_needs_positive_wifi_adapter_state(self):
+        from local_ocr_airplane import isolated
+
+        radio = {"airplane_mode_on": "1", "wifi_on": "2", "mobile_data": "0"}
+        networks = "Active default network: none\nCurrent Networks:\nNetwork Requests:\n"
+        self.assertTrue(isolated(radio, networks, "Wi-Fi is disabled\nOther debug fields"))
+        for wifi in ("Wi-Fi is enabled", "Permission Denial", "Wi-Fi is disabled\nWi-Fi is enabled"):
+            self.assertFalse(isolated(radio, networks, wifi), wifi)
+        self.assertFalse(isolated(dict(radio, wifi_on="1"), networks, "Wi-Fi is disabled"))
+        self.assertFalse(isolated(dict(radio, mobile_data="1"), networks, "Wi-Fi is disabled"))
+
     def test_language_and_rerun_modes_refuse_unscoped_arguments_before_apk_admission(self):
         runner = Path(__file__).with_name("run_local_ocr_guest.py")
         for flags, message in (
@@ -117,15 +162,21 @@ class LocalOcrGuestTest(unittest.TestCase):
     def test_accepts_one_matching_pass_only(self):
         started = block(*CASE, 1)
         ok = "OK (1 test)\r\n"
+        result = "INSTRUMENTATION_CODE: -1\r\n"
         passed = block(*CASE, 0)
-        self.assertTrue(passed_case(started + passed + ok, CASE))
+        self.assertTrue(passed_case(started + passed + ok + result, CASE))
         for output in (
-            started + block(*CASE, -4) + ok,  # A failed assumption is not an actual test.
-            started + block(*CASE, -2),
-            started + block(CASE[0], "aDifferentTest", 0) + ok,
-            started + passed + passed + ok,
-            passed + ok,
-            started + passed + "OK (2 tests)\n",
+            started + passed + ok,
+            started + passed + ok + result + result,
+            started + passed + ok + result + "Unexpected trailing result\n",
+            started + passed + ok + result.replace("-1", "0"),
+            started + passed + ok + "INSTRUMENTATION_RESULT: shortMsg=Process crashed.\r\n" + result,
+            started + block(*CASE, -4) + ok + result,  # A failed assumption is not an actual test.
+            started + block(*CASE, -2) + result,
+            started + block(CASE[0], "aDifferentTest", 0) + ok + result,
+            started + passed + passed + ok + result,
+            passed + ok + result,
+            started + passed + "OK (2 tests)\n" + result,
         ):
             with self.subTest(output=output):
                 self.assertFalse(passed_case(output, CASE))

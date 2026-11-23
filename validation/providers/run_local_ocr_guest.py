@@ -66,6 +66,11 @@ def normalize_config(contents):
 
 
 def passed_case(output, case):
+    terminal = re.findall(r"(?m)^INSTRUMENTATION_CODE: (-?[0-9]+)[ \r]*$", output)
+    if terminal != ["-1"] or not re.search(r"(?:^|\n)INSTRUMENTATION_CODE: -1[ \r\n]*\Z", output):
+        return False
+    if re.search(r"(?m)^(?:INSTRUMENTATION_(?:FAILED|ABORTED):|INSTRUMENTATION_RESULT: (?:shortMsg|longMsg)=)", output):
+        return False
     observed = []
     for fields, code in re.findall(r"(.*?)(?:^INSTRUMENTATION_STATUS_CODE: (-?\d+)[ \r]*$)", output, re.M | re.S):
         method = re.search(r"(?m)^INSTRUMENTATION_STATUS: test=([^ \r\n]+)[ \r]*$", fields)
@@ -73,7 +78,7 @@ def passed_case(output, case):
         if not cls or not method:
             return False
         observed.append((cls[1], method[1], code))
-    return observed == [(*case, "1"), (*case, "0")] and bool(re.search(r"(?m)^OK \(1 test\)[ \r]*$", output))
+    return observed == [(*case, "1"), (*case, "0")] and len(re.findall(r"(?m)^OK \(1 test\)[ \r]*$", output)) == 1
 
 
 def recovery_pid(output, ordinal):
@@ -249,11 +254,17 @@ def run_type(ns):
                                 self.serial = response
                         if self.serial and self.protocol() == 41:
                             targeted = [adb, "-s", self.serial]
-                            state = self.command([*targeted, "get-state"], allowed=(0, 1)).strip()
-                            boot = self.command([*targeted, "shell", "getprop", "sys.boot_completed"], allowed=(0, 1)).strip()
-                            pm = self.command([*targeted, "shell", "pm", "path", "android"], allowed=(0, 1)).strip()
-                            if state == "device" and boot == "1" and pm.startswith("package:"):
-                                break
+                            try:
+                                state = self.command([*targeted, "get-state"], allowed=(0, 1)).strip()
+                                if state == "device":
+                                    boot = self.command([*targeted, "shell", "getprop", "sys.boot_completed"], allowed=(0, 1)).strip()
+                                    if boot == "1" and self.command([*targeted, "shell", "pm", "path", "android"],
+                                                                    allowed=(0, 1)).strip().startswith("package:"):
+                                        break
+                            except subprocess.TimeoutExpired:
+                                # LDPlayer can report an attached serial before Android responds to shell requests.
+                                # Retry the read within the existing boot deadline, never repeat a launch or input.
+                                pass
                     time.sleep(2)
                 else:
                     raise RuntimeError("Owned guest boot or ADB readiness deadline exceeded")
@@ -334,7 +345,8 @@ def run_type(ns):
                 self.lock.rmdir()
             raise RuntimeError("Unverified provisioning/launch; retained the exact allocator cleanup obligation")
 
-        def witness(self, pair, hashes, fresh, files_source, saved_album, backfill, recovery, controls, rerun, diagnosis, previous_test, settings_restart=False):
+        def witness(self, pair, hashes, fresh, files_source, saved_album, backfill, recovery, controls, rerun, diagnosis, previous_test,
+                    settings_restart=False, inspect_save_as=False):
             record = self.owned()
             row = self.exact(self.inventory())
             need([int(row[i]) for i in (5, 6)] == [item[0] for item in record["runtime_processes"]], "Target processes changed")
@@ -347,7 +359,7 @@ def run_type(ns):
                  "Fresh guest already contains an unrelated PristinePage app")
             if settings_restart:
                 need(present == {f"package:{APP}", f"package:{TEST}"} and previous_test is None,
-                     "Settings restart must reuse both exact installed APKs")
+                     "This witness must reuse both exact installed APKs")
             for package, path in pair.items():
                 need(sha(path) == hashes[package], "APK changed before install")
                 installed = self.installed_hash(package) if f"package:{package}" in present else None
@@ -376,6 +388,9 @@ def run_type(ns):
             if controls:
                 self.language_journey(target, controls)
                 return
+            self.saved_journey(target, files_source, saved_album, backfill, rerun, inspect_save_as=inspect_save_as)
+
+        def saved_journey(self, target, files_source, saved_album, backfill, rerun, checkpoint=None, inspect_save_as=False):
             if files_source:
                 from local_ocr_files_journey import LocalFilesJourney
                 journey = LocalFilesJourney(self, target, APP, files_source)
@@ -385,14 +400,32 @@ def run_type(ns):
                     # Preserve crash and resolver evidence before shutting down; do not reissue the unsuccessful UI action.
                     self.inspect_files_failure(target)
                     raise
+            if checkpoint:
+                checkpoint("after-save")
             case = FILES_CASE if saved_album else BACKFILL_CASE if backfill else MANUAL_CASE if rerun else CASE
             extras = ["-e", "filesSavedAlbum", saved_album] if saved_album else ["-e", "recoveryAlbum", f"'{rerun}'"] if rerun else []
+            if checkpoint:
+                extras += ["-e", "filesSearchOnly", "1"]
+            directory = None
+            if inspect_save_as:
+                folder = "PristinePage-Export-" + uuid.uuid4().hex[:12]
+                directory = f"/sdcard/Download/{folder}"
+                # No -p: inspect a fresh local directory, never an existing user destination.
+                self.command([*target, "shell", "mkdir", directory])
+                extras += ["-e", "filesSaveAsFolder", folder, "-e", "filesInspectPicker", "1"]
             output = self.command([*target, "shell", "am", "instrument", "-w", "-r", "-e", "class",
                                    "#".join(case), *extras, RUNNER], timeout=320 if rerun else 250)
             self.path("instrumentation.txt").write_text(output, encoding="utf-8")
             need(passed_case(output, case),
                  "Ordinary OCR instrumentation failed or skipped; inspect the exact transcript")
-            self.save(self.path("outcomes.json"), {"case": "#".join(case), "passed": True, "filesAlbum": saved_album}, durable=True)
+            branch = "EXACT_PAGE_SEARCH" if checkpoint else "PICKER_INSPECTED_WITHOUT_CONFIRMATION" if directory else None
+            if branch:
+                markers = re.findall(r"(?m)^INSTRUMENTATION_RESULT: filesWitness=(\S+)[ \r]*$", output)
+                need(markers == [branch], "No exact completion marker for the requested scope")
+            if directory:
+                need(not self.command([*target, "shell", "ls", "-A", directory]).strip(), "The unconfirmed test destination is not empty")
+            self.save(self.path("outcomes.json"), {"case": "#".join(case), "instrumentationPassed": True,
+                                                  "filesAlbum": saved_album, "branch": branch}, durable=True)
 
         def interrupt_and_recover(self, target):
             title = f"OCR recovery {uuid.uuid4().hex[:12]}"
@@ -514,12 +547,24 @@ def main():
     files.add_argument("--diagnose-files", action="store_const", const="files", dest="diagnosis")
     files.add_argument("--diagnose-recovery", dest="diagnosis")
     parser.add_argument("--previous-test-sha")
+    parser.add_argument("--airplane", action="store_true")
+    parser.add_argument("--save-as", action="store_true")
+    parser.add_argument("--inspect-save-as", action="store_true")
     parser.add_argument("stage", type=lambda v: Path(v).absolute())
     parser.add_argument("app", type=Path)
     parser.add_argument("app_sha")
     parser.add_argument("test", type=Path)
     parser.add_argument("test_sha")
     args = parser.parse_args()
+    if args.airplane and args.save_as:
+        parser.error("Choose airplane-mode search or external JPEG Save as, not both")
+    if args.airplane:
+        parser.error("Unattended radio switching is disabled on this LDPlayer guest; use a verified isolation and restoration witness")
+    if args.save_as:
+        parser.error("Unattended Save as is disabled until the exact local provider directory is proven before confirmation")
+    if args.inspect_save_as:
+        if not args.existing or not args.files_saved_album or args.enable_local_adb or args.airplane:
+            parser.error("Save as inspection requires the retained exact synthetic Files album")
     if args.enable_local_adb and not args.existing:
         parser.error("Local-only ADB diagnosis requires the exact newly provisioned and released guest")
     if (args.files_source or args.files_saved_album) and not args.existing:
@@ -568,9 +613,10 @@ def main():
         run.prepare(args.new, args.recover_provision[1] if args.recover_provision else None, args.enable_local_adb)
         run.witness(pair, hashes, args.new or bool(args.recover_provision), args.files_source, args.files_saved_album,
                     args.startup_backfill, args.native_recovery, args.language_controls, args.manual_rerun, args.diagnosis,
-                    args.previous_test_sha, settings_restart=args.settings_restart)
+                    args.previous_test_sha, settings_restart=args.settings_restart, inspect_save_as=args.inspect_save_as)
         if not args.diagnosis:
-            print("Verified search, reopen and private JPEG export of the previously saved Files scan." if args.files_saved_album else
+            print("Inspected the system JPEG destination without confirming Save." if args.inspect_save_as else
+                  "Verified search, reopen and private JPEG export of the previously saved Files scan." if args.files_saved_album else
                   "Verified the Files picker journey." if args.files_source else
                   "Verified automatic startup backfill and exact Home navigation." if args.startup_backfill else
                   "Verified terminal recovery after three observed native interruptions." if args.native_recovery else
