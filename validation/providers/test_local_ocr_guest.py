@@ -156,6 +156,31 @@ class LocalOcrGuestTest(unittest.TestCase):
         self.assertIsNone(install_flags(APP, "same", "same", None, require_installed=True))
         self.assertEqual(["-r", "-t"], install_flags(TEST, "previous-test", "candidate", "previous-test", require_installed=True))
 
+    def test_local_save_target_is_bound_to_one_foreground_provider_directory(self):
+        from local_jpeg_destination import matches_local_downloads
+
+        folder = "PristinePage-Export-ab1234567890"
+        authority = "com.android.providers.downloads.documents"
+        path = f"/storage/emulated/0/Download/{folder}"
+        uri = f"content://{authority}/document/raw%3A%2Fstorage%2Femulated%2F0%2FDownload%2F{folder}"
+        component = "com.android.documentsui/.picker.PickActivity"
+        dump = (
+            f"  ACTIVITY {component} abc123 pid=42\n"
+            "        #2: DirectoryFragment{def456 #2 id=0x7f090044}\n"
+            f"          mArguments=Bundle[{{root=Root{{authority={authority}, rootId=downloads, title=Downloads, "
+            f"isUsb=false, isSd=false, isMtp=false}} @ content://{authority}/root/downloads, "
+            f"document=DocumentInfo{{docId=raw:{path}, name={folder}, mimeType=vnd.android.document/directory, "
+            f"isContainer=true, isDirectory=true, isCreateSupported=true}} @ {uri}}}]\n"
+        )
+        self.assertTrue(matches_local_downloads(dump, component, path))
+        for invalid in (
+            dump.replace(authority, "test.remote.documents"), dump.replace(f"Download/{folder}", f"Elsewhere/{folder}"),
+            dump.replace("%2FDownload%2F", "%2FOther%2F"), dump.replace("isCreateSupported=true", "isCreateSupported=false"),
+            dump.replace("DirectoryFragment", "OtherFragment"), dump + dump,
+            dump.replace(component, "elsewhere/.Picker"), dump.replace("isUsb=false", "isUsb=true"),
+        ):
+            self.assertFalse(matches_local_downloads(invalid, component, path))
+
     def test_only_the_exact_previous_application_may_receive_a_checked_successor(self):
         self.assertEqual(["-r"], install_flags(APP, "old-app", "new-app", "old-test", previous_app="old-app"))
         with self.assertRaises(RuntimeError):
