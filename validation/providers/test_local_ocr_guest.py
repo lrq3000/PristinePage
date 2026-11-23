@@ -2,6 +2,7 @@
 
 import subprocess
 import sys
+from tempfile import TemporaryDirectory
 import unittest
 import xml.etree.ElementTree as ET
 from pathlib import Path
@@ -16,6 +17,26 @@ def block(class_name, method, code):
 
 
 class LocalOcrGuestTest(unittest.TestCase):
+    def test_fresh_registration_requires_exact_unused_stopped_index_and_both_disks(self):
+        from run_local_ocr_guest import inspect_fresh_registration
+
+        target = "agent-pristinepage-ocr-0123456789ab"
+        with TemporaryDirectory() as temp:
+            home = Path(temp).resolve()
+            vm = home / "vms/leidian2"
+            vm.mkdir(parents=True)
+            before = [["0", "LDPlayer", "0", "0", "0", "-1", "-1"]]
+            stopped = ["2", target, "0", "0", "0", "-1", "-1"]
+            (vm / "data.vmdk").write_bytes(b"data")
+            with self.assertRaises(RuntimeError):
+                inspect_fresh_registration(before, before + [stopped], target, home)
+            (vm / "sdcard.vmdk").write_bytes(b"sdcard")
+            self.assertEqual(2, inspect_fresh_registration(before, before + [stopped], target, home))
+            for after in (before, before + [stopped, stopped], [stopped[:4] + ["1", "1234", "1235"]],
+                          [["0", *stopped[1:]]], [stopped, ["2", *before[0][1:]]]):
+                with self.subTest(after=after), self.assertRaises(RuntimeError):
+                    inspect_fresh_registration(before, after, target, home)
+
     def test_airplane_verification_requires_no_connected_network_or_default_route(self):
         from local_ocr_airplane import disconnected
 

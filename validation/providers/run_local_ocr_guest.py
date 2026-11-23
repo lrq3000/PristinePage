@@ -43,6 +43,21 @@ def need(ok, message):
         raise RuntimeError(message)
 
 
+def inspect_fresh_registration(before, after, name, installation):
+    """The local CLI can return a nonzero status after creating the VM. Admit observed state, never repeat add."""
+    matches = [row for row in after if row[1] == name]
+    need(len(matches) == 1 and all(row[1] != name for row in before), "No unique new guest registration")
+    row, = matches
+    need(re.fullmatch(r"(?:0|[1-9][0-9]*)", row[0]) and all(other[0] != row[0] for other in before) and
+         sum(other[0] == row[0] for other in after) == 1, "Creation did not allocate a fresh index")
+    need(int(row[4]) == 0 and int(row[5]) <= 0 and int(row[6]) <= 0, "New guest is not stopped")
+    directory = installation / "vms" / f"leidian{row[0]}"
+    need(directory.resolve() == directory and all(
+         path.resolve() == path and path.is_file() and path.stat().st_size > 0
+         for path in (directory / "data.vmdk", directory / "sdcard.vmdk")), "New guest disks are incomplete or redirected")
+    return int(row[0])
+
+
 def install_flags(package, installed, candidate, previous_test, previous_app=None, *, require_installed=False):
     if installed is None:
         need(not require_installed, "Save as inspection requires both installed APK identities")
@@ -223,13 +238,9 @@ def run_type(ns):
                 self.save(self.slot, {"owner": ns["OWNER"], "generation": self.generation,
                                       "state": "held", "operation": "PristinePage local OCR guest", "acquired": now()}, durable=True)
                 if create:
-                    # This LDPlayer CLI can report exit 1 even when the add completed. Do not repeat it: authenticate the observed result.
-                    self.command([console, "add", "--name", name], timeout=95, allowed=(0, 1))
-                    after = self.inventory()
-                    matches = [row for row in after if row[1] == name]
-                    need(len(matches) == 1 and all(row[0] != matches[0][0] for row in before), "Creation did not allocate a fresh guest")
-                    self.index = int(matches[0][0])
-                    self.require_stopped(self.exact(after))
+                    # Exit 1 or 2 can accompany a complete, stopped registration; only a unique new index and both disks admit it.
+                    self.command([console, "add", "--name", name], timeout=95, allowed=(0, 1, 2))
+                    self.index = inspect_fresh_registration(before, self.inventory(), name, console.parent)
                     record.update(index=self.index, state="launching")
                     self.save(self.record, record, durable=True)
                 if create or recovery:
