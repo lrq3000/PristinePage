@@ -133,6 +133,13 @@ import kotlinx.coroutines.launch
         if (state.loading) LinearProgressIndicator(Modifier.fillMaxWidth())
         if (home) {
             val searching = state.albumSearch.isNotBlank()
+            val query = state.albumSearch
+            val lifecycle = LocalLifecycleOwner.current.lifecycle
+            LaunchedEffect(session, query, lifecycle) {
+                if (query.isNotBlank()) lifecycle.repeatOnLifecycle(Lifecycle.State.STARTED) {
+                    session.observePageSearch(query)
+                }
+            }
             if (state.canSearchAlbums) OutlinedTextField(
                 value = state.albumSearch,
                 onValueChange = { session.accept(LibraryEvent.SetAlbumSearch(it, ZoneId.systemDefault())) },

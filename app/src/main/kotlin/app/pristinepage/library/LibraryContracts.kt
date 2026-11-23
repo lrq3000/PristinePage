@@ -5,6 +5,8 @@ import app.pristinepage.capture.PhotoImportKind
 import app.pristinepage.data.model.*
 import app.pristinepage.data.repository.AlbumSearchQuery
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.emptyFlow
 import java.time.ZoneId
 import java.util.Locale
 
@@ -33,6 +35,7 @@ internal interface SearchableLibraryActions {
 
 internal interface SearchablePageActions {
     suspend fun searchPages(query: String): HomePageSearchPage
+    fun pageSearchChanges(query: String): Flow<Unit> = emptyFlow()
 }
 
 /** No recognized text or persistent search token. Revalidation belongs to the store that issued the hit. */
@@ -110,4 +113,5 @@ interface LibrarySession {
     fun accept(event: LibraryEvent)
     fun identity(): LibraryIdentity
     fun claimPickerLaunch(batchId: ImportSessionId): Boolean
+    suspend fun observePageSearch(query: String) = Unit
 }

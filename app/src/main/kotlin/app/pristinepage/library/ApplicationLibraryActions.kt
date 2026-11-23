@@ -15,6 +15,8 @@ import app.pristinepage.data.repository.RoomSourceMetadataSearch
 import app.pristinepage.data.repository.SavedOcrWork
 import app.pristinepage.data.repository.SourceMetadataQuery
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.flow.emitAll
+import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.withContext
 import java.util.Locale
 
@@ -34,6 +36,10 @@ class ApplicationLibraryActions(
 
     override suspend fun searchPages(query: String): HomePageSearchPage =
         if (SourceMetadataQuery.parse(query) != null) searchMetadata(query, null) else searchRecognizedText(query, null)
+
+    override fun pageSearchChanges(query: String) = flow {
+        if (SourceMetadataQuery.parse(query) == null) emitAll(open().store.savedOcr.observeSearchChanges())
+    }
 
     private suspend fun searchRecognizedText(query: String, cursor: SavedOcrWork.Continuation?): HomePageSearchPage {
         val store = open().store

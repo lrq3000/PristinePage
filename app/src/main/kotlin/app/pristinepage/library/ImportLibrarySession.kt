@@ -18,6 +18,8 @@ import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.catch
+import kotlinx.coroutines.flow.conflate
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -36,6 +38,7 @@ class ImportLibrarySession(private val actions: LibraryActions, restored: Librar
     private var albumCursor: AlbumPosition? = null
     private var retryFirstAlbumPage = false
     private var pageCursor: (suspend () -> HomePageSearchPage)? = null
+    private var pageWindows = 0
     private var hitNavigation = 0L
     private var openingHit: Job? = null
     private var searchZone = ZoneId.systemDefault()
@@ -43,6 +46,26 @@ class ImportLibrarySession(private val actions: LibraryActions, restored: Librar
     init { refresh(true) }
 
     override fun identity() = current.value.let { value -> LibraryIdentity(value.selectedId, value.request?.session, value.selectedPage, value.request?.kind ?: PhotoImportKind.GALLERY) }
+
+    override suspend fun observePageSearch(query: String) {
+        val search = actions as? SearchablePageActions ?: return
+        if (query.isBlank()) return
+        fun stillOnQuery() = current.value.let { it.selectedId == null && it.albumSearch == query }
+        search.pageSearchChanges(query).catch {
+            if (it is CancellationException) throw it
+            // A failed observation does not disable an explicit query or refresh.
+        }.conflate().collect {
+            while (stillOnQuery()) {
+                val pending = metadataRead
+                pending?.join()
+                if (pending !== metadataRead) continue
+                if (!stillOnQuery()) break
+                val token = metadataGeneration
+                refreshPageWindow(query, search) { token == metadataGeneration && stillOnQuery() }
+                if (token == metadataGeneration) break
+            }
+        }
+    }
 
     override fun claimPickerLaunch(batchId: ImportSessionId): Boolean {
         val value = current.value
@@ -84,6 +107,7 @@ class ImportLibrarySession(private val actions: LibraryActions, restored: Librar
                 searchZone = event.zone
                 albumCursor = null
                 pageCursor = null
+                pageWindows = 0
                 current.value = value.copy(albumSearch = text, documents = emptyList(), pageMatches = emptyList(),
                     pageSearchUnavailable = false, albumSearchUnavailable = false, hasMore = false, error = null)
                 refresh(true, debounceSearch = text.isNotBlank())
@@ -124,9 +148,9 @@ class ImportLibrarySession(private val actions: LibraryActions, restored: Librar
         fun eligible(): Boolean {
             val value = current.value
             return token == metadataGeneration && nav == navigation && value.selectedId == null &&
-                !value.loading && !value.preparingImport && value.request == null && hit in value.pageMatches
+                !value.loading && !value.preparingImport && value.request == null
         }
-        if (!eligible()) return
+        if (!eligible() || hit !in current.value.pageMatches) return
         cancelOpeningHit()
         val opening = hitNavigation
         fun currentHit() = opening == hitNavigation && eligible()
@@ -296,21 +320,56 @@ class ImportLibrarySession(private val actions: LibraryActions, restored: Librar
             retryFirstAlbumPage = firstAlbum
             current.value = current.value.copy(documents = if (reset) emptyList() else current.value.documents, albumSearchUnavailable = true)
         }
-        val pageActions = actions as? SearchablePageActions
+        reloadSearchPages(reset, value, actions as? SearchablePageActions) { token == metadataGeneration }
+    }
+
+    private suspend fun refreshPageWindow(query: String, search: SearchablePageActions, currentRead: () -> Boolean) {
+        val hits = mutableListOf<HomePageSearchHit>()
+        val extent = pageWindows.coerceAtLeast(1)
+        var next: (suspend () -> HomePageSearchPage)? = { search.searchPages(query) }
+        var windows = 0
+        try {
+            while (windows < extent) {
+                val read = next ?: break
+                val found = read()
+                currentCoroutineContext().ensureActive()
+                if (!currentRead()) return
+                hits += found.hits
+                next = found.next
+                ++windows
+            }
+        } catch (canceled: CancellationException) { throw canceled }
+        catch (_: Exception) {
+            // The current window and its cursor remain usable; exact hit revalidation still controls navigation.
+            return
+        }
+        if (currentRead()) publishPageWindow(hits, next, windows)
+    }
+
+    private fun publishPageWindow(hits: List<HomePageSearchHit>, next: (suspend () -> HomePageSearchPage)?, windows: Int) {
+        pageCursor = next
+        pageWindows = windows
+        current.value = current.value.copy(pageMatches = owned(hits.distinctBy { it.document to it.page }),
+            pageSearchUnavailable = false, hasMore = retryFirstAlbumPage || albumCursor != null || next != null)
+    }
+
+    private suspend fun reloadSearchPages(reset: Boolean, value: LibraryState, pageActions: SearchablePageActions?, currentRead: () -> Boolean) {
         val next: (suspend () -> HomePageSearchPage)? = if (reset) pageActions?.let { { it.searchPages(value.albumSearch) } } else pageCursor
         if (next != null) try {
             val found = next()
-            if (token != metadataGeneration) return
-            pageCursor = found.next
+            currentCoroutineContext().ensureActive()
+            if (!currentRead()) return
             val hits = (if (reset) emptyList() else current.value.pageMatches) + found.hits
-            current.value = current.value.copy(pageMatches = owned(hits.distinctBy { it.document to it.page }), pageSearchUnavailable = false)
+            publishPageWindow(hits, found.next, if (reset) 1 else pageWindows + 1)
         } catch (canceled: CancellationException) { throw canceled }
         catch (_: Exception) {
-            if (token != metadataGeneration) return
+            currentCoroutineContext().ensureActive()
+            if (!currentRead()) return
             pageCursor = next
+            if (reset) pageWindows = 0
             current.value = current.value.copy(pageMatches = if (reset) emptyList() else current.value.pageMatches, pageSearchUnavailable = true)
         }
-        if (token == metadataGeneration) current.value = current.value.copy(hasMore = retryFirstAlbumPage || albumCursor != null || pageCursor != null)
+        if (currentRead()) current.value = current.value.copy(hasMore = retryFirstAlbumPage || albumCursor != null || pageCursor != null)
     }
 
     private suspend fun loadSelected(id: DocumentId?, nav: Long, token: Long) {

@@ -43,13 +43,18 @@ def need(ok, message):
         raise RuntimeError(message)
 
 
-def install_flags(package, installed, candidate, previous_test):
+def install_flags(package, installed, candidate, previous_test, previous_app=None):
     if installed is None:
         return ["-t"] if package == TEST else []
     if installed == candidate:
         return None
+    if package == APP and installed == previous_app:
+        return ["-r"]
     need(package == TEST and installed == previous_test, "Refusing to replace an unapproved installed APK")
     return ["-r", "-t"]
+
+def check_installed_pair(installed, previous, candidate):
+    need(installed in (previous, candidate), "Refusing an installed pair that is neither the exact predecessor nor the exact candidate")
 
 
 def sha(path):
@@ -346,7 +351,7 @@ def run_type(ns):
             raise RuntimeError("Unverified provisioning/launch; retained the exact allocator cleanup obligation")
 
         def witness(self, pair, hashes, fresh, files_source, saved_album, backfill, recovery, controls, rerun, diagnosis, previous_test,
-                    settings_restart=False, inspect_save_as=False):
+                    settings_restart=False, inspect_save_as=False, previous_app=None):
             record = self.owned()
             row = self.exact(self.inventory())
             need([int(row[i]) for i in (5, 6)] == [item[0] for item in record["runtime_processes"]], "Target processes changed")
@@ -360,11 +365,22 @@ def run_type(ns):
             if settings_restart:
                 need(present == {f"package:{APP}", f"package:{TEST}"} and previous_test is None,
                      "This witness must reuse both exact installed APKs")
+            if previous_app is not None:
+                need(present == {f"package:{APP}", f"package:{TEST}"} and previous_test is not None,
+                     "A checked successor requires the retained installed app and test")
+            installed = {}
             for package, path in pair.items():
                 need(sha(path) == hashes[package], "APK changed before install")
-                installed = self.installed_hash(package) if f"package:{package}" in present else None
-                flags = install_flags(package, installed, hashes[package], previous_test)
+                installed[package] = self.installed_hash(package) if f"package:{package}" in present else None
+            if previous_app is not None:
+                check_installed_pair(installed, {APP: previous_app, TEST: previous_test}, hashes)
+                self.save(self.path("installed-before.json"), {"sha256": installed}, durable=True)
+            installation = {package: install_flags(package, installed[package], hashes[package], previous_test, previous_app)
+                            for package in pair}
+            for package, path in pair.items():
+                flags = installation[package]
                 if flags is not None:
+                    need(sha(path) == hashes[package], "APK changed before install")
                     result = self.command([*target, "install", *flags, path], timeout=110)
                     need(result.strip().splitlines()[-1] == "Success", "Exact guest install failed")
                 need(self.installed_hash(package) == hashes[package], "Installed bytes do not match the reviewed APK")
@@ -547,6 +563,7 @@ def main():
     files.add_argument("--diagnose-files", action="store_const", const="files", dest="diagnosis")
     files.add_argument("--diagnose-recovery", dest="diagnosis")
     parser.add_argument("--previous-test-sha")
+    parser.add_argument("--previous-app-sha")
     parser.add_argument("--airplane", action="store_true")
     parser.add_argument("--save-as", action="store_true")
     parser.add_argument("--inspect-save-as", action="store_true")
@@ -586,6 +603,12 @@ def main():
     if args.previous_test_sha and (not args.existing or args.diagnosis
                                   or not re.fullmatch(r"[0-9a-f]{64}", args.previous_test_sha)):
         parser.error("An exact installed test digest is accepted only for test APK updates on the OCR guest")
+    if args.previous_app_sha is not None and (
+            not args.existing or not args.previous_test_sha or args.enable_local_adb or args.inspect_save_as
+            or any((args.files_source, args.files_saved_album, args.startup_backfill, args.native_recovery, args.language_controls,
+                    args.manual_rerun, args.settings_restart, args.diagnosis))
+            or not re.fullmatch(r"[0-9a-f]{64}", args.previous_app_sha)):
+        parser.error("An app successor needs exact prior app and test digests and the primary Home OCR witness on the retained guest")
     root = Path.cwd().resolve()
     need(root.name == "ocr-background-search" and root.parent.name == ".worktrees", "Use the authorized OCR worktree")
     if args.language_controls:
@@ -613,7 +636,8 @@ def main():
         run.prepare(args.new, args.recover_provision[1] if args.recover_provision else None, args.enable_local_adb)
         run.witness(pair, hashes, args.new or bool(args.recover_provision), args.files_source, args.files_saved_album,
                     args.startup_backfill, args.native_recovery, args.language_controls, args.manual_rerun, args.diagnosis,
-                    args.previous_test_sha, settings_restart=args.settings_restart, inspect_save_as=args.inspect_save_as)
+                    args.previous_test_sha, settings_restart=args.settings_restart, inspect_save_as=args.inspect_save_as,
+                    previous_app=args.previous_app_sha)
         if not args.diagnosis:
             print("Inspected the system JPEG destination without confirming Save." if args.inspect_save_as else
                   "Verified search, reopen and private JPEG export of the previously saved Files scan." if args.files_saved_album else

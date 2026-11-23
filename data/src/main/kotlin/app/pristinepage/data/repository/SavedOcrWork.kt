@@ -15,6 +15,7 @@ import java.io.IOException
 import java.util.Collections
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.map
 
 /** Store-owned OCR boundary for the application graph. Construction does not schedule work, resolve assets, read files or enable an engine. */
@@ -172,6 +173,13 @@ class SavedOcrWork private constructor(store: PrivateImportStore.OcrComposition)
     suspend fun canOpen(hit: Hit): Boolean {
         val binding = hit.bindingFor(this) ?: return false
         return retained(hit.page.value, "ocr_store_read_failed") { search.canOpen(binding) }
+    }
+
+    /** Committed result changes, not WorkManager deliveries. The initial emission closes the query-before-subscription race; no query, page ID or text leaves the tracker. */
+    fun observeSearchChanges(): Flow<Unit> = flow {
+        retained(null, "ocr_search_observation_failed") {
+            invalidation.createFlow("OcrResult", "Page", "Document", "AtelierDraft").collect { emit(Unit) }
+        }
     }
 
     suspend fun readText(document: DocumentId, page: PageId, expectedRevision: Long? = null): ReadText? =

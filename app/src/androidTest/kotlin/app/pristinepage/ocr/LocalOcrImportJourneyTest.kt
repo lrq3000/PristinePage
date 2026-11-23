@@ -83,6 +83,13 @@ class LocalOcrImportJourneyTest {
         }
         val actions = ApplicationLibraryActions(context, app.savedOcrSignals::onPagesSaved, app.services::imports)
         val query = words[1]
+        val label = context.getString(R.string.home_matching_page, title, 2)
+        val library = compose.runOnUiThread { ViewModelProvider(compose.activity)[ImportLibraryViewModel::class.java].session }
+        compose.onNodeWithTag("home-album-search").performTextInput(query)
+        compose.waitUntil(15_000) {
+            library.state.value.let { it.albumSearch == query && !it.loading }
+        }
+        assertFalse(library.state.value.pageMatches.any { it.document == document })
         assertFalse(graph.store.savedOcr.find(query, null, 20).hits.any { it.document == document })
         val manager = WorkManager.getInstance(context)
         suspend fun wakes() = withContext(Dispatchers.IO) {
@@ -112,9 +119,11 @@ class LocalOcrImportJourneyTest {
                 } }
             }
         }
-        val label = context.getString(R.string.home_matching_page, title, 2)
-        compose.onNodeWithTag("home-album-search").performTextInput(query)
-        compose.waitUntil(15_000) { compose.onAllNodesWithText(label).fetchSemanticsNodes().size == 1 }
+        compose.waitUntil(15_000) {
+            library.state.value.let { it.albumSearch == query && it.pageMatches.any { h -> h.document == document && h.page == saved[1].pageId } }
+        }
+        compose.onNodeWithTag("atelier-album-list").performScrollToNode(hasText(label))
+        assertEquals(1, compose.onAllNodesWithText(label).fetchSemanticsNodes().size)
         compose.onNodeWithText(label).performClick()
         val editor = compose.runOnUiThread { ViewModelProvider(compose.activity)[EditorViewModel::class.java] }
         compose.waitUntil(15_000) { editor.session.value?.state?.value?.page != null }

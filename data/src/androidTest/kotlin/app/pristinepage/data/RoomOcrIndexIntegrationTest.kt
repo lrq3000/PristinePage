@@ -58,6 +58,7 @@ import app.pristinepage.data.repository.SourceInput
 import kotlinx.coroutines.async
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.coroutineScope
@@ -1654,6 +1655,25 @@ class RoomOcrIndexIntegrationTest {
         } finally {
             try { store?.close() } finally { database.close() }
         }
+    }
+
+    @Test fun collectingSearchChangesRetainsItsIssuingStoreUntilCancellation(): Unit = runBlocking {
+        val provider = SourceInput { error("Listening for OCR search changes must not open a provider") }
+        val inspector = SourceInspector { _, _ -> error("Listening for OCR search changes must not decode a source") }
+        val store = PrivateImportStore.open(isolatedOcrStoreContext(), provider, inspector)
+        val changes = store.savedOcr.observeSearchChanges()
+        val subscribed = CompletableDeferred<Unit>()
+        val observer = launch { changes.collect { subscribed.complete(Unit) } }
+        try {
+            withTimeout(10_000) { subscribed.await() }
+            val refusal = runCatching { store.close() }.exceptionOrNull() as? RepositoryFailure
+            assertEquals(OperationErrorCode.REVISION_CONFLICT, refusal?.error?.code)
+        } finally {
+            observer.cancelAndJoin()
+            store.close()
+        }
+        val closed = runCatching { changes.first() }.exceptionOrNull() as? RepositoryFailure
+        assertEquals("ocr_store_closed", closed?.error?.safeMessageKey)
     }
 
     /** Use the same Context API as the production store, but never the application's persisted database or file root. */

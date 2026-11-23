@@ -127,6 +127,24 @@ class LocalOcrGuestTest(unittest.TestCase):
             with self.subTest(package=package, installed=installed), self.assertRaises(RuntimeError):
                 install_flags(package, installed, "new", approved)
 
+    def test_only_the_exact_previous_application_may_receive_a_checked_successor(self):
+        self.assertEqual(["-r"], install_flags(APP, "old-app", "new-app", "old-test", previous_app="old-app"))
+        with self.assertRaises(RuntimeError):
+            install_flags(APP, "foreign", "new-app", "old-test", previous_app="old-app")
+        with self.assertRaises(RuntimeError):
+            install_flags(TEST, "old-app", "new-test", "old-test", previous_app="old-app")
+
+    def test_checked_successor_refuses_mixed_installed_pairs(self):
+        from run_local_ocr_guest import check_installed_pair
+
+        prior = {APP: "old-app", TEST: "old-test"}
+        candidate = {APP: "new-app", TEST: "new-test"}
+        for installed in (prior, candidate):
+            check_installed_pair(installed, prior, candidate)
+        for installed in ({APP: "old-app", TEST: "new-test"}, {APP: "new-app", TEST: "old-test"}, {APP: "old-app"}):
+            with self.assertRaises(RuntimeError):
+                check_installed_pair(installed, prior, candidate)
+
     def test_files_tap_uses_actionable_ancestor_and_refuses_ambiguity(self):
         button = ('<node clickable="true" enabled="true" bounds="[10,20][40,60]">'
                   '<node text="From files" clickable="false"/></node>')
