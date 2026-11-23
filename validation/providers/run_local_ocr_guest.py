@@ -43,8 +43,9 @@ def need(ok, message):
         raise RuntimeError(message)
 
 
-def install_flags(package, installed, candidate, previous_test, previous_app=None):
+def install_flags(package, installed, candidate, previous_test, previous_app=None, *, require_installed=False):
     if installed is None:
+        need(not require_installed, "Save as inspection requires both installed APK identities")
         return ["-t"] if package == TEST else []
     if installed == candidate:
         return None
@@ -375,7 +376,8 @@ def run_type(ns):
             if previous_app is not None:
                 check_installed_pair(installed, {APP: previous_app, TEST: previous_test}, hashes)
                 self.save(self.path("installed-before.json"), {"sha256": installed}, durable=True)
-            installation = {package: install_flags(package, installed[package], hashes[package], previous_test, previous_app)
+            installation = {package: install_flags(package, installed[package], hashes[package], previous_test, previous_app,
+                                                    require_installed=inspect_save_as)
                             for package in pair}
             for package, path in pair.items():
                 flags = installation[package]
@@ -422,24 +424,17 @@ def run_type(ns):
             extras = ["-e", "filesSavedAlbum", saved_album] if saved_album else ["-e", "recoveryAlbum", f"'{rerun}'"] if rerun else []
             if checkpoint:
                 extras += ["-e", "filesSearchOnly", "1"]
-            directory = None
             if inspect_save_as:
-                folder = "PristinePage-Export-" + uuid.uuid4().hex[:12]
-                directory = f"/sdcard/Download/{folder}"
-                # No -p: inspect a fresh local directory, never an existing user destination.
-                self.command([*target, "shell", "mkdir", directory])
-                extras += ["-e", "filesSaveAsFolder", folder, "-e", "filesInspectPicker", "1"]
+                extras += ["-e", "filesInspectPicker", "1"]
             output = self.command([*target, "shell", "am", "instrument", "-w", "-r", "-e", "class",
                                    "#".join(case), *extras, RUNNER], timeout=320 if rerun else 250)
             self.path("instrumentation.txt").write_text(output, encoding="utf-8")
             need(passed_case(output, case),
                  "Ordinary OCR instrumentation failed or skipped; inspect the exact transcript")
-            branch = "EXACT_PAGE_SEARCH" if checkpoint else "PICKER_INSPECTED_WITHOUT_CONFIRMATION" if directory else None
+            branch = "EXACT_PAGE_SEARCH" if checkpoint else "PICKER_OPENED_WITHOUT_CONFIRMATION" if inspect_save_as else None
             if branch:
                 markers = re.findall(r"(?m)^INSTRUMENTATION_RESULT: filesWitness=(\S+)[ \r]*$", output)
                 need(markers == [branch], "No exact completion marker for the requested scope")
-            if directory:
-                need(not self.command([*target, "shell", "ls", "-A", directory]).strip(), "The unconfirmed test destination is not empty")
             self.save(self.path("outcomes.json"), {"case": "#".join(case), "instrumentationPassed": True,
                                                   "filesAlbum": saved_album, "branch": branch}, durable=True)
 
@@ -639,7 +634,7 @@ def main():
                     args.previous_test_sha, settings_restart=args.settings_restart, inspect_save_as=args.inspect_save_as,
                     previous_app=args.previous_app_sha)
         if not args.diagnosis:
-            print("Inspected the system JPEG destination without confirming Save." if args.inspect_save_as else
+            print("Observed the system JPEG picker without choosing a destination." if args.inspect_save_as else
                   "Verified search, reopen and private JPEG export of the previously saved Files scan." if args.files_saved_album else
                   "Verified the Files picker journey." if args.files_source else
                   "Verified automatic startup backfill and exact Home navigation." if args.startup_backfill else

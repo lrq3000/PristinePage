@@ -4,13 +4,9 @@ import android.graphics.Bitmap
 import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.Paint
-import android.graphics.Rect
 import android.graphics.Typeface
 import android.os.Bundle
-import android.os.SystemClock
-import android.view.InputDevice
-import android.view.MotionEvent
-import android.view.accessibility.AccessibilityNodeInfo
+import android.os.ParcelFileDescriptor
 import androidx.compose.ui.test.assertIsEnabled
 import androidx.compose.ui.test.hasText
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
@@ -38,12 +34,14 @@ import app.pristinepage.core.recipe.AppearanceRecipe
 import app.pristinepage.data.model.IngestResult
 import app.pristinepage.data.repository.SavedOcrWork
 import app.pristinepage.editor.EditorViewModel
+import app.pristinepage.export.AlbumExportViewModel
 import app.pristinepage.library.ApplicationLibraryActions
 import app.pristinepage.library.ImportLibraryViewModel
 import app.pristinepage.library.LibraryPhotoResult
 import java.io.File
 import java.util.UUID
 import java.util.concurrent.TimeUnit
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.delay
@@ -142,9 +140,8 @@ class LocalOcrImportJourneyTest {
         val document = graph.store.catalog.list(null, 50).single { it.title == name }
         val page = graph.store.catalog.load(document.documentId).pages.single()
         val saved = graph.store.editablePages.load(document.documentId, page.pageId)
-        val folder = InstrumentationRegistry.getArguments().getString("filesSaveAsFolder")
-        if (folder != null) {
-            require(folder.matches(Regex("PristinePage-Export-[a-f0-9]{12}")))
+        val inspectPicker = InstrumentationRegistry.getArguments().getString("filesInspectPicker") == "1"
+        if (inspectPicker) {
             val original = graph.store.committedSources.load(saved.sourceId)
             assertEquals("Save as is permitted only for the exact synthetic Files input",
                 "f4585967198db8a51a7d8afae50e449bdead2ad3b4122d1478afffc5fbd5608f", original.sourceByteHash)
@@ -168,11 +165,11 @@ class LocalOcrImportJourneyTest {
         compose.waitUntil(15_000) { editor.session.value?.state?.value?.page != null }
         assertEquals(page.pageId, editor.session.value?.state?.value?.page?.pageId)
         if (InstrumentationRegistry.getArguments().getString("filesSearchOnly") == "1") {
-            require(folder == null)
+            require(!inspectPicker)
             instrumentation.addResults(Bundle().apply { putString("filesWitness", "EXACT_PAGE_SEARCH") })
             return@runBlocking
         }
-        if (folder == null) {
+        if (!inspectPicker) {
             val ocrTool = compose.onNodeWithTag("editor-tool-ocr-text").performScrollTo().assertIsEnabled()
             // Invoke the real accessible action on the horizontal ribbon: a touch can be clipped or obscured independently of the dialog.
             ocrTool.performSemanticsAction(SemanticsActions.OnClick) { action -> check(action()) }
@@ -191,91 +188,63 @@ class LocalOcrImportJourneyTest {
         compose.onNodeWithTag("album-export-generate").assertIsEnabled().performClick()
         compose.waitUntil(45_000) { compose.onAllNodesWithTag("album-export-save-as").fetchSemanticsNodes().size == 1 }
         compose.onNodeWithTag("album-export-save-as").assertIsEnabled()
-        if (folder == null) return@runBlocking
-        check(InstrumentationRegistry.getArguments().getString("filesInspectPicker") == "1")
-        compose.onNodeWithTag("album-export-save-as").performClick()
-        inspectLocalFiles(folder, "${name}_1.jpg")
-        instrumentation.addResults(Bundle().apply { putString("filesWitness", "PICKER_INSPECTED_WITHOUT_CONFIRMATION") })
+        if (!inspectPicker) return@runBlocking
+        val export = compose.runOnUiThread { ViewModelProvider(compose.activity)[AlbumExportViewModel::class.java] }
+        var stage = "before tap"
+        val automation = instrumentation.uiAutomation
+        fun resumed() = runCatching {
+            val handle = automation.executeShellCommand("dumpsys activity activities")
+            ParcelFileDescriptor.AutoCloseInputStream(handle).bufferedReader().useLines { lines ->
+                // Retain only resumed component names, not task intents, extras, titles or URIs.
+                lines.mapNotNull { RESUMED_COMPONENT.find(it)?.groupValues?.get(1) }.distinct().take(4).toList()
+            }
+        }.getOrNull()
+        fun boundaryFailure(reason: String): Nothing {
+            val state = export.state.value
+            throw AssertionError(
+                "Save as $reason at $stage: busy=${state.busy}; prepared=${state.publicationId != null}; waiting=${state.waitingForTarget}; " +
+                    "launchPending=${state.launch != null}; error=${state.error}; notice=${state.notice}; resumed=${resumed() ?: "unavailable"}",
+            )
+        }
+        try {
+            val idle = export.state.value
+            check(!idle.busy && !idle.waitingForTarget && idle.publicationId == null && idle.launch == null)
+            check(resumed()?.singleOrNull() == "${context.packageName}/${MainActivity::class.java.name}")
+            stage = "launch"
+            compose.onNodeWithTag("album-export-save-as").performClick()
+            // The preparation returns asynchronously. Keep advancing Compose until its ActivityResult launch effect has run before switching to system-window snapshots.
+            compose.waitUntil(15_000) {
+                export.state.value.let {
+                    it.error != null || it.notice != null || it.waitingForTarget && it.publicationId != null && it.launch == null
+                }
+            }
+            val launch = export.state.value
+            check(launch.waitingForTarget && launch.publicationId != null && launch.launch == null && launch.error == null && launch.notice == null)
+            stage = "foreground chooser"
+            val picker = withTimeout(15_000) {
+                waitFor { automation.rootInActiveWindow?.packageName?.toString()?.takeIf { it in FILES_PACKAGES } }
+            }
+            val activity = resumed()?.singleOrNull()
+            check(activity == "$picker/.picker.PickActivity" || activity == "$picker/$picker.picker.PickActivity")
+            val pending = export.state.value
+            check(pending.publicationId == launch.publicationId && pending.waitingForTarget && pending.launch == null &&
+                pending.error == null && pending.notice == null)
+        } catch (_: TimeoutCancellationException) {
+            boundaryFailure("timed out")
+        } catch (canceled: CancellationException) {
+            throw canceled
+        } catch (_: Exception) {
+            boundaryFailure("refused")
+        } catch (_: AssertionError) {
+            boundaryFailure("assertion failed")
+        }
+        // Prove only that the chooser actually opened. No input or destination selection is allowed inside it.
+        instrumentation.addResults(Bundle().apply { putString("filesWitness", "PICKER_OPENED_WITHOUT_CONFIRMATION") })
     }
 
-    private suspend fun inspectLocalFiles(folder: String, filename: String) {
-        val automation = InstrumentationRegistry.getInstrumentation().uiAutomation
-        val files = setOf("com.android.documentsui", "com.google.android.documentsui")
-        fun descendants(root: AccessibilityNodeInfo): List<AccessibilityNodeInfo> = buildList {
-            fun visit(node: AccessibilityNodeInfo, depth: Int) {
-                check(depth <= 30 && size < 1_500) { "Unexpected synthetic Files hierarchy extent" }
-                add(node)
-                for (index in 0 until node.childCount) node.getChild(index)?.let { visit(it, depth + 1) }
-            }
-            visit(root, 0)
-        }
-        suspend fun locate(step: String, predicate: (AccessibilityNodeInfo) -> Boolean): AccessibilityNodeInfo {
-            var latestPackage = "none"
-            var resourceIds = emptyList<String>()
-            try {
-                return withTimeout(15_000) {
-                    waitFor {
-                        val root = automation.rootInActiveWindow ?: return@waitFor null
-                        val owner = root.packageName?.toString()
-                        latestPackage = owner?.takeIf { it in files } ?: "other"
-                        if (owner !in files) return@waitFor null
-                        val nodes = descendants(root).filter { it.isVisibleToUser && it.packageName?.toString() in files }
-                        resourceIds = nodes.mapNotNull { it.viewIdResourceName?.substringAfterLast('/') }.distinct().sorted().take(40)
-                        nodes.filter(predicate).also { check(it.size <= 1) { "Ambiguous system Files control for $step" } }.singleOrNull()
-                    }
-                }
-            } catch (timeout: TimeoutCancellationException) {
-                throw AssertionError("System Files never showed $step (owner=$latestPackage; controls=$resourceIds)", timeout)
-            }
-        }
-        fun AccessibilityNodeInfo.labelIn(vararg labels: String) =
-            text?.toString() in labels || contentDescription?.toString() in labels
-        fun AccessibilityNodeInfo.inRow(listId: String): Boolean {
-            var node = parent
-            while (node != null && node.packageName?.toString() in files) {
-                if (node.viewIdResourceName?.substringAfterLast('/') == listId) return true
-                node = node.parent
-            }
-            return false
-        }
-        suspend fun tap(step: String, predicate: (AccessibilityNodeInfo) -> Boolean) {
-            var node = locate(step, predicate)
-            while (!node.isClickable && node.parent?.packageName?.toString() in files) node = checkNotNull(node.parent)
-            check(node.isClickable && node.isEnabled && node.performAction(AccessibilityNodeInfo.ACTION_CLICK)) {
-                "The exact system Files control did not accept the action"
-            }
-        }
-        tap("the root drawer") { it.labelIn("Show roots", "Afficher les répertoires racines") }
-        tap("the local Downloads root") { it.labelIn("Downloads", "Téléchargements") && it.inRow("roots_list") }
-        val title = locate("the new synthetic directory") {
-            it.text?.toString() == folder && it.viewIdResourceName == "android:id/title" && it.inRow("dir_list")
-        }
-        var row = checkNotNull(title.parent)
-        while (row.parent?.viewIdResourceName?.substringAfterLast('/') != "dir_list") {
-            row = checkNotNull(row.parent) { "The destination is not an actual local Files directory row" }
-            check(row.packageName?.toString() in files)
-        }
-        check(row.isEnabled && row.isFocusable)
-        val bounds = Rect().also { row.getBoundsInScreen(it) }
-        check(!bounds.isEmpty)
-        // API 28 DocumentsUI delegates this row to its parent and can omit ACTION_CLICK.
-        val timestamp = SystemClock.uptimeMillis()
-        for (action in listOf(MotionEvent.ACTION_DOWN, MotionEvent.ACTION_UP)) {
-            val event = MotionEvent.obtain(timestamp, SystemClock.uptimeMillis(), action,
-                bounds.exactCenterX(), bounds.exactCenterY(), 0)
-            try {
-                event.source = InputDevice.SOURCE_TOUCHSCREEN
-                check(automation.injectInputEvent(event, true))
-            } finally {
-                event.recycle()
-            }
-        }
-        // The folder row must be behind us, and the folder must be selected as the current breadcrumb before any write.
-        locate("the selected directory breadcrumb") { it.text?.toString() == folder && it.inRow("dropdown_breadcrumb") }
-        locate("the exact export name field") { it.isEditable && it.text?.toString() == filename }
-        locate("the Save confirmation") {
-            it.labelIn("Save", "Enregistrer") && it.viewIdResourceName?.substringAfterLast('/') == "button_save"
-        }
+    private companion object {
+        val FILES_PACKAGES = setOf("com.android.documentsui", "com.google.android.documentsui")
+        val RESUMED_COMPONENT = Regex("""(?:mResumedActivity:|topResumedActivity=)\s+ActivityRecord\{[^}\r\n]*?\bu\d+\s+([A-Za-z0-9_.]+/[A-Za-z0-9_.$]+)\s""")
     }
 }
 

@@ -127,6 +127,13 @@ class LocalOcrGuestTest(unittest.TestCase):
             with self.subTest(package=package, installed=installed), self.assertRaises(RuntimeError):
                 install_flags(package, installed, "new", approved)
 
+    def test_picker_inspection_refuses_missing_members_of_the_retained_pair(self):
+        for package in (APP, TEST):
+            with self.subTest(package=package), self.assertRaisesRegex(RuntimeError, "installed APK"):
+                install_flags(package, None, "candidate", "previous-test", require_installed=True)
+        self.assertIsNone(install_flags(APP, "same", "same", None, require_installed=True))
+        self.assertEqual(["-r", "-t"], install_flags(TEST, "previous-test", "candidate", "previous-test", require_installed=True))
+
     def test_only_the_exact_previous_application_may_receive_a_checked_successor(self):
         self.assertEqual(["-r"], install_flags(APP, "old-app", "new-app", "old-test", previous_app="old-app"))
         with self.assertRaises(RuntimeError):
