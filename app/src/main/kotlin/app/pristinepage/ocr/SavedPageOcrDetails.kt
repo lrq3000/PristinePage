@@ -27,7 +27,6 @@ import app.pristinepage.R
 import app.pristinepage.core.geometry.GeometrySizing
 import app.pristinepage.core.ocr.OcrConfiguration
 import app.pristinepage.core.ocr.OcrError
-import app.pristinepage.core.ocr.OcrLayout
 import app.pristinepage.core.ocr.OcrText
 import app.pristinepage.core.pipeline.PixelSize
 import app.pristinepage.core.pipeline.Recipe
@@ -37,6 +36,7 @@ import app.pristinepage.data.model.EditablePage
 import app.pristinepage.data.repository.SavedOcrWork
 import app.pristinepage.data.repository.SavedOcrWork.PagePhase
 import app.pristinepage.design.OcrLanguage
+import app.pristinepage.design.label
 import app.pristinepage.ocr.SavedOcrScheduling.RerunOutcome
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.awaitCancellation
@@ -214,12 +214,7 @@ private sealed interface Reading {
 private fun OcrSettingsSummary(configuration: OcrConfiguration) {
     val engine = if (configuration.engineId == "tesseract-android") stringResource(R.string.ocr_engine_tesseract) else configuration.engineId
     Text(stringResource(R.string.ocr_details_engine, engine, configuration.engineVersion))
-    val layout = when (configuration.layout) {
-        OcrLayout.AUTOMATIC -> R.string.ocr_layout_automatic
-        OcrLayout.SINGLE_BLOCK -> R.string.ocr_layout_block
-        OcrLayout.SPARSE_TEXT -> R.string.ocr_layout_sparse
-    }
-    Text(stringResource(R.string.ocr_details_layout, stringResource(layout)))
+    Text(stringResource(R.string.ocr_details_layout, stringResource(configuration.layout.label())))
     val ordered = configuration.languagePacks?.ordered.orEmpty()
     if (ordered.isNotEmpty()) {
         val languages = ordered.map { pack ->

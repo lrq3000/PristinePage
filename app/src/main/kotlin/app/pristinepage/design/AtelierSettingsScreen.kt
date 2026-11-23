@@ -22,6 +22,7 @@ import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import app.pristinepage.R
+import app.pristinepage.core.ocr.OcrLayout
 import app.pristinepage.data.model.AlbumOrder
 import app.pristinepage.library.AlbumTitleTemplate
 import app.pristinepage.library.defaultAlbumTitle
@@ -87,6 +88,15 @@ internal fun AtelierSettingsScreen(page: SettingsPage, preferences: AtelierPrefe
                     SettingsPage.OCR -> {
                         Text(stringResource(ocrStatus))
                         SettingsLink(SettingsPage.OCR_LANGUAGES, navigate)
+                        SettingsHeading(R.string.settings_ocr_layout)
+                        Text(stringResource(R.string.settings_ocr_layout_help), style = MaterialTheme.typography.bodySmall)
+                        Column(Modifier.selectableGroup()) {
+                            for (layout in OcrLayout.entries) {
+                                SettingsRadio(layout.label(), settings.ocrLayout == layout, "settings-ocr-layout-${layout.name.lowercase(Locale.ROOT)}") {
+                                    preferences.setOcrLayout(layout)
+                                }
+                            }
+                        }
                         SettingsSwitch(R.string.settings_ocr_diagnostics, settings.ocrDiagnostics, "settings-ocr-diagnostics", preferences::setOcrDiagnostics)
                         Text(stringResource(R.string.settings_ocr_diagnostics_help), style = MaterialTheme.typography.bodySmall)
                     }
@@ -115,6 +125,12 @@ internal fun AtelierSettingsScreen(page: SettingsPage, preferences: AtelierPrefe
             }
         }
     }
+}
+
+internal fun OcrLayout.label(): Int = when (this) {
+    OcrLayout.AUTOMATIC -> R.string.ocr_layout_automatic
+    OcrLayout.SINGLE_BLOCK -> R.string.ocr_layout_block
+    OcrLayout.SPARSE_TEXT -> R.string.ocr_layout_sparse
 }
 
 @Composable private fun SettingsHeading(label: Int) {

@@ -33,10 +33,12 @@ class SavedOcrApplicationTest {
 
     @Test fun queueUsesOrderedDefaultsButRefusesSilentModelSubstitution() = runBlocking {
         val seen = mutableListOf<OcrConfiguration?>()
-        var installed = config
+        val sparse = config.copy(layout = OcrLayout.SPARSE_TEXT)
+        var installed = sparse
         var mutateRequest = false
-        val runtime = SavedOcrApplication.Runtime(factory) { requested ->
+        val runtime = SavedOcrApplication.Runtime(factory) { requested, layout ->
             assertEquals(codes, requested)
+            assertEquals(OcrLayout.SPARSE_TEXT, layout)
             if (mutateRequest) (requested as MutableList<String>).reverse()
             installed
         }
@@ -48,17 +50,20 @@ class SavedOcrApplicationTest {
             override suspend fun execute(target: SavedOcrWork.Target, sessions: SavedOcrPreparer.SessionFactory): SavedOcrWork.Outcome =
                 error("Enrollment must not start recognition")
         }
-        val app = SavedOcrApplication({ runtime }, { codes }, { graph })
+        val app = SavedOcrApplication({ runtime }, { SavedOcrApplication.Defaults(codes, OcrLayout.SPARSE_TEXT) }, { graph })
         assertSame(session, app.reconciliation())
-        installed = config.copy(languagePacks = OcrLanguagePacks(checkNotNull(config.languagePacks).ordered.reversed()))
+        installed = sparse.copy(languagePacks = OcrLanguagePacks(checkNotNull(sparse.languagePacks).ordered.reversed()))
         assertSame(session, app.reconciliation())
         mutateRequest = true
         assertSame(session, app.reconciliation())
-        assertEquals(listOf(config, null, null), seen)
+        mutateRequest = false
+        installed = config
+        assertSame(session, app.reconciliation())
+        assertEquals(listOf(sparse, null, null, null), seen)
     }
 
     @Test fun workerPassesTheExactTargetAndFactoryWithoutConsultingDefaults() = runBlocking {
-        val runtime = SavedOcrApplication.Runtime(factory) { error("Restart must not consult defaults") }
+        val runtime = SavedOcrApplication.Runtime(factory) { _, _ -> error("Restart must not consult defaults") }
         val expectedTarget = target
         val graph = object : SavedOcrApplication.Graph {
             override fun reconcile(defaults: OcrConfiguration?): SavedOcrScheduling.QualifiedSession = error("Worker must not discover unrelated pages")
@@ -74,16 +79,19 @@ class SavedOcrApplicationTest {
 
     @Test fun rerunWithSavedSettingsReverifiesExactPacksAndKeepsTheSavedLayout() = runBlocking {
         val saved = config.copy(layout = OcrLayout.SPARSE_TEXT)
-        var available = config
-        val runtime = SavedOcrApplication.Runtime(factory) { requested ->
+        var available = saved
+        val runtime = SavedOcrApplication.Runtime(factory) { requested, layout ->
             assertEquals(listOf("fra", "eng"), requested)
+            assertEquals(OcrLayout.SPARSE_TEXT, layout)
             available
         }
         val app = SavedOcrApplication({ runtime }, { error("Saved configuration cannot consult current defaults") }, { error("Resolving a rerun must not open the library") })
         assertEquals(saved, app.resolveRerunConfiguration(saved, useDefaults = false))
-        available = config.copy(engineVersion = 2)
+        available = config
         assertNull(app.resolveRerunConfiguration(saved, useDefaults = false))
-        available = config.copy(languagePacks = OcrLanguagePacks(listOf(
+        available = saved.copy(engineVersion = 2)
+        assertNull(app.resolveRerunConfiguration(saved, useDefaults = false))
+        available = saved.copy(languagePacks = OcrLanguagePacks(listOf(
             OcrLanguagePack("fra", "3".repeat(64)), OcrLanguagePack("eng", "2".repeat(64)))))
         assertNull(app.resolveRerunConfiguration(saved, useDefaults = false))
     }
@@ -92,13 +100,17 @@ class SavedOcrApplicationTest {
         val reversed = OcrLanguagePacks(checkNotNull(config.languagePacks).ordered.reversed())
         val current = config.copy(layout = OcrLayout.SINGLE_BLOCK, languagePacks = reversed)
         var available = current
-        val runtime = SavedOcrApplication.Runtime(factory) { requested ->
+        val runtime = SavedOcrApplication.Runtime(factory) { requested, layout ->
             assertEquals(listOf("eng", "fra"), requested)
+            assertEquals(OcrLayout.SINGLE_BLOCK, layout)
             available
         }
-        val app = SavedOcrApplication({ runtime }, { listOf("eng", "fra") }, { error("Resolving a rerun must not open the library") })
+        val app = SavedOcrApplication({ runtime }, { SavedOcrApplication.Defaults(listOf("eng", "fra"), OcrLayout.SINGLE_BLOCK) },
+            { error("Resolving a rerun must not open the library") })
         assertEquals(current, app.resolveRerunConfiguration(config, useDefaults = true))
-        available = config
+        available = current.copy(layout = OcrLayout.AUTOMATIC)
+        assertNull(app.resolveRerunConfiguration(config, useDefaults = true))
+        available = config.copy(layout = OcrLayout.SINGLE_BLOCK)
         assertNull(app.resolveRerunConfiguration(config, useDefaults = true))
     }
 

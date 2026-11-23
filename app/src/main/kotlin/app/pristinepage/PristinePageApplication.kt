@@ -25,7 +25,10 @@ open class PristinePageApplication : Application() {
     internal val savedOcr by lazy {
         SavedOcrApplication(
             installed = { installedSavedOcrRuntime().also { runtimeReady.value = it != null } },
-            orderedDefaults = { atelierPreferences.settings.value.ocrLanguages.map { it.packCode } },
+            defaults = {
+                val settings = atelierPreferences.settings.value
+                SavedOcrApplication.Defaults(settings.ocrLanguages.map { it.packCode }, settings.ocrLayout)
+            },
             graph = { SavedOcrApplication.bind(services.imports()) },
         )
     }

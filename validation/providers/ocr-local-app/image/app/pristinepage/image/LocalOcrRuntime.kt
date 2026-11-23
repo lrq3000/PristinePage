@@ -2,6 +2,7 @@ package app.pristinepage.image
 
 import android.app.Application
 import app.pristinepage.core.ocr.OcrConfiguration
+import app.pristinepage.core.ocr.OcrLayout
 import app.pristinepage.image.decode.ImageAllocationBudget
 import app.pristinepage.image.ocr.PrivateOcrPackOwner
 import app.pristinepage.image.ocr.SavedOcrPreparer
@@ -12,8 +13,8 @@ import kotlinx.coroutines.withContext
 /** Available only in an opt-in S-01 candidate. Copy from APK assets to the normal private verified pack owner; never consult a network or user path. */
 class LocalOcrRuntime private constructor(private val installed: TesseractInstalledOcr) {
     val sessions: SavedOcrPreparer.SessionFactory get() = installed.sessions
-    suspend fun configurationFor(codes: List<String>): OcrConfiguration? = try {
-        installed.configurationFor(codes)
+    suspend fun configurationFor(codes: List<String>, layout: OcrLayout): OcrConfiguration? = try {
+        installed.configurationFor(codes, layout)
     } catch (_: OutOfMemoryError) {
         // Defaults are not a started job. Do not substitute a different installed list or prevent recovery of previously bound jobs.
         null
