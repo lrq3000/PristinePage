@@ -12,7 +12,7 @@ from pathlib import Path
 from local_jpeg_destination import matches_local_downloads
 from local_ocr_files_journey import FILES, LocalFilesJourney
 from run_local_ocr_airplane import LOCAL_ADB_OVERRIDES, verify_target
-from run_local_ocr_guest import APP, GUEST_PATTERN, RUNNER, TEST, exact_apk, load_allocator, need, passed_case, run_type, sha
+from run_local_ocr_guest import APP, GUEST_PATTERN, RUNNER, TEST, exact_apk, install_flags, load_allocator, need, passed_case, run_type, sha
 from run_local_ocr_large_page import APP_SHA
 from run_local_ocr_text_chooser_death import ALBUM, DIGEST, OPEN
 
@@ -22,16 +22,20 @@ EXPECTED_STATUS = re.compile(
     r"INSTRUMENTATION_STATUS_CODE: 68\n"
 )
 LEAF = "recognized-text.txt"
+EMPTY_SHA = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+BLANK = (OPEN[0], "recognizedBlankPageCanSaveAnEmptyTextDocument")
 
 
-def expected_output(transcript):
+def expected_output(transcript, *, blank=False):
     marks = EXPECTED_STATUS.findall(transcript)
     if not marks:
         return None
     need(len(marks) == 1, "Duplicate chooser-ready checkpoint")
-    length = re.findall(r"(?m)^INSTRUMENTATION_STATUS: ocrTextExpectedBytes=([1-9]\d{0,5})$", marks[0])
+    length = re.findall(r"(?m)^INSTRUMENTATION_STATUS: ocrTextExpectedBytes=(0|[1-9]\d{0,5})$", marks[0])
     digest = re.findall(rf"(?m)^INSTRUMENTATION_STATUS: ocrTextExpectedSha=({DIGEST})$", marks[0])
     need(len(length) == len(digest) == 1 and int(length[0]) <= 393_216, "Malformed bounded synthetic producer identity")
+    need((int(length[0]) == 0 and digest[0] == EMPTY_SHA) if blank else int(length[0]) > 0,
+         "The producer checkpoint does not match the selected blank/nonblank case")
     return int(length[0]), digest[0]
 
 
@@ -57,7 +61,7 @@ def confirmation_point(tree, owner, folder):
     return (str((x1 + x2) // 2), str((y1 + y2) // 2)) if x1 < x2 and y1 < y2 else None
 
 
-def exercise(run, ns, target, title, token):
+def exercise(run, ns, target, title, token, *, blank=False):
     journey = LocalFilesJourney(run, target, APP, None)
     folder = f"PristinePage-Export-{token}"
     directory = f"/sdcard/Download/{folder}"
@@ -67,15 +71,16 @@ def exercise(run, ns, target, title, token):
     need(re.fullmatch(rf"/(?:storage/emulated/0|mnt/shell/emulated/0)/Download/{folder}", real) and
          not journey.command("shell", "ls", "-A", directory).strip(), "Expected an exact new empty guest directory")
     out = run.path("instrumentation.txt")
-    argv = [*target, "shell", "am", "instrument", "-w", "-r", "-e", "class", "#".join(OPEN),
-            "-e", "filesSavedAlbum", title, "-e", "filesInspectTextChooser", "4", RUNNER]
+    case = BLANK if blank else OPEN
+    extras = ["-e", "ocrBlankTextSave", "1"] if blank else ["-e", "filesSavedAlbum", title, "-e", "filesInspectTextChooser", "4"]
+    argv = [*target, "shell", "am", "instrument", "-w", "-r", "-e", "class", "#".join(case), *extras, RUNNER]
     with out.open("xb") as f:
         proc = subprocess.Popen(argv, stdout=f, stderr=subprocess.STDOUT)
         try:
-            deadline = time.monotonic() + 70
+            deadline = time.monotonic() + (115 if blank else 70)
             while True:
                 transcript = out.read_text(encoding="utf-8", errors="replace")
-                expected = expected_output(transcript)
+                expected = expected_output(transcript, blank=blank)
                 if expected:
                     need(proc.poll() is None, "The producer checkpoint no longer owns the live chooser")
                     break
@@ -103,8 +108,8 @@ def exercise(run, ns, target, title, token):
             journey.command("shell", "input", "tap", *point)
             need(proc.wait(timeout=42) == 0, "The app-side verification did not finish")
             result = out.read_text(encoding="utf-8", errors="replace")
-            need(passed_case(EXPECTED_STATUS.sub("", result), OPEN) and
-                 expected_output(result) == expected and
+            need(passed_case(EXPECTED_STATUS.sub("", result), case) and
+                 expected_output(result, blank=blank) == expected and
                  re.findall(r"(?m)^INSTRUMENTATION_RESULT: filesWitness=(\w+)$", result) == ["LOCAL_TEXT_APP_VERIFIED"],
                  "The app did not acknowledge verified text readback")
             need(journey.command("shell", "ls", "-A", directory).splitlines() == [LEAF], "Unexpected guest output")
@@ -124,16 +129,20 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     for field in ("guest", "synthetic_files_album", "test_sha", "fresh_token"):
         parser.add_argument(field)
+    parser.add_argument("--blank", action="store_true", help="Exercise only the independently generated successful blank OCR control")
+    parser.add_argument("--previous-test", help="Exact installed predecessor for the test-only update")
     args = parser.parse_args()
     need(re.fullmatch(GUEST_PATTERN, args.guest) and re.fullmatch(ALBUM, args.synthetic_files_album) and
          re.fullmatch(DIGEST, args.test_sha) and re.fullmatch(r"[a-f0-9]{12}", args.fresh_token), "Require exact synthetic scope")
     need(not any(os.environ.get(name) for name in LOCAL_ADB_OVERRIDES), "Refusing ADB overrides")
+    need(args.previous_test is None or (re.fullmatch(DIGEST, args.previous_test) and args.previous_test != args.test_sha),
+         "Invalid exact test predecessor")
     root = Path.cwd().resolve()
     need(root.name == "ocr-current-validation" and root.parent.name == ".worktrees", "Unexpected OCR worktree")
     providers = root / "validation/raw/providers"
     stage, retained = providers / "ocr-app-main-f28885a", providers / "ocr-publication-reviewed-apks"
-    proofs = [exact_apk(retained / f"{APP_SHA}.apk", APP_SHA, stage, False),
-              exact_apk(retained / f"{args.test_sha}.apk", args.test_sha, stage, True)]
+    test = retained / f"{args.test_sha}.apk"
+    proofs = [exact_apk(retained / f"{APP_SHA}.apk", APP_SHA, stage, False), exact_apk(test, args.test_sha, stage, True)]
     prefix = "picker-adapter-ocr-text-save-" + uuid.uuid4().hex[:12]
     raw = root / "validation/raw/storage" / prefix
     raw.mkdir()
@@ -146,11 +155,19 @@ def main():
         run.prepare(False, None, False)
         verify_target(run, ns)
         target = [ns["ADB"], "-s", run.serial]
+        need(run.installed_hash(APP) == APP_SHA, "Refusing to replace the exact app APK")
+        previous = run.installed_hash(TEST)
+        flags = install_flags(TEST, previous, args.test_sha, args.previous_test, require_installed=True)
+        if flags:
+            verify_target(run, ns)
+            need(sha(test) == args.test_sha, "Test APK changed before install")
+            install = run.command([*target, "install", *flags, "--no-streaming", test], timeout=130)
+            need(install.strip().splitlines()[-1] == "Success", "Scoped test installation was not acknowledged")
         need(run.installed_hash(APP) == APP_SHA and run.installed_hash(TEST) == args.test_sha and
              run.command([*target, "shell", "pm", "list", "instrumentation", APP]).splitlines() ==
              [f"instrumentation:{RUNNER} (target={APP})"], "Refusing to operate against an unverified installed pair")
-        run.save(run.path("installed.json"), {"app": APP_SHA, "test": args.test_sha}, durable=True)
-        exercise(run, ns, target, args.synthetic_files_album, args.fresh_token)
+        run.save(run.path("installed.json"), {"app": APP_SHA, "test": args.test_sha, "testBefore": previous}, durable=True)
+        exercise(run, ns, target, args.synthetic_files_album, args.fresh_token, blank=args.blank)
     finally:
         run.close_owned()
 

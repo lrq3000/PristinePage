@@ -46,6 +46,7 @@ import app.pristinepage.editor.EditorViewModel
 import app.pristinepage.export.AlbumExportViewModel
 import app.pristinepage.library.ApplicationLibraryActions
 import app.pristinepage.library.ImportLibraryViewModel
+import app.pristinepage.library.LibraryEvent
 import app.pristinepage.library.LibraryPhotoResult
 import java.io.File
 import java.util.UUID
@@ -252,15 +253,7 @@ class LocalOcrImportJourneyTest {
                     // UiAutomation client while the host is observing the system window; only test the app result here.
                     val expected = text.text.value.encodeToByteArray()
                     require(expected.isNotEmpty())
-                    val digest = java.security.MessageDigest.getInstance("SHA-256").digest(expected).joinToString("") { "%02x".format(it) }
-                    instrumentation.sendStatus(68, Bundle().apply {
-                        putString("ocrTextExpectedSha", digest)
-                        putInt("ocrTextExpectedBytes", expected.size)
-                    })
-                    withTimeout(165_000) { waitFor { owner.state.value.takeIf { !it.busy && it.consent == null } } }
-                    assertEquals(R.string.ocr_save_text_verified, owner.state.value.notice)
-                    compose.onNodeWithText(context.getString(R.string.ocr_save_text_verified)).assertExists()
-                    instrumentation.addResults(Bundle().apply { putString("filesWitness", "LOCAL_TEXT_APP_VERIFIED") })
+                    awaitHostVerifiedTextSave(context, owner, expected)
                     return@runBlocking
                 }
                 val automation = instrumentation.uiAutomation
@@ -358,6 +351,69 @@ class LocalOcrImportJourneyTest {
         }
         // Prove only that the chooser actually opened. No input or destination selection is allowed inside it.
         instrumentation.addResults(Bundle().apply { putString("filesWitness", "PICKER_OPENED_WITHOUT_CONFIRMATION") })
+    }
+
+    @Test
+    fun recognizedBlankPageCanSaveAnEmptyTextDocument(): Unit = runBlocking {
+        val instrumentation = InstrumentationRegistry.getInstrumentation()
+        val context = instrumentation.targetContext
+        val app = context.applicationContext as PristinePageApplication
+        assumeTrue("The blank save requires a guarded host-side DocumentsUI driver",
+            app.hasBundledOcr && InstrumentationRegistry.getArguments().getString("ocrBlankTextSave") == "1")
+        val graph = app.services.imports()
+        val document = graph.store.documents.createDocument("Blank OCR text control ${UUID.randomUUID()}")
+        val dir = File(context.cacheDir, "editor-journey-fixtures")
+        check(dir.isDirectory || dir.mkdirs())
+        val id = UUID.randomUUID().toString()
+        val file = File(dir, "$id.png")
+        check(file.createNewFile())
+        val blank = Bitmap.createBitmap(400, 440, Bitmap.Config.ARGB_8888)
+        try {
+            blank.eraseColor(Color.WHITE)
+            file.outputStream().use { check(blank.compress(Bitmap.CompressFormat.PNG, 100, it)) }
+        } finally { blank.recycle() }
+        val actions = ApplicationLibraryActions(context, app.savedOcrSignals::onPagesSaved, app.services::imports)
+        val request = actions.begin(graph.store.catalog.load(document).document)
+        val page = (actions.deliver(request, LibraryPhotoResult.Selected(
+            listOf("content://${context.packageName}.editor-fixtures/$id"), 0,
+        )).single() as IngestResult.Committed).pageId
+        val saved = graph.store.editablePages.load(document, page)
+        val work = graph.store.savedOcr
+        val text = withTimeout(70_000) { waitFor { work.readText(document, page, saved.recipeRevision) } }
+        assertEquals("", text.text.value)
+        assertFalse(text.previousGeneration)
+        val status = checkNotNull(work.readStatus(document, page, saved.recipeRevision))
+        assertEquals(SavedOcrWork.PagePhase.READY, status.phase)
+        assertEquals(1, status.attemptsStarted)
+        val library = compose.runOnUiThread { ViewModelProvider(compose.activity)[ImportLibraryViewModel::class.java].session }
+        compose.waitUntil(10_000) { !library.state.value.loading }
+        compose.runOnUiThread { library.accept(LibraryEvent.Open(document)) }
+        compose.waitUntil(15_000) { library.state.value.document?.pages?.singleOrNull()?.pageId == page }
+        compose.onNodeWithTag("original-page-${page.value}").performScrollTo().assertIsEnabled().performClick()
+        val editor = compose.runOnUiThread { ViewModelProvider(compose.activity)[EditorViewModel::class.java] }
+        compose.waitUntil(15_000) { editor.session.value?.state?.value?.page?.let { it.pageId == page && it.recipeRevision == saved.recipeRevision } == true }
+        compose.onNodeWithTag("editor-tool-ocr-text").performScrollTo().assertIsEnabled()
+            .performSemanticsAction(SemanticsActions.OnClick) { check(it()) }
+        compose.waitUntil(15_000) { compose.onAllNodesWithText(context.getString(R.string.ocr_text_blank)).fetchSemanticsNodes().size == 1 }
+        val owner = compose.runOnUiThread { ViewModelProvider(compose.activity)[OcrTextSaveViewModel::class.java] }
+        compose.onNodeWithTag("ocr-text-save-as").performScrollTo().assertIsEnabled().performClick()
+        compose.waitUntil(15_000) { owner.state.value.let { it.consent != null && !it.launchRequested || !it.busy } }
+        assertTrue(owner.state.value.let { it.busy && it.consent != null && !it.launchRequested })
+        awaitHostVerifiedTextSave(context, owner, byteArrayOf())
+    }
+
+    /** The host checks the real provider and sends the sole confirmation, then separately hashes the closed file. */
+    private suspend fun awaitHostVerifiedTextSave(context: android.content.Context, owner: OcrTextSaveViewModel, expected: ByteArray) {
+        val instrumentation = InstrumentationRegistry.getInstrumentation()
+        val digest = java.security.MessageDigest.getInstance("SHA-256").digest(expected).joinToString("") { "%02x".format(it) }
+        instrumentation.sendStatus(68, Bundle().apply {
+            putString("ocrTextExpectedSha", digest)
+            putInt("ocrTextExpectedBytes", expected.size)
+        })
+        withTimeout(165_000) { waitFor { owner.state.value.takeIf { !it.busy && it.consent == null } } }
+        assertEquals(R.string.ocr_save_text_verified, owner.state.value.notice)
+        compose.onNodeWithText(context.getString(R.string.ocr_save_text_verified)).assertExists()
+        instrumentation.addResults(Bundle().apply { putString("filesWitness", "LOCAL_TEXT_APP_VERIFIED") })
     }
 
     private companion object {

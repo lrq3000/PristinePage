@@ -40,3 +40,11 @@ class TextPublicationDriverTest(unittest.TestCase):
         ):
             with self.subTest(xml=invalid):
                 self.assertIsNone(confirmation_point(ET.fromstring(invalid), OWNER, FOLDER))
+
+    def test_zero_byte_marker_is_only_admitted_for_the_explicit_blank_case(self):
+        blank = MARKER.replace("36\n", "0\n").replace(DIGEST, "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855")
+        self.assertEqual((0, "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"),
+                         expected_output(blank, blank=True))
+        for text, blank_case in ((blank, False), (MARKER, True), (blank.replace("e3b0", "1111"), True)):
+            with self.subTest(blank=blank_case), self.assertRaises(RuntimeError):
+                expected_output(text, blank=blank_case)
