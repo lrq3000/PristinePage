@@ -31,6 +31,7 @@ import app.pristinepage.MainActivity
 import app.pristinepage.PristinePageApplication
 import app.pristinepage.R
 import app.pristinepage.core.recipe.AppearanceRecipe
+import app.pristinepage.core.recipe.BinaryRecipe
 import app.pristinepage.data.model.IngestResult
 import app.pristinepage.data.repository.SavedOcrWork
 import app.pristinepage.editor.EditorViewModel
@@ -41,6 +42,7 @@ import app.pristinepage.library.LibraryPhotoResult
 import java.io.File
 import java.util.UUID
 import java.util.concurrent.TimeUnit
+import kotlin.random.Random
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.TimeoutCancellationException
@@ -74,13 +76,14 @@ class LocalOcrImportJourneyTest {
         val dir = File(context.cacheDir, "editor-journey-fixtures")
         check(dir.isDirectory || dir.mkdirs())
         val words = listOf("BLUEBELL", "ALBATROSS")
-        val refs = words.map { word ->
+        val reference = Random.nextInt(100_000, 1_000_000).toString()
+        val refs = words.mapIndexed { index, word ->
             val id = UUID.randomUUID().toString()
-            makePage(File(dir, "$id.png"), word)
+            makePage(File(dir, "$id.png"), word, reference.takeIf { index == 1 })
             "content://${context.packageName}.editor-fixtures/$id"
         }
         val actions = ApplicationLibraryActions(context, app.savedOcrSignals::onPagesSaved, app.services::imports)
-        val query = words[1]
+        val query = "${words[1]} $reference"
         val label = context.getString(R.string.home_matching_page, title, 2)
         val library = compose.runOnUiThread { ViewModelProvider(compose.activity)[ImportLibraryViewModel::class.java].session }
         compose.onNodeWithTag("home-album-search").performTextInput(query)
@@ -125,7 +128,50 @@ class LocalOcrImportJourneyTest {
         compose.onNodeWithText(label).performClick()
         val editor = compose.runOnUiThread { ViewModelProvider(compose.activity)[EditorViewModel::class.java] }
         compose.waitUntil(15_000) { editor.session.value?.state?.value?.page != null }
-        assertEquals(saved[1].pageId, editor.session.value?.state?.value?.page?.pageId)
+        val original = checkNotNull(editor.session.value?.state?.value?.page)
+        assertEquals(saved[1].pageId, original.pageId)
+        val originalHash = graph.store.committedSources.load(original.sourceId).sourceByteHash
+        val precedingWakes = wakes().map { it.id }.toSet()
+        val staleHit = hits.single()
+        assertTrue(graph.store.savedOcr.canOpen(staleHit))
+
+        // Change a real accepted recipe from the saved editor, without requesting recognition from the test.
+        compose.onNodeWithTag("editor-tool-looks").performScrollTo().assertIsEnabled().performClick()
+        compose.onNodeWithTag("editor-look-gray").performScrollTo().assertIsEnabled().performClick()
+        compose.onNodeWithTag("editor-apply").assertIsEnabled().performClick()
+        compose.waitUntil(15_000) { editor.session.value?.state?.value?.page?.recipeRevision == original.recipeRevision + 1 }
+        val edited = graph.store.editablePages.load(document, original.pageId)
+        assertEquals(original.recipeRevision + 1, edited.recipeRevision)
+        assertEquals(original.sourceId, edited.sourceId)
+        assertEquals(originalHash, graph.store.committedSources.load(edited.sourceId).sourceByteHash)
+        assertEquals(BinaryRecipe.GrayscaleV1, edited.recipe.binary)
+        assertFalse(graph.store.savedOcr.canOpen(staleHit))
+        assertNull(graph.store.savedOcr.readText(document, edited.pageId, original.recipeRevision))
+        val refreshed = withTimeout(120_000) {
+            waitFor { graph.store.savedOcr.readStatus(document, edited.pageId, edited.recipeRevision)
+                ?.takeIf { it.phase == SavedOcrWork.PagePhase.READY } }
+        }
+        assertEquals(1, refreshed.attemptsStarted)
+        assertNull(refreshed.lastError)
+        assertEquals("tesseract-android", refreshed.configuration.engineId)
+        withTimeout(15_000) {
+            waitFor { wakes().filterNot { it.id in precedingWakes }.singleOrNull()?.takeIf { it.state == WorkInfo.State.SUCCEEDED } }
+        }
+        val updated = graph.store.savedOcr.find(query, null, 20).hits.filter { it.document == document }
+        assertEquals(listOf(edited.pageId), updated.map { it.page })
+        assertTrue(graph.store.savedOcr.canOpen(updated.single()))
+
+        compose.onNodeWithTag("editor-back").performClick()
+        compose.onNodeWithTag("atelier-home-back").assertIsEnabled().performClick()
+        compose.waitUntil(15_000) {
+            library.state.value.let { !it.loading && it.selectedId == null && it.albumSearch == query &&
+                it.pageMatches.any { hit -> hit.document == document && hit.page == edited.pageId } }
+        }
+        compose.onNodeWithTag("atelier-album-list").performScrollToNode(hasText(label))
+        compose.onNodeWithText(label).performClick()
+        compose.waitUntil(15_000) {
+            editor.session.value?.state?.value?.page?.let { it.pageId == edited.pageId && it.recipeRevision == edited.recipeRevision } == true
+        }
     }
 
     @Test
@@ -299,7 +345,7 @@ private suspend fun <T : Any> waitFor(read: suspend () -> T?): T {
     }
 }
 
-private fun makePage(file: File, word: String) {
+private fun makePage(file: File, word: String, reference: String? = null) {
     check(file.createNewFile())
     val bitmap = Bitmap.createBitmap(1024, 480, Bitmap.Config.ARGB_8888)
     try {
@@ -309,7 +355,9 @@ private fun makePage(file: File, word: String) {
             textSize = 76f
             typeface = Typeface.create(Typeface.SANS_SERIF, Typeface.BOLD)
         }
-        Canvas(bitmap).drawText("Receipt $word", 50f, 220f, paint)
+        val canvas = Canvas(bitmap)
+        canvas.drawText("Receipt $word", 50f, 220f, paint)
+        reference?.let { canvas.drawText("Reference $it", 50f, 336f, paint) }
         file.outputStream().use { check(bitmap.compress(Bitmap.CompressFormat.PNG, 100, it)) }
     } finally {
         bitmap.recycle()

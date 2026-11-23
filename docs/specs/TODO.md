@@ -580,6 +580,10 @@ Course check: the current exact-pair panel witness passed, so leave production O
 
 The [reviewed chooser-launch witness](../../validation/providers/ocr-tesseract-qualification.md#external-jpeg-save-as-control) passed on the unchanged app after one failed ADB-readiness attempt. The installed pair and exact foreground activity were verified; the final test never interacted with the chooser after it opened. No provider target, external JPEG, or complete user journey is accepted.
 
+`OCR-EDITED-PAGE-LD-86` — coordinator, following `1cc01ee`, exact same OCR application. Extend the two-page synthetic import witness through real editor Apply, exact old-revision hit refusal and a new one-start WorkManager result. Require the accepted edited recipe and same original source bytes, then reopen the same page from Home. Scope: the existing named Android test and qualification/ledger only unless the witness reproduces a product defect. No manual wake/rerun, schema, engine, runtime acquisition, outside picker action or network changes. Recheck at the first failure or end of the same-APK witness.
+
+The [accepted-edit companion witness](../../validation/providers/ocr-tesseract-qualification.md#automatic-ocr-after-a-saved-edit) passed on the unchanged OCR app. The engine recorded one start for the new recipe, an old producer's hit refused to open, and the unchanged Home query reopened the exact new revision. This closes the checked ordinary edit trigger, not cold-radio, representative quality, external export or release acceptance. Do not add more text-export infrastructure ahead of the offline journey.
+
 ### Carnet release boundary — T-11 / CARNET-SHARE-LEASE-01
 
 Input is the audited public copy of the 16 Carnet corrective commits, through the JPEG/ZIP follow-up. Scope: guard provider display-name and size metadata by the same durable lease as file reads, verify the provider boundary, and retain live-share, Save as and frozen-name semantics. Post-revocation readability of already opened descriptors, external copies, and native acceptance are separate. The [operational plan](OPERATIONAL_PLAN.md) governs integration, public branches and the v0.3.0 bump.
