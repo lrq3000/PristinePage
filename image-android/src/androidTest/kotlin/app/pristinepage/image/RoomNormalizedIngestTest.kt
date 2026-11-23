@@ -10,6 +10,8 @@ import app.pristinepage.core.recipe.RecipeCodec
 import app.pristinepage.data.db.PristineDatabase
 import app.pristinepage.data.files.SourceFiles
 import app.pristinepage.data.files.SourceInspector
+import app.pristinepage.data.files.InspectedSourceForIngest
+import app.pristinepage.data.journal.IngestJournalCodec
 import app.pristinepage.data.model.*
 import app.pristinepage.data.repository.*
 import app.pristinepage.image.decode.AndroidSourceInspector
@@ -22,6 +24,8 @@ import java.io.ByteArrayInputStream
 import java.io.ByteArrayOutputStream
 import java.io.DataOutputStream
 import java.io.File
+import java.nio.ByteBuffer
+import java.nio.ByteOrder
 import java.util.UUID
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.*
@@ -62,6 +66,39 @@ class RoomNormalizedIngestTest {
         }
     }
 
+    @Test fun admittedCaptureDateIsSealedWithoutChangingNormalizedSourceIdentity() = runBlocking {
+        val tiff = ByteBuffer.allocate(64).order(ByteOrder.LITTLE_ENDIAN).putShort(0x4949).putShort(42).putInt(8)
+            .putShort(1).putShort(0x8769.toShort()).putShort(4).putInt(1).putInt(26).putInt(0)
+            .putShort(1).putShort(0x9003.toShort()).putShort(2).putInt(20).putInt(44).putInt(0)
+            .put("2024:02:29 09:20:01\u0000".encodeToByteArray()).array()
+        val pixels = byteArrayOf(0, -1, 0, 0, 0, -1, 0, 0, 0, -1)
+        val dated = EncodedImageFixtures.png(3, 1, 8, 2, pixels, EncodedImageFixtures.chunk("eXIf", tiff))
+        val undated = EncodedImageFixtures.png(3, 1, 8, 2, pixels)
+        Fixture(dated, projectCaptureDate = true).use { f ->
+            val child = f.reserve().single()
+            val committed = f.store.ingest(f.reference, child) as IngestResult.Committed
+            val intent = RoomIngestLookup(f.database).find(child)!!
+            val sql = f.database.openHelper.readableDatabase
+            val receipt = sql.query("SELECT payload FROM FileTransaction WHERE transactionId=?", arrayOf(intent.transactionId.value))
+                .use { row -> assertTrue(row.moveToFirst()); IngestJournalCodec.decodeCommit(row.getBlob(0), intent) }
+            assertEquals(SourceCaptureDate(19782), receipt.seal.captureDate)
+            assertEquals(sha(dated), committed.sourceByteHash)
+            val plain = File(f.root, "undated.bin").apply { writeBytes(undated) }
+            assertEquals(receipt.seal.inspection, f.decoder.inspect(plain, sha(undated)))
+            assertEquals(SourceCaptureDate(null), f.decoder.inspectForIngest(plain, sha(undated)).captureDate)
+            val wrongHash = try {
+                f.decoder.inspectForIngest(plain, sha(dated))
+                fail("Wrong original digest must not yield a projection")
+                null
+            } catch (failure: RepositoryFailure) { failure.error.code }
+            assertEquals(OperationErrorCode.INTEGRITY_FAILED, wrongHash)
+            f.reopen(); f.forbidInputs = true
+            assertEquals(committed, f.store.ingest(f.reference, child))
+            assertEquals(1, f.inspected)
+            assertEquals(0L, f.budget.usedBytes)
+        }
+    }
+
     @Test fun corruptAndMalformedActualSourcesNeverCommitVisibilityOrReadyOwnership() = runBlocking {
         for (bytes in listOf(rgbaPng().dropLast(1).toByteArray(), exif(jpeg(), 9), byteArrayOf(1, 2, 3, 4))) Fixture(bytes).use { f ->
             val child = f.reserve().single()
@@ -95,7 +132,9 @@ class RoomNormalizedIngestTest {
         }
     }
 
-    internal class Fixture(val bytes: ByteArray, val budget: ImageAllocationBudget = ImageAllocationBudget(32L * 1024 * 1024)) : AutoCloseable {
+    internal class Fixture(val bytes: ByteArray, val budget: ImageAllocationBudget = ImageAllocationBudget(32L * 1024 * 1024),
+        private val projectCaptureDate: Boolean = false,
+    ) : AutoCloseable {
         private val context = InstrumentationRegistry.getInstrumentation().targetContext
         private val name = "t04-normalized-${UUID.randomUUID()}.db"
         val root = File(context.filesDir, "t04-normalized-${UUID.randomUUID()}")
@@ -125,12 +164,22 @@ class RoomNormalizedIngestTest {
                     override fun close() { closed++; super.close() }
                 }
             }
-            val inspector = SourceInspector { file, hash ->
-                assertFalse(database.inTransaction()); assertFalse("Replay decoded the source again", forbidInputs); assertEquals(opened, closed); inspected++
-                assertArrayEquals(bytes, file.readBytes()); assertEquals(sha(bytes), hash)
-                val inspection = decoder.inspect(file, hash)
-                afterInspection()
-                inspection
+            val inspector = object : SourceInspector {
+                private suspend fun checked(file: File, hash: String, inspect: suspend () -> InspectedSourceForIngest): InspectedSourceForIngest {
+                    assertFalse(database.inTransaction()); assertFalse("Replay decoded the source again", forbidInputs); assertEquals(opened, closed); inspected++
+                    assertArrayEquals(bytes, file.readBytes()); assertEquals(sha(bytes), hash)
+                    val inspection = inspect()
+                    afterInspection()
+                    return inspection
+                }
+                override suspend fun inspect(file: File, expectedByteSha256: String): SourceInspection =
+                    checked(file, expectedByteSha256) {
+                        InspectedSourceForIngest(decoder.inspect(file, expectedByteSha256), null)
+                    }.inspection
+
+                override suspend fun inspectForIngest(file: File, expectedByteSha256: String): InspectedSourceForIngest =
+                    if (!projectCaptureDate) super.inspectForIngest(file, expectedByteSha256)
+                    else checked(file, expectedByteSha256) { decoder.inspectForIngest(file, expectedByteSha256) }
             }
             val completion = RoomIngestCompletion(database, files)
             return RoomSourceStore(files, provider, inspector, RoomIngestPreparation(database), RoomIngestLookup(database), completion, completion, RoomIngestPhases(database), RoomJobLeases(database, owners), owners)

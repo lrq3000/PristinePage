@@ -34,6 +34,48 @@ class IngestJournalCodecTest {
         assertArrayEquals(bytes, call("encodeSeal", decoded) as ByteArray)
     }
 
+    @Test fun captureProjectionDoesNotChangeHistoricalSealOrReceiptBytes() {
+        val legacy = """{"byteCount":4,"inspection":{"conversionFingerprint":"srgb-v1","encodedSize":{"height":2,"width":3},"exifOrientation":6,"mime":"image/png","normalizedSize":{"height":3,"width":2},"profileSha256":null,"sourcePixelHash":"${"a".repeat(64)}"},"intent":${String(encode(), Charsets.UTF_8)},"schemaVersion":1,"sourceByteHash":"9f64a747e1b97f131fabb6b447296c9b6f0201e79fb3c5356e6c77e89b6a806a"}"""
+        assertArrayEquals(legacy.encodeToByteArray(), call("encodeSeal", seal) as ByteArray)
+        assertNull((call("decodeSeal", legacy.encodeToByteArray(), intent) as IngestJournalSeal).captureDate)
+        val receipt = """{"documentRevision":3,"schemaVersion":1,"seal":$legacy}""".encodeToByteArray()
+        assertArrayEquals(receipt, call("encodeCommit", IngestJournalCommit(seal, 3)) as ByteArray)
+        assertEquals(IngestJournalCommit(seal, 3), call("decodeCommit", receipt, intent))
+    }
+
+    @Test fun datedAndNoUsableDateV2RecordsRoundTripWithoutChangingNormalizedIdentity() {
+        val dated = seal.copy(schemaVersion = 2, captureDate = SourceCaptureDate(19782))
+        val empty = dated.copy(captureDate = SourceCaptureDate(null))
+        for ((value, day) in listOf(dated to "19782", empty to "null")) {
+            val legacy = String(call("encodeSeal", seal) as ByteArray, Charsets.UTF_8)
+            val canonical = legacy.replaceFirst("\"inspection\":", "\"captureDate\":{\"epochDay\":$day},\"inspection\":")
+                .replace("\"schemaVersion\":1,\"sourceByteHash\"", "\"schemaVersion\":2,\"sourceByteHash\"")
+            assertArrayEquals(canonical.encodeToByteArray(), call("encodeSeal", value) as ByteArray)
+            val decoded = call("decodeSeal", canonical.encodeToByteArray(), intent) as IngestJournalSeal
+            assertEquals(value, decoded)
+            assertEquals(inspection, decoded.inspection)
+            val receipt = """{"documentRevision":4,"schemaVersion":2,"seal":$canonical}""".encodeToByteArray()
+            val committed = IngestJournalCommit(value, 4)
+            assertArrayEquals(receipt, call("encodeCommit", committed) as ByteArray)
+            assertEquals(committed, call("decodeCommit", receipt, intent))
+            assertThrows(IllegalArgumentException::class.java) { call("decodeCommit", receipt, intent.copy(attempt = 2)) }
+        }
+    }
+
+    @Test fun projectedDateCannotBeInjectedIntoLegacyOrNoncanonicalRecords() {
+        val projection = SourceCaptureDate(19782)
+        assertThrows(IllegalArgumentException::class.java) { call("encodeSeal", seal.copy(captureDate = projection)) }
+        assertThrows(IllegalArgumentException::class.java) { SourceCaptureDate(Long.MAX_VALUE) }
+        val dated = seal.copy(schemaVersion = 2, captureDate = projection)
+        val good = String(call("encodeSeal", dated) as ByteArray, Charsets.UTF_8)
+        for (bad in listOf(good.replace("19782", "19782.0"), good.replace("19782", "2932897"),
+            good.replace("\"epochDay\":19782", "\"epochDay\":19782,\"gps\":\"synthetic\""),
+            good.replace("\"schemaVersion\":2", "\"schemaVersion\":3"))) {
+            assertThrows(IllegalArgumentException::class.java) { call("decodeSeal", bad.encodeToByteArray(), intent) }
+        }
+        assertThrows(IllegalArgumentException::class.java) { call("encodeCommit", IngestJournalCommit(dated, 4, schemaVersion = 1)) }
+    }
+
     @Test fun sealedBytesCannotBeReboundToAnotherReservedDocumentPageOrTransaction() {
         val bytes = call("encodeSeal", seal) as ByteArray
         val other = "180aab39-4036-4979-922e-e91a1ded30c4"

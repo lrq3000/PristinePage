@@ -22,11 +22,35 @@ class PreviewBitmapAllocationTest {
                     }
                 }
                 assertEquals(OperationErrorCode.RESOURCE_LIMIT,failure.error.code)
+                assertTrue(failure.error.retryable)
                 assertEquals(24L,budget.usedBytes); assertEquals(7,image.getUnsigned(0,0,0))
                 assertFalse(failure.error.toString().contains("synthetic"))
             }
         }
         assertEquals(0L,budget.usedBytes)
+    }
+
+    @Test fun recognitionBitmapOomIsNotEvidenceOfTemporaryLedgerContention() {
+        val budget = ImageAllocationBudget(128)
+        budget.reserve(24).use {
+            RgbImage(2, 2, 6, ByteArray(12) { 7 }).use { image ->
+                var checkpoints = 0
+                val failure = assertThrows(RepositoryFailure::class.java) {
+                    SrgbPreviewBitmap.convertForOcr(image, budget) {
+                        if (++checkpoints == 2) {
+                            assertEquals(64L, budget.usedBytes)
+                            throw OutOfMemoryError("synthetic OCR bitmap allocation boundary")
+                        }
+                    }
+                }
+                assertEquals(OperationErrorCode.RESOURCE_LIMIT, failure.error.code)
+                assertFalse(failure.error.retryable)
+                assertFalse(failure.error.toString().contains("synthetic"))
+                assertEquals(24L, budget.usedBytes)
+                assertEquals(7, image.getUnsigned(0, 0, 0))
+            }
+        }
+        assertEquals(0L, budget.usedBytes)
     }
 
     @Test fun allocationOomBeforeReservationDoesNotReleaseACompetingOwner() {

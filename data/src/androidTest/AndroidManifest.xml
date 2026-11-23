@@ -3,5 +3,6 @@
     <application>
         <service android:name="app.pristinepage.data.OwnerProofFixtureService" android:exported="false" android:process=":owner_proof_fixture" />
         <service android:name="app.pristinepage.data.IngestCrashFixtureService" android:exported="false" android:process=":ingest_crash_fixture" />
+        <service android:name="app.pristinepage.data.OcrCrashFixtureService" android:exported="false" android:process=":ocr_crash_fixture" />
     </application>
 </manifest>

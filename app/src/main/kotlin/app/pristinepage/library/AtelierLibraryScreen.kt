@@ -53,12 +53,14 @@ import app.pristinepage.design.AtelierPreferences
 import app.pristinepage.design.AtelierStyle
 import app.pristinepage.design.HomeThumbnailLayout
 import app.pristinepage.image.preview.RenderedPreviewBitmap
+import app.pristinepage.ocr.AlbumOcrPending
 import java.time.ZoneId
 import java.util.Locale
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.awaitCancellation
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.launch
 
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
@@ -76,6 +78,7 @@ import kotlinx.coroutines.launch
     batchBusy: Boolean = false,
     batchError: OperationErrorCode? = null,
     thumbnailsCurrent: (DocumentSummary) -> Boolean = { true },
+    observeOcrPending: ((DocumentId, DocumentPage) -> Flow<AlbumOcrPending.State?>)? = null,
     openAtelier: ((String, DocumentSummary?) -> Unit)? = null,
     onSettings: () -> Unit,
     onEdit: (DocumentId, PageId) -> Unit,
@@ -130,11 +133,18 @@ import kotlinx.coroutines.launch
         if (state.loading) LinearProgressIndicator(Modifier.fillMaxWidth())
         if (home) {
             val searching = state.albumSearch.isNotBlank()
+            val query = state.albumSearch
+            val lifecycle = LocalLifecycleOwner.current.lifecycle
+            LaunchedEffect(session, query, lifecycle) {
+                if (query.isNotBlank()) lifecycle.repeatOnLifecycle(Lifecycle.State.STARTED) {
+                    session.observePageSearch(query)
+                }
+            }
             if (state.canSearchAlbums) OutlinedTextField(
                 value = state.albumSearch,
                 onValueChange = { session.accept(LibraryEvent.SetAlbumSearch(it, ZoneId.systemDefault())) },
                 label = { Text(stringResource(R.string.home_search_scans)) },
-                supportingText = { Text(stringResource(R.string.home_search_available_fields)) },
+                supportingText = { Text(stringResource(if (state.canSearchPages) R.string.home_search_with_text else R.string.home_search_available_fields)) },
                 singleLine = true,
                 keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
                 trailingIcon = if (state.albumSearch.isEmpty()) null else {{
@@ -154,15 +164,37 @@ import kotlinx.coroutines.launch
                 item { Text(stringResource(preferencesState.order.label()), style = MaterialTheme.typography.labelMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant) }
                 item { LibraryFeedback(state, session) }
-                if (state.documents.isEmpty() && !state.loading && state.error == null) {
-                    item { Text(stringResource(if (searching) R.string.home_search_no_matches else R.string.atelier_empty), Modifier.padding(vertical = 12.dp)) }
+                if (searching && state.pageSearchUnavailable) item {
+                    Text(stringResource(R.string.home_page_search_unavailable), Modifier.padding(vertical = 4.dp))
+                }
+                if (searching && state.albumSearchUnavailable) item {
+                    Text(stringResource(R.string.home_album_search_unavailable), Modifier.padding(vertical = 4.dp))
+                }
+                if (state.documents.isEmpty() && state.pageMatches.isEmpty() && !state.loading && !state.hasMore && state.error == null &&
+                    !state.albumSearchUnavailable && !state.pageSearchUnavailable) {
+                    item { Text(stringResource(if (!searching) R.string.atelier_empty
+                        else if (state.canSearchPages) R.string.home_search_no_page_or_album_matches
+                        else R.string.home_search_no_matches), Modifier.padding(vertical = 12.dp)) }
                 }
                 items(state.documents, key = { it.documentId.value }) { album ->
                     AlbumCard(album, creation, preferencesState.homeThumbnailLayout, loadOverview, loadThumbnail,
                         canClose, thumbnailsCurrent(album)) { session.accept(LibraryEvent.Open(album.documentId)) }
                 }
+                if (searching && state.pageMatches.isNotEmpty()) {
+                    item { Text(stringResource(R.string.home_matching_pages), Modifier.semantics { heading() }, style = MaterialTheme.typography.titleMedium) }
+                    items(state.pageMatches, key = { "matching-page-${it.page.value}" }) { hit ->
+                        TextButton(onClick = { session.accept(LibraryEvent.OpenPageMatch(hit, onEdit)) }, enabled = canAcquire,
+                            modifier = Modifier.fillMaxWidth().heightIn(min = AtelierStyle.touchTarget)) {
+                            Text(stringResource(R.string.home_matching_page, hit.albumTitle, hit.pageNumber))
+                        }
+                    }
+                }
                 if (state.hasMore) item {
-                    TextButton(onClick = { session.accept(LibraryEvent.More) }, enabled = !state.loading) { Text(stringResource(R.string.more_documents)) }
+                    TextButton(onClick = { session.accept(LibraryEvent.More) }, enabled = !state.loading) {
+                        Text(stringResource(if (!searching) R.string.more_documents
+                            else if (state.albumSearchUnavailable || state.pageSearchUnavailable) R.string.home_search_retry_more
+                            else R.string.home_search_more))
+                    }
                 }
             }
             HorizontalDivider(color = AtelierStyle.divider)
@@ -215,7 +247,7 @@ import kotlinx.coroutines.launch
                             Column(Modifier.padding(6.dp)) {
                                  val album = checkNotNull(overview).document
                                  val thumbnailSize = Modifier.fillMaxWidth().aspectRatio(1.18f)
-                                 if (thumbnailsCurrent(album)) AtelierThumbnail(album, page, loadThumbnail, thumbnailSize)
+                                  if (thumbnailsCurrent(album)) AlbumPageThumbnail(album, page, loadThumbnail, thumbnailSize, observeOcrPending)
                                  else Box(thumbnailSize.background(AtelierStyle.canvas, RoundedCornerShape(4.dp)))
                                 Text(stringResource(R.string.page_number, page.ordinal + 1), Modifier.padding(6.dp))
                             }
@@ -269,6 +301,37 @@ import kotlinx.coroutines.launch
         }
         "rename" -> overview?.document?.let { album ->
             RenameSheet(album, state, session) { stopSheet() }
+        }
+    }
+}
+
+@Composable
+private fun AlbumPageThumbnail(
+    album: DocumentSummary, page: DocumentPage,
+    load: suspend (DocumentSummary, DocumentPage) -> RenderedPreviewBitmap, modifier: Modifier,
+    observePending: ((DocumentId, DocumentPage) -> Flow<AlbumOcrPending.State?>)?,
+) {
+    val lifecycle = LocalLifecycleOwner.current.lifecycle
+    var status by remember(album.documentId, page.pageId, page.recipeRevision, observePending) {
+        mutableStateOf<AlbumOcrPending.State?>(null)
+    }
+    LaunchedEffect(album.documentId, page.pageId, page.recipeRevision, observePending, lifecycle) {
+        if (observePending == null) return@LaunchedEffect
+        lifecycle.repeatOnLifecycle(Lifecycle.State.STARTED) {
+            try { observePending(album.documentId, page).collect { status = it } }
+            catch (canceled: CancellationException) { throw canceled }
+            catch (_: Exception) { /* Optional status cannot prevent displaying the saved page. */ }
+            finally { status = null }
+        }
+    }
+    Box(modifier) {
+        val pending = status
+        AtelierThumbnail(album, page, load, Modifier.matchParentSize().graphicsLayer { alpha = if (pending == null) 1f else 0.45f })
+        if (pending != null) Column(Modifier.align(Alignment.BottomCenter).fillMaxWidth()
+            .background(MaterialTheme.colorScheme.surface).padding(4.dp)) {
+            LinearProgressIndicator(Modifier.fillMaxWidth())
+            Text(stringResource(if (pending == AlbumOcrPending.State.ACTIVE_WAKE) R.string.ocr_tile_pending else R.string.ocr_tile_queued),
+                style = MaterialTheme.typography.labelSmall)
         }
     }
 }

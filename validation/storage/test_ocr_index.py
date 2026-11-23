@@ -49,10 +49,19 @@ def sync_triggers():
 
 
 def match():
-    pattern = r'@Query\("""(.*?)"""\)\s*protected abstract fun selectMatches\('
+    pattern = r'@Query\("""((?:(?!""").)*)"""\)\s*protected abstract fun selectMatches\('
     clause, = literals(DB / "OcrResultDao.kt", pattern)
     hidden, = literals(DB / "AtelierDraftDao.kt", r'HIDDEN_ATELIER_DOCUMENT = """(.*?)"""')
     return clause.replace("$HIDDEN_ATELIER_DOCUMENT", hidden)
+
+
+def result_query(method):
+    src = DB / "OcrResultDao.kt"
+    pattern = rf'@Query\("""((?:(?!""").)*)"""\)\s*abstract fun {method}\('
+    clause, = literals(src, pattern)
+    fragments = literals(src, r'private const val OCR_TEXT_STORAGE_BOUNDS =\s*"([^"\n]*)"\s*\+\s*"([^"\n]*)"')
+    bounds = "".join(fragments[0])
+    return clause.replace("$OCR_TEXT_STORAGE_BOUNDS", bounds)
 
 
 class OcrIndexSqlTest(unittest.TestCase):
@@ -67,9 +76,74 @@ class OcrIndexSqlTest(unittest.TestCase):
         self.assertEqual(0, result.returncode, result.stderr)
         return result.stdout.splitlines()
 
-    def query(self, term="ecole"):
+    def query(self, term="ecole", limit=2):
         self.assertRegex(term, r"\A[a-z]+\Z")
-        return match().replace(":expression", f"""'"{term}"'""").replace(":afterPageId", "NULL").replace(":limit", "2")
+        return match().replace(":expression", f"""'"{term}"'""").replace(":afterPageId", "NULL").replace(":limit", str(limit))
+
+    def test_status_checks_live_page_membership_without_projecting_ocr_work(self):
+        clause, = literals(DB / "OcrPageWorkDao.kt", r'@Query\("""((?:(?!""").)*)"""\)\s*abstract fun visibleStatusPage\(')
+        query = clause.replace(":page", f"'{PAGE}'").replace(":document", f"'{DOC}'")
+        self.assertEqual(["1", "0", "0", "0"], self.run_sql([
+            *create_tables(2), SEED, query, query.replace(f"'{DOC}'", f"'{DRAFT}'"),
+            "BEGIN", "UPDATE Page SET state='REMOVED', ordinal=NULL, removedAt=10", query, "ROLLBACK",
+            "UPDATE Document SET lifecycle='TOMBSTONED',deletedAt=10", query,
+        ]))
+
+    def test_malformed_page_id_does_not_consume_the_first_match_slot(self):
+        malformed = "0" * 36
+        self.assertEqual([f"{DOC}|{PAGE}"], self.run_sql([
+            "PRAGMA foreign_keys=ON", *create_tables(3), *sync_triggers(), SEED, INSERT_TEXT,
+            "BEGIN",
+            f"INSERT INTO Page VALUES ('{malformed}','{DOC}','{SOURCE}',1,'ACTIVE',1,NULL,0)",
+            f"INSERT INTO RecipeRevision VALUES ('{malformed}',1,'{SOURCE}',1,X'010203','{'c' * 64}',NULL,0)",
+            INSERT_TEXT.replace(PAGE, malformed), "COMMIT",
+            self.query(limit=1),
+            "PRAGMA foreign_key_check",
+        ]))
+
+    def test_producer_metadata_guard_rejects_malformed_result_storage(self):
+        sql = result_query("matchesProducerMetadata")
+        for name, value in (
+            ("page", f"'{PAGE}'"), ("revision", "1"), ("sourceSha", f"'{'b' * 64}'"),
+            ("engineVersion", "1"), ("engine", "'fixture'"), ("layout", "'AUTOMATIC'"),
+        ):
+            sql = sql.replace(f":{name}", value)
+        for field, bad in (
+            ("indexedText", "CAST('invoice' AS BLOB)"),
+            ("indexedText", "'invoice' || char(0) || 'suffix'"),
+            ("indexedText", "replace(hex(zeroblob(262145)), '00', '界')"),
+            ("verbatimText", "CAST('invoice' AS BLOB)"),
+            ("verbatimText", "'invoice' || char(0) || 'suffix'"),
+            ("verbatimText", "replace(hex(zeroblob(131073)), '00', '界')"),
+        ):
+            with self.subTest(field=field, bad=bad):
+                self.assertEqual(["1", "0", "1"], self.run_sql([
+                    "PRAGMA foreign_keys=ON", *create_tables(3), *sync_triggers(), SEED, INSERT_TEXT, sql,
+                    "BEGIN", f"UPDATE OcrResult SET {field}={bad}", sql, "ROLLBACK", sql,
+                ]))
+
+    def test_guarded_verbatim_projection_uses_exact_bytes_without_materializing_corrupt_text(self):
+        sql = result_query("selectVerbatim")
+        for token, value in (
+            (":page", f"'{PAGE}'"), (":revision", "1"), (":sourceSha", f"'{'b' * 64}'"),
+            (":engineVersion", "1"), (":engine", "'fixture'"), (":layout", "'AUTOMATIC'"),
+        ):
+            sql = sql.replace(token, value)
+        query = f"SELECT hex(recognizedUtf8) FROM ({sql})"
+        mark = "SELECT 'boundary'"
+        original = "  École 東京都の領収書です" + "\n"
+        hextext = original.encode("utf-8").hex().upper()
+        self.assertEqual([hextext, "", "boundary", "393216", "boundary"], self.run_sql([
+            *create_tables(3), *sync_triggers(), SEED, INSERT_TEXT,
+            f"UPDATE OcrResult SET verbatimText=CAST(X'{hextext}' AS TEXT)", query,
+            "UPDATE OcrResult SET verbatimText=NULL,indexedText=''", query, mark,
+            "UPDATE OcrResult SET verbatimText=CAST(X'610062' AS TEXT)", query,
+            "UPDATE OcrResult SET verbatimText=CAST('not text storage' AS BLOB)", query,
+            "UPDATE OcrResult SET verbatimText=NULL, indexedText=replace(hex(zeroblob(131072)), '00', '界')",
+            f"SELECT length(recognizedUtf8) FROM ({sql})",
+            "UPDATE OcrResult SET indexedText=replace(hex(zeroblob(131073)), '00', '界')", query,
+            "UPDATE OcrResult SET indexedText='old',recipeRevision=2", query, mark,
+        ]))
 
     def test_populated_v2_upgrade_preserves_recipe_and_has_no_invented_text(self):
         migration = DB / "OcrIndexMigration.kt"

@@ -15,7 +15,7 @@ class ImageAllocationBudget internal constructor(val capacityBytes: Long, privat
     @Synchronized fun reserve(bytes: Long): AutoCloseable {
         if (bytes <= 0) refuse(OperationErrorCode.INVALID_INPUT, "invalid_image_allocation")
         // Subtraction is safe because 0<=used<=capacity; addition-first could wrap even when both values are positive.
-        if (bytes > capacityBytes - used) refuse(OperationErrorCode.RESOURCE_LIMIT, "image_allocation_limit")
+        if (bytes > capacityBytes - used) throw Denied(this, bytes)
         beforeTokenAllocation?.invoke()
         // Allocate the complete release token before charging the ledger. A failed allocation otherwise has no owner to return the charge.
         val reservation = Reservation(this, bytes)
@@ -28,6 +28,10 @@ class ImageAllocationBudget internal constructor(val capacityBytes: Long, privat
         private val closed = AtomicBoolean(false)
         override fun close() { if (closed.compareAndSet(false, true)) owner.release(bytes) }
     }
+
+    /** Internal evidence of the actual refusing ledger and request. Never crosses the render-result or repository public boundary. */
+    internal class Denied(val ledger: ImageAllocationBudget, val requestedBytes: Long) :
+        RepositoryFailure(OperationError(OperationErrorCode.RESOURCE_LIMIT, false, "image_allocation_limit", null))
 
     companion object {
         @JvmStatic fun forMemoryClass(memoryClassMiB: Int): ImageAllocationBudget {

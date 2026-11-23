@@ -6,14 +6,15 @@ import app.pristinepage.data.model.OperationErrorCode
 import app.pristinepage.data.model.RepositoryFailure
 
 /** Full-source identity never downscales to make admission pass. Keep the permit until every estimated bitmap/workspace/output lease has closed or ownership has transferred explicitly. */
-class DecodePermit internal constructor(val size: PixelSize, val reservedBytes: Long, private val reservation: AutoCloseable) : AutoCloseable {
+class DecodePermit internal constructor(val size: PixelSize, val reservedBytes: Long, private val reservation: AutoCloseable, private val ledger: ImageAllocationBudget) : AutoCloseable {
+    internal fun chargedOn(budget: ImageAllocationBudget): Long = if (ledger === budget) reservedBytes else 0L
     override fun close() = reservation.close()
 }
 
 class DecodeAdmission(private val budget: ImageAllocationBudget) {
     fun admit(encodedBytes: Long, width: Long, height: Long, orientation: Int): DecodePermit {
         val estimate = estimate(encodedBytes, width, height, orientation)
-        return DecodePermit(estimate.size, estimate.bytes, budget.reserve(estimate.bytes))
+        return DecodePermit(estimate.size, estimate.bytes, budget.reserve(estimate.bytes), budget)
     }
 
     internal class Estimate(val size: PixelSize, val bytes: Long)

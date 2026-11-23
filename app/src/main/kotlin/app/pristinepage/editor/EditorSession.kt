@@ -9,13 +9,17 @@ import app.pristinepage.core.recipe.RecipeCodec
 import app.pristinepage.data.model.*
 import app.pristinepage.image.decode.ImageAllocationBudget
 import app.pristinepage.image.preview.RenderedPreviewBitmaps
+import app.pristinepage.ocr.sendCommittedOcrHint
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 
 /** Main-confined retained editor state. Only immutable recipes enter history; every image request starts from the same retained source via the Application renderer. UI recreation may retain this session, but close is terminal and fences privately finishing IO. */
-class EditorSession @JvmOverloads constructor(documentId: String, pageId: String, private val actions: EditorActions, renderer: RenderCoordinator, private val scope: CoroutineScope, converter: RenderedPreviewBitmaps? = null, private val imageBudget: ImageAllocationBudget? = null) : AutoCloseable {
+class EditorSession @JvmOverloads constructor(documentId: String, pageId: String, private val actions: EditorActions, renderer: RenderCoordinator,
+    private val scope: CoroutineScope, converter: RenderedPreviewBitmaps? = null, private val imageBudget: ImageAllocationBudget? = null,
+    private val onPagesSaved: (DocumentId, List<PageId>) -> Unit = { _, _ -> },
+) : AutoCloseable {
     private val document = DocumentId(documentId)
     private val selected = PageId(pageId)
     private val current = MutableStateFlow(EditorState())
@@ -365,6 +369,7 @@ class EditorSession @JvmOverloads constructor(documentId: String, pageId: String
                         edits.accept()
                         current.value = current.value.copy(page = page.copy(documentRevision = result.documentRevision, recipeRevision = result.recipeRevision, recipeHash = result.recipeHash, recipe = draft), saving = false)
                         updateDraft()
+                        sendCommittedOcrHint(document, listOf(result.pageId), onPagesSaved)
                         if (andBack) exit() else renderDraft()
                     }
                     is SaveRecipeResult.Conflict -> saveFailed(OperationError(OperationErrorCode.REVISION_CONFLICT, false, "editor_revision_conflict", selected.value))

@@ -7,10 +7,12 @@ import android.graphics.ImageDecoder
 import android.os.Build
 import app.pristinepage.core.image.RgbImage
 import app.pristinepage.core.pipeline.requireSha256
+import app.pristinepage.data.files.InspectedSourceForIngest
 import app.pristinepage.data.files.SourceInspector
 import app.pristinepage.data.model.OperationError
 import app.pristinepage.data.model.OperationErrorCode
 import app.pristinepage.data.model.RepositoryFailure
+import app.pristinepage.data.model.SourceCaptureDate
 import app.pristinepage.data.model.SourceInspection
 import java.io.File
 import java.io.FileNotFoundException
@@ -26,9 +28,13 @@ import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.withContext
 
 /** The whole result owns its image AND its tracked decode reservation. The image is borrowed within this scope: consumers must not retain a separate RgbImage lease past close without arranging shared-budget ownership transfer. */
-class DecodedSource internal constructor(val inspection: SourceInspection, val image: RgbImage, private val permit: DecodePermit, val sourceByteHash: String) : AutoCloseable {
+class DecodedSource internal constructor(
+    val inspection: SourceInspection, val image: RgbImage, private val permit: DecodePermit, val sourceByteHash: String,
+    internal val captureDate: SourceCaptureDate? = null,
+) : AutoCloseable {
     init { requireSha256(sourceByteHash) }
     private val closed = AtomicBoolean(false)
+    internal fun chargedOn(budget: ImageAllocationBudget): Long = permit.chargedOn(budget)
     override fun close() { if (closed.compareAndSet(false, true)) { try { image.close() } finally { permit.close() } } }
 }
 
@@ -36,7 +42,12 @@ class DecodedSource internal constructor(val inspection: SourceInspection, val i
 class AndroidSourceInspector @JvmOverloads constructor(private val budget: ImageAllocationBudget, private val dispatcher: CoroutineDispatcher = Dispatchers.IO) : SourceInspector, SourceFileDecoder {
     override suspend fun inspect(file: File, expectedByteSha256: String): SourceInspection = decodeFile(file, expectedByteSha256).use { it.inspection }
 
-    override suspend fun decodeFile(file: File, expectedByteSha256: String): DecodedSource {
+    override suspend fun inspectForIngest(file: File, expectedByteSha256: String): InspectedSourceForIngest =
+        decodeFile(file, expectedByteSha256, captureDate = true).use { InspectedSourceForIngest(it.inspection, checkNotNull(it.captureDate)) }
+
+    override suspend fun decodeFile(file: File, expectedByteSha256: String): DecodedSource = decodeFile(file, expectedByteSha256, captureDate = false)
+
+    private suspend fun decodeFile(file: File, expectedByteSha256: String, captureDate: Boolean): DecodedSource {
         var completed: DecodedSource? = null
         try {
             return withContext(dispatcher) {
@@ -48,7 +59,8 @@ class AndroidSourceInspector @JvmOverloads constructor(private val budget: Image
                 // Bound and account the parser workspace BEFORE inspecting metadata. This reservation ends once only scalar header values remain; the larger decode permit then accounts all live raster buffers/workspace.
                 val parserBytes = sourceParserBytes(file.length())
                 val header = budget.reserve(parserBytes).use {
-                    val parsed = SourceContainer.read(file) { context.ensureActive() }
+                    val checkpoint = { context.ensureActive() }
+                    val parsed = if (captureDate) SourceContainer.readWithCaptureDate(file, checkpoint) else SourceContainer.read(file, checkpoint)
                     if (parsed.jpegProjection == null) verifyBytes(file, expectedByteSha256) { context.ensureActive() }
                     parsed
                 }
@@ -70,7 +82,8 @@ class AndroidSourceInspector @JvmOverloads constructor(private val budget: Image
                             val hash = CanonicalSourcePixels.hash(image, fingerprint) { context.ensureActive() }
                             val inspection = SourceInspection(header.mime, header.size, permit.size, orientation, null, fingerprint, hash)
                             context.ensureActive()
-                            DecodedSource(inspection, image, permit, expectedByteSha256).also { completed = it; transferred = true }
+                            val projectedDate = if (captureDate) SourceCaptureDate(header.capturedOn?.toEpochDay()) else null
+                            DecodedSource(inspection, image, permit, expectedByteSha256, projectedDate).also { completed = it; transferred = true }
                         } finally { if (!transferred) image.close() }
                     } finally { bitmap.recycle() }
                 } finally { if (!transferred) permit.close() }

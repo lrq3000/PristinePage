@@ -46,9 +46,12 @@ class PublicHistoryTest(unittest.TestCase):
         return cls.git("commit-tree", tree, "-p", parent, "--no-gpg-sign", "-m", message).strip()
 
     def add_file(self, path, content):
-        blob = self.git("hash-object", "-w", "--stdin", value=content).strip()
-        file_entry = f"100644 blob {blob}\t{path}\n"
-        return self.git("mktree", value=file_entry).strip()
+        oid = self.git("hash-object", "-w", "--stdin", value=content).strip()
+        entry_type = "100644 blob"
+        for name in reversed(path.split("/")):
+            oid = self.git("mktree", value=f"{entry_type} {oid}\t{name}\n").strip()
+            entry_type = "040000 tree"
+        return oid
 
     def push_check(self, tip):
         return subprocess.run(
@@ -85,6 +88,21 @@ class PublicHistoryTest(unittest.TestCase):
         private_value = "synthetic-person@" + "example.invalid"
         tip = self.commit(self.base, self.add_file("notes.md", private_value), "Add note")
         self.assert_blocked(tip, private_value, "address needs destination approval")
+
+    def test_accepts_the_reviewed_kotlin_label_in_its_original_commit(self):
+        result = self.push_check("51b972d7c69494f7be2b92448bedababebcda319")
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_does_not_generalize_the_kotlin_label_exception(self):
+        label = "this@" + "SavedOcrApplicationTest.target"
+        tip = self.commit(self.base, self.add_file("Fixture.kt", f'val contact = "{label}"\n'), "Synthetic fixture")
+        self.assert_blocked(tip, label, "address needs destination approval")
+
+    def test_refuses_the_same_added_line_in_another_commit(self):
+        label = "this@" + "SavedOcrApplicationTest.target"
+        file_name = "app/src/test/kotlin/app/pristinepage/ocr/SavedOcrApplicationTest.kt"
+        tip = self.commit(self.base, self.add_file(file_name, f"                assertEquals({label}, target)\n"), "Synthetic fixture")
+        self.assert_blocked(tip, label, "address needs destination approval")
 
     def test_rejects_private_evidence_path(self):
         private_value = "output.keystore"

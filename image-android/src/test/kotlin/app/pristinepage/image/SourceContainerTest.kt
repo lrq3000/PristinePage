@@ -14,6 +14,7 @@ import java.nio.file.Files
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.security.MessageDigest
+import java.time.LocalDate
 import java.util.zip.CRC32
 import kotlin.math.roundToInt
 import org.junit.Assert.*
@@ -224,6 +225,39 @@ class SourceContainerTest {
         assertEquals(PixelSize(3, 2), get(header, "getSize"))
     }
 
+    @Test fun dateOptInUsesTheSameCameraJpegAdmissionAndDoesNotEnterTheCodecProjection() {
+        val original = compatJpeg(6, byteArrayOf(42, 0, 42), includeDate = true)
+        val root = File("build/test-source-containers").apply { mkdirs() }
+        val file = Files.createTempFile(root.toPath(), "capture-day-", ".jpg").toFile().apply { writeBytes(original) }
+        val header = SourceContainer.readWithCaptureDate(file) {}
+        assertEquals(LocalDate.of(2024, 2, 29), header.capturedOn)
+        assertEquals(6, header.exifOrientation)
+        assertNull(SourceContainer.read(file) {}.capturedOn)
+        val hash = MessageDigest.getInstance("SHA-256").digest(original).joinToString("") { "%02x".format(it.toInt() and 255) }
+        val projected = requireNotNull(header.jpegProjection).read(file, hash) {}
+        val view = Files.createTempFile(root.toPath(), "capture-day-view-", ".jpg").toFile().apply { writeBytes(projected) }
+        assertNull(SourceContainer.readWithCaptureDate(view) {}.capturedOn)
+        assertArrayEquals(original, file.readBytes())
+    }
+
+    @Test fun pngAndWebpUseOnlyTheirAdmittedExifChunk() {
+        val tiff = ByteBuffer.allocate(76).order(ByteOrder.LITTLE_ENDIAN).putShort(0x4949).putShort(42).putInt(8)
+            .putShort(2).putShort(0x112).putShort(3).putInt(1).putShort(6).putShort(0)
+            .putShort(0x8769.toShort()).putShort(4).putInt(1).putInt(38).putInt(0)
+            .putShort(1).putShort(0x9003.toShort()).putShort(2).putInt(20).putInt(56).putInt(0)
+            .put("2024:02:29 09:20:01\u0000".encodeToByteArray()).array()
+        val root = File("build/test-source-containers").apply { mkdirs() }
+        for ((mime, bytes) in listOf("image/png" to png(extra = chunk("eXIf", tiff)),
+            "image/webp" to webp("EXIF".encodeToByteArray() + byteArrayOf(76, 0, 0, 0) + tiff))) {
+            val file = Files.createTempFile(root.toPath(), "capture-day-", ".bin").toFile().apply { writeBytes(bytes) }
+            val header = SourceContainer.readWithCaptureDate(file) {}
+            assertEquals(mime, header.mime)
+            assertEquals(6, header.exifOrientation)
+            assertEquals(LocalDate.of(2024, 2, 29), header.capturedOn)
+            assertNull(SourceContainer.read(file) {}.capturedOn)
+        }
+    }
+
     @Test fun compatibilityDoesNotAcceptLargeTrailersOrSecondaryImages() {
         reject(OperationErrorCode.RESOURCE_LIMIT, compatJpeg(1, ByteArray(65537)))
         reject(OperationErrorCode.UNSUPPORTED_FORMAT, compatJpeg(1, byteArrayOf(0, -1, -40, -1, -39)))
@@ -276,13 +310,16 @@ class SourceContainerTest {
         assertArrayEquals(original, file.readBytes())
     }
 
-    private fun compatJpeg(orientation: Int, trailer: ByteArray, color: Int = 1, firstMakerNoteType: Int = 7): ByteArray {
-        val tiff = ByteBuffer.allocate(92).order(ByteOrder.BIG_ENDIAN).putShort(0x4d4d).putShort(42).putInt(8)
+    private fun compatJpeg(orientation: Int, trailer: ByteArray, color: Int = 1, firstMakerNoteType: Int = 7, includeDate: Boolean = false): ByteArray {
+        val tiff = ByteBuffer.allocate(if (includeDate) 124 else 92).order(ByteOrder.BIG_ENDIAN).putShort(0x4d4d).putShort(42).putInt(8)
         tiff.putShort(2).putShort(0x112).putShort(3).putInt(1).putShort(orientation.toShort()).putShort(0)
         tiff.putShort(0x8769.toShort()).putShort(4).putInt(1).putInt(38).putInt(0)
-        tiff.putShort(4).putShort(0x10d).putShort(7).putInt(0).putInt(0)
+        tiff.putShort(if (includeDate) 5 else 4).putShort(0x10d).putShort(7).putInt(0).putInt(0)
         repeat(2) { tiff.putShort(0x927c.toShort()).putShort(if (it == 0) firstMakerNoteType.toShort() else 7).putInt(1).putInt(0x2a000000) }
-        tiff.putShort(0xa001.toShort()).putShort(3).putInt(1).putShort(color.toShort()).putShort(0).putInt(0)
+        tiff.putShort(0xa001.toShort()).putShort(3).putInt(1).putShort(color.toShort()).putShort(0)
+        if (includeDate) tiff.putShort(0x9003.toShort()).putShort(2).putInt(20).putInt(104)
+        tiff.putInt(0)
+        if (includeDate) tiff.put("2024:02:29 09:20:01\u0000".encodeToByteArray())
         return jpeg(extra = segment(0xe1, "Exif\u0000\u0000".toByteArray() + tiff.array())) + trailer
     }
 

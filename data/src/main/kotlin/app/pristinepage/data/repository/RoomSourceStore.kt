@@ -93,12 +93,15 @@ class RoomSourceStore @JvmOverloads constructor(private val files: SourceFiles, 
             val stream = CheckedInput(input, context, intent.sessionId)
             val staged = files.stage(intent.transactionId.value, intent.sourceBlobId.value, stream, MAX_BYTES)
             context.ensureActive()
-            val inspection = try { inspector.inspect(staged.stagingFile, staged.byteSha256) }
+            val inspected = try { inspector.inspectForIngest(staged.stagingFile, staged.byteSha256) }
             catch (canceled: CancellationException) { throw canceled }
             catch (failure: RepositoryFailure) { throw failure }
             catch (_: Exception) { throw RepositoryFailure(OperationError(OperationErrorCode.PROCESSING_FAILED, false, "source_inspection_failed", intent.sessionId.value)) }
             context.ensureActive()
-            val sealed = files.seal(staged, IngestJournalCodec.encodeSeal(IngestJournalSeal(intent, inspection, staged.byteSha256, staged.byteCount)))
+            val sealed = files.seal(staged, IngestJournalCodec.encodeSeal(IngestJournalSeal(
+                intent, inspected.inspection, staged.byteSha256, staged.byteCount,
+                schemaVersion = if (inspected.captureDate == null) 1 else 2, captureDate = inspected.captureDate,
+            )))
             if (!phases.sealed(intent, lease, sealed)) return replay.replay(intent)
             context.ensureActive()
             files.move(sealed)

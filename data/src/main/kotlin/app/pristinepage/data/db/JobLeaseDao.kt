@@ -4,6 +4,8 @@ import androidx.room.Dao
 import androidx.room.Query
 import app.pristinepage.data.repository.JobLeaseQueries
 
+internal data class OcrProducerLocator(val idempotenceKey: String, val digest: String, val extent: Int)
+
 /** Restrict writes to lease/progress fields, retaining every canonical job identity byte. The surrounding Room transaction validates owner/state and the generation predicate fences a late runner. */
 @Dao abstract class JobLeaseDao : JobLeaseQueries {
     @Query("SELECT * FROM Job WHERE jobId=:id") abstract override fun job(id: String): JobRow?
@@ -26,6 +28,15 @@ import app.pristinepage.data.repository.JobLeaseQueries
         AND (typeof(createdAt)='integer' AND typeof(updatedAt)='integer')
         THEN 1 ELSE 0 END FROM Job WHERE jobId=:id""")
     internal abstract fun ocrJobReadIsBounded(id: String, expectedKey: String, expectedDigest: String, expectedInputBytes: Int): Boolean?
+
+    // Read only bounded locator scalars for a retained producing job. Its exact v2 envelope is admitted and checked separately.
+    @Query("""SELECT idempotenceKey,canonicalInputSha256 AS digest,length(input) AS extent FROM Job
+        WHERE jobId=:id AND kind='PAGE_OCR' AND state='SUCCEEDED'
+          AND (typeof(idempotenceKey)='text' AND length(idempotenceKey)=length(CAST(idempotenceKey AS BLOB)) AND length(idempotenceKey) BETWEEN 50 AND 68)
+          AND (typeof(canonicalInputSha256)='text' AND length(canonicalInputSha256)=64 AND length(CAST(canonicalInputSha256 AS BLOB))=64
+            AND canonicalInputSha256 NOT GLOB '*[^0-9a-f]*')
+          AND (typeof(input)='blob' AND length(input) BETWEEN 1 AND 3532)""")
+    internal abstract fun ocrProducerLocator(id: String): OcrProducerLocator?
 
     @Query("UPDATE Job SET state=:state,attempt=:attempt,leaseOwner=:owner,leaseUntil=:until,leaseGeneration=:generation,checkpoint=:checkpoint,errorCode=:error,updatedAt=:updated WHERE jobId=:id AND leaseGeneration=:expectedGeneration")
     abstract fun updateLeaseState(id: String, state: String, attempt: Long, owner: String?, until: Long?, generation: Long, checkpoint: ByteArray?, error: String?, updated: Long, expectedGeneration: Long): Int

@@ -56,6 +56,29 @@ class EditorComparisonTest {
         } finally { s.close() }
     }
 
+    @Test fun onlyTheExactlyAcknowledgedEditorRevisionNotifiesOcrAndKeepsTheSaveSuccessful() = runTest {
+        val f = Fixture()
+        val commits = mutableListOf<Pair<DocumentId, List<PageId>>>()
+        val s = f.session(this) { document, pages ->
+            commits += document to pages
+            throw IllegalStateException("Synthetic notification refusal")
+        }
+        try {
+            advanceUntilIdle()
+            val page = checkNotNull(s.state.value.page)
+            val draft = f.accepted.copy(appearance = AppearanceRecipe.NaturalLV1(), binary = null)
+            f.savedResponse = { SaveRecipeResult.Saved(PageId("00000000-0000-0000-0000-000000000007"), 8, 6, RecipeCodec.hash(it)) }
+            s.edit(draft); s.apply(); advanceUntilIdle()
+            assertTrue(commits.isEmpty())
+            assertEquals(OperationErrorCode.INTEGRITY_FAILED, s.state.value.error?.code)
+            f.savedResponse = null
+            s.apply(); advanceUntilIdle()
+            assertEquals(listOf(page.documentId to listOf(page.pageId)), commits)
+            assertEquals(draft, s.state.value.page?.recipe)
+            assertNull(s.state.value.error)
+        } finally { s.close() }
+    }
+
     @Test fun pauseResumeKeepsTheChosenComparisonAndCannotReloadOrSaveADifferentRecipe() = runTest {
         val f = Fixture(); val s = f.session(this)
         try {
@@ -85,9 +108,11 @@ class EditorComparisonTest {
         val accepted = Recipe(geometry = GeometryRecipe.None(binding,outputQuarterTurns = 1),appearance = AppearanceRecipe.PaperGainV1(strength = .5),denoise = DenoiseRecipe.BilateralLumaV1(),detail = DetailRecipe.LumaDetail7V1(),binary = BinaryRecipe.GrayscaleV1)
         private val document = DocumentId("00000000-0000-0000-0000-000000000001"); private val page = PageId("00000000-0000-0000-0000-000000000002"); private val source = SourceId("00000000-0000-0000-0000-000000000003")
         val requests = mutableListOf<RenderRequest>(); val saves = mutableListOf<Recipe>(); var releases = 0; var loads = 0
-        fun session(scope: CoroutineScope) = EditorSession(document.value,page.value,this,this,scope)
+        var savedResponse: ((Recipe) -> SaveRecipeResult)? = null
+        fun session(scope: CoroutineScope, onPagesSaved: (DocumentId, List<PageId>) -> Unit = { _, _ -> }) =
+            EditorSession(document.value, page.value, this, this, scope, onPagesSaved = onPagesSaved)
         override suspend fun load(documentId: DocumentId, pageId: PageId): EditablePage { assertEquals(document,documentId); assertEquals(page,pageId); loads++; return EditablePage(document,5,page,source,7,RecipeCodec.hash(accepted),accepted) }
-        override suspend fun save(pageId: PageId, expectedRevision: Long, recipe: Recipe): SaveRecipeResult { assertEquals(page,pageId); assertEquals(7L,expectedRevision); saves += recipe; return SaveRecipeResult.Saved(page,8,6,RecipeCodec.hash(recipe)) }
+        override suspend fun save(pageId: PageId, expectedRevision: Long, recipe: Recipe): SaveRecipeResult { assertEquals(page,pageId); assertEquals(7L,expectedRevision); saves += recipe; return savedResponse?.invoke(recipe) ?: SaveRecipeResult.Saved(page,8,6,RecipeCodec.hash(recipe)) }
         override suspend fun render(request: RenderRequest): RenderResult { requests += request; val size = request.output.size; return RenderResult(request,RenderStatus.OK,RgbImage(size.width,size.height,size.width*3,ByteArray(size.width*size.height*3)),emptyList(),emptyList(),AutoCloseable { releases++ }) }
     }
 }

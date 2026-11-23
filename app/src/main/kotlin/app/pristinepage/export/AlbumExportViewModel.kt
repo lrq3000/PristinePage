@@ -23,10 +23,7 @@ import app.pristinepage.image.export.AlbumJpegQuality
 import app.pristinepage.library.AlbumExportReview
 import java.io.File
 import java.io.IOException
-import java.io.InputStream
-import java.io.OutputStream
 import java.nio.file.Files
-import java.security.MessageDigest
 import java.util.UUID
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -165,7 +162,7 @@ internal class AlbumExportViewModel(application: Application, private val import
                     throw IOException("Destination is not a new empty file")
                 }
                 ParcelFileDescriptor.AutoCloseOutputStream(descriptor).use { sink ->
-                    copyExact(source, sink, result.ready, active) { sent += it }
+                    transferExactExport(source, sink, result.ready.byteCount, result.ready.sha256, active) { sent += it }
                     sink.flush()
                 }
                 closed = true
@@ -173,7 +170,7 @@ internal class AlbumExportViewModel(application: Application, private val import
             val readback = if (flags and Intent.FLAG_GRANT_READ_URI_PERMISSION == 0) false else withContext(Dispatchers.IO) {
                 val scope = currentCoroutineContext()
                 val stream = try { resolver.openInputStream(uri) } catch (_: SecurityException) { null }
-                stream?.use { require(copyExact(it, null, result.ready, { scope.ensureActive() }) == result.ready.sha256) }
+                stream?.use { transferExactExport(it, null, result.ready.byteCount, result.ready.sha256, { scope.ensureActive() }) }
                 stream != null
             }
             result.store.updateSaveAs(pending, "WRITING", if (readback) "READBACK_VERIFIED" else "OUTPUT_COMPLETED", reference, sent, readback)
@@ -225,10 +222,10 @@ internal class AlbumExportViewModel(application: Application, private val import
                 check(file.createNewFile())
                 ownsFile = true
                 file.outputStream().use { sink ->
-                    copyExact(source, sink, result.ready, active)
+                    transferExactExport(source, sink, result.ready.byteCount, result.ready.sha256, active)
                     sink.fd.sync()
                 }
-                file.inputStream().use { copyExact(it, null, result.ready, active) }
+                file.inputStream().use { transferExactExport(it, null, result.ready.byteCount, result.ready.sha256, active) }
             }
             val expires = result.store.recordShare(result.ready, id, file.name)
             recorded = true
@@ -307,22 +304,3 @@ internal fun exportOutputs(pages: List<ExportPagePlan>, size: ExportSize): List<
         PageOutputSettings(page.page.pageId, size.edge?.let { GeometrySizing.output(geometry, RenderPurpose.EXPORT, it) }
             ?: ExportSizing.normal(geometry))
     }
-
-private fun copyExact(input: InputStream, output: OutputStream?, ready: NamedAlbumExports.Ready,
-    checkpoint: () -> Unit, wrote: (Int) -> Unit = {}): String {
-    val buffer = ByteArray(65_536)
-    val digest = MessageDigest.getInstance("SHA-256")
-    var remaining = ready.byteCount
-    while (remaining > 0) {
-        checkpoint()
-        val count = input.read(buffer, 0, minOf(remaining, buffer.size.toLong()).toInt())
-        if (count <= 0) throw IOException("Truncated export")
-        digest.update(buffer, 0, count)
-        output?.write(buffer, 0, count)
-        wrote(count)
-        remaining -= count
-    }
-    val hash = digest.digest().joinToString("") { "%02x".format(it.toInt() and 255) }
-    if (input.read() != -1 || hash != ready.sha256) throw IOException("Export copy differs")
-    return hash
-}

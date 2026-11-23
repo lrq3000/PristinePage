@@ -1,5 +1,6 @@
 """Flag likely private material in PristinePage's outgoing Git history."""
 
+import hashlib
 import re
 import subprocess
 import sys
@@ -10,6 +11,13 @@ import sys
 PUBLIC_TIPS = ("43a796c05b2c058fc7fa26784cae1d20c9ae849e", "2909e007c68580591bd03916e95cb45d1ff37ef9")
 PUBLIC_EMAILS = {b"1118942+lrq3000@users.noreply.github.com"}
 EMAIL = re.compile(rb"(?<![\w.+-])[\w.+-]+@(?:[\w-]+\.)+[a-z][a-z0-9-]*", re.I)
+# Trusted exact-diff exceptions, not an allowlist supplied by the candidate. This historical line compares a Kotlin labeled receiver's property, not a mailbox.
+REVIEWED_EMAIL_FALSE_POSITIVES = {
+    ("51b972d7c69494f7be2b92448bedababebcda319",
+     b"app/src/test/kotlin/app/pristinepage/ocr/SavedOcrApplicationTest.kt",
+     "7b0b3a981d05d4e0c56a4b697836f3af18ac586f26e72795272bf5afa727060e"):
+        b"this@" + b"SavedOcrApplicationTest.target",
+}
 LOCAL_PATH = re.compile(rb"(?:[a-z]:[\\/]+(?:Users|Documents and Settings)[\\/]+|/(?:home|Users)/)[^\\/ \t\r\n`]+", re.I)
 COMMIT_TOKEN = re.compile(rb"(?<![0-9a-f])[0-9a-f]{7,40}(?![0-9a-f])", re.I)
 PRIVATE_PATH = re.compile(
@@ -34,10 +42,10 @@ class HistoryCheck:
         self.allowed = self.public | {line.split()[0] for line in self.outgoing}
         self.checked_tokens = set()
 
-    def inspect(self, value):
+    def inspect(self, value, reviewed_email=None):
         if LOCAL_PATH.search(value):
             raise ValueError("a workstation home path needs review")
-        if any(email.lower() not in PUBLIC_EMAILS for email in EMAIL.findall(value)):
+        if any(email != reviewed_email and email.lower() not in PUBLIC_EMAILS for email in EMAIL.findall(value)):
             raise ValueError("an email address needs destination approval")
         for match in COMMIT_TOKEN.finditer(value):
             token = match[0].lower()
@@ -47,6 +55,11 @@ class HistoryCheck:
                 if oid not in self.allowed and git("cat-file", "-t", oid.decode("ascii")).strip() == b"commit":
                     raise ValueError("a reference resolves to a non-public, non-outgoing commit")
             self.checked_tokens.add(token)
+
+    def inspect_added_line(self, oid, path, line):
+        # Suppress only the reviewed match on the exact original line; keep every other check active.
+        key = (oid, path, hashlib.sha256(line).hexdigest()) if b"@" in line else None
+        self.inspect(line, REVIEWED_EMAIL_FALSE_POSITIVES.get(key))
 
     def check(self):
         for line in self.outgoing:
@@ -64,14 +77,19 @@ class HistoryCheck:
                     raise ValueError("an outgoing file path matches a private artifact class")
                 self.inspect(path)
             in_hunk = False
+            path = None
             for row in git("diff", *common, "--no-color", "--text", "--unified=0",
+                           "--line-prefix=", "--src-prefix=a/", "--dst-prefix=b/",
                            "--output-indicator-new=+", parent, oid, "--").split(b"\n"):
                 if row.startswith(b"diff --git "):
                     in_hunk = False
+                    path = None
+                elif not in_hunk and row.startswith(b"+++ b/"):
+                    path = row[len(b"+++ b/"):]
                 elif row.startswith(b"@@ "):
                     in_hunk = True
                 elif in_hunk and row.startswith(b"+"):
-                    self.inspect(row[1:])
+                    self.inspect_added_line(oid, path, row[1:])
 
 
 def main():

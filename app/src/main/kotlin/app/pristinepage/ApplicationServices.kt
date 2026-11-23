@@ -21,13 +21,14 @@ import app.pristinepage.image.preview.OriginalPreviewBitmap
 import app.pristinepage.image.preview.OriginalPreviewBitmapLoader
 import app.pristinepage.image.preview.OriginalPreviewLoader
 import java.io.FileNotFoundException
+import java.io.File
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 
 /** An explicit application-owned composition, not an Activity-scoped allowance or a global lookup registry. Construction opens no DB/provider; the first suspending request serializes initialization and actual recovery. A failed/canceled initialization is not cached as a clean startup. */
-class ApplicationServices(context: Context, private val budget: ImageAllocationBudget, private val provider: SourceInput) {
+class ApplicationServices(context: Context, internal val budget: ImageAllocationBudget, private val provider: SourceInput) {
     private val context = context.applicationContext
     private val initialization = Mutex()
     private var initialized: ApplicationImports? = null
@@ -48,7 +49,13 @@ class ApplicationServices(context: Context, private val budget: ImageAllocationB
             val normalizer = AndroidSourceInspector(budget)
             val decodeQueue = Mutex()
             // Scope the queue to normalization, not a provider read or the surrounding ingest transaction.
-            val ingress = SourceInspector { file, hash -> decodeQueue.withLock { normalizer.inspect(file, hash) } }
+            val ingress = object : SourceInspector {
+                override suspend fun inspect(file: File, expectedByteSha256: String) =
+                    decodeQueue.withLock { normalizer.inspect(file, expectedByteSha256) }
+
+                override suspend fun inspectForIngest(file: File, expectedByteSha256: String) =
+                    decodeQueue.withLock { normalizer.inspectForIngest(file, expectedByteSha256) }
+            }
             val store = PrivateImportStore.open(context, provider, ingress, ClassicalRecipeAdmission())
             try {
                 val report = store.documents.reconcile()

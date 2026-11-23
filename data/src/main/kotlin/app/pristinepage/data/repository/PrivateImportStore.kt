@@ -5,6 +5,8 @@ import androidx.room.Room
 import app.pristinepage.data.db.PristineDatabase
 import app.pristinepage.data.db.AtelierDraftMigration
 import app.pristinepage.data.db.OcrIndexMigration
+import app.pristinepage.data.db.OcrWorkMigration
+import app.pristinepage.data.db.SourceCaptureDayMigration
 import app.pristinepage.data.files.DerivedFiles
 import app.pristinepage.data.files.SourceFiles
 import app.pristinepage.data.files.SourceInspector
@@ -41,8 +43,21 @@ class PrivateImportStore private constructor(
     val albums: AlbumCatalog get() = documentCatalog
     val albumSearch: SearchableAlbumCatalog get() = documentCatalog
     private val exportLifetime = OrdinaryExportLifetime(database::close)
+    val savedOcr: SavedOcrWork by lazy { SavedOcrWork.bind(OcrComposition.from(this)) }
+    val sourceMetadata: RoomSourceMetadataSearch by lazy { SourceMetadataComposition.bind(this) }
 
     override fun close() = exportLifetime.close()
+
+    /** Pair the readonly metadata reader with the issuing store's exact database and retirement boundary. */
+    internal class SourceMetadataComposition private constructor(store: PrivateImportStore) {
+        internal val database = store.database
+        internal val lifetime = store.exportLifetime
+
+        companion object {
+            @JvmSynthetic
+            internal fun bind(store: PrivateImportStore) = RoomSourceMetadataSearch.bind(SourceMetadataComposition(store))
+        }
+    }
 
     // Internal only and lazy: the import-only path does not construct derived-file or export participants.
     internal val ordinaryExport: OrdinaryExport by lazy { ExportComposition.bind(this) }
@@ -79,6 +94,20 @@ class PrivateImportStore private constructor(
         }
     }
 
+    /** Only an opened store can supply this paired database, lifetime and ownership registry. */
+    internal class OcrComposition private constructor(store: PrivateImportStore) {
+        internal val database = store.database
+        internal val owners = store.owners
+        internal val lifetime = store.exportLifetime
+        private val root = store.root
+        internal fun derivedFiles() = DerivedFiles(root)
+
+        companion object {
+            @JvmSynthetic
+            internal fun from(store: PrivateImportStore): OcrComposition = OcrComposition(store)
+        }
+    }
+
     companion object {
         /** No destructive migration fallback, provider resumption or optimistic renderer admission. Opening verifies Room on IO; cancellation during result dispatch closes the database even if the caller never receives the constructed owner. */
         @JvmStatic @JvmOverloads suspend fun open(context: Context, provider: SourceInput, inspector: SourceInspector, admission: RecipeAdmission = RecipeAdmission { _, _ -> OperationError(OperationErrorCode.PROVIDER_UNAVAILABLE, false, "renderer_unavailable", null) }): PrivateImportStore =
@@ -100,7 +129,7 @@ class PrivateImportStore private constructor(
                 return withContext(Dispatchers.IO) {
                     coroutineContext.ensureActive()
                 val database = Room.databaseBuilder(context.applicationContext, PristineDatabase::class.java, "pristinepage.db")
-                    .addMigrations(AtelierDraftMigration, OcrIndexMigration).build()
+                    .addMigrations(AtelierDraftMigration, OcrIndexMigration, OcrWorkMigration, SourceCaptureDayMigration).build()
                     opened = database
                     database.openHelper.writableDatabase
                     val root = File(context.applicationContext.filesDir, "store").canonicalFile

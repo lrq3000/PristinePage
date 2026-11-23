@@ -5,6 +5,7 @@ import androidx.lifecycle.viewModelScope
 import app.pristinepage.ApplicationImports
 import app.pristinepage.data.model.*
 import app.pristinepage.image.render.ClassicalRecipeAdmission
+import app.pristinepage.ocr.sendCommittedOcrHint
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -21,7 +22,10 @@ internal data class BatchHost(
     val savedRevision: Long? = null,
 )
 
-internal class BatchEditViewModel(private val openGraph: suspend () -> ApplicationImports) : ViewModel() {
+internal class BatchEditViewModel(
+    private val openGraph: suspend () -> ApplicationImports,
+    private val onPagesSaved: (DocumentId, List<PageId>) -> Unit,
+) : ViewModel() {
     private val mutable = MutableStateFlow(BatchHost())
     val state = mutable.asStateFlow()
     var draft: BatchEditSession? = null
@@ -69,6 +73,7 @@ internal class BatchEditViewModel(private val openGraph: suspend () -> Applicati
                         val document = checkNotNull(mutable.value.album).document
                         draft = null
                         mutable.value = BatchHost(undo = result.undo, savedDocument = document.documentId, savedRevision = document.documentRevision + 1)
+                        sendCommittedOcrHint(document.documentId, result.pageIds, onPagesSaved)
                     }
                     BatchEditOutcome.Unchanged -> dismiss()
                     is BatchEditOutcome.Conflict -> mutable.value = mutable.value.copy(error = OperationErrorCode.REVISION_CONFLICT)
@@ -89,6 +94,7 @@ internal class BatchEditViewModel(private val openGraph: suspend () -> Applicati
         val value = mutable.value
         val token = value.undo ?: return
         val revision = value.savedRevision ?: return
+        val document = value.savedDocument ?: return
         if (value.saving) return
         mutable.value = value.copy(saving = true)
         viewModelScope.launch {
@@ -101,6 +107,7 @@ internal class BatchEditViewModel(private val openGraph: suspend () -> Applicati
                 }
                 mutable.value = BatchHost(error = error, savedDocument = value.savedDocument,
                     savedRevision = (outcome as? DocumentMutationResult.Applied)?.documentRevision)
+                if (outcome is DocumentMutationResult.Applied) sendCommittedOcrHint(document, outcome.affectedPageIds, onPagesSaved)
             } catch (canceled: CancellationException) { throw canceled }
             catch (failure: RepositoryFailure) { mutable.value = BatchHost(error = failure.error.code, savedDocument = value.savedDocument) }
             catch (_: Exception) { mutable.value = BatchHost(error = OperationErrorCode.STORAGE_FAILED, savedDocument = value.savedDocument) }

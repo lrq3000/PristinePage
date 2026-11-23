@@ -15,6 +15,35 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class AtelierAlbumPublicationTest {
+    @Test fun acquisitionSaveReturnsOnlyTheOrderedDestinationPagesEvenAfterReplay() = runBlocking {
+        val f = Fixture()
+        val staged = f.base.pageIds
+        val prior = f.seedDestinationPage()
+        val result = f.saveAcquisition()
+        val committed = f.base.metadata.activePages(f.target.value).map { PageId(it.pageId) }
+        assertEquals(f.target, result.document)
+        assertEquals(3, committed.size)
+        assertEquals(listOf(prior) + result.pageIds, committed)
+        assertTrue(result.pageIds.none { it in staged })
+        f.duplicateCommittedPage(checkNotNull(result.pageIds.firstOrNull()))
+        assertEquals(4, f.base.metadata.activePages(f.target.value).size)
+        val beforeReplay = f.snapshot()
+        val replayed = f.saveAcquisition()
+        assertEquals(result.document, replayed.document)
+        assertEquals(result.pageIds, replayed.pageIds)
+        f.rejected(OperationErrorCode.REVISION_CONFLICT) { f.saveAcquisition(f.witnesses.reversed()) }
+        assertEquals(beforeReplay, f.snapshot())
+        assertEquals(2, f.renders)
+    }
+
+    @Test fun acquisitionSaveKeepsTheSamePageIdentitiesWhenPublishingANewAlbum() = runBlocking {
+        val f = Fixture(newAlbum = true)
+        val saved = f.saveAcquisition()
+        assertEquals(f.base.document, saved.document)
+        assertEquals(f.base.pageIds, saved.pageIds)
+        assertEquals(false, f.dao.savedDocumentIsHidden(saved.document.value))
+    }
+
     @Test fun appendRetainsOriginalIngestIdsAndReplaysExactOrderedReceiptWithoutRenderingAgain() = runBlocking {
         val f = Fixture()
         val before = f.base.metadata.activePages(f.base.document.value)
@@ -112,17 +141,19 @@ class AtelierAlbumPublicationTest {
         } finally { resume.complete(Unit) }
     }
 
-    private class Fixture(primary: Fixture? = null) {
+    private class Fixture(primary: Fixture? = null, newAlbum: Boolean = false) {
         val base: RepositoryFixture = primary?.base ?: RepositoryFixture()
         val target: DocumentId = primary?.target ?: DocumentId(UUID.randomUUID().toString())
         val id: String = primary?.id ?: UUID.randomUUID().toString()
         val witnesses = base.pageIds.map { AtelierPageWitness(it, 1, RecipeCodec.hash(base.initial)) }
         var renders = 0
         var beforeReturn: suspend (Int) -> Unit = {}
-        private var record = AtelierDraftRow(id, base.document.value, target.value, 1, "EDITING", 4, 2, base.pageIds.first().value, null, 0)
+        private var record = AtelierDraftRow(id, base.document.value, target.value.takeUnless { newAlbum }, 1L.takeUnless { newAlbum },
+            "EDITING", 4, 2, base.pageIds.first().value, null, 0)
         private val q = base.metadata
         val dao: AtelierDraftDao = object : AtelierDraftDao() {
-            override fun savedDocumentIsHidden(id: String) = if (q.document(id) == null) null else id == base.document.value
+            override fun savedDocumentIsHidden(id: String) = if (q.document(id) == null) null else
+                id == record.stagingDocumentId && (record.state != "COMMITTED" || record.targetDocumentId != null)
             override fun savedPromotionReceipt(id: String) = record.receiptPageIds.takeIf { record.stagingDocumentId == id }
             override fun draft(id: String) = record.takeIf { it.draftId == id }
             override fun forStagingDocument(id: String) = record.takeIf { it.stagingDocumentId == id }
@@ -169,6 +200,32 @@ class AtelierAlbumPublicationTest {
 
         suspend fun publish(witness: List<AtelierPageWitness> = witnesses, drafts: AtelierDraftDao = dao): AtelierPublicationReceipt =
             repository.publishAtelierDraft(drafts, id, 4L, witness, renderer)
+
+        suspend fun saveAcquisition(witness: List<AtelierPageWitness> = witnesses) = RoomEditablePages(access, q, Dispatchers.Unconfined).let { pages ->
+            val sessions = RoomImportSessions(access, ImportSessionTest.Fixture(0), dispatcher = Dispatchers.Unconfined, drafts = dao)
+            val acquisition = AtelierAcquisition(RoomAtelierDrafts(access, dao, sessions), dao, pages, repository)
+            val view = AtelierDraftView(id, 4L, record.targetDocumentId?.let(::DocumentId), true, 2, base.pageIds.first(), null, emptyList())
+            val reviewed = witness.map { EditablePage(base.document, 1L, it.page, base.source, it.revision, it.recipeHash, base.initial) }
+            acquisition.save(view, reviewed, renderer)
+        }
+
+        fun seedDestinationPage(): PageId {
+            val id = PageId(UUID.randomUUID().toString())
+            q.transaction {
+                val sample = checkNotNull(q.page(base.pageIds.first().value))
+                q.insertPage(sample.copy(pageId = id.value, documentId = target.value))
+                q.insertRecipe(checkNotNull(q.recipe(sample.pageId, 1)).copy(pageId = id.value))
+                q.insertReference(SourceReferenceRow("PAGE", id.value, base.source.value, 0))
+                q.insertReference(SourceReferenceRow("RECIPE_HISTORY", "recipe-v1/${id.value}/1", base.source.value, 0))
+                q.setSourceRefCount(base.source.value, q.countSourceReferences(base.source.value))
+            }
+            return id
+        }
+
+        suspend fun duplicateCommittedPage(page: PageId) {
+            val currentRevision = checkNotNull(q.document(target.value)).documentRevision
+            assertTrue(repository.duplicatePage(page, currentRevision) is DocumentMutationResult.Applied)
+        }
 
         suspend fun rejected(code: OperationErrorCode, action: suspend () -> Any?) {
             try { action(); fail("An invalid publication succeeded") }

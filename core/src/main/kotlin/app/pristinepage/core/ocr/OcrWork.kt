@@ -44,7 +44,7 @@ class OcrText(val value: String) {
 
 class OcrResult internal constructor(val configuration: OcrConfiguration, val text: OcrText)
 enum class OcrPhase { QUEUED, RUNNING, READY, FAILED }
-enum class OcrError { ENGINE_FAILED, RESOURCE_LIMIT, INVALID_OUTPUT, INTERRUPTED }
+enum class OcrError { ENGINE_FAILED, RESOURCE_LIMIT, INVALID_OUTPUT, INTERRUPTED, PREPARATION_RESOURCE_LIMIT }
 
 data class OcrAttempt internal constructor(val input: OcrInput, val generation: Long, val number: Int, val ownerId: UUID)
 
@@ -71,7 +71,7 @@ class OcrWork private constructor(
         OcrWork(input, configuration, generation, OcrPhase.READY, attemptsStarted, OcrResult(configuration, text), null)
     } else null
 
-    fun failed(attempt: OcrAttempt, error: OcrError): OcrWork? = if (owns(attempt)) {
+    fun failed(attempt: OcrAttempt, error: OcrError): OcrWork? = if (owns(attempt) && error != OcrError.PREPARATION_RESOURCE_LIMIT) {
         val next = if (attemptsStarted == MAX_STARTS) OcrPhase.FAILED else OcrPhase.QUEUED
         OcrWork(input, configuration, generation, next, attemptsStarted, result, error)
     } else null

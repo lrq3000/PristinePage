@@ -7,6 +7,8 @@ import androidx.room.ForeignKey
 import androidx.room.Fts4
 import androidx.room.FtsOptions
 import androidx.room.Index
+import androidx.room.Insert
+import androidx.room.OnConflictStrategy
 import androidx.room.PrimaryKey
 import androidx.room.Query
 import app.pristinepage.core.ocr.OcrConfiguration
@@ -15,6 +17,9 @@ import app.pristinepage.core.ocr.OcrText
 import app.pristinepage.data.model.PageId
 import app.pristinepage.data.repository.OcrSearchTerms
 import app.pristinepage.data.repository.canonicalOcrSearchText
+
+/** Raised only by projection preparation, before any result transaction or SQL write. */
+internal class OcrProjectionLimit : IllegalArgumentException("OCR search projection exceeds its size limit")
 
 /** The immutable source/recipe binding keeps a result private to its exact saved page revision. */
 @Entity(tableName = "OcrResult", foreignKeys = [
@@ -36,7 +41,7 @@ internal class OcrResultRow(
     companion object {
         fun fromRecognition(input: OcrInput, configuration: OcrConfiguration, text: OcrText): OcrResultRow {
             val indexed = canonicalOcrSearchText(text.value)
-            require(indexed.length <= 262_144) // NFC and segmentation can expand input; do not truncate the index silently.
+            if (indexed.length > 262_144) throw OcrProjectionLimit() // Do not truncate an expanded index.
             return OcrResultRow(0, input.pageId, input.recipeRevision, input.sourcePixelSha256, configuration.engineId,
                 configuration.engineVersion, configuration.layout.name, indexed, text.value.takeUnless { it == indexed })
         }
@@ -48,13 +53,63 @@ internal class OcrResultRow(
 internal class OcrResultFtsRow(val indexedText: String)
 
 internal data class OcrMatchRow(val documentId: String, val pageId: String)
+internal class OcrVerbatimRow(val recognizedUtf8: ByteArray)
+
+private const val OCR_TEXT_STORAGE_BOUNDS =
+    "(typeof(indexedText)='text' AND length(CAST(indexedText AS BLOB))<=786432 AND instr(indexedText,char(0))=0) AND " +
+    "(verbatimText IS NULL OR (typeof(verbatimText)='text' AND length(CAST(verbatimText AS BLOB))<=393216 AND instr(verbatimText,char(0))=0))"
 
 @Dao
 internal abstract class OcrResultDao {
+    // Use UPDATE for an existing page. The external-content FTS triggers remove the old tokens before indexing the new text at the same rowid.
+    fun writeResult(row: OcrResultRow): Boolean = if (hasResult(row.pageId)) {
+        updateResult(row.pageId, row.recipeRevision, row.sourcePixelSha256, row.engineId, row.engineVersion, row.layout,
+            row.indexedText, row.verbatimText) == 1
+    } else insertResult(row) > 0
+
+    fun matchesResult(row: OcrResultRow): Boolean =
+        matchesResult(row.pageId, row.recipeRevision, row.sourcePixelSha256, row.engineId, row.engineVersion, row.layout,
+            row.indexedText, row.verbatimText)
+
+    @Query("SELECT EXISTS(SELECT 1 FROM OcrResult WHERE pageId=:page)")
+    protected abstract fun hasResult(page: String): Boolean
+
+    @Insert(onConflict = OnConflictStrategy.ABORT)
+    protected abstract fun insertResult(row: OcrResultRow): Long
+
+    @Query("""UPDATE OcrResult SET recipeRevision=:revision,sourcePixelSha256=:sourceSha,engineId=:engine,engineVersion=:engineVersion,
+        layout=:layout,indexedText=:indexed,verbatimText=:verbatim WHERE pageId=:page""")
+    protected abstract fun updateResult(
+        page: String, revision: Long, sourceSha: String, engine: String, engineVersion: Int,
+        layout: String, indexed: String, verbatim: String?,
+    ): Int
+
+    // Bounded expected text is bound to SQL; no untrusted result text is materialized in a readback CursorWindow.
+    @Query("""SELECT EXISTS (SELECT 1 FROM OcrResult WHERE pageId=:page AND recipeRevision=:revision AND sourcePixelSha256=:sourceSha
+        AND engineId=:engine AND engineVersion=:engineVersion AND layout=:layout AND indexedText=:indexed AND verbatimText IS :verbatim)""")
+    protected abstract fun matchesResult(
+        page: String, revision: Long, sourceSha: String, engine: String, engineVersion: Int,
+        layout: String, indexed: String, verbatim: String?,
+    ): Boolean
+
+    // The UTF-8 byte ceilings conservatively follow the 262,144/131,072 UTF-16-unit writer limits. Return a scalar, never either text field.
+    @Query("""SELECT EXISTS (SELECT 1 FROM OcrResult WHERE pageId=:page AND recipeRevision=:revision AND sourcePixelSha256=:sourceSha
+        AND engineId=:engine AND engineVersion=:engineVersion AND layout=:layout
+        AND $OCR_TEXT_STORAGE_BOUNDS)""")
+    abstract fun matchesProducerMetadata(page: String, revision: Long, sourceSha: String, engine: String, engineVersion: Int, layout: String): Boolean
+
+    // Admit only the actual result bytes into the CursorWindow; converting it to a String in Room could hide malformed UTF-8.
+    @Query("""SELECT CAST(COALESCE(verbatimText,indexedText) AS BLOB) AS recognizedUtf8 FROM OcrResult
+        WHERE pageId=:page AND recipeRevision=:revision AND sourcePixelSha256=:sourceSha
+          AND engineId=:engine AND engineVersion=:engineVersion AND layout=:layout
+          AND $OCR_TEXT_STORAGE_BOUNDS
+          AND (verbatimText IS NOT NULL OR length(CAST(indexedText AS BLOB))<=393216)""")
+    abstract fun selectVerbatim(page: String, revision: Long, sourceSha: String, engine: String, engineVersion: Int, layout: String): OcrVerbatimRow?
+
     fun matchPages(terms: OcrSearchTerms, afterPageId: PageId?, limit: Int): List<OcrMatchRow> =
         selectMatches(terms.expression, afterPageId?.value, limit)
 
-    // This narrow prefilter is not navigation authority. A consuming repository must also decode the bounded Atelier receipt and use the existing guarded page/document reads.
+    // IDs must be representable as typed UUIDs before LIMIT, or one malformed candidate can prevent the batch from advancing. This prefilter does not validate the decoded Atelier receipt or grant navigation authority.
     @Query("""SELECT Document.documentId, Page.pageId
         FROM OcrResultFts JOIN OcrResult ON OcrResult.rowid=OcrResultFts.rowid
         JOIN Page ON Page.pageId=OcrResult.pageId AND Page.currentRecipeRevision=OcrResult.recipeRevision
@@ -68,7 +123,11 @@ internal abstract class OcrResultDao {
           AND Document.lifecycle='ACTIVE' AND Document.deletedAt IS NULL AND NOT $HIDDEN_ATELIER_DOCUMENT
           AND Source.state='READY' AND SourceBlob.state='READY'
           AND typeof(Page.pageId)='text' AND length(CAST(Page.pageId AS BLOB))=36
+          AND (Page.pageId GLOB '????????-????-????-????-????????????' AND length(replace(Page.pageId,'-',''))=32
+            AND Page.pageId NOT GLOB '*[^0-9a-f-]*')
           AND typeof(Document.documentId)='text' AND length(CAST(Document.documentId AS BLOB))=36
+          AND (Document.documentId GLOB '????????-????-????-????-????????????' AND length(replace(Document.documentId,'-',''))=32
+            AND Document.documentId NOT GLOB '*[^0-9a-f-]*')
         ORDER BY Page.pageId LIMIT CASE WHEN :limit BETWEEN 1 AND 50 THEN :limit ELSE 0 END""")
     protected abstract fun selectMatches(expression: String, afterPageId: String?, limit: Int): List<OcrMatchRow>
 }

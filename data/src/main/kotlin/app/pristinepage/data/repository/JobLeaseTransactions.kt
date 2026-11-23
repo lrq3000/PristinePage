@@ -12,7 +12,11 @@ import kotlinx.coroutines.CancellationException
 class JobLeaseTransactions @JvmOverloads constructor(private val metadata: MetadataAccess, private val jobs: JobLeaseQueries, private val auditClock: () -> Long = System::currentTimeMillis, private val leaseClock: () -> Long = SystemClock::elapsedRealtime) : FencedJobCompletion {
     constructor(database: PristineDatabase) : this(RoomMetadataAccess(database), database.jobLeases())
 
-    override fun <T : Any> complete(lease: JobLease, commitMetadata: () -> T): T? {
+    override fun <T : Any> complete(lease: JobLease, commitMetadata: () -> T): T? =
+        completeWithReadback(lease, commitMetadata, null)
+
+    /** Read back an additional domain invariant after the final job UPDATE but before COMMIT; a refused read rolls back both. */
+    internal fun <T : Any> completeWithReadback(lease: JobLease, commitMetadata: () -> T, verifyMetadata: (() -> Unit)?): T? {
         try {
             return metadata.transaction {
                 if (JobLeaseFence.current(jobs, lease, leaseClock()) == null) return@transaction null
@@ -21,6 +25,11 @@ class JobLeaseTransactions @JvmOverloads constructor(private val metadata: Metad
                 // The bounded writer may still fail, expire or invalidate its own destination. Do not commit its domain changes unless the same attempt remains publishable at the final fence.
                 val job = JobLeaseFence.current(jobs, lease, now) ?: lostLease(lease)
                 if (jobs.updateLease(job.copy(state = "SUCCEEDED", leaseOwner = null, leaseUntil = null, updatedAt = auditClock()), lease.generation) != 1) lostLease(lease)
+                if (verifyMetadata != null) {
+                    verifyMetadata()
+                    // The success update cleared the live deadline; observe the pre-update lease after the readback.
+                    if (JobLeaseFence.current(job, lease, leaseClock()) == null) lostLease(lease)
+                }
                 result
             }
         } catch (canceled: CancellationException) { throw canceled }

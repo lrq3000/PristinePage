@@ -62,6 +62,8 @@ import app.pristinepage.library.AtelierThumbnailLoader
 import app.pristinepage.library.OriginalPagePreview
 import app.pristinepage.library.LibrarySession
 import app.pristinepage.library.ImportPhase
+import app.pristinepage.ocr.AlbumOcrPending
+import app.pristinepage.ocr.SavedPageOcrReader
 import app.pristinepage.image.preview.OriginalPreviewBitmap
 import app.pristinepage.image.preview.RenderedPreviewBitmap
 import app.pristinepage.image.preview.RenderedPreviewBitmapLoader
@@ -98,24 +100,25 @@ class MainActivity : ComponentActivity() {
     private fun start(restored: LibraryIdentity, restoredEditor: EditorIdentity? = null) {
         val app = application as PristinePageApplication
         val services = app.services
+        app.savedOcrSignals.onStartup()
         val factory = object : ViewModelProvider.Factory {
             @Suppress("UNCHECKED_CAST") override fun <T : ViewModel> create(modelClass: Class<T>): T {
                 require(modelClass == ImportLibraryViewModel::class.java)
-                return ImportLibraryViewModel(ApplicationLibraryActions(applicationContext, services::imports), restored) as T
+                return ImportLibraryViewModel(ApplicationLibraryActions(applicationContext, app.savedOcrSignals::onPagesSaved, services::imports), restored) as T
             }
         }
         val retained = ViewModelProvider(this, factory)[ImportLibraryViewModel::class.java].session
         val editorFactory = object : ViewModelProvider.Factory {
             @Suppress("UNCHECKED_CAST") override fun <T : ViewModel> create(modelClass: Class<T>): T {
                 require(modelClass == EditorViewModel::class.java)
-                return EditorViewModel(services::imports) as T
+                return EditorViewModel(services::imports, app.savedOcrSignals::onPagesSaved) as T
             }
         }
         val editorOwner = ViewModelProvider(this, editorFactory)[EditorViewModel::class.java]
         val batchOwner = ViewModelProvider(this, object : ViewModelProvider.Factory {
             @Suppress("UNCHECKED_CAST") override fun <T : ViewModel> create(modelClass: Class<T>): T {
                 require(modelClass == BatchEditViewModel::class.java)
-                return BatchEditViewModel(services::imports) as T
+                return BatchEditViewModel(services::imports, app.savedOcrSignals::onPagesSaved) as T
             }
         })[BatchEditViewModel::class.java]
         val exportOwner = ViewModelProvider(this, object : ViewModelProvider.Factory {
@@ -127,7 +130,7 @@ class MainActivity : ComponentActivity() {
         val acquisition = ViewModelProvider(this, object : ViewModelProvider.Factory {
             @Suppress("UNCHECKED_CAST") override fun <T : ViewModel> create(modelClass: Class<T>): T {
                 require(modelClass == AtelierCaptureViewModel::class.java)
-                return AtelierCaptureViewModel(applicationContext, services::imports) as T
+                return AtelierCaptureViewModel(applicationContext, services::imports, app.savedOcrSignals::onPagesSaved) as T
             }
         })[AtelierCaptureViewModel::class.java]
         editor = editorOwner
@@ -173,9 +176,11 @@ class MainActivity : ComponentActivity() {
                 }
             }
             else if (atHome && settingsPage != null) {
-                AtelierSettingsScreen(checkNotNull(settingsPage), app.atelierPreferences) { settingsPage = it }
+                val ocrReady by app.ocrRuntimeReady.collectAsStateWithLifecycle()
+                AtelierSettingsScreen(checkNotNull(settingsPage), app.atelierPreferences, app.hasBundledOcr, ocrReady) { settingsPage = it }
             }
             else if (host.identity == null) libraryState.SaveableStateProvider("atelier-library") {
+                val observeOcrPending = remember(app) { AlbumOcrPending.forSavedPage(app) { services.imports().store.savedOcr } }
                 val loadThumbnail: suspend (DocumentSummary, DocumentPage) -> RenderedPreviewBitmap = { album, tile ->
                     // Lazy tiles retain only their small displays. Serialize expensive full-source decoding; the existing process-owned budget still governs every allocation.
                     thumbnailPermit.withPermit {
@@ -189,12 +194,19 @@ class MainActivity : ComponentActivity() {
                      onExport = { exportOwner.review(it, null) },
                      batchUndo = batch.undo?.takeIf { batch.savedDocument == library.selectedId },
                      undoBatch = batchOwner::undoSaved, closeBatchNotice = batchOwner::clearNotice,
-                     batchBusy = batch.saving, batchError = batch.error?.takeIf { batch.savedDocument == library.selectedId },
+                      batchBusy = batch.saving, batchError = batch.error?.takeIf { batch.savedDocument == library.selectedId },
+                      observeOcrPending = observeOcrPending,
                      thumbnailsCurrent = { album ->
                          batch.savedDocument != album.documentId ||
                              (!batch.saving && album.documentRevision >= (batch.savedRevision ?: 0L))
                      },
-                      openAtelier = acquisition::open, onSettings = { settingsPage = SettingsPage.ROOT }) { document, page ->
+                       openAtelier = { title, target ->
+                           retained.accept(LibraryEvent.LeaveHomeSearch)
+                           acquisition.open(title, target)
+                       }, onSettings = {
+                           retained.accept(LibraryEvent.LeaveHomeSearch)
+                           settingsPage = SettingsPage.ROOT
+                       }) { document, page ->
                     editorOwner.open(document.value, page.value)
                 }
             }
@@ -217,13 +229,27 @@ class MainActivity : ComponentActivity() {
                         }
                     }
                 }
-                if (selected != null) key(identity) { PageEditorScreen(loadOriginal = loadOriginal,
-                    pageNumber = fallback?.ordinal?.plus(1), albumPageCount = orderedPages.size,
-                    previousPage = destination(-1), nextPage = destination(1), originalOnLoadFailure = {
-                    if (fallback != null) key(fallback) {
-                        OriginalPagePreview(fallback, loadOriginal)
+                if (selected != null) key(identity) {
+                    val savedOcr = remember(app) {
+                        SavedPageOcrReader(
+                            open = { services.imports().store.savedOcr },
+                            rerunInFlight = app.savedOcrSignals.rerunInFlight,
+                            requestRerun = { observed, defaults ->
+                                app.savedOcrSignals.onRerun(
+                                    qualify = { app.savedOcr.resolveRerunConfiguration(observed.configuration, defaults) },
+                                    commit = { services.imports().store.savedOcr.requestRerun(observed, it) },
+                                )
+                            },
+                        )
                     }
-                }).Content(selected, ::leaveEditor) }
+                     PageEditorScreen(loadOriginal = loadOriginal, savedOcr = savedOcr, showOcrDiagnostics = settings.ocrDiagnostics,
+                        pageNumber = fallback?.ordinal?.plus(1), albumPageCount = orderedPages.size,
+                        previousPage = destination(-1), nextPage = destination(1), originalOnLoadFailure = {
+                            if (fallback != null) key(fallback) {
+                                OriginalPagePreview(fallback, loadOriginal)
+                            }
+                        }).Content(selected, ::leaveEditor)
+                }
                 else {
                     BackHandler { leaveEditor() }
                     Column(Modifier.fillMaxSize().safeDrawingPadding().padding(24.dp)) {

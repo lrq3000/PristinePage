@@ -1,18 +1,21 @@
 package app.pristinepage.capture
 
 import app.pristinepage.data.model.IngestResult
+import app.pristinepage.data.model.DocumentId
 import app.pristinepage.data.model.OperationError
 import app.pristinepage.data.model.OperationErrorCode
+import app.pristinepage.data.model.PageId
 import app.pristinepage.data.repository.ImportSessionLifecycle
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
 
 /** Consumes one request-bound callback in the caller's structured scope. The controller/storage retain ordered receipt, capacity, replay and cancellation authority; no grant acquisition, detached work or current-document lookup is hidden here. */
-class PhotoImportResultRouter(private val imports: PhotoImportController, private val lifecycle: ImportSessionLifecycle) {
+class PhotoImportResultRouter(private val imports: PhotoImportController, private val lifecycle: ImportSessionLifecycle,
+    private val onPagesSaved: ((DocumentId, List<PageId>) -> Unit)? = null) {
     suspend fun deliver(request: PhotoImportRequest, selection: PhotoSelection): List<IngestResult> {
         currentCoroutineContext().ensureActive()
         return when (selection) {
-            is PhotoSelection.Selected -> imports.import(selection.uris, request.session)
+            is PhotoSelection.Selected -> imports.import(selection.uris, request.session, onPagesSaved)
             PhotoSelection.Canceled -> abandon(request, OperationError(OperationErrorCode.CANCELED, false, "photo_selection_canceled", request.batchId))
             is PhotoSelection.Rejected -> abandon(request, selection.error)
         }

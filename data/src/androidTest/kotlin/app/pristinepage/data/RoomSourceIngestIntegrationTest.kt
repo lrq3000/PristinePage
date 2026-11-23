@@ -9,6 +9,7 @@ import app.pristinepage.core.pipeline.PixelSize
 import app.pristinepage.data.db.PristineDatabase
 import app.pristinepage.data.files.SourceFiles
 import app.pristinepage.data.files.SourceInspector
+import app.pristinepage.data.files.InspectedSourceForIngest
 import app.pristinepage.data.files.DirectorySync
 import app.pristinepage.data.model.*
 import app.pristinepage.data.repository.*
@@ -27,14 +28,19 @@ class RoomSourceIngestIntegrationTest {
         Fixture().use { f ->
             val child = f.reserve().single()
             val first = f.store.ingest(f.reference, child) as IngestResult.Committed
+            val intent = RoomIngestLookup(f.database).find(child)!!
+            assertEquals(0L, f.count("SourceCaptureDay"))
+            // A later projection must not retroactively change or invalidate a v1 ingest receipt.
+            f.database.openHelper.writableDatabase.execSQL("INSERT INTO SourceCaptureDay VALUES (?,?,19782)",
+                arrayOf(intent.sourceBlobId.value, first.sourceByteHash))
             assertEquals(1, f.opened); assertEquals(1, f.closed)
             f.reopen()
             assertEquals(first, f.store.ingest(f.reference, child))
+            assertTrue(f.database.ingestCompletion().captureProjectionMatches(intent.sourceBlobId.value, first.sourceByteHash, 19782))
             assertEquals(1, f.opened); assertEquals(1L, f.count("Page")); assertEquals(2L, f.count("SourceReference"))
             assertEquals("COMMITTED", f.database.importSessions().session(child.value)!!.state)
             assertNull(f.database.importSessions().session(child.value)!!.uriText)
             assertEquals(2L, f.database.catalog().source(first.sourceId.value)!!.refCount)
-            val intent = RoomIngestLookup(f.database).find(child)!!
             val job = f.database.jobLeases().job(intent.jobId.value)!!
             assertEquals("SUCCEEDED", job.state); assertNull(job.leaseOwner)
             assertArrayEquals(f.bytes, f.files.finalFile(intent.sourceBlobId.value).readBytes())
@@ -57,6 +63,67 @@ class RoomSourceIngestIntegrationTest {
             assertTrue(f.store.ingest(f.reference, child) is IngestResult.Pending)
             assertEquals(1, f.opened)
             f.assertForeignKeys()
+        }
+    }
+
+    @Test fun captureProjectionKeepsExactDigestAcrossRoomReopenAndRefusesChangedDay() = runBlocking {
+        Fixture(captureDate = SourceCaptureDate(19782)).use { f ->
+            val child = f.reserve().single()
+            val saved = f.store.ingest(f.reference, child) as IngestResult.Committed
+            val intent = RoomIngestLookup(f.database).find(child)!!
+            val id = intent.sourceBlobId.value
+            f.reopen()
+            assertEquals(saved, f.store.ingest(f.reference, child))
+            val sql = f.database.openHelper.writableDatabase
+            sql.query("SELECT byteSha256,epochDay FROM SourceCaptureDay WHERE sourceBlobId=?", arrayOf(id)).use {
+                assertTrue(it.moveToFirst()); assertEquals(saved.sourceByteHash, it.getString(0)); assertEquals(19782L, it.getLong(1))
+            }
+            sql.execSQL("UPDATE SourceCaptureDay SET epochDay=19783 WHERE sourceBlobId=?", arrayOf(id))
+            val refused = f.store.ingest(f.reference, child) as IngestResult.Rejected
+            assertEquals(OperationErrorCode.INTEGRITY_FAILED, refused.error.code)
+            assertEquals("ingest_capture_date_mismatch", refused.error.safeMessageKey)
+            assertEquals(1, f.opened)
+            assertArrayEquals(f.bytes, f.files.finalFile(id).readBytes())
+        }
+    }
+
+    @Test fun lateSqliteCorruptionOfCoverageRollsBackBothProjectionAndPage() = runBlocking {
+        Fixture(captureDate = SourceCaptureDate(null)).use { f ->
+            val child = f.reserve().single()
+            f.database.openHelper.writableDatabase.execSQL("""CREATE TRIGGER corrupt_source_date AFTER UPDATE OF state ON Job
+                WHEN NEW.state='SUCCEEDED' BEGIN UPDATE SourceCaptureDay SET epochDay=19782; END""")
+            val refused = f.store.ingest(f.reference, child) as IngestResult.Rejected
+            assertEquals(OperationErrorCode.INTEGRITY_FAILED, refused.error.code)
+            assertEquals("ingest_capture_date_mismatch", refused.error.safeMessageKey)
+            val intent = RoomIngestLookup(f.database).find(child)!!
+            assertEquals("MOVED", f.database.ingestPreparation().fileTransaction(intent.transactionId.value)!!.state)
+            assertEquals("RUNNING", f.database.jobLeases().job(intent.jobId.value)!!.state)
+            for (table in listOf("Page", "Source", "SourceBlob", "RecipeRevision", "SourceReference", "SourceCaptureDay"))
+                assertEquals(0L, f.count(table))
+            assertArrayEquals(f.bytes, f.files.finalFile(intent.sourceBlobId.value).readBytes())
+            f.database.openHelper.writableDatabase.execSQL("DROP TRIGGER corrupt_source_date")
+            f.reopen()
+            val recovery = RoomRecoveryCoordinator(f.database, f.files, f.owners)
+            assertEquals(1L, recovery.reconcile().completed)
+            assertEquals(0L, recovery.reconcile().completed)
+            val saved = f.store.ingest(f.reference, child) as IngestResult.Committed
+            assertEquals(1L, f.count("Page"))
+            assertEquals(1L, f.count("SourceCaptureDay"))
+            assertEquals(1, f.opened)
+            assertTrue(f.database.ingestCompletion().captureProjectionMatches(intent.sourceBlobId.value, saved.sourceByteHash, null))
+            assertArrayEquals(f.bytes, f.files.finalFile(intent.sourceBlobId.value).readBytes())
+            f.assertForeignKeys()
+
+            val sql = f.database.openHelper.writableDatabase
+            for (assignment in listOf("byteSha256=CAST(byteSha256 AS BLOB)", "epochDay=2.5", "byteSha256='${"e".repeat(64)}'")) {
+                sql.execSQL("UPDATE SourceCaptureDay SET $assignment WHERE sourceBlobId=?", arrayOf(intent.sourceBlobId.value))
+                val replay = f.store.ingest(f.reference, child) as IngestResult.Rejected
+                assertEquals("ingest_capture_date_mismatch", replay.error.safeMessageKey)
+                sql.execSQL("UPDATE SourceCaptureDay SET byteSha256=?,epochDay=NULL WHERE sourceBlobId=?",
+                    arrayOf(saved.sourceByteHash, intent.sourceBlobId.value))
+            }
+            sql.execSQL("DELETE FROM SourceCaptureDay WHERE sourceBlobId=?", arrayOf(intent.sourceBlobId.value))
+            assertEquals("ingest_capture_date_mismatch", (f.store.ingest(f.reference, child) as IngestResult.Rejected).error.safeMessageKey)
         }
     }
 
@@ -111,7 +178,9 @@ class RoomSourceIngestIntegrationTest {
         }
     }
 
-    internal class Fixture(private val enableRetry: Boolean = false, directorySync: DirectorySync? = null) : AutoCloseable {
+    internal class Fixture(private val enableRetry: Boolean = false, directorySync: DirectorySync? = null,
+        private val captureDate: SourceCaptureDate? = null,
+    ) : AutoCloseable {
         private val context: Context = InstrumentationRegistry.getInstrumentation().context
         private val name = "t03-ingest-${UUID.randomUUID()}.db"
         val root = File(context.filesDir, "t03-ingest-${UUID.randomUUID()}")
@@ -144,18 +213,23 @@ class RoomSourceIngestIntegrationTest {
                 providerFailure?.let { throw it }
                 object : ByteArrayInputStream(bytes) { override fun close() { closed++; super.close() } }
             }
-            val inspector = SourceInspector { file, hash ->
+            val normalizedInspector = SourceInspector { file, hash ->
                 assertFalse(database.inTransaction()); assertEquals(opened, closed)
                 assertArrayEquals(bytes, file.readBytes()); assertEquals("9f64a747e1b97f131fabb6b447296c9b6f0201e79fb3c5356e6c77e89b6a806a", hash)
                 inspectionFailure?.let { throw it }
                 SourceInspection("image/png", PixelSize(3, 2), PixelSize(3, 2), 1, null, "synthetic-v1", "a".repeat(64))
+            }
+            val inspector = if (captureDate == null) normalizedInspector else object : SourceInspector {
+                override suspend fun inspect(file: File, expectedByteSha256: String) = normalizedInspector.inspect(file, expectedByteSha256)
+                override suspend fun inspectForIngest(file: File, expectedByteSha256: String): InspectedSourceForIngest =
+                    InspectedSourceForIngest(inspect(file, expectedByteSha256), captureDate)
             }
             val completion = RoomIngestCompletion(database, files)
             return RoomSourceStore(files, provider, inspector, RoomIngestPreparation(database), RoomIngestLookup(database), completion, completion, RoomIngestPhases(database), RoomJobLeases(database, owners), owners, restarts = if (enableRetry) RoomIngestRestarts(database, files, owners) else null)
         }
         fun reopen() { database.close(); database = open(); store = store() }
         fun count(table: String): Long {
-            require(table in setOf("Page", "Source", "SourceBlob", "RecipeRevision", "SourceReference"))
+            require(table in setOf("Page", "Source", "SourceBlob", "RecipeRevision", "SourceReference", "SourceCaptureDay"))
             return database.openHelper.readableDatabase.query("SELECT COUNT(*) FROM $table").use { cursor -> check(cursor.moveToFirst()); cursor.getLong(0) }
         }
         fun assertForeignKeys() { database.openHelper.readableDatabase.query("PRAGMA foreign_key_check").use { cursor -> assertFalse(cursor.moveToFirst()) } }

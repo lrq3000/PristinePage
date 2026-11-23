@@ -21,8 +21,11 @@ import java.util.Base64
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
 
+// Match the verbatim Room boundary: 131,072 UTF-16 units require at most three UTF-8 bytes per unit.
+internal const val MAX_OCR_TEXT_BYTES = 393_216L
+
 @Serializable
-enum class DerivedKind { RENDER, EXPORT }
+enum class DerivedKind { RENDER, EXPORT, OCR_TEXT }
 
 data class DerivedFileTarget(val kind: DerivedKind, val objectId: String, val snapshotId: String? = null) {
     init {
@@ -107,7 +110,7 @@ class DerivedFiles internal constructor(
         checkpoint: () -> Unit = {},
     ): StagedDerived {
         requireOpaqueId(transactionId)
-        require(maxBytes > 0) { "Invalid derived byte admission limit" }
+        require(admitsExtent(target.kind, maxBytes)) { "Invalid derived byte admission limit" }
         checkpoint()
         val file = stagingFile(transactionId)
         finalFile(target)
@@ -123,7 +126,7 @@ class DerivedFiles internal constructor(
             } finally {
                 output.close()
             }
-            output.requireComplete()
+            output.requireComplete(target.kind)
             checkpoint()
             channel.force(true)
             StagedDerived(paths.root, transactionId, target, output.byteSha256(), output.byteCount)
@@ -179,7 +182,7 @@ class DerivedFiles internal constructor(
         transactionId: String, expectedSealSha256: String, target: DerivedFileTarget, maxBytes: Long,
         checkpoint: () -> Unit, authenticate: (String, Long, ByteArray) -> Unit, readback: (File, ByteArray) -> Unit,
     ): ObservedDerivedSeal? {
-        require(maxBytes > 0) { "Invalid derived byte admission limit" }
+        require(admitsExtent(target.kind, maxBytes)) { "Invalid derived byte admission limit" }
         return inspect(transactionId, expectedSealSha256, checkpoint, durable = false,
             beforePayloads = { staged, metadata ->
                 require(staged.target == target) { "Derived target binding mismatch" }
@@ -257,8 +260,10 @@ class DerivedFiles internal constructor(
         beforePayloads = { staged, metadata ->
             require(staged.target == target) { "Derived target binding mismatch" }
             if (staged.byteCount > maxBytes) throw DerivedByteLimitExceeded()
-            authenticate(staged.byteSha256, staged.byteCount, metadata)
-        }, requireFinal = requireFinal, readback = readback)?.let { SealedDerived(it.seal) }
+            authenticate(staged.byteSha256, staged.byteCount, metadata.copyOf())
+        }, requireFinal = requireFinal,
+        readback = { file, metadata -> readback(file, metadata.copyOf()) },
+    )?.let { SealedDerived(it.seal) }
 
     /** Match the receipt, check every present copy and re-establish the seal barriers before touching the final path. Reuse a verified existing final without rewriting or removing either copy. */
     @JvmOverloads
@@ -302,6 +307,7 @@ class DerivedFiles internal constructor(
     fun finalFile(target: DerivedFileTarget): File = paths.beneath(when (target.kind) {
         DerivedKind.RENDER -> "renders/${target.objectId}/page.bin"
         DerivedKind.EXPORT -> "exports/${checkNotNull(target.snapshotId)}/${target.objectId}.bin"
+        DerivedKind.OCR_TEXT -> "ocr-text-exports/${target.objectId}/text.bin"
     })
 
     private fun inspect(
@@ -361,7 +367,7 @@ class DerivedFiles internal constructor(
         require(expectedSealSha256 == null || expectedSealSha256 == hash) { "Derived seal integrity mismatch" }
         val record = JSON.decodeFromString(DerivedSeal.serializer(), bytes.toString(Charsets.UTF_8))
         require(record.version == SEAL_VERSION && record.transactionId == transactionId) { "Unknown or mismatched derived seal" }
-        require(record.byteCount > 0) { "Empty derived payload in seal" }
+        require(admitsExtent(record.kind, record.byteCount)) { "Invalid derived payload extent in seal" }
         requireSha256(record.byteSha256)
         val target = DerivedFileTarget(record.kind, record.objectId, record.snapshotId)
         val metadata = Base64.getDecoder().decode(record.metadataBase64)
@@ -489,9 +495,9 @@ class DerivedFiles internal constructor(
             closed = true
         }
 
-        fun requireComplete() {
+        fun requireComplete(kind: DerivedKind) {
             failure?.let { throw it }
-            require(byteCount > 0) { "Empty derived payload" }
+            require(admitsExtent(kind, byteCount)) { "Invalid derived payload extent" }
         }
 
         fun byteSha256(): String = hex(digest.digest())
@@ -507,6 +513,9 @@ class DerivedFiles internal constructor(
         const val SEAL_LIMIT = METADATA_LIMIT * 2
         const val BUFFER_SIZE = 65_536
         val JSON = Json { encodeDefaults = true; ignoreUnknownKeys = false }
+
+        fun admitsExtent(kind: DerivedKind, bytes: Long): Boolean =
+            if (kind == DerivedKind.OCR_TEXT) bytes in 0L..MAX_OCR_TEXT_BYTES else bytes > 0
 
         fun encode(seal: DerivedSeal): ByteArray =
             JSON.encodeToString(DerivedSeal.serializer(), seal).toByteArray(Charsets.UTF_8)

@@ -16,6 +16,20 @@ import org.junit.runner.RunWith
 
 @RunWith(AndroidJUnit4::class)
 class AtelierPreferencesTest {
+    @Test fun diagnosticsPersistWithoutChangingTheStoredRecognitionOrder() {
+        val context = InstrumentationRegistry.getInstrumentation().targetContext
+        val name = "test-ocr-diagnostics-${UUID.randomUUID()}"
+        val preferences = AtelierPreferences(context, name)
+        assertEquals(false, preferences.settings.value.ocrDiagnostics)
+        preferences.setOcrLanguage(OcrLanguage.JAPANESE, true)
+        preferences.setOcrDiagnostics(true)
+        val reopened = AtelierPreferences(context, name)
+        assertEquals(true, reopened.settings.value.ocrDiagnostics)
+        assertEquals(listOf(OcrLanguage.ENGLISH, OcrLanguage.FRENCH, OcrLanguage.JAPANESE), reopened.settings.value.ocrLanguages)
+        reopened.setOcrDiagnostics(false)
+        assertEquals(false, AtelierPreferences(context, name).settings.value.ocrDiagnostics)
+    }
+
     @Test fun savedOcrLanguagesAreIndependentOfTheCameraAndRetainSelectionOrder() {
         val context = InstrumentationRegistry.getInstrumentation().targetContext
         val name = "test-ocr-prefs-${UUID.randomUUID()}"

@@ -87,9 +87,19 @@ class BatchEditSessionTest {
         session.rotateClockwise()
         session.clearSelection()
         assertEquals(listOf(1, 2, 2, 0), f.ids.map { session.recipes.getValue(it).geometry.outputQuarterTurns })
-        assertTrue(session.done() is BatchEditOutcome.Saved)
+        val result = session.done() as BatchEditOutcome.Saved
+        assertEquals(f.ids.take(3), result.pageIds)
         assertEquals(f.ids.take(3), f.saved.map { it.pageId })
         assertEquals(listOf(1, 2, 2), f.saved.map { it.recipe.geometry.outputQuarterTurns })
+    }
+
+    @Test fun aMismatchedBatchReceiptDoesNotProduceACommittedPageHint() = runTest {
+        val f = Fixture()
+        val session = f.session(initialSelection = setOf(f.ids.first())) { _, _, _ ->
+            DocumentMutationResult.Applied(8, listOf(f.ids.last()), UndoId(UUID.randomUUID().toString()))
+        }
+        session.rotateClockwise()
+        assertEquals(BatchEditOutcome.NeedsRefresh, session.done())
     }
 
     @Test fun documentColorAndStrengthSaveOnlyTheEditedPageWithItsIndependentGeometry() = runTest {

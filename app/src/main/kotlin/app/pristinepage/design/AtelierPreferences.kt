@@ -61,6 +61,7 @@ internal data class AtelierSettings(
     val homeThumbnailLayout: HomeThumbnailLayout = HomeThumbnailLayout.STACK,
     val albumTitleTemplate: AlbumTitleTemplate = AlbumTitleTemplate.DEFAULT,
     val ocrLanguages: List<OcrLanguage> = OcrLanguage.DEFAULT,
+    val ocrDiagnostics: Boolean = false,
 ) {
     fun withOcrLanguage(language: OcrLanguage, enabled: Boolean): AtelierSettings {
         if ((language in ocrLanguages) == enabled || (!enabled && ocrLanguages.size == 1)) return this
@@ -76,6 +77,7 @@ internal data class AtelierSettings(
             HomeThumbnailLayout.entries.firstOrNull { it.name == values["homeThumbnailLayout"] } ?: HomeThumbnailLayout.STACK,
             (values["albumTitleTemplate"] as? String)?.let(AlbumTitleTemplate::parse) ?: AlbumTitleTemplate.DEFAULT,
             OcrLanguage.fromStored(values["ocrLanguages"]),
+            values["ocrDiagnostics"] as? Boolean ?: false,
         )
     }
 }
@@ -117,5 +119,11 @@ internal class AtelierPreferences(context: Context, name: String = "pristinepage
         if (updated == previous) return
         storage.edit { putString("ocrLanguages", updated.ocrLanguages.joinToString(",") { it.packCode }) }
         current.value = updated
+    }
+
+    fun setOcrDiagnostics(enabled: Boolean) {
+        if (current.value.ocrDiagnostics == enabled) return
+        storage.edit { putBoolean("ocrDiagnostics", enabled) }
+        current.value = current.value.copy(ocrDiagnostics = enabled)
     }
 }

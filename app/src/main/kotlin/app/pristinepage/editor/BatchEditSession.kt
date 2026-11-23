@@ -22,7 +22,7 @@ internal sealed interface BatchEditOutcome {
     data object Unchanged : BatchEditOutcome
     data object Busy : BatchEditOutcome
     data object NeedsRefresh : BatchEditOutcome
-    data class Saved(val undo: UndoId) : BatchEditOutcome
+    data class Saved(val undo: UndoId, val pageIds: List<PageId>) : BatchEditOutcome
     data class Conflict(val revision: Long) : BatchEditOutcome
     data class Failed(val error: OperationError) : BatchEditOutcome
 }
@@ -163,7 +163,7 @@ internal class BatchEditSession(pages: List<EditablePage>,
                         result.affectedPageIds != changes.map { it.pageId }) {
                         uncertain = true
                         BatchEditOutcome.NeedsRefresh
-                    } else { closed = true; BatchEditOutcome.Saved(undo) }
+                    } else { closed = true; BatchEditOutcome.Saved(undo, result.affectedPageIds.toList()) }
                 }
                 is DocumentMutationResult.Conflict -> BatchEditOutcome.Conflict(result.actualRevision)
                 is DocumentMutationResult.Rejected -> BatchEditOutcome.Failed(result.error)

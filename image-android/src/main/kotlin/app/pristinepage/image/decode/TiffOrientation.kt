@@ -3,18 +3,26 @@ package app.pristinepage.image.decode
 import app.pristinepage.data.model.OperationError
 import app.pristinepage.data.model.OperationErrorCode
 import app.pristinepage.data.model.RepositoryFailure
+import java.time.DateTimeException
+import java.time.LocalDate
 
-/** Narrow, nonmaterializing EXIF/TIFF envelope reader. It validates every reachable declared value BEFORE any platform metadata/codec parsing, but only exposes primary orientation. No component-count-sized allocation or general maker-note interpreter exists here. */
+/** Narrow EXIF/TIFF envelope reader. Every reachable declared extent is checked before platform metadata/codec parsing. Only allowlisted scalars can leave this reader; it has no component-count-sized allocation or maker-note interpreter. */
 object TiffOrientation {
     fun read(bytes: ByteArray, checkpoint: () -> Unit): Int = Reader(bytes, checkpoint).read()
 
-    /** These narrow exceptions are only safe when the complete APP1 is replaced before native decode. */
-    internal fun readCameraJpeg(bytes: ByteArray, checkpoint: () -> Unit): Pair<Int, Boolean> {
-        val reader = Reader(bytes, checkpoint, cameraJpeg = true)
-        return reader.read() to reader.needsProjection
+    internal class Metadata(val orientation: Int, val needsProjection: Boolean, val capturedOn: LocalDate?)
+
+    /** Camera-JPEG exceptions are only safe when the complete APP1 is replaced before native decode. */
+    internal fun inspect(bytes: ByteArray, checkpoint: () -> Unit, cameraJpeg: Boolean, captureDate: Boolean): Metadata {
+        val reader = Reader(bytes, checkpoint, cameraJpeg, captureDate)
+        val orientation = reader.read()
+        return Metadata(orientation, reader.needsProjection, reader.capturedOn)
     }
 
-    private class Reader(private val bytes: ByteArray, private val checkpoint: () -> Unit, private val cameraJpeg: Boolean = false) {
+    private class Reader(
+        private val bytes: ByteArray, private val checkpoint: () -> Unit,
+        private val cameraJpeg: Boolean = false, private val captureDate: Boolean = false,
+    ) {
         private val base = if (bytes.size >= 6 && bytes.copyOfRange(0, 6).contentEquals("Exif\u0000\u0000".toByteArray())) 6 else 0
         private val length = bytes.size - base
         private var little = false
@@ -22,6 +30,8 @@ object TiffOrientation {
         private var entries = 0
         private var charged = 0L
         private var orientation = 1
+        var capturedOn: LocalDate? = null
+            private set
         var needsProjection = false
             private set
 
@@ -40,7 +50,7 @@ object TiffOrientation {
             return orientation
         }
 
-        private fun directory(offset: Long, depth: Int, primary: Boolean) {
+        private fun directory(offset: Long, depth: Int, primary: Boolean, primaryExif: Boolean = false) {
             checkpoint()
             if (depth > 8 || visited.size >= 64) refuse(OperationErrorCode.RESOURCE_LIMIT, "source_metadata_limit")
             if (!visited.add(offset)) invalid()
@@ -87,19 +97,42 @@ object TiffOrientation {
                         if (type != 3 || components != 1L) invalid()
                         if (u16(value.toInt()) != 1) refuse(OperationErrorCode.UNSUPPORTED_FORMAT, "source_profile_unsupported")
                     }
+                    0x9003 -> if (captureDate && primaryExif && type == 2 && components == 20L) {
+                        capturedOn = calendarDay(value.toInt())
+                    }
                     0x8769, 0x8825, 0xa005, 0x14a -> {
                         if (type !in setOf(4, 13) || (tag != 0x14a && components != 1L)) invalid()
                         if (components > 64) refuse(OperationErrorCode.RESOURCE_LIMIT, "source_metadata_limit")
                         repeat(components.toInt()) { index ->
                             val nested = u32((value + index * 4L).toInt())
                             if (nested < 8) invalid()
-                            directory(nested, depth + 1, false)
+                            directory(nested, depth + 1, false, primaryExif = primary && tag == 0x8769)
                         }
                     }
                 }
             }
             val next = u32((offset + 2 + count * 12L).toInt())
             if (next != 0L) { if (next < 8) invalid(); directory(next, depth + 1, false) }
+        }
+
+        // Keep the local calendar day only; EXIF DateTimeOriginal does not itself identify a UTC instant.
+        private fun calendarDay(at: Int): LocalDate? {
+            if (b(at + 4) != 58 || b(at + 7) != 58 || b(at + 10) != 32 ||
+                b(at + 13) != 58 || b(at + 16) != 58 || b(at + 19) != 0) return null
+            fun digits(start: Int, count: Int): Int {
+                var value = 0
+                for (i in 0 until count) {
+                    val digit = b(at + start + i) - 48
+                    if (digit !in 0..9) return -1
+                    value = value * 10 + digit
+                }
+                return value
+            }
+            val year = digits(0, 4)
+            if (year < 1 || digits(11, 2) !in 0..23 || digits(14, 2) !in 0..59 || digits(17, 2) !in 0..59) return null
+            return try {
+                LocalDate.of(year, digits(5, 2), digits(8, 2))
+            } catch (_: DateTimeException) { null }
         }
 
         private fun range(offset: Long, count: Long) { if (offset < 0 || count < 0 || offset > length || count > length - offset) invalid() }

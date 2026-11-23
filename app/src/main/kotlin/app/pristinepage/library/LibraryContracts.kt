@@ -5,6 +5,8 @@ import app.pristinepage.capture.PhotoImportKind
 import app.pristinepage.data.model.*
 import app.pristinepage.data.repository.AlbumSearchQuery
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.emptyFlow
 import java.time.ZoneId
 import java.util.Locale
 
@@ -30,6 +32,19 @@ internal interface OrderedLibraryActions {
 internal interface SearchableLibraryActions {
     suspend fun searchAlbums(query: AlbumSearchQuery, order: AlbumOrder, locale: Locale, after: AlbumPosition?, limit: Int): AlbumPage
 }
+
+internal interface SearchablePageActions {
+    suspend fun searchPages(query: String): HomePageSearchPage
+    fun pageSearchChanges(query: String): Flow<Unit> = emptyFlow()
+}
+
+/** No recognized text or persistent search token. Revalidation belongs to the store that issued the hit. */
+class HomePageSearchHit internal constructor(
+    val document: DocumentId, val page: PageId, val albumTitle: String, val pageNumber: Int,
+    internal val stillMatches: suspend () -> Boolean,
+)
+
+class HomePageSearchPage internal constructor(val hits: List<HomePageSearchHit>, internal val next: (suspend () -> HomePageSearchPage)?)
 
 /** Only opaque identity may be placed in app saved state. A restored batch is not permission to relaunch a picker, reopen a URI, or infer a successful import. */
 data class LibraryIdentity @JvmOverloads constructor(val selected: DocumentId? = null, val pending: ImportSessionId? = null, val selectedPage: PageId? = null, val kind: PhotoImportKind = PhotoImportKind.GALLERY) {
@@ -62,6 +77,10 @@ data class LibraryState(
     val renameResult: DocumentMutationResult? = null,
     val albumSearch: String = "",
     val canSearchAlbums: Boolean = false,
+    val canSearchPages: Boolean = false,
+    val pageMatches: List<HomePageSearchHit> = emptyList(),
+    val pageSearchUnavailable: Boolean = false,
+    val albumSearchUnavailable: Boolean = false,
 ) {
     // Keep transient search input (which can contain a private quote) out of incidental diagnostics.
     override fun toString() = "LibraryState(loading=$loading, albumCount=${documents.size}, hasMore=$hasMore, phase=$phase)"
@@ -73,6 +92,8 @@ sealed interface LibraryEvent {
     data object CloseAlbum : LibraryEvent
     data class SetAlbumSort(val order: AlbumOrder, val locale: Locale) : LibraryEvent
     class SetAlbumSearch(val text: String, val zone: ZoneId) : LibraryEvent
+    class OpenPageMatch(val hit: HomePageSearchHit, val open: (DocumentId, PageId) -> Unit) : LibraryEvent
+    data object LeaveHomeSearch : LibraryEvent
     data class RenameAlbum(val documentId: DocumentId, val expectedDocumentRevision: Long, val title: String) : LibraryEvent
     data object ClearRenameResult : LibraryEvent
     data class NewDocument @JvmOverloads constructor(val title: String, val importAfterCreate: Boolean = false, val kind: PhotoImportKind = PhotoImportKind.GALLERY) : LibraryEvent
@@ -92,4 +113,5 @@ interface LibrarySession {
     fun accept(event: LibraryEvent)
     fun identity(): LibraryIdentity
     fun claimPickerLaunch(batchId: ImportSessionId): Boolean
+    suspend fun observePageSearch(query: String) = Unit
 }

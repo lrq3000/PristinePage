@@ -2,6 +2,9 @@ package app.pristinepage.data.repository
 
 import app.pristinepage.core.ocr.OcrConfiguration
 import app.pristinepage.core.ocr.OcrInput
+import app.pristinepage.core.ocr.OcrLanguagePack
+import app.pristinepage.core.ocr.OcrLanguagePacks
+import app.pristinepage.core.ocr.OcrLayout
 import app.pristinepage.core.pipeline.requireSha256
 import app.pristinepage.data.db.JobRow
 import app.pristinepage.data.model.DocumentId
@@ -57,5 +60,37 @@ internal data class OcrJobInput(
 
     companion object {
         const val KIND = "PAGE_OCR"
+        private const val V2_TAG = "pristinepage-ocr-page-v2"
+        private const val V2_HEADER_FIELDS = 12
+        private const val MAX_V2_BYTES = 3_532
+
+        /** Decode an already byte-admitted record; syntax does not establish current ownership, installed pack bytes, or a lease. */
+        fun decodeV2(bytes: ByteArray): OcrJobInput {
+            require(bytes.size in 1..MAX_V2_BYTES)
+            val snapshot = bytes.copyOf()
+            require(snapshot.all { it >= 0 })
+            val fields = snapshot.decodeToString().split('\u0000', limit = V2_HEADER_FIELDS + 2 * 32 + 1)
+            require(fields.size > V2_HEADER_FIELDS && fields[0] == V2_TAG)
+
+            val count = fields[11].toIntOrNull()
+            require(count != null && count in 1..32 && fields.size == V2_HEADER_FIELDS + 2 * count)
+            val packs = OcrLanguagePacks(List(count) { index ->
+                val offset = V2_HEADER_FIELDS + 2 * index
+                OcrLanguagePack(fields[offset], fields[offset + 1])
+            })
+            val intent = OcrJobInput(
+                DocumentId(fields[1]),
+                OcrInput(fields[2], needLong(fields[4]), fields[6]),
+                SourceId(fields[3]),
+                fields[5],
+                needLong(fields[7]),
+                OcrConfiguration(fields[8], requireNotNull(fields[9].toIntOrNull()), OcrLayout.valueOf(fields[10]), packs),
+            )
+            // Reuse the canonical writer to refuse alternate numeric spelling and any other storage alias.
+            require(intent.canonical.contentEquals(snapshot))
+            return intent
+        }
+
+        private fun needLong(field: String): Long = requireNotNull(field.toLongOrNull())
     }
 }

@@ -68,8 +68,14 @@ class RoomJobLeases @JvmOverloads constructor(private val metadata: MetadataAcce
                 // Fence known cancellation through the last clock sample for the guarded route, without changing legacy acquisition timing.
                 if (guardedRead != null) coroutineContext.ensureActive()
                 val count = jobs.updateLease(running, job.leaseGeneration)
-                if (afterWrite != null && count !in 0..1) reject(OperationErrorCode.INTEGRITY_FAILED, "job_lease_update_count_invalid", jobId.value)
-                if (count != 1) return@transaction AcquireLeaseResult.Busy(job.state)
+                if (count != 1) {
+                    if (afterWrite != null) {
+                        // An ignored update can have run trigger side effects. Do not return normally from the guarded transaction.
+                        if (count == 0) throw GuardedStartBusy(job.state)
+                        reject(OperationErrorCode.INTEGRITY_FAILED, "job_lease_update_count_invalid", jobId.value)
+                    }
+                    return@transaction AcquireLeaseResult.Busy(job.state)
+                }
                 val lease = JobLease(jobId, owner, generation)
                 if (afterWrite != null) {
                     val written = afterWrite(running) { coroutineContext.ensureActive() }
@@ -82,9 +88,12 @@ class RoomJobLeases @JvmOverloads constructor(private val metadata: MetadataAcce
                 AcquireLeaseResult.Granted(lease)
             }
         } catch (canceled: CancellationException) { throw canceled }
+        catch (busy: GuardedStartBusy) { AcquireLeaseResult.Busy(busy.state) }
         catch (failure: RepositoryFailure) { AcquireLeaseResult.Rejected(failure.error) }
         catch (_: Exception) { AcquireLeaseResult.Rejected(OperationError(OperationErrorCode.STORAGE_FAILED, true, "job_lease_write_failed", jobId.value)) }
     }
+
+    private class GuardedStartBusy(val state: String) : RuntimeException()
 
     /** The ordinary render entry rechecks the first admission's exact JOB binding inside the existing same-database lease writer. The receipt is not a live JOB pin. */
     internal class FrozenRenderAcquisition(

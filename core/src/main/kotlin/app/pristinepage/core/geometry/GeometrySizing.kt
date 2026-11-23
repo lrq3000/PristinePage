@@ -14,6 +14,9 @@ import kotlin.math.max
 
 /** Resolves only deterministic raster dimensions. Source-identity matching, provider execution and resource admission remain the consuming renderer's responsibilities. */
 object GeometrySizing {
+    // OCR has its own qualification target. Do not reduce the selected preview/detail/export targets.
+    const val OCR_LONG_EDGE = 2400
+
     @JvmStatic fun baseTarget(recipe: GeometryRecipe): PixelSize = when (recipe) {
         is GeometryRecipe.None -> recipe.source.sourceSize
         is GeometryRecipe.Perspective -> fit(naturalTarget(recipe.quad, recipe.source.sourceSize), recipe.targetRule)
@@ -24,6 +27,17 @@ object GeometrySizing {
     }
 
     @JvmStatic fun target(recipe: GeometryRecipe): PixelSize = Coordinates.rotatedSize(baseTarget(recipe), recipe.outputQuarterTurns)
+
+    /** One exact common scale; a floating-point product just below an integer can produce a pair the renderer rightly rejects. */
+    @JvmStatic fun ocr(recipe: GeometryRecipe): OutputSpec {
+        val size = target(recipe)
+        val edge = maxOf(size.width, size.height)
+        val limit = minOf(edge, OCR_LONG_EDGE).toLong()
+        fun axis(value: Int) = (limit * value / edge).coerceAtLeast(1L).toInt()
+        val output = PixelSize(axis(size.width), axis(size.height))
+        require(recipe is GeometryRecipe.None || (output.width >= 2 && output.height >= 2)) { "Geometric OCR input has a singleton axis" }
+        return OutputSpec(output, RenderPurpose.OCR)
+    }
 
     /** The caller supplies a purpose-specific L explicitly, including EXPORT; no preview/export default or emergency shrink is inferred here. */
     @JvmStatic fun output(recipe: GeometryRecipe, purpose: RenderPurpose, longEdge: Int): OutputSpec {
