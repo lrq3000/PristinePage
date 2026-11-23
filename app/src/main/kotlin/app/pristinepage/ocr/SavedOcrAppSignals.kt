@@ -4,7 +4,7 @@ import app.pristinepage.core.ocr.OcrConfiguration
 import app.pristinepage.data.model.DocumentId
 import app.pristinepage.data.model.PageId
 import app.pristinepage.data.repository.SavedOcrWork
-import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicReference
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.async
@@ -19,16 +19,42 @@ internal class SavedOcrAppSignals(
     private val processScope: CoroutineScope,
     private val scheduling: SavedOcrScheduling,
 ) {
-    private val startupStarted = AtomicBoolean(false)
+    private enum class Startup(val pending: Boolean = false, val invalidated: Boolean = false) {
+        IDLE, RUNNING, PENDING(pending = true), COMPLETE,
+        RUNNING_INVALIDATED(invalidated = true), PENDING_INVALIDATED(pending = true, invalidated = true);
+
+        fun afterPass(completed: Boolean) = when {
+            completed && !invalidated -> COMPLETE
+            pending -> RUNNING
+            else -> IDLE
+        }
+    }
+    private val startup = AtomicReference(Startup.IDLE)
     private val manualRerun = MutableStateFlow(false)
     val rerunInFlight = manualRerun.asStateFlow()
 
     fun onStartup() {
-        if (!startupStarted.compareAndSet(false, true)) return
+        // A foreground event during a refused/incomplete pass must not wait for a third foreground transition.
+        val previous = startup.getAndUpdate {
+            when (it) {
+                Startup.IDLE -> Startup.RUNNING
+                Startup.RUNNING -> Startup.PENDING
+                Startup.RUNNING_INVALIDATED -> Startup.PENDING_INVALIDATED
+                else -> it
+            }
+        }
+        if (previous != Startup.IDLE) return
         processScope.launch {
-            var completed = false
-            try { completed = deliver { scheduling.onStartup() } }
-            finally { if (!completed) startupStarted.set(false) }
+            try {
+                do {
+                    val completed = deliver { scheduling.onStartup() } == true
+                    // Invalidation and pass completion are one transition: a concurrent failed save may be behind this pass's cursor.
+                    val finished = startup.getAndUpdate { it.afterPass(completed) }
+                } while (finished.afterPass(completed) == Startup.RUNNING)
+            } catch (canceled: CancellationException) {
+                startup.set(Startup.IDLE)
+                throw canceled
+            }
         }
     }
 
@@ -36,7 +62,18 @@ internal class SavedOcrAppSignals(
         val committed = pages.toList()
         if (committed.isEmpty()) return
         processScope.launch {
-            deliver { scheduling.onPagesSaved(document, committed) }
+            var completed = false
+            try { completed = deliver { scheduling.onPagesSaved(document, committed) } == true }
+            finally {
+                if (!completed) startup.getAndUpdate {
+                    when (it) {
+                        Startup.COMPLETE -> Startup.IDLE
+                        Startup.RUNNING -> Startup.RUNNING_INVALIDATED
+                        Startup.PENDING -> Startup.PENDING_INVALIDATED
+                        else -> it
+                    }
+                }
+            }
         }
     }
 
@@ -53,14 +90,13 @@ internal class SavedOcrAppSignals(
         }.await()
     }
 
-    private suspend fun deliver(wake: suspend () -> Unit): Boolean = try {
+    private suspend fun <T : Any> deliver(wake: suspend () -> T): T? = try {
         wake()
-        true
     } catch (canceled: CancellationException) {
         throw canceled
     } catch (_: Exception) {
         // Room work and the accepted page remain discoverable at startup. Never reinterpret a wake failure as failed save or recognition, or log a raw cause.
-        false
+        null
     }
 }
 

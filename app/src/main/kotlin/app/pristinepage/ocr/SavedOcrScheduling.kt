@@ -20,6 +20,7 @@ internal class SavedOcrScheduling(
     private val enqueue: suspend (SavedOcrWork.Target) -> Unit,
 ) {
     interface QualifiedSession {
+        val canCreateJobs: Boolean
         suspend fun reconcilePage(document: DocumentId, page: PageId): SavedOcrWork.Target?
         fun pendingPages(): Flow<SavedOcrWork.Target>
     }
@@ -51,12 +52,13 @@ internal class SavedOcrScheduling(
         return outcome
     }
 
-    /** One qualified defaults snapshot for this committed notification, not a persistent cache or a batch transaction. */
-    suspend fun onPagesSaved(document: DocumentId, pages: List<PageId>) {
+    /** One defaults snapshot per committed notification. A partial notification leaves the next foreground backfill eligible. */
+    suspend fun onPagesSaved(document: DocumentId, pages: List<PageId>): Boolean {
         val active = currentCoroutineContext()
         active.ensureActive()
-        if (pages.isEmpty()) return
-        val qualified = resolve() ?: return
+        if (pages.isEmpty()) return true
+        val qualified = resolve() ?: return false
+        var complete = qualified.canCreateJobs
         for (page in pages) {
             active.ensureActive()
             try {
@@ -67,18 +69,34 @@ internal class SavedOcrScheduling(
                 throw canceled
             } catch (_: Exception) {
                 // The accepted page and any committed job remain discoverable. A single failure must not drop the rest of this notification.
+                complete = false
             }
         }
         active.ensureActive()
+        return complete
     }
 
-    /** Serial enrollment keeps each scan bounded in memory and exposes failures without misreporting a recognition start. */
-    suspend fun onStartup() {
-        currentCoroutineContext().ensureActive()
-        resolve()?.pendingPages()?.collect { target ->
-            currentCoroutineContext().ensureActive()
-            enqueue(target)
+    /** Keep offering later pages after a failed wake. An incomplete scan remains eligible for the next launch. */
+    suspend fun onStartup(): Boolean {
+        val active = currentCoroutineContext()
+        active.ensureActive()
+        val qualified = resolve() ?: return false
+        var firstFailure: Exception? = null
+        qualified.pendingPages().collect { target ->
+            active.ensureActive()
+            try {
+                enqueue(target)
+            } catch (canceled: CancellationException) {
+                throw canceled
+            } catch (failure: Exception) {
+                // Keep only the first exception: the app signal uses it to leave startup eligible, not to log or count a recognition failure.
+                if (firstFailure == null) firstFailure = failure
+            }
         }
+        active.ensureActive()
+        firstFailure?.let { throw it }
+        // A read-only pass can deliver previously committed jobs but could not backfill pages that still need a job.
+        return qualified.canCreateJobs
     }
 
     companion object {
@@ -94,6 +112,8 @@ internal class SavedOcrScheduling(
 
         /** A verified runtime may have no resolvable default pack list. Null defaults preserve rediscovery without allocating new jobs. */
         fun bind(work: SavedOcrWork, defaults: OcrConfiguration?): QualifiedSession = object : QualifiedSession {
+            override val canCreateJobs = defaults != null
+
             override suspend fun reconcilePage(document: DocumentId, page: PageId): SavedOcrWork.Target? =
                 work.reconcilePage(document, page, defaults)
 

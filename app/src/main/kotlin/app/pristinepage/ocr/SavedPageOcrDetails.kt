@@ -13,6 +13,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.LiveRegionMode
 import androidx.compose.ui.semantics.liveRegion
@@ -27,7 +28,6 @@ import app.pristinepage.R
 import app.pristinepage.core.geometry.GeometrySizing
 import app.pristinepage.core.ocr.OcrConfiguration
 import app.pristinepage.core.ocr.OcrError
-import app.pristinepage.core.ocr.OcrLayout
 import app.pristinepage.core.ocr.OcrText
 import app.pristinepage.core.pipeline.PixelSize
 import app.pristinepage.core.pipeline.Recipe
@@ -37,6 +37,7 @@ import app.pristinepage.data.model.EditablePage
 import app.pristinepage.data.repository.SavedOcrWork
 import app.pristinepage.data.repository.SavedOcrWork.PagePhase
 import app.pristinepage.design.OcrLanguage
+import app.pristinepage.design.label
 import app.pristinepage.ocr.SavedOcrScheduling.RerunOutcome
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.awaitCancellation
@@ -49,6 +50,7 @@ class SavedPageOcrReader internal constructor(
     private val open: suspend () -> SavedOcrWork,
     internal val rerunInFlight: StateFlow<Boolean>,
     internal val requestRerun: suspend (SavedOcrWork.PageStatus, Boolean) -> RerunOutcome,
+    internal val requestSave: ((SavedOcrWork.TextExportObservation) -> Boolean)? = null,
 ) {
     internal suspend fun status(page: EditablePage) = open().readStatus(page.documentId, page.pageId, page.recipeRevision)
     internal suspend fun text(page: EditablePage) = open().readText(page.documentId, page.pageId, page.recipeRevision)
@@ -120,6 +122,8 @@ internal fun SavedPageOcrDetails(panel: SavedPageOcrPanel, page: EditablePage?, 
             }
         }
     }
+    // Read the snapshot in the host composition, not only in the dialog's separate window composition.
+    val displayed = result
     AlertDialog(
         onDismissRequest = dismiss,
         title = { Text(stringResource(panel.title)) },
@@ -130,7 +134,7 @@ internal fun SavedPageOcrDetails(panel: SavedPageOcrPanel, page: EditablePage?, 
                     LaunchedEffect(label) { focus.bringIntoView() }
                     Text(stringResource(label), modifier = Modifier.bringIntoViewRequester(focus).semantics { liveRegion = LiveRegionMode.Polite })
                 }
-                when (val shown = result) {
+                when (val shown = displayed) {
                     Reading.Loading -> Text(stringResource(R.string.ocr_details_loading))
                     Reading.Unavailable -> Text(stringResource(R.string.ocr_details_unavailable))
                     is Reading.Status -> {
@@ -162,13 +166,20 @@ internal fun SavedPageOcrDetails(panel: SavedPageOcrPanel, page: EditablePage?, 
                             // Do not pass private OCR to platform text classification or clipboard via selectable text.
                             Text(original, style = MaterialTheme.typography.bodyMedium.copy(textDirection = TextDirection.Content))
                         }
+                        val save = reader.requestSave
+                        if (item != null && save != null) TextButton(
+                            onClick = {
+                                if (lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED) && save(item.exportObservation)) dismiss()
+                            },
+                            modifier = Modifier.heightIn(min = 48.dp).testTag("ocr-text-save-as"),
+                        ) { Text(stringResource(R.string.ocr_save_text)) }
                     }
                 }
             }
         },
         confirmButton = { TextButton(onClick = dismiss, modifier = Modifier.heightIn(min = 48.dp)) { Text(stringResource(R.string.atelier_close)) } },
         dismissButton = {
-            TextButton(onClick = { notice = null; refresh++ }, enabled = !submitting && page != null && result != Reading.Loading,
+            TextButton(onClick = { notice = null; refresh++ }, enabled = !submitting && page != null && displayed != Reading.Loading,
                 modifier = Modifier.heightIn(min = 48.dp)) {
                 Text(stringResource(R.string.ocr_details_refresh))
             }
@@ -214,12 +225,7 @@ private sealed interface Reading {
 private fun OcrSettingsSummary(configuration: OcrConfiguration) {
     val engine = if (configuration.engineId == "tesseract-android") stringResource(R.string.ocr_engine_tesseract) else configuration.engineId
     Text(stringResource(R.string.ocr_details_engine, engine, configuration.engineVersion))
-    val layout = when (configuration.layout) {
-        OcrLayout.AUTOMATIC -> R.string.ocr_layout_automatic
-        OcrLayout.SINGLE_BLOCK -> R.string.ocr_layout_block
-        OcrLayout.SPARSE_TEXT -> R.string.ocr_layout_sparse
-    }
-    Text(stringResource(R.string.ocr_details_layout, stringResource(layout)))
+    Text(stringResource(R.string.ocr_details_layout, stringResource(configuration.layout.label())))
     val ordered = configuration.languagePacks?.ordered.orEmpty()
     if (ordered.isNotEmpty()) {
         val languages = ordered.map { pack ->

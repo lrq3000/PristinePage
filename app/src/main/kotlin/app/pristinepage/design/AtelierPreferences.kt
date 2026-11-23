@@ -3,6 +3,7 @@ package app.pristinepage.design
 import android.content.Context
 import androidx.core.content.edit
 import app.pristinepage.R
+import app.pristinepage.core.ocr.OcrLayout
 import app.pristinepage.data.model.AlbumOrder
 import app.pristinepage.library.AlbumTitleTemplate
 import java.util.Collections
@@ -62,6 +63,7 @@ internal data class AtelierSettings(
     val albumTitleTemplate: AlbumTitleTemplate = AlbumTitleTemplate.DEFAULT,
     val ocrLanguages: List<OcrLanguage> = OcrLanguage.DEFAULT,
     val ocrDiagnostics: Boolean = false,
+    val ocrLayout: OcrLayout = OcrLayout.AUTOMATIC,
 ) {
     fun withOcrLanguage(language: OcrLanguage, enabled: Boolean): AtelierSettings {
         if ((language in ocrLanguages) == enabled || (!enabled && ocrLanguages.size == 1)) return this
@@ -78,6 +80,7 @@ internal data class AtelierSettings(
             (values["albumTitleTemplate"] as? String)?.let(AlbumTitleTemplate::parse) ?: AlbumTitleTemplate.DEFAULT,
             OcrLanguage.fromStored(values["ocrLanguages"]),
             values["ocrDiagnostics"] as? Boolean ?: false,
+            OcrLayout.entries.firstOrNull { it.name == values["ocrLayout"] } ?: OcrLayout.AUTOMATIC,
         )
     }
 }
@@ -125,5 +128,11 @@ internal class AtelierPreferences(context: Context, name: String = "pristinepage
         if (current.value.ocrDiagnostics == enabled) return
         storage.edit { putBoolean("ocrDiagnostics", enabled) }
         current.value = current.value.copy(ocrDiagnostics = enabled)
+    }
+
+    fun setOcrLayout(layout: OcrLayout) {
+        if (current.value.ocrLayout == layout) return
+        storage.edit { putString("ocrLayout", layout.name) }
+        current.value = current.value.copy(ocrLayout = layout)
     }
 }

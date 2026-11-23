@@ -64,6 +64,8 @@ import app.pristinepage.library.LibrarySession
 import app.pristinepage.library.ImportPhase
 import app.pristinepage.ocr.AlbumOcrPending
 import app.pristinepage.ocr.SavedPageOcrReader
+import app.pristinepage.ocr.OcrTextSaveHost
+import app.pristinepage.ocr.OcrTextSaveViewModel
 import app.pristinepage.image.preview.OriginalPreviewBitmap
 import app.pristinepage.image.preview.RenderedPreviewBitmap
 import app.pristinepage.image.preview.RenderedPreviewBitmapLoader
@@ -100,7 +102,6 @@ class MainActivity : ComponentActivity() {
     private fun start(restored: LibraryIdentity, restoredEditor: EditorIdentity? = null) {
         val app = application as PristinePageApplication
         val services = app.services
-        app.savedOcrSignals.onStartup()
         val factory = object : ViewModelProvider.Factory {
             @Suppress("UNCHECKED_CAST") override fun <T : ViewModel> create(modelClass: Class<T>): T {
                 require(modelClass == ImportLibraryViewModel::class.java)
@@ -127,6 +128,12 @@ class MainActivity : ComponentActivity() {
                 return AlbumExportViewModel(app, services::imports) as T
             }
         })[AlbumExportViewModel::class.java]
+        val textSave = ViewModelProvider(this, object : ViewModelProvider.Factory {
+            @Suppress("UNCHECKED_CAST") override fun <T : ViewModel> create(modelClass: Class<T>): T {
+                require(modelClass == OcrTextSaveViewModel::class.java)
+                return OcrTextSaveViewModel(app) { services.imports().store.savedOcr } as T
+            }
+        })[OcrTextSaveViewModel::class.java]
         val acquisition = ViewModelProvider(this, object : ViewModelProvider.Factory {
             @Suppress("UNCHECKED_CAST") override fun <T : ViewModel> create(modelClass: Class<T>): T {
                 require(modelClass == AtelierCaptureViewModel::class.java)
@@ -140,7 +147,13 @@ class MainActivity : ComponentActivity() {
         val binding = LibraryPickerBinding(activityResultRegistry, retained)
         picker = binding
         binding.synchronize()
-        observing = lifecycleScope.launch { repeatOnLifecycle(Lifecycle.State.STARTED) { retained.state.collect { binding.synchronize() } } }
+        observing = lifecycleScope.launch {
+            repeatOnLifecycle(Lifecycle.State.STARTED) {
+                // A failed or unavailable earlier reconciliation may recover on the next foreground visit.
+                app.savedOcrSignals.onStartup()
+                retained.state.collect { binding.synchronize() }
+            }
+        }
         val loadOriginal: suspend (String) -> OriginalPreviewBitmap = { source ->
             services.imports().originalPreview(source)
         }
@@ -177,7 +190,7 @@ class MainActivity : ComponentActivity() {
             }
             else if (atHome && settingsPage != null) {
                 val ocrReady by app.ocrRuntimeReady.collectAsStateWithLifecycle()
-                AtelierSettingsScreen(checkNotNull(settingsPage), app.atelierPreferences, app.hasBundledOcr, ocrReady) { settingsPage = it }
+                AtelierSettingsScreen(checkNotNull(settingsPage), app.atelierPreferences, ocrReady) { settingsPage = it }
             }
             else if (host.identity == null) libraryState.SaveableStateProvider("atelier-library") {
                 val observeOcrPending = remember(app) { AlbumOcrPending.forSavedPage(app) { services.imports().store.savedOcr } }
@@ -240,6 +253,7 @@ class MainActivity : ComponentActivity() {
                                     commit = { services.imports().store.savedOcr.requestRerun(observed, it) },
                                 )
                             },
+                            requestSave = textSave::save,
                         )
                     }
                      PageEditorScreen(loadOriginal = loadOriginal, savedOcr = savedOcr, showOcrDiagnostics = settings.ocrDiagnostics,
@@ -264,6 +278,7 @@ class MainActivity : ComponentActivity() {
                 }
             }
             AlbumExportDialog(exportOwner)
+            OcrTextSaveHost(textSave, activityResultRegistry)
         } }
     }
 

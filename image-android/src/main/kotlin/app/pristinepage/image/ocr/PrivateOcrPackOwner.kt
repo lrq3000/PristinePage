@@ -11,6 +11,7 @@ import java.io.IOException
 import java.io.InputStream
 import java.nio.ByteBuffer
 import java.nio.channels.FileChannel
+import java.nio.channels.OverlappingFileLockException
 import java.nio.file.DirectoryIteratorException
 import java.nio.file.FileAlreadyExistsException
 import java.nio.file.Files
@@ -71,7 +72,9 @@ internal class PrivateOcrPackOwner private constructor(
             if (Files.exists(lock, NOFOLLOW_LINKS) && !ordinaryLeaf(lock)) return false
             FileChannel.open(lock, setOf<OpenOption>(CREATE, WRITE, NOFOLLOW_LINKS), *mode(privateFileMode)).use { channel ->
                 if (!ordinaryLeaf(lock)) return false
-                val ownership = channel.tryLock() ?: return false
+                // A lock already held in this JVM is reported as an exception, not as a null cross-process refusal.
+                val ownership = try { channel.tryLock() } catch (_: OverlappingFileLockException) { null }
+                    ?: return false
                 ownership.use {
                     if (!physicalDirectory(parent)) return false
                     if (Files.exists(destination, NOFOLLOW_LINKS)) return acquire(all, checkpoint) != null

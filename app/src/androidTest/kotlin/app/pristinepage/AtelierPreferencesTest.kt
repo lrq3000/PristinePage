@@ -3,6 +3,7 @@ package app.pristinepage
 import android.content.Context
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
+import app.pristinepage.core.ocr.OcrLayout
 import app.pristinepage.data.model.AlbumOrder
 import app.pristinepage.design.AtelierPreferences
 import app.pristinepage.design.AtelierSettings
@@ -16,15 +17,18 @@ import org.junit.runner.RunWith
 
 @RunWith(AndroidJUnit4::class)
 class AtelierPreferencesTest {
-    @Test fun diagnosticsPersistWithoutChangingTheStoredRecognitionOrder() {
+    @Test fun diagnosticsAndLayoutPersistWithoutChangingTheStoredRecognitionOrder() {
         val context = InstrumentationRegistry.getInstrumentation().targetContext
         val name = "test-ocr-diagnostics-${UUID.randomUUID()}"
         val preferences = AtelierPreferences(context, name)
         assertEquals(false, preferences.settings.value.ocrDiagnostics)
+        assertEquals(OcrLayout.AUTOMATIC, preferences.settings.value.ocrLayout)
         preferences.setOcrLanguage(OcrLanguage.JAPANESE, true)
+        preferences.setOcrLayout(OcrLayout.SPARSE_TEXT)
         preferences.setOcrDiagnostics(true)
         val reopened = AtelierPreferences(context, name)
         assertEquals(true, reopened.settings.value.ocrDiagnostics)
+        assertEquals(OcrLayout.SPARSE_TEXT, reopened.settings.value.ocrLayout)
         assertEquals(listOf(OcrLanguage.ENGLISH, OcrLanguage.FRENCH, OcrLanguage.JAPANESE), reopened.settings.value.ocrLanguages)
         reopened.setOcrDiagnostics(false)
         assertEquals(false, AtelierPreferences(context, name).settings.value.ocrDiagnostics)

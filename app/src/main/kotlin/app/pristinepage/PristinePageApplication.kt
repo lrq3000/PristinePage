@@ -2,6 +2,7 @@ package app.pristinepage
 
 import android.app.Application
 import app.pristinepage.design.AtelierPreferences
+import app.pristinepage.image.BundledOcrRuntime
 import app.pristinepage.ocr.SavedOcrAppSignals
 import app.pristinepage.ocr.SavedOcrApplication
 import app.pristinepage.ocr.SavedOcrScheduling
@@ -10,22 +11,32 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 
 /** Process lifetime owns the service root. No eager camera permission, provider read, database open or background-completion promise is attached to Application.onCreate. */
-open class PristinePageApplication : Application() {
+class PristinePageApplication : Application() {
     val services: ApplicationServices by lazy { ApplicationServices(this) }
     internal val atelierPreferences by lazy { AtelierPreferences(this) }
     private val runtimeReady = MutableStateFlow(false)
     internal val ocrRuntimeReady = runtimeReady.asStateFlow()
 
-    // Normal builds have no runtime. The local qualification source set is the only override.
-    internal open val hasBundledOcr: Boolean get() = false
-    internal open suspend fun installedSavedOcrRuntime(): SavedOcrApplication.Runtime? = null
+    private val ocrInitialization = Mutex()
+    private var verifiedRuntime: SavedOcrApplication.Runtime? = null
+
+    private suspend fun installedSavedOcrRuntime(): SavedOcrApplication.Runtime? = ocrInitialization.withLock {
+        verifiedRuntime ?: BundledOcrRuntime.open(this, services.budget)?.let { installed ->
+            SavedOcrApplication.Runtime(installed.sessions, installed::configurationFor).also { verifiedRuntime = it }
+        }
+    }
 
     internal val savedOcr by lazy {
         SavedOcrApplication(
             installed = { installedSavedOcrRuntime().also { runtimeReady.value = it != null } },
-            orderedDefaults = { atelierPreferences.settings.value.ocrLanguages.map { it.packCode } },
+            defaults = {
+                val settings = atelierPreferences.settings.value
+                SavedOcrApplication.Defaults(settings.ocrLanguages.map { it.packCode }, settings.ocrLayout)
+            },
             graph = { SavedOcrApplication.bind(services.imports()) },
         )
     }

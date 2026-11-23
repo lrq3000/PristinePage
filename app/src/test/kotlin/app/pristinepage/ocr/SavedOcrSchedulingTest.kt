@@ -24,16 +24,17 @@ class SavedOcrSchedulingTest {
     private val first = SavedOcrWork.Target(page, JobId("aaaaaaaa-aaaa-4aaa-8aaa-000000000003"))
     private val second = SavedOcrWork.Target(PageId("aaaaaaaa-aaaa-4aaa-8aaa-000000000004"), JobId("aaaaaaaa-aaaa-4aaa-8aaa-000000000005"))
 
-    @Test fun missingRuntimeLeavesBothSignalsDormant() = runBlocking {
+    @Test fun missingRuntimeLeavesBothSignalsDormant(): Unit = runBlocking {
         val schedule = SavedOcrScheduling(resolve = { null }) { throw AssertionError("No runtime, no WorkManager enrollment") }
         schedule.onPagesSaved(document, listOf(page))
-        schedule.onStartup()
+        assertFalse(schedule.onStartup())
     }
 
     @Test fun saveReconcilesOnlyTheNamedPageAndSkipsAnAbsentTarget() = runBlocking {
         val targets = mutableListOf<SavedOcrWork.Target>()
         val seen = mutableListOf<Pair<DocumentId, PageId>>()
         val store = object : SavedOcrScheduling.QualifiedSession {
+            override val canCreateJobs = true
             override suspend fun reconcilePage(document: DocumentId, page: PageId): SavedOcrWork.Target? {
                 seen += document to page
                 return if (page == first.page) first else null
@@ -50,6 +51,7 @@ class SavedOcrSchedulingTest {
     @Test fun startupWaitsForEnrollmentBeforeTakingTheNextTarget() = runBlocking {
         val events = mutableListOf<String>()
         val store = object : SavedOcrScheduling.QualifiedSession {
+            override val canCreateJobs = true
             override suspend fun reconcilePage(document: DocumentId, page: PageId): SavedOcrWork.Target =
                 throw AssertionError("Startup must use the bounded discovery path")
 
@@ -92,6 +94,17 @@ class SavedOcrSchedulingTest {
         assertEquals(listOf(second), targets)
     }
 
+    @Test fun unresolvedDefaultsStillDeliverExistingJobsButLeaveBackfillEligible(): Unit = runBlocking {
+        val enrolled = mutableListOf<SavedOcrWork.Target>()
+        val partial = object : SavedOcrScheduling.QualifiedSession by onlyFirst() {
+            override val canCreateJobs = false
+            override fun pendingPages(): Flow<SavedOcrWork.Target> = flow { emit(first) }
+        }
+        val schedule = SavedOcrScheduling({ partial }) { enrolled += it }
+        assertFalse(schedule.onStartup())
+        assertEquals(listOf(first), enrolled)
+    }
+
     @Test fun cancellationWhileWaitingForEnrollmentStopsDiscovery() = runBlocking {
         val entered = CompletableDeferred<Unit>()
         val schedule = SavedOcrScheduling(resolve = { onlyFirst() }) {
@@ -104,10 +117,25 @@ class SavedOcrSchedulingTest {
         assertTrue(startup.isCancelled)
     }
 
-    @Test fun failedEnrollmentIsVisibleAndStopsThatScan() = runBlocking {
+    @Test fun failedEnrollmentDoesNotStrandLaterPagesButKeepsStartupRetryable() = runBlocking {
         val failure = IllegalStateException("Fixture scheduler failed")
-        val schedule = SavedOcrScheduling(resolve = { onlyFirst() }) { throw failure }
+        val enrolled = mutableListOf<SavedOcrWork.Target>()
+        val store = object : SavedOcrScheduling.QualifiedSession {
+            override val canCreateJobs = true
+            override suspend fun reconcilePage(document: DocumentId, page: PageId): SavedOcrWork.Target =
+                throw AssertionError("Startup must use the bounded discovery path")
+
+            override fun pendingPages(): Flow<SavedOcrWork.Target> = flow {
+                emit(first)
+                emit(second)
+            }
+        }
+        val schedule = SavedOcrScheduling(resolve = { store }) { target ->
+            if (target == first) throw failure
+            enrolled += target
+        }
         assertSame(failure, runCatching { schedule.onStartup() }.exceptionOrNull())
+        assertEquals(listOf(second), enrolled)
     }
 
     @Test fun unqualifiedRerunDoesNotCommitOrOfferAWake() = runBlocking {
@@ -145,12 +173,13 @@ class SavedOcrSchedulingTest {
 
     private fun onlyFirst(): SavedOcrScheduling.QualifiedSession =
         object : SavedOcrScheduling.QualifiedSession {
+            override val canCreateJobs = true
             override suspend fun reconcilePage(document: DocumentId, page: PageId): SavedOcrWork.Target? =
                 throw AssertionError("Startup must use the bounded discovery path")
 
             override fun pendingPages(): Flow<SavedOcrWork.Target> = flow {
                 emit(first)
-                throw AssertionError("A failed or canceled enrollment continued discovery")
+                throw AssertionError("A canceled enrollment continued discovery")
             }
         }
 }

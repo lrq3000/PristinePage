@@ -1,0 +1,222 @@
+[
+  {
+    "id": "eng-clean",
+    "language": "eng",
+    "style": "clean",
+    "font": "times.ttf",
+    "anchor": "garden",
+    "identifier": "2846",
+    "text": "Workshop notice\nThe garden opens on Monday.\nReference 2846",
+    "bytes": 25934,
+    "sha256": "a8e46a99dad8736979d515d10ab5e52fa7988f440ef3300cc80ab4a5d0353708"
+  },
+  {
+    "id": "eng-receipt",
+    "language": "eng",
+    "style": "receipt",
+    "font": "consola.ttf",
+    "anchor": "receipt",
+    "identifier": "5731",
+    "text": "Market receipt\nFresh apples and bread\nReceipt 5731",
+    "bytes": 15303,
+    "sha256": "b9d50b9c3a1bedfad777b9a4b6dc938ee87b6f17f83a2f39f32242058459ff4a"
+  },
+  {
+    "id": "eng-tint",
+    "language": "eng",
+    "style": "tint",
+    "font": "calibri.ttf",
+    "anchor": "borrowed",
+    "identifier": "6928",
+    "text": "Library bulletin\nReturn borrowed books on Friday.\nRecord 6928",
+    "bytes": 24546,
+    "sha256": "a74373239495c7c18698d326d1ea9bd8564c599f3b3639edccf632dece19201c"
+  },
+  {
+    "id": "eng-tilt",
+    "language": "eng",
+    "style": "tilt",
+    "font": "arial.ttf",
+    "anchor": "parcel",
+    "identifier": "3479",
+    "text": "Delivery note\nPlease leave the parcel inside.\nParcel 3479",
+    "bytes": 54727,
+    "sha256": "f43f6ffca20c3e38bcba0d8e2038adb77b64b29ef54b1b84fc195ae37e1669a5"
+  },
+  {
+    "id": "eng-perspective",
+    "language": "eng",
+    "style": "perspective",
+    "font": "georgia.ttf",
+    "anchor": "schedule",
+    "identifier": "8164",
+    "text": "Meeting agenda\nDiscuss the winter schedule.\nMeeting 8164",
+    "bytes": 56616,
+    "sha256": "aa651faa160465780834a1c44b87abf1c57e06431bc5188fef36bf8de9e34acc"
+  },
+  {
+    "id": "fra-clean",
+    "language": "fra",
+    "style": "clean",
+    "font": "georgia.ttf",
+    "anchor": "musée",
+    "identifier": "4537",
+    "text": "Avis de visite\nLe musée ouvre le lundi.\nRéférence 4537",
+    "bytes": 20937,
+    "sha256": "e5b5016a379acfc96e812d249d228c4a68c3012198852c6f6647092cb6d77a3e"
+  },
+  {
+    "id": "fra-receipt",
+    "language": "fra",
+    "style": "receipt",
+    "font": "consola.ttf",
+    "anchor": "caisse",
+    "identifier": "8263",
+    "text": "Ticket de caisse\nPommes fraîches et pain\nTicket 8263",
+    "bytes": 16990,
+    "sha256": "b90d52f5db3780412a536e4b41af850355ec3644a40e5f939f6498d08e713bc2"
+  },
+  {
+    "id": "fra-tint",
+    "language": "fra",
+    "style": "tint",
+    "font": "arial.ttf",
+    "anchor": "travaux",
+    "identifier": "5942",
+    "text": "Bulletin de quartier\nLes travaux commencent en été.\nDossier 5942",
+    "bytes": 28599,
+    "sha256": "825769a291550857ab7d16124d5de0df8bdf45c10835ba64d9be863a50732001"
+  },
+  {
+    "id": "fra-tilt",
+    "language": "fra",
+    "style": "tilt",
+    "font": "times.ttf",
+    "anchor": "livraison",
+    "identifier": "7316",
+    "text": "Note de livraison\nLe colis est arrivé ce matin.\nColis 7316",
+    "bytes": 44585,
+    "sha256": "4799f5612d203c6e360de3824d11cb5d63535b3f7b055510e4c87ce9c8159890"
+  },
+  {
+    "id": "fra-perspective",
+    "language": "fra",
+    "style": "perspective",
+    "font": "calibri.ttf",
+    "anchor": "calendrier",
+    "identifier": "2687",
+    "text": "Ordre du jour\nPréparer le calendrier annuel.\nRéunion 2687",
+    "bytes": 45869,
+    "sha256": "5f2469e15e5bf0cc2be6378b557ed01331a09185ccaf44df00dabe5d626787ac"
+  },
+  {
+    "id": "jpn-clean",
+    "language": "jpn",
+    "style": "clean",
+    "font": "YuGothM.ttc",
+    "anchor": "図書館",
+    "identifier": "3827",
+    "text": "図書館のお知らせ\n月曜日に本を返してください。\n番号 3827",
+    "bytes": 34483,
+    "sha256": "1046906bf8368a67e93f0f2ac475cea2845533899bd915b51bc917e418a2fe0a"
+  },
+  {
+    "id": "jpn-receipt",
+    "language": "jpn",
+    "style": "receipt",
+    "font": "msgothic.ttc",
+    "anchor": "領収書",
+    "identifier": "6492",
+    "text": "お店の領収書\nりんごとパンを買いました。\n番号 6492",
+    "bytes": 23898,
+    "sha256": "7478534b298f6c14224e36203c96e0d156bce9dbbd4d5619c40ecd3e938fa97f"
+  },
+  {
+    "id": "jpn-tint",
+    "language": "jpn",
+    "style": "tint",
+    "font": "YuGothR.ttc",
+    "anchor": "公園",
+    "identifier": "5274",
+    "text": "町の案内\n公園の入口はこちらです。\n番号 5274",
+    "bytes": 24827,
+    "sha256": "16c1a8530e4ca4c0e1f83e75162c7075a0e41bd8eadf47d7f08758b6114a3e13"
+  },
+  {
+    "id": "jpn-tilt",
+    "language": "jpn",
+    "style": "tilt",
+    "font": "YuGothM.ttc",
+    "anchor": "荷物",
+    "identifier": "9738",
+    "text": "配達のお知らせ\n荷物は明日の朝に届きます。\n番号 9738",
+    "bytes": 55825,
+    "sha256": "e7bfe20191789583398378db39cece2cf336e8147c5dfa14aefd13dd0eb9c035"
+  },
+  {
+    "id": "jpn-perspective",
+    "language": "jpn",
+    "style": "perspective",
+    "font": "YuGothB.ttc",
+    "anchor": "来週",
+    "identifier": "4615",
+    "text": "会議の予定\n来週の予定を話し合います。\n番号 4615",
+    "bytes": 55669,
+    "sha256": "33290496ee433750a6ef23fc8afc1a0342a9764a33e4e790aba341eae95e8825"
+  },
+  {
+    "id": "chi_sim-clean",
+    "language": "chi_sim",
+    "style": "clean",
+    "font": "simsun.ttc",
+    "anchor": "图书馆",
+    "identifier": "6153",
+    "text": "图书馆通知\n请在星期一归还图书。\n编号 6153",
+    "bytes": 26591,
+    "sha256": "858d316f0b75634d9f15c19c8133d4a93be4558c309ef417e5131847e89ddff5"
+  },
+  {
+    "id": "chi_sim-receipt",
+    "language": "chi_sim",
+    "style": "receipt",
+    "font": "msyh.ttc",
+    "anchor": "收据",
+    "identifier": "4872",
+    "text": "商店收据\n今天购买苹果和面包。\n单号 4872",
+    "bytes": 19151,
+    "sha256": "f46887ac79e527f4b7c01382d3a4d9a32fde4a55f29dda38e09bd4d6a6fabbb0"
+  },
+  {
+    "id": "chi_sim-tint",
+    "language": "chi_sim",
+    "style": "tint",
+    "font": "msyhl.ttc",
+    "anchor": "公园",
+    "identifier": "7634",
+    "text": "社区公告\n公园入口明天开放。\n编号 7634",
+    "bytes": 20622,
+    "sha256": "33f5315944407110e6747dd05fd3c085eb095b998b1a4731cf79b60768343fbd"
+  },
+  {
+    "id": "chi_sim-tilt",
+    "language": "chi_sim",
+    "style": "tilt",
+    "font": "simsun.ttc",
+    "anchor": "送货通知",
+    "identifier": "2958",
+    "text": "送货通知\n包裹将在明早送达。\n单号 2958",
+    "bytes": 42574,
+    "sha256": "84f0c608bb35bc3f84e48ddbe69b2b0831252525748a686e9145120ea2ad0bea"
+  },
+  {
+    "id": "chi_sim-perspective",
+    "language": "chi_sim",
+    "style": "perspective",
+    "font": "msyhbd.ttc",
+    "anchor": "计划",
+    "identifier": "5386",
+    "text": "会议安排\n请准备下周的工作计划。\n编号 5386",
+    "bytes": 53590,
+    "sha256": "539b3597d0f4a117a8a4f5181d9a75ef7133d36d10374f8c580e88aba9049bc7"
+  }
+]

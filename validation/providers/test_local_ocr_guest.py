@@ -2,6 +2,7 @@
 
 import subprocess
 import sys
+from tempfile import TemporaryDirectory
 import unittest
 import xml.etree.ElementTree as ET
 from pathlib import Path
@@ -16,6 +17,26 @@ def block(class_name, method, code):
 
 
 class LocalOcrGuestTest(unittest.TestCase):
+    def test_fresh_registration_requires_exact_unused_stopped_index_and_both_disks(self):
+        from run_local_ocr_guest import inspect_fresh_registration
+
+        target = "agent-pristinepage-ocr-0123456789ab"
+        with TemporaryDirectory() as temp:
+            home = Path(temp).resolve()
+            vm = home / "vms/leidian2"
+            vm.mkdir(parents=True)
+            before = [["0", "LDPlayer", "0", "0", "0", "-1", "-1"]]
+            stopped = ["2", target, "0", "0", "0", "-1", "-1"]
+            (vm / "data.vmdk").write_bytes(b"data")
+            with self.assertRaises(RuntimeError):
+                inspect_fresh_registration(before, before + [stopped], target, home)
+            (vm / "sdcard.vmdk").write_bytes(b"sdcard")
+            self.assertEqual(2, inspect_fresh_registration(before, before + [stopped], target, home))
+            for after in (before, before + [stopped, stopped], [stopped[:4] + ["1", "1234", "1235"]],
+                          [["0", *stopped[1:]]], [stopped, ["2", *before[0][1:]]]):
+                with self.subTest(after=after), self.assertRaises(RuntimeError):
+                    inspect_fresh_registration(before, after, target, home)
+
     def test_airplane_verification_requires_no_connected_network_or_default_route(self):
         from local_ocr_airplane import disconnected
 
@@ -82,6 +103,33 @@ class LocalOcrGuestTest(unittest.TestCase):
         self.assertFalse(radio_proven(good, "after"))
         self.assertFalse(radio_proven(dict(good, **{"before-wifi": "Wi-Fi is enabled\n"}), "before"))
         self.assertFalse(radio_proven(dict(good, **{"before-state": "1\n2\n0\n"}), "before"))
+
+    def test_ocr_refusal_journey_requires_its_own_instrumented_pass_and_marker(self):
+        from run_local_ocr_airplane import RECOVERY_CASE, RECOVERY_MARKER, invocation, witnessed
+
+        case, option, _ = invocation(None, recover_runtime=True)
+        self.assertEqual(RECOVERY_CASE, case)
+        self.assertEqual("offlineOcrFixture", option)
+        ending = "OK (1 test)\nINSTRUMENTATION_CODE: -1\n"
+        transcript = block(*case, 1) + block(*case, 0) + f"INSTRUMENTATION_RESULT: offlineOcrWitness={RECOVERY_MARKER}\n" + ending
+        self.assertTrue(witnessed(transcript, recover_runtime=True))
+        self.assertFalse(witnessed(transcript))
+        self.assertFalse(witnessed(transcript.replace(RECOVERY_MARKER, "EXACT_COLD_FILES_PAGE_IN_AIRPLANE_MODE"), recover_runtime=True))
+        with self.assertRaises(RuntimeError):
+            invocation("latin", recover_runtime=True)
+
+    def test_offline_app_update_requires_an_exact_predecessor_for_both_packages(self):
+        runner = Path(__file__).with_name("run_local_ocr_airplane.py")
+        for flags in (["--previous-app-sha", "a" * 64],
+                      ["--previous-app-sha", "bad", "--previous-test-sha", "b" * 64]):
+            with self.subTest(flags=flags):
+                completed = subprocess.run(
+                    [sys.executable, "-B", runner, "--existing", "unused", *flags,
+                     "unused", "unused", "unused", "unused", "unused", "unused"],
+                    capture_output=True, text=True, timeout=15,
+                )
+                self.assertEqual(2, completed.returncode, completed.stderr)
+                self.assertIn("An app update requires both exact predecessor digests", completed.stderr)
 
     def test_language_and_rerun_modes_refuse_unscoped_arguments_before_apk_admission(self):
         runner = Path(__file__).with_name("run_local_ocr_guest.py")
@@ -166,11 +214,18 @@ class LocalOcrGuestTest(unittest.TestCase):
         component = "com.android.documentsui/.picker.PickActivity"
         dump = (
             f"  ACTIVITY {component} abc123 pid=42\n"
-            "        #2: DirectoryFragment{def456 #2 id=0x7f090044}\n"
-            f"          mArguments=Bundle[{{root=Root{{authority={authority}, rootId=downloads, title=Downloads, "
+            "      Active Fragments in 74a9797:\n"
+            "        #2: null\n"
+            "        #3: DirectoryFragment{def456 #4 id=0x7f090044}\n"
+            "          mAdded=true mRemoving=false mFromLayout=false mInLayout=false\n"
+            "          mHidden=false mDetached=false mMenuVisible=true mHasMenu=false\n"
+            f"          mArguments=Bundle[{{selection=size=0, items=[], root=Root{{authority={authority}, rootId=downloads, title=Downloads, "
             f"isUsb=false, isSd=false, isMtp=false}} @ content://{authority}/root/downloads, "
             f"document=DocumentInfo{{docId=raw:{path}, name={folder}, mimeType=vnd.android.document/directory, "
-            f"isContainer=true, isDirectory=true, isCreateSupported=true}} @ {uri}}}]\n"
+            f"isContainer=true, isDirectory=true, isCreateSupported=true}} @ {uri}, ignoreState=true}}]\n"
+            "      Added Fragments:\n"
+            "        #2: DirectoryFragment{def456 #4 id=0x7f090044}\n"
+            "      FragmentManager misc state:\n"
         )
         self.assertTrue(matches_local_downloads(dump, component, path))
         for invalid in (
@@ -178,6 +233,13 @@ class LocalOcrGuestTest(unittest.TestCase):
             dump.replace("%2FDownload%2F", "%2FOther%2F"), dump.replace("isCreateSupported=true", "isCreateSupported=false"),
             dump.replace("DirectoryFragment", "OtherFragment"), dump + dump,
             dump.replace(component, "elsewhere/.Picker"), dump.replace("isUsb=false", "isUsb=true"),
+            dump.replace("mHidden=false", "mHidden=true"), dump.replace("mAdded=true", "mAdded=false"),
+            dump.replace("Added Fragments:", "Historical Fragments:"),
+            dump.replace("Active Fragments in 74a9797:", "Active Fragments in another manager:"),
+            dump.replace("Active Fragments in 74a9797:", "Active Fragments in 1234:\n      Active Fragments in 74a9797:"),
+            dump.replace("Added Fragments:\n        #2: DirectoryFragment{def456", "Added Fragments:\n        #2: DirectoryFragment{abc123"),
+            dump.replace("          mAdded=true", "        #4: Unparsed.Fragment{abcdef}\n          mAdded=true"),
+            dump.replace("ignoreState=true", "unrecognized=value"),
         ):
             self.assertFalse(matches_local_downloads(invalid, component, path))
 
@@ -252,3 +314,53 @@ class LocalOcrGuestTest(unittest.TestCase):
         ):
             with self.subTest(output=output):
                 self.assertFalse(passed_case(output, CASE))
+
+    def test_sparse_layout_requires_its_own_case_and_single_exact_marker(self):
+        import run_local_ocr_guest as guest
+
+        case = (guest.LANGUAGE_CASE[0], "japaneseSparseLayoutRemainsBoundToTheExactSearchHit")
+        marker = "INSTRUMENTATION_STATUS: ocrLanguageControl=jpn\r\nINSTRUMENTATION_STATUS_CODE: 65\r\n"
+        done = block(*case, 0) + "OK (1 test)\r\nINSTRUMENTATION_CODE: -1\r\n"
+        start = block(*case, 1)
+        self.assertEqual(("jpn",), guest.checked_language_results(start + marker + done, suite="japanese"))
+        for invalid in (start + done, start + marker + marker + done,
+                        start + marker.replace("jpn", "eng") + done, block(*guest.LANGUAGE_CASE, 1) + marker + done):
+            with self.subTest(invalid=invalid), self.assertRaises(RuntimeError):
+                guest.checked_language_results(invalid, suite="japanese")
+
+    def test_remaining_script_batch_requires_each_marker_in_order(self):
+        import run_local_ocr_guest as guest
+
+        case = (guest.LANGUAGE_CASE[0], "remainingLatinLanguagesReachTheExactHomePage")
+        ids = ("spa", "deu", "ita", "por", "nld", "pol", "tur")
+        markers = [f"INSTRUMENTATION_STATUS: ocrLanguageControl={control}\nINSTRUMENTATION_STATUS_CODE: 65\n" for control in ids]
+        done = block(*case, 0) + "\nOK (1 test)\nINSTRUMENTATION_CODE: -1\n"
+        start = block(*case, 1)
+        self.assertEqual(ids, guest.checked_language_results(start + "".join(markers) + done, suite="latin"))
+        for reordered in (markers[:-1], markers + markers[:1], markers[::-1]):
+            with self.assertRaises(RuntimeError):
+                guest.checked_language_results(start + "".join(reordered) + done, suite="latin")
+
+    def test_offline_script_batch_cannot_substitute_the_files_marker(self):
+        from run_local_ocr_airplane import invocation
+        from run_local_ocr_guest import LANGUAGE_SUITES
+
+        case, option, limit = invocation("latin")
+        self.assertEqual(LANGUAGE_SUITES["latin"][0], case)
+        self.assertEqual("ocrFixture", option)
+        self.assertTrue(0 < limit < 1500)
+        self.assertEqual("offlineOcrFixture", invocation(None)[1])
+        with self.assertRaises(RuntimeError):
+            invocation("not-a-qualified-batch")
+
+    def test_offline_source_is_confined_and_profile_specific(self):
+        from run_local_ocr_airplane import offline_source
+
+        root = Path.cwd()
+        stage = root / "validation/raw/providers/synthetic-qualified-stage"
+        self.assertEqual(stage, offline_source(root, stage, "latin"))
+        for path in (root, stage / ".." / ".." / "storage", root.parent / "another-worktree"):
+            with self.assertRaises(RuntimeError):
+                offline_source(root, path, "latin")
+        with self.assertRaises(RuntimeError):
+            offline_source(root, stage, None)

@@ -27,11 +27,11 @@ import org.junit.Assert.*
 import org.junit.Test
 import org.junit.runner.RunWith
 
-/** Android WorkManager transport with synthetic IDs and no active OCR runtime; the dispatch backend is not asserted. */
+/** Android WorkManager transport with unbound synthetic IDs; no scan, OCR result or retained library is changed. */
 @RunWith(AndroidJUnit4::class)
 class OcrWorkManagerIntegrationTest {
     @Test fun sameJobKeepsTheLiveWakeButASuccessorOnTheSamePageRuns() = runBlocking {
-        val context = dormantTarget()
+        val context = standardTarget()
         val manager = WorkManager.getInstance(context)
         val target = newTarget()
         val duplicate = OcrPageEnrollment.forTarget(target)
@@ -54,29 +54,27 @@ class OcrWorkManagerIntegrationTest {
             cancelUnfinished(manager, held.id, duplicate.request.id, successor.request.id)
         }
         assertEquals(WorkInfo.State.CANCELLED, manager.getWorkInfoById(held.id).awaitBounded()?.state)
-        assertFalse(context.getDatabasePath("pristinepage.db").exists())
     }
 
-    @Test fun invalidInputFailsAndTheDormantRuntimeDoesNotOpenTheLibrary() = runBlocking {
-        val context = dormantTarget()
+    @Test fun invalidInputFailsBeforeExecutingTheStandardOcrWorker() = runBlocking {
+        val context = standardTarget()
         val manager = WorkManager.getInstance(context)
         val target = newTarget()
+        val database = context.getDatabasePath("pristinepage.db")
+        val existedBefore = database.exists()
         val unwantedField = Data.Builder().putAll(OcrPageDelivery.encode(target)).putBoolean("fixture_extra", true).build()
         val invalid = OneTimeWorkRequest.Builder(SavedOcrPageWorker::class.java).setInputData(unwantedField).build()
-        val valid = OcrPageEnrollment.forTarget(target)
         try {
             manager.enqueue(invalid).result.awaitBounded()
             requireTerminal(manager, invalid.id, WorkInfo.State.FAILED)
-            valid.enqueue(manager).result.awaitBounded()
-            requireTerminal(manager, valid.request.id, WorkInfo.State.SUCCEEDED)
         } finally {
-            cancelUnfinished(manager, invalid.id, valid.request.id)
+            cancelUnfinished(manager, invalid.id)
         }
-        assertFalse(context.getDatabasePath("pristinepage.db").exists())
+        assertEquals(existedBefore, database.exists())
     }
 
     @Test fun pendingTileUsesOnlyTheLiveWakeForItsSuppliedGeneration() = runBlocking {
-        val context = dormantTarget()
+        val context = standardTarget()
         val manager = WorkManager.getInstance(context)
         val target = newTarget()
         val held = OneTimeWorkRequest.Builder(SavedOcrPageWorker::class.java)
@@ -91,16 +89,14 @@ class OcrWorkManagerIntegrationTest {
             cancelUnfinished(manager, held.id)
         }
         assertEquals(WorkInfo.State.CANCELLED, manager.getWorkInfoById(held.id).awaitBounded()?.state)
-        assertFalse(context.getDatabasePath("pristinepage.db").exists())
     }
 
-    private fun dormantTarget(): Context {
+    private fun standardTarget(): Context {
         val instrumentation = InstrumentationRegistry.getInstrumentation()
         val context = instrumentation.targetContext.applicationContext
         assertEquals("app.pristinepage.debug.test", instrumentation.context.packageName)
         assertEquals("app.pristinepage.debug", context.packageName)
         assertTrue(context is PristinePageApplication)
-        assertFalse("Dedicated transport fixture must not use an existing document library", context.getDatabasePath("pristinepage.db").exists())
         return context
     }
 

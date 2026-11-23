@@ -1,4 +1,4 @@
-"""Stage and verify the opt-in PristinePage debug OCR inputs, without probe fixtures."""
+"""Stage and verify the mandatory PristinePage OCR inputs, without probe fixtures."""
 
 import argparse
 from hashlib import sha256
@@ -19,6 +19,29 @@ BASE_DEBUG_NATIVE = {
     "lib/arm64-v8a/libsurface_util_jni.so": (4_896, "a5c9d1928ea92ec7a94dff8cf666e7739cd734198b9f0ae1d4e28ea3c86516ba"),
 }
 ASSET_PREFIX = "ocr-local/"
+
+
+def verify_standard_manifest(badging, manifest):
+    selected = re.search(r"(?m)^package: name='(app\.pristinepage(?:\.debug)?)'[^\r\n]* versionName='([^']+)'", badging)
+    if not selected:
+        raise ValueError("Unexpected standard OCR APK identity")
+    app, version = selected.groups()
+    # aapt2 prints namespace URIs rather than the manifest's short prefix; qualify the application itself, not a nested component.
+    lines = iter(manifest.splitlines())
+    application = next((m for line in lines if (m := re.fullmatch(r"( *)E: application(?: .*)?", line))), None)
+    name = r'A: (?:android:|http://schemas\.android\.com/apk/res/android:)name(?:\([^)]+\))?="app\.pristinepage\.PristinePageApplication"(?: .*|$)'
+    application_name = False
+    if application:
+        indent = len(application[1])
+        for line in lines:
+            attribute = line.lstrip(" ")
+            if len(line) - len(attribute) <= indent or not attribute.startswith("A: "):
+                break
+            application_name |= re.fullmatch(name, attribute) is not None
+    if (not re.fullmatch(r"\d+\.\d+\.\d+" + ("-debug" if app.endswith(".debug") else ""), version)
+            or not application_name or "androidx.work.WorkManagerInitializer" not in manifest
+            or re.search(r"android\.permission\.(INTERNET|ACCESS_NETWORK_STATE|CHANGE_NETWORK_STATE)", manifest)):
+        raise ValueError("Not the standard offline OCR application")
 
 
 def require_exact_tree(root, entries):
@@ -96,19 +119,14 @@ def stage_inventory(stage):
             "catalog/LocalOcrCatalog.kt": identity(catalog_bytes())}
 
 
-def prepare(stage, probe, receipt, notice):
-    stage_location(stage)
-    verify_stage(probe, receipt)
-    verify_file(notice, *CLANG_NOTICE)
+def stage_files(stage, aar, files):
     stage.mkdir()
-    for relative in local_assets():
-        rest = relative.removeprefix("assets/" + ASSET_PREFIX)
-        source = notice if rest == "notices/clang-r522817c-NOTICE.txt" else probe / "assets/ocr-probe" / rest
+    for relative, source in files.items():
         target = stage / relative
         target.parent.mkdir(parents=True, exist_ok=True)
         with source.open("rb") as origin, target.open("xb") as destination:
             shutil.copyfileobj(origin, destination)
-    with (probe / AAR[0]).open("rb") as source, (stage / AAR[0]).open("xb") as target:
+    with aar.open("rb") as source, (stage / AAR[0]).open("xb") as target:
         shutil.copyfileobj(source, target)
     with ZipFile(stage / AAR[0]) as aar, (stage / "classes.jar").open("xb") as target:
         target.write(aar.read("classes.jar"))
@@ -116,6 +134,29 @@ def prepare(stage, probe, receipt, notice):
     with (stage / "catalog/LocalOcrCatalog.kt").open("xb") as target:
         target.write(catalog_bytes())
     require_exact_tree(stage, stage_inventory(stage))
+
+
+def prepare(stage, probe, receipt, notice):
+    stage_location(stage)
+    verify_stage(probe, receipt)
+    verify_file(notice, *CLANG_NOTICE)
+    assets = {relative: probe / "assets/ocr-probe" / relative.removeprefix("assets/" + ASSET_PREFIX)
+              for relative in local_assets()}
+    assets[f"assets/{ASSET_PREFIX}notices/clang-r522817c-NOTICE.txt"] = notice
+    stage_files(stage, probe / AAR[0], assets)
+
+
+def prepare_from_publisher(stage, inputs, notice):
+    """Stage known publisher files entirely offline, without using or generating any test images."""
+    stage_location(stage)
+    aar = inputs / AAR[0]
+    files = {f"assets/{ASSET_PREFIX}tessdata/{code}.traineddata": inputs / f"{code}.traineddata" for code in pack_pins()}
+    files.update({f"assets/{ASSET_PREFIX}notices/{name}": inputs / source for source, (_, _, name) in NOTICES.items()})
+    files[f"assets/{ASSET_PREFIX}notices/clang-r522817c-NOTICE.txt"] = notice
+    verify_file(aar, *AAR[1:])
+    for relative, pin in local_assets().items():
+        verify_file(files[relative], *pin)
+    stage_files(stage, aar, files)
 
 
 def verify_candidate(stage, apk):
@@ -133,6 +174,7 @@ def main():
     parser.add_argument("stage", type=lambda p: Path(p).absolute())
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument("--from-probe", type=lambda p: Path(p).absolute())
+    mode.add_argument("--from-publisher", type=lambda p: Path(p).absolute())
     mode.add_argument("--apk", type=Path)
     mode.add_argument("--without-ocr", type=Path)
     mode.add_argument("--default-debug", type=Path)
@@ -143,6 +185,10 @@ def main():
         if not args.probe_receipt or not args.clang_notice:
             parser.error("Preparation needs the independently recorded probe receipt and notice")
         prepare(args.stage, args.from_probe, args.probe_receipt, args.clang_notice)
+    elif args.from_publisher:
+        if not args.clang_notice:
+            parser.error("Preparation needs the exact pinned Clang notice")
+        prepare_from_publisher(args.stage, args.from_publisher, args.clang_notice)
     elif args.apk:
         verify_candidate(args.stage, args.apk)
     elif args.without_ocr:

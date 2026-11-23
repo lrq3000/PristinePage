@@ -25,6 +25,8 @@ import app.pristinepage.data.db.OcrIndexMigration
 import app.pristinepage.data.db.OcrResultRow
 import app.pristinepage.data.db.OcrWorkMigration
 import app.pristinepage.data.db.SourceCaptureDayMigration
+import app.pristinepage.data.db.OcrTextPublicationMigration
+import app.pristinepage.data.db.OcrTextPublicationRetryMigration
 import app.pristinepage.data.db.PristineDatabase
 import app.pristinepage.data.files.SourceInspector
 import app.pristinepage.data.model.DocumentId
@@ -88,12 +90,13 @@ class RoomOcrIndexIntegrationTest {
     private val context = instrumentation.targetContext
     @get:Rule val migration = MigrationTestHelper(instrumentation, PristineDatabase::class.java)
 
-    @Test fun populatedV1ToV4MigrateWithoutInventingWorkOrCaptureDatesAndRetainTheIndexOnReopen() {
-        for (version in 1..4) {
+    @Test fun populatedV1ToV6MigrateWithoutInventingWorkDatesOrConsentAndRetainTheIndexOnReopen() {
+        for (version in 1..6) {
             val name = "ocr-migration-${UUID.randomUUID()}"
             assertFalse(context.getDatabasePath(name).exists())
             fun open() = Room.databaseBuilder(context, PristineDatabase::class.java, name)
-                .addMigrations(AtelierDraftMigration, OcrIndexMigration, OcrWorkMigration, SourceCaptureDayMigration).build()
+                .addMigrations(AtelierDraftMigration, OcrIndexMigration, OcrWorkMigration, SourceCaptureDayMigration,
+                    OcrTextPublicationMigration, OcrTextPublicationRetryMigration).build()
             migration.createDatabase(name, version).use { sql ->
                 seed(sql)
                 if (version >= 3) insertText(sql)
@@ -101,13 +104,14 @@ class RoomOcrIndexIntegrationTest {
             val database = open()
             try {
                 val sql = database.openHelper.writableDatabase
-                assertEquals(5, sql.version)
+                assertEquals(7, sql.version)
                 assertEquals("010203", sql.scalar("SELECT hex(canonicalRecipe) FROM RecipeRevision"))
                 assertEquals("Existing album", sql.scalar("SELECT title FROM Document"))
                 assertEquals("0", sql.scalar("SELECT COUNT(*) FROM OcrPageWork"))
                 assertEquals("0", sql.scalar("SELECT COUNT(*) FROM Job"))
                 assertEquals(if (version >= 3) "1" else "0", sql.scalar("SELECT COUNT(*) FROM OcrResult"))
                 assertEquals("0", sql.scalar("SELECT COUNT(*) FROM SourceCaptureDay"))
+                assertEquals("0", sql.scalar("SELECT COUNT(*) FROM OcrTextPublication"))
                 assertEquals("1", sql.scalar("SELECT COUNT(*) FROM SourceBlob"))
                 if (version < 3) insertText(sql)
                 assertEquals("1", sql.scalar("SELECT COUNT(*) FROM OcrResultFts WHERE OcrResultFts MATCH 'ecole'"))
@@ -593,6 +597,135 @@ class RoomOcrIndexIntegrationTest {
         file.writeBytes("synthetic text".encodeToByteArray())
         val changed = runCatching { work.readPreparedTextExport(ready) }.exceptionOrNull() as? RepositoryFailure
         assertEquals(OperationErrorCode.INTEGRITY_FAILED, changed?.error?.code)
+    }
+
+    @Test fun ocrTextConsentIsDurableBeforeTheChooserAndCannotAuthorizeASecondTransfer() = withOcrAttempts(publicStore = true) { f ->
+        val work = f.ocrPort()
+        val verbatim = "  École\r\n領収書 · إيصال  \n"
+        f.results.publish(f.request, f.start(), OcrText(verbatim))
+        val observed = checkNotNull(work.readText(DocumentId(DOCUMENT), PageId(PAGE), 1)).exportObservation
+        val frozen = checkNotNull(work.prepareTextExport(observed))
+        val target = "content://synthetic.example/document/fresh"
+        val result = work.publishPreparedText(frozen, choose = { id ->
+            assertEquals(id, f.sql.scalar("SELECT consentId FROM OcrTextPublication WHERE state='WAITING_DESTINATION' AND targetUri IS NULL"))
+            assertFalse(work.recoverTextPublications().needsVerification) // The scoped chooser owner is still live.
+            target
+        }) { uri, bytes ->
+            assertEquals(target, uri)
+            assertEquals("WRITING", f.sql.scalar("SELECT state FROM OcrTextPublication"))
+            assertArrayEquals(verbatim.encodeToByteArray(), bytes)
+            SavedOcrWork.TextSaveOutcome.READBACK_VERIFIED
+        }
+        assertEquals(SavedOcrWork.TextSaveOutcome.READBACK_VERIFIED, result)
+        assertEquals("READBACK_VERIFIED", f.sql.scalar("SELECT state FROM OcrTextPublication"))
+        assertNotNull(runCatching {
+            work.publishPreparedText(frozen, choose = { throw AssertionError("Second chooser was issued") }) { _, _ ->
+                throw AssertionError("Second transfer")
+            }
+        }.exceptionOrNull() as? RepositoryFailure)
+        assertEquals("1", f.sql.scalar("SELECT COUNT(*) FROM OcrTextPublication"))
+        assertEquals("0", f.sql.scalar("SELECT COUNT(*) FROM Publication"))
+    }
+
+    @Test fun ocrTextChooserCancellationDoesNotAuthorizeAnyTarget() = withOcrAttempts(publicStore = true) { f ->
+        val work = f.ocrPort()
+        f.results.publish(f.request, f.start(), OcrText(""))
+        val observed = checkNotNull(work.readText(DocumentId(DOCUMENT), PageId(PAGE), 1)).exportObservation
+        val frozen = checkNotNull(work.prepareTextExport(observed))
+        assertEquals(SavedOcrWork.TextSaveOutcome.CANCELED,
+            work.publishPreparedText(frozen, choose = { null }) { _, _ -> throw AssertionError("Transfer after cancellation") })
+        assertEquals("CANCELED", f.sql.scalar("SELECT state FROM OcrTextPublication WHERE targetUri IS NULL AND byteCount=0"))
+    }
+
+    @Test fun ocrTextRetryKeepsFrozenBytesAfterThePageGetsANewProducer() = withOcrAttempts(publicStore = true) { f ->
+        val work = f.ocrPort()
+        val document = DocumentId(DOCUMENT)
+        val page = PageId(PAGE)
+        val original = "Original text"
+        f.results.publish(f.request, f.start(), OcrText(original))
+        val frozen = checkNotNull(work.prepareTextExport(checkNotNull(work.readText(document, page, 1)).exportObservation))
+        val first = "content://fixture/document/first"
+        val second = "content://fixture/document/second"
+        assertEquals(SavedOcrWork.TextSaveOutcome.PERMISSION_LOST, work.publishPreparedText(frozen, choose = { first }) { _, _ ->
+            SavedOcrWork.TextSaveOutcome.PERMISSION_LOST
+        })
+        val status = checkNotNull(work.readStatus(document, page, 1))
+        val successor = work.requestRerun(status, status.configuration)
+        assertEquals(SavedOcrWork.Outcome.PUBLISHED, work.execute(successor) { _, _, handoff -> handoff.retain(preparedText("Different text")) })
+        assertEquals(SavedOcrWork.TextSaveOutcome.READBACK_VERIFIED, work.publishPreparedText(frozen, choose = { second }) { uri, bytes ->
+            assertEquals(second, uri)
+            assertArrayEquals(original.encodeToByteArray(), bytes)
+            SavedOcrWork.TextSaveOutcome.READBACK_VERIFIED
+        })
+        assertEquals("2", f.sql.scalar("SELECT COUNT(*) FROM OcrTextPublication"))
+        assertEquals("1", f.sql.scalar("SELECT COUNT(DISTINCT transactionId) FROM OcrTextPublication"))
+    }
+
+    @Test fun ocrTextRecoveryDoesNotReplayAnUnacknowledgedWrite() = withOcrAttempts(publicStore = true) { f ->
+        val work = f.ocrPort()
+        val original = "Before acknowledgment"
+        f.results.publish(f.request, f.start(), OcrText(original))
+        val frozen = checkNotNull(work.prepareTextExport(checkNotNull(work.readText(DocumentId(DOCUMENT), PageId(PAGE), 1)).exportObservation))
+        val target = "content://fixture/document/interrupted"
+        val failure = runCatching {
+            work.publishPreparedText(frozen, choose = { target }) { _, _ -> throw java.io.IOException("Synthetic post-close failure") }
+        }.exceptionOrNull()
+        assertTrue(failure is RepositoryFailure)
+        assertEquals("NEEDS_VERIFICATION", f.sql.scalar("SELECT state FROM OcrTextPublication"))
+        val recovered = work.recoverTextPublications()
+        assertTrue(recovered.needsVerification)
+        assertEquals(target, recovered.priorDestination)
+        assertArrayEquals(original.encodeToByteArray(), work.readPreparedTextExport(checkNotNull(recovered.retry)))
+        assertEquals("1", f.sql.scalar("SELECT COUNT(*) FROM OcrTextPublication"))
+    }
+
+    @Test fun ocrTextRetryRefusesItsEarlierUriBeforeCallingTheWriter() = withOcrAttempts(publicStore = true) { f ->
+        val work = f.ocrPort()
+        f.results.publish(f.request, f.start(), OcrText(""))
+        val frozen = checkNotNull(work.prepareTextExport(
+            checkNotNull(work.readText(DocumentId(DOCUMENT), PageId(PAGE), 1)).exportObservation))
+        val prior = "content://fixture/document/previous-empty"
+        assertEquals(SavedOcrWork.TextSaveOutcome.NEEDS_VERIFICATION,
+            work.publishPreparedText(frozen, choose = { prior }) { _, _ -> SavedOcrWork.TextSaveOutcome.NEEDS_VERIFICATION })
+        val savedRecord = f.sql.scalar("SELECT consentId || ':' || state || ':' || targetUri FROM OcrTextPublication")
+        val file = checkedPrivateOcrFile(f.sql, f.sql.scalar("SELECT finalPath FROM FileTransaction WHERE kind='OCR_TEXT' AND state='COMMITTED'"))
+        var calls = 0
+        try {
+            file.writeBytes(byteArrayOf(1)) // Any early reading of the frozen bytes would now fail.
+            assertEquals(SavedOcrWork.TextSaveOutcome.DESTINATION_REFUSED,
+                work.publishPreparedText(frozen, choose = { prior }) { _, _ ->
+                    calls++
+                    SavedOcrWork.TextSaveOutcome.READBACK_VERIFIED
+                })
+        } finally { file.writeBytes(byteArrayOf()) }
+        assertEquals(0, calls)
+        assertEquals(savedRecord, f.sql.scalar("SELECT consentId || ':' || state || ':' || targetUri FROM OcrTextPublication WHERE targetUri IS NOT NULL"))
+        assertEquals("1", f.sql.scalar("SELECT COUNT(*) FROM OcrTextPublication WHERE state='NEEDS_VERIFICATION' AND targetUri IS NOT NULL"))
+        assertEquals("1", f.sql.scalar("SELECT COUNT(*) FROM OcrTextPublication WHERE state='CANCELED' AND targetUri IS NULL"))
+        val next = "content://fixture/document/different-empty"
+        assertEquals(SavedOcrWork.TextSaveOutcome.READBACK_VERIFIED,
+            work.publishPreparedText(frozen, choose = { next }) { target, bytes ->
+                assertEquals(next, target)
+                assertArrayEquals(byteArrayOf(), bytes)
+                SavedOcrWork.TextSaveOutcome.READBACK_VERIFIED
+            })
+    }
+
+    @Test fun repeatedOcrTextDestinationRollsBackAPriorRecordChangeDuringRefusal() = withOcrAttempts(publicStore = true) { f ->
+        val work = f.ocrPort()
+        f.results.publish(f.request, f.start(), OcrText("Keep the prior record"))
+        val frozen = checkNotNull(work.prepareTextExport(
+            checkNotNull(work.readText(DocumentId(DOCUMENT), PageId(PAGE), 1)).exportObservation))
+        val prior = "content://fixture/document/preserve-prior"
+        assertEquals(SavedOcrWork.TextSaveOutcome.NEEDS_VERIFICATION,
+            work.publishPreparedText(frozen, choose = { prior }) { _, _ -> SavedOcrWork.TextSaveOutcome.NEEDS_VERIFICATION })
+        f.sql.execSQL("""CREATE TRIGGER disturb_prior_text_destination AFTER UPDATE ON OcrTextPublication
+            WHEN NEW.state='CANCELED' BEGIN UPDATE OcrTextPublication SET targetUri=NULL WHERE consentId<>NEW.consentId; END""")
+        val failure = runCatching {
+            work.publishPreparedText(frozen, choose = { prior }) { _, _ -> throw AssertionError("Unexpected provider write") }
+        }.exceptionOrNull() as? RepositoryFailure
+        assertEquals(OperationErrorCode.INTEGRITY_FAILED, failure?.error?.code)
+        assertEquals(prior, f.sql.scalar("SELECT targetUri FROM OcrTextPublication WHERE targetUri IS NOT NULL"))
     }
 
     @Test fun ignoredPrivateOcrTextCompletionNeverReturnsReady() =

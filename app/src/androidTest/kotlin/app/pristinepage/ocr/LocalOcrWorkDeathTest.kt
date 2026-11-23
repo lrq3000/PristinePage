@@ -49,7 +49,7 @@ class LocalOcrWorkDeathTest {
         val title = arguments.getString("recoveryAlbum")
         val ordinal = arguments.getString("recoveryOrdinal")?.toIntOrNull()
         assumeTrue("Requires an explicit synthetic recovery attempt on the private candidate",
-            app.hasBundledOcr && title != null && ordinal != null && ordinal in 1..3)
+            title != null && ordinal != null && ordinal in 1..3)
         val name = checkNotNull(title)
         check(name.matches(Regex("OCR recovery [a-f0-9]{12}")))
         val graph = app.services.imports()
@@ -102,7 +102,7 @@ class LocalOcrWorkDeathTest {
         val context = InstrumentationRegistry.getInstrumentation().targetContext
         val app = context.applicationContext as PristinePageApplication
         val title = InstrumentationRegistry.getArguments().getString("recoveryAlbum")
-        assumeTrue("Requires the exact three already interrupted starts", app.hasBundledOcr && title != null)
+        assumeTrue("Requires the exact three already interrupted starts", title != null)
         val graph = app.services.imports()
         val document = graph.store.catalog.list(null, 50).single { it.title == title }.documentId
         val page = graph.store.catalog.load(document).pages.single().pageId

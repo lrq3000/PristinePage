@@ -1,5 +1,6 @@
 package app.pristinepage
 
+import app.pristinepage.core.ocr.OcrLayout
 import app.pristinepage.design.AtelierSettings
 import app.pristinepage.design.OcrLanguage
 import org.junit.Assert.*
@@ -16,6 +17,19 @@ class OcrLanguagePreferencesTest {
         val settings = AtelierSettings.fromStored(stored)
         assertEquals(listOf(OcrLanguage.JAPANESE, OcrLanguage.ENGLISH, OcrLanguage.ARABIC), settings.ocrLanguages)
         assertFalse(settings.showCameraGrid)
+    }
+
+    @Test fun layoutDefaultsToAutomaticWithoutResettingExistingLanguageChoices() {
+        val old = mapOf("ocrLanguages" to "jpn,eng", "grid" to false)
+        for (values in listOf(old, old + ("ocrLayout" to "UNKNOWN"), old + ("ocrLayout" to 2))) {
+            val settings = AtelierSettings.fromStored(values)
+            assertEquals(OcrLayout.AUTOMATIC, settings.ocrLayout)
+            assertEquals(listOf(OcrLanguage.JAPANESE, OcrLanguage.ENGLISH), settings.ocrLanguages)
+            assertFalse(settings.showCameraGrid)
+        }
+        val selected = AtelierSettings.fromStored(old + ("ocrLayout" to "SPARSE_TEXT"))
+        assertEquals(OcrLayout.SPARSE_TEXT, selected.ocrLayout)
+        assertEquals(OcrLayout.SPARSE_TEXT, selected.withOcrLanguage(OcrLanguage.FRENCH, true).ocrLayout)
     }
 
     @Test fun addingAppendsAndRemovingTheLastSelectionIsRefused() {

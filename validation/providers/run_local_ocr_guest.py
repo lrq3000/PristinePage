@@ -16,7 +16,7 @@ import uuid
 from zipfile import ZipFile
 
 from prepare_ocr_android_probe import verify_file, verify_stage
-from prepare_ocr_local_app import verify_candidate, verify_ocr_members
+from prepare_ocr_local_app import verify_candidate, verify_ocr_members, verify_standard_manifest
 
 
 APP = "app.pristinepage.debug"
@@ -29,8 +29,17 @@ BACKFILL_CASE = ("app.pristinepage.ocr.LocalOcrStartupBackfillTest", "firstActiv
 DEATH_CASE = ("app.pristinepage.ocr.LocalOcrWorkDeathTest", "interruptRealNativeRecognition")
 RECOVER_CASE = (DEATH_CASE[0], "thirdInterruptionIsTerminalAfterOrdinaryLaunch")
 LANGUAGE_CASE = ("app.pristinepage.ocr.LocalOcrLanguageJourneyTest", "settingsSelectedScriptsReachTheExactHomePage")
+JAPANESE_CASE = (LANGUAGE_CASE[0], "japaneseSparseLayoutRemainsBoundToTheExactSearchHit")
 MANUAL_CASE = ("app.pristinepage.ocr.LocalOcrManualRerunTest", "terminalPageCanRerunWithSavedSettingsAndThenDefaults")
 LANGUAGE_CONTROLS = ("eng", "fra", "blank", "ara-eng", "ara", "chi_sim")
+LANGUAGE_SUITES = {
+    "baseline": (LANGUAGE_CASE, LANGUAGE_CONTROLS),
+    "japanese": (JAPANESE_CASE, ("jpn",)),
+    "latin": ((LANGUAGE_CASE[0], "remainingLatinLanguagesReachTheExactHomePage"),
+              ("spa", "deu", "ita", "por", "nld", "pol", "tur")),
+    "non-latin": ((LANGUAGE_CASE[0], "remainingNonLatinLanguagesReachTheExactHomePage"),
+                  ("rus", "ukr", "ell", "heb", "hin", "kor", "vie", "ind")),
+}
 LANGUAGE_RECEIPT = "7d7f418e3b20eea85ed795151c54df8ac2b920d6c09cc5d443a6559c7c5ec093"
 SIGNER = "7ef552d3eab5d93fac15b3d2dd7233f1b50a170d2baf68460b12f6085f8dadee"
 ALLOCATOR = "ebc068885e9e6af8c836fb658edebc245a4b8c3adf52bf6c040fa4fdac263c1d"
@@ -41,6 +50,31 @@ RAM_KIB = 4 * 1024**2
 def need(ok, message):
     if not ok:
         raise RuntimeError(message)
+
+
+def checked_language_results(output, suite="baseline"):
+    case, controls = LANGUAGE_SUITES[suite]
+    marker = re.compile(r"(?m)^INSTRUMENTATION_STATUS: ocrLanguageControl=([a-z_-]+)\nINSTRUMENTATION_STATUS_CODE: 65\n")
+    normalized = output.replace("\r\n", "\n")
+    marks = tuple(marker.findall(normalized))
+    need(marks == controls and passed_case(marker.sub("", normalized), case),
+         "Not all exact language controls completed; inspect the transcript")
+    return marks
+
+
+def inspect_fresh_registration(before, after, name, installation):
+    """The local CLI can return a nonzero status after creating the VM. Admit observed state, never repeat add."""
+    matches = [row for row in after if row[1] == name]
+    need(len(matches) == 1 and all(row[1] != name for row in before), "No unique new guest registration")
+    row, = matches
+    need(re.fullmatch(r"(?:0|[1-9][0-9]*)", row[0]) and all(other[0] != row[0] for other in before) and
+         sum(other[0] == row[0] for other in after) == 1, "Creation did not allocate a fresh index")
+    need(int(row[4]) == 0 and int(row[5]) <= 0 and int(row[6]) <= 0, "New guest is not stopped")
+    directory = installation / "vms" / f"leidian{row[0]}"
+    need(directory.resolve() == directory and all(
+         path.resolve() == path and path.is_file() and path.stat().st_size > 0
+         for path in (directory / "data.vmdk", directory / "sdcard.vmdk")), "New guest disks are incomplete or redirected")
+    return int(row[0])
 
 
 def install_flags(package, installed, candidate, previous_test, previous_app=None, *, require_installed=False):
@@ -125,9 +159,12 @@ def exact_apk(path, digest, stage, is_test):
         with ZipFile(path) as archive:
             verify_ocr_members(archive, {})
     else:
-        need(re.search(r"versionName='[^']+-debug-ocr-local'", badging) and
-             "app.pristinepage.LocalOcrApplication" in manifest and "androidx.work.WorkManagerInitializer" in manifest,
-             "Not the OCR-enabled debug app")
+        # Retain replay of historical test pairs. The new normal-build route is checked separately and must contain the same OCR payload.
+        if re.search(r"versionName='[^']+-debug-ocr-local'", badging):
+            need("app.pristinepage.LocalOcrApplication" in manifest and "androidx.work.WorkManagerInitializer" in manifest,
+                 "Not the historical OCR development app")
+        else:
+            verify_standard_manifest(badging, manifest)
         verify_candidate(stage, path)
     return {"package": package, "sha256": digest, "manifest": manifest, "badging": badging}
 
@@ -223,13 +260,9 @@ def run_type(ns):
                 self.save(self.slot, {"owner": ns["OWNER"], "generation": self.generation,
                                       "state": "held", "operation": "PristinePage local OCR guest", "acquired": now()}, durable=True)
                 if create:
-                    # This LDPlayer CLI can report exit 1 even when the add completed. Do not repeat it: authenticate the observed result.
-                    self.command([console, "add", "--name", name], timeout=95, allowed=(0, 1))
-                    after = self.inventory()
-                    matches = [row for row in after if row[1] == name]
-                    need(len(matches) == 1 and all(row[0] != matches[0][0] for row in before), "Creation did not allocate a fresh guest")
-                    self.index = int(matches[0][0])
-                    self.require_stopped(self.exact(after))
+                    # Exit 1 or 2 can accompany a complete, stopped registration; only a unique new index and both disks admit it.
+                    self.command([console, "add", "--name", name], timeout=95, allowed=(0, 1, 2))
+                    self.index = inspect_fresh_registration(before, self.inventory(), name, console.parent)
                     record.update(index=self.index, state="launching")
                     self.save(self.record, record, durable=True)
                 if create or recovery:
@@ -460,7 +493,7 @@ def run_type(ns):
             need(passed_case(output, RECOVER_CASE), "Missing terminal recovery witness")
             self.save(self.path("recovery-outcome.json"), {"phase": "FAILED", "error": "INTERRUPTED", "starts": 3}, durable=True)
 
-        def language_journey(self, target, controls):
+        def language_journey(self, target, controls, suite="baseline"):
             prefix = uuid.uuid4().hex[:12]
             folder = "/sdcard/Download/pristinepage-ocr-" + prefix
             probe = controls.parents[2]
@@ -468,7 +501,8 @@ def run_type(ns):
             verify_stage(probe, LANGUAGE_RECEIPT)
             cases = {case["id"]: case for case in json.loads((controls.parent / "manifest.json").read_text(encoding="utf-8"))["cases"]}
             self.command([*target, "shell", "mkdir", folder])
-            for control in LANGUAGE_CONTROLS:
+            case, control_ids = LANGUAGE_SUITES[suite]
+            for control in control_ids:
                 name = control + ".png"
                 source = controls / name
                 identity = cases[control]
@@ -476,14 +510,11 @@ def run_type(ns):
                 verify_file(source, identity["imageBytes"], identity["imageSha256"])
                 self.command([*target, "push", source, f"{folder}/{name}"], timeout=20)
             output = self.command([*target, "shell", "am", "instrument", "-w", "-r", "-e", "class",
-                                   "#".join(LANGUAGE_CASE), "-e", "ocrFixture", prefix, RUNNER], timeout=830)
-            self.path("language-instrumentation.txt").write_text(output, encoding="utf-8")
-            normalized = output.replace("\r\n", "\n")
-            marks = re.findall(r"(?m)^INSTRUMENTATION_STATUS: ocrLanguageControl=([a-z_-]+)\nINSTRUMENTATION_STATUS_CODE: 65\n", normalized)
-            clean = re.sub(r"(?m)^INSTRUMENTATION_STATUS: ocrLanguageControl=[a-z_-]+\nINSTRUMENTATION_STATUS_CODE: 65\n", "", normalized)
-            need(tuple(marks) == LANGUAGE_CONTROLS and passed_case(clean, LANGUAGE_CASE),
-                 "Not all exact language controls completed; inspect the transcript")
-            self.save(self.path("language-outcomes.json"), {"controls": marks, "passed": True}, durable=True)
+                                   "#".join(case), "-e", "ocrFixture", prefix, RUNNER], timeout=60 + 150 * len(control_ids))
+            label = "language" if suite in ("baseline", "japanese") else f"language-{suite}"
+            self.path(f"{label}-instrumentation.txt").write_text(output, encoding="utf-8")
+            marks = checked_language_results(output, suite)
+            self.save(self.path(f"{label}-outcomes.json"), {"controls": marks, "passed": True}, durable=True)
 
         def inspect_files_failure(self, target):
             for name, argv in (
@@ -606,7 +637,8 @@ def main():
             or not re.fullmatch(r"[0-9a-f]{64}", args.previous_app_sha)):
         parser.error("An app successor needs exact prior app and test digests and the primary Home OCR witness on the retained guest")
     root = Path.cwd().resolve()
-    need(root.name == "ocr-background-search" and root.parent.name == ".worktrees", "Use the authorized OCR worktree")
+    need(root.name in ("ocr-background-search", "ocr-current-validation") and root.parent.name == ".worktrees",
+         "Use the authorized OCR worktree")
     if args.language_controls:
         raw = root / "validation/raw/providers"
         need(args.language_controls.is_dir() and args.language_controls.is_relative_to(raw)
