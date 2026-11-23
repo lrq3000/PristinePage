@@ -59,10 +59,11 @@ class SavedOcrApplicationTest {
 
     @Test fun workerPassesTheExactTargetAndFactoryWithoutConsultingDefaults() = runBlocking {
         val runtime = SavedOcrApplication.Runtime(factory) { error("Restart must not consult defaults") }
+        val expectedTarget = target
         val graph = object : SavedOcrApplication.Graph {
             override fun reconcile(defaults: OcrConfiguration?): SavedOcrScheduling.QualifiedSession = error("Worker must not discover unrelated pages")
             override suspend fun execute(target: SavedOcrWork.Target, sessions: SavedOcrPreparer.SessionFactory): SavedOcrWork.Outcome {
-                assertEquals(this@SavedOcrApplicationTest.target, target)
+                assertEquals(expectedTarget, target)
                 assertSame(factory, sessions)
                 return SavedOcrWork.Outcome.PUBLISHED
             }
