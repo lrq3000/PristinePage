@@ -104,10 +104,24 @@ class SavedOcrSchedulingTest {
         assertTrue(startup.isCancelled)
     }
 
-    @Test fun failedEnrollmentIsVisibleAndStopsThatScan() = runBlocking {
+    @Test fun failedEnrollmentDoesNotStrandLaterPagesButKeepsStartupRetryable() = runBlocking {
         val failure = IllegalStateException("Fixture scheduler failed")
-        val schedule = SavedOcrScheduling(resolve = { onlyFirst() }) { throw failure }
+        val enrolled = mutableListOf<SavedOcrWork.Target>()
+        val store = object : SavedOcrScheduling.QualifiedSession {
+            override suspend fun reconcilePage(document: DocumentId, page: PageId): SavedOcrWork.Target =
+                throw AssertionError("Startup must use the bounded discovery path")
+
+            override fun pendingPages(): Flow<SavedOcrWork.Target> = flow {
+                emit(first)
+                emit(second)
+            }
+        }
+        val schedule = SavedOcrScheduling(resolve = { store }) { target ->
+            if (target == first) throw failure
+            enrolled += target
+        }
         assertSame(failure, runCatching { schedule.onStartup() }.exceptionOrNull())
+        assertEquals(listOf(second), enrolled)
     }
 
     @Test fun unqualifiedRerunDoesNotCommitOrOfferAWake() = runBlocking {
@@ -150,7 +164,7 @@ class SavedOcrSchedulingTest {
 
             override fun pendingPages(): Flow<SavedOcrWork.Target> = flow {
                 emit(first)
-                throw AssertionError("A failed or canceled enrollment continued discovery")
+                throw AssertionError("A canceled enrollment continued discovery")
             }
         }
 }

@@ -40,19 +40,25 @@ class SavedOcrAppSignalsTest {
         assertEquals(1, scans)
     }
 
-    @Test fun aLaterLaunchCanRecoverAfterAnEnrollmentFailure() = runTest {
-        var starts = 0
-        val target = SavedOcrWork.Target(first, job)
-        val work = session(discover = {}, pending = target)
+    @Test fun aLaterLaunchCanRecoverTheFailedWakeWithoutStrandingTheRestOfTheScan() = runTest {
+        var scans = 0
+        val delivered = mutableListOf<SavedOcrWork.Target>()
+        val firstTarget = SavedOcrWork.Target(first, job)
+        val nextTarget = SavedOcrWork.Target(next, JobId("aaaaaaaa-aaaa-4aaa-8aaa-000000000015"))
+        val work = session(discover = { scans++ }, pending = { if (scans == 1) listOf(firstTarget, nextTarget) else listOf(firstTarget) })
         val signals = SavedOcrAppSignals(backgroundScope, SavedOcrScheduling({ work }) {
-            assertEquals(target, it)
-            if (++starts == 1) throw IllegalStateException("Synthetic launch failure")
+            if (scans == 1 && it == firstTarget) throw IllegalStateException("Synthetic launch failure")
+            delivered += it
         })
         signals.onStartup()
         runCurrent()
+        assertEquals(listOf(nextTarget), delivered)
         signals.onStartup()
         runCurrent()
-        assertEquals(2, starts)
+        assertEquals(listOf(nextTarget, firstTarget), delivered)
+        signals.onStartup()
+        runCurrent()
+        assertEquals(2, scans)
     }
 
     @Test fun savesDetachExactPageIdsAndOneFailedWakeDoesNotBlockTheNext() = runTest {
@@ -177,12 +183,12 @@ class SavedOcrAppSignalsTest {
 
     private fun session(
         discover: suspend () -> Unit = { fail("Expected a save hint") },
-        pending: SavedOcrWork.Target? = null,
+        pending: () -> List<SavedOcrWork.Target> = { emptyList() },
         saved: suspend (DocumentId, PageId) -> SavedOcrWork.Target? = { _, _ -> error("Expected startup discovery") },
     ): SavedOcrScheduling.QualifiedSession = object : SavedOcrScheduling.QualifiedSession {
         override fun pendingPages(): Flow<SavedOcrWork.Target> = flow {
             discover()
-            if (pending != null) emit(pending)
+            for (target in pending()) emit(target)
         }
         override suspend fun reconcilePage(document: DocumentId, page: PageId): SavedOcrWork.Target? = saved(document, page)
     }

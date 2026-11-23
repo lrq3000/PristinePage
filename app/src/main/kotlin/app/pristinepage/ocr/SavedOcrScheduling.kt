@@ -72,13 +72,24 @@ internal class SavedOcrScheduling(
         active.ensureActive()
     }
 
-    /** Serial enrollment keeps each scan bounded in memory and exposes failures without misreporting a recognition start. */
+    /** Keep offering later pages after a failed wake. An incomplete scan remains eligible for the next launch. */
     suspend fun onStartup() {
-        currentCoroutineContext().ensureActive()
+        val active = currentCoroutineContext()
+        active.ensureActive()
+        var firstFailure: Exception? = null
         resolve()?.pendingPages()?.collect { target ->
-            currentCoroutineContext().ensureActive()
-            enqueue(target)
+            active.ensureActive()
+            try {
+                enqueue(target)
+            } catch (canceled: CancellationException) {
+                throw canceled
+            } catch (failure: Exception) {
+                // Keep only the first exception: the app signal uses it to leave startup eligible, not to log or count a recognition failure.
+                if (firstFailure == null) firstFailure = failure
+            }
         }
+        active.ensureActive()
+        firstFailure?.let { throw it }
     }
 
     companion object {
