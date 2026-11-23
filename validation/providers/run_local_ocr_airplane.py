@@ -169,7 +169,7 @@ def verify_target(run, ns):
          "Current guest processes, local ADB and exact serial must match the active claim")
 
 
-def exercise(run, ns, source, hashes, test, previous, *, suite=None):
+def exercise(run, ns, source, hashes, test, previous, *, suite=None, diagnostic_shell=False):
     target = [ns["ADB"], "-s", run.serial]
     radio = AirplaneJourney(run, target)
     case, option, limit = invocation(suite)
@@ -200,7 +200,8 @@ def exercise(run, ns, source, hashes, test, previous, *, suite=None):
     nonce = uuid.uuid4().hex
     state = f"/data/local/tmp/pristinepage-airplane-{nonce}"
     program = run.path("guest-program.sh")
-    program.write_bytes(GUEST_SCRIPT.encode("ascii"))
+    # Optional shell-phase trace only for an isolated synthetic prelaunch investigation; never traces OCR output.
+    program.write_bytes(("set -x\n" + GUEST_SCRIPT if diagnostic_shell else GUEST_SCRIPT).encode("ascii"))
     if suite is None:
         folder = f"/sdcard/Download/PristinePage-Offline-{nonce[:12]}"
         fixture = f"{folder}/pristinepage-offline-{nonce[:12]}.png"
