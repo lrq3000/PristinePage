@@ -24,10 +24,15 @@ import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.repeatOnLifecycle
 import app.pristinepage.R
+import app.pristinepage.core.geometry.GeometrySizing
 import app.pristinepage.core.ocr.OcrConfiguration
 import app.pristinepage.core.ocr.OcrError
 import app.pristinepage.core.ocr.OcrLayout
 import app.pristinepage.core.ocr.OcrText
+import app.pristinepage.core.pipeline.PixelSize
+import app.pristinepage.core.pipeline.Recipe
+import app.pristinepage.core.recipe.AppearanceRecipe
+import app.pristinepage.core.recipe.BinaryRecipe
 import app.pristinepage.data.model.EditablePage
 import app.pristinepage.data.repository.SavedOcrWork
 import app.pristinepage.data.repository.SavedOcrWork.PagePhase
@@ -53,13 +58,16 @@ internal enum class SavedPageOcrPanel(val title: Int) { PROCESSING(R.string.ocr_
 
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
-internal fun SavedPageOcrDetails(panel: SavedPageOcrPanel, page: EditablePage?, reader: SavedPageOcrReader, dismiss: () -> Unit) {
+internal fun SavedPageOcrDetails(panel: SavedPageOcrPanel, page: EditablePage?, reader: SavedPageOcrReader, showDiagnostics: Boolean, dismiss: () -> Unit) {
     val lifecycle = LocalLifecycleOwner.current.lifecycle
     val ui = rememberCoroutineScope()
     var refresh by remember { mutableIntStateOf(0) }
     var submitting by remember(panel, page, reader) { mutableStateOf(false) }
     var notice by remember(panel, page, reader) { mutableStateOf<Int?>(null) }
     val processBusy by reader.rerunInFlight.collectAsStateWithLifecycle()
+    val planned = remember(panel, page, showDiagnostics) {
+        ocrPlannedDiagnostics(showDiagnostics && panel == SavedPageOcrPanel.PROCESSING, page?.recipe)
+    }
     var result by remember(panel, page, reader, lifecycle, refresh) {
         mutableStateOf<Reading>(if (page == null) Reading.Unavailable else Reading.Loading)
     }
@@ -132,6 +140,11 @@ internal fun SavedPageOcrDetails(panel: SavedPageOcrPanel, page: EditablePage?, 
                         Text(stringResource(ocrErrorLabel(status?.lastError)))
                         if (status != null) {
                             OcrSettingsSummary(status.configuration)
+                            planned?.let { plan ->
+                                plan.input?.let { Text(stringResource(R.string.ocr_details_planned_input, it.width, it.height)) }
+                                Text(stringResource(R.string.ocr_details_planned_appearance, stringResource(plan.appearance)))
+                                for (stage in plan.finishing) Text(stringResource(R.string.ocr_details_planned_finishing, stringResource(stage)))
+                            }
                             TextButton(onClick = { submit(status, defaults = true) }, enabled = !submitting && !processBusy, modifier = Modifier.heightIn(min = 48.dp)) {
                                 Text(stringResource(R.string.ocr_rerun_defaults))
                             }
@@ -161,6 +174,33 @@ internal fun SavedPageOcrDetails(panel: SavedPageOcrPanel, page: EditablePage?, 
             }
         },
     )
+}
+
+/** Planned fields are scalars and app-owned labels only. Never retain a recipe, a result, or the paths/provenance a recipe contains. */
+internal data class OcrPlannedDiagnostics(val input: PixelSize?, val appearance: Int, val finishing: List<Int>)
+
+internal fun ocrPlannedDiagnostics(enabled: Boolean, accepted: Recipe?): OcrPlannedDiagnostics? {
+    if (!enabled || accepted == null) return null
+    val input = try { GeometrySizing.ocr(accepted.geometry).size } catch (_: IllegalArgumentException) { null }
+    val appearance = when (accepted.appearance) {
+        AppearanceRecipe.NoneV1 -> R.string.editor_look_none
+        is AppearanceRecipe.PaperGainV1 -> R.string.editor_look_paper
+        is AppearanceRecipe.NaturalLV1 -> R.string.editor_look_natural
+        is AppearanceRecipe.DocumentColorV1 -> R.string.editor_look_document_color
+        is AppearanceRecipe.PaperShadowV1 -> R.string.editor_look_paper_shadow
+        is AppearanceRecipe.LocalMaxGainV1 -> R.string.ocr_details_local_gain
+        is AppearanceRecipe.ProviderAppearanceV1 -> R.string.ocr_details_model_appearance
+    }
+    val finishing = buildList {
+        if (accepted.denoise != null) add(R.string.ocr_details_noise_reduction)
+        if (accepted.detail != null) add(R.string.ocr_details_sharpening)
+        when (accepted.binary) {
+            null -> Unit
+            BinaryRecipe.GrayscaleV1 -> add(R.string.editor_look_gray)
+            is BinaryRecipe.SauvolaV1 -> add(R.string.editor_look_binary)
+        }
+    }
+    return OcrPlannedDiagnostics(input, appearance, finishing)
 }
 
 private sealed interface Reading {

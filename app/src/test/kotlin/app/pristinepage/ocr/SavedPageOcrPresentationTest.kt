@@ -3,13 +3,36 @@ package app.pristinepage.ocr
 import app.pristinepage.R
 import app.pristinepage.core.ocr.OcrError
 import app.pristinepage.core.ocr.OcrText
+import app.pristinepage.core.pipeline.PixelSize
+import app.pristinepage.core.pipeline.Recipe
+import app.pristinepage.core.recipe.AppearanceRecipe
+import app.pristinepage.core.recipe.GeometryRecipe
+import app.pristinepage.core.recipe.SourceBinding
 import app.pristinepage.data.repository.SavedOcrWork.PagePhase
+import app.pristinepage.design.AtelierSettings
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Test
 
 class SavedPageOcrPresentationTest {
+    @Test fun diagnosticsAreOptInAndRejectInvalidStoredValues() {
+        for (stored in listOf(emptyMap(), mapOf("ocrDiagnostics" to "true"), mapOf("ocrDiagnostics" to false))) {
+            assertFalse(AtelierSettings.fromStored(stored).ocrDiagnostics)
+        }
+        assertEquals(true, AtelierSettings.fromStored(mapOf("ocrDiagnostics" to true)).ocrDiagnostics)
+    }
+
+    @Test fun onlyOptedInDetailsExposePlannedExtentFromTheAcceptedRecipe() {
+        val geometry = GeometryRecipe.None(SourceBinding("a".repeat(64), PixelSize(1600, 3200), "fixture"), outputQuarterTurns = 1)
+        val accepted = Recipe(geometry = geometry, appearance = AppearanceRecipe.NaturalLV1())
+        assertNull(ocrPlannedDiagnostics(false, accepted))
+        val details = checkNotNull(ocrPlannedDiagnostics(true, accepted))
+        assertEquals(PixelSize(2400, 1200), details.input)
+        assertEquals(R.string.editor_look_natural, details.appearance)
+        assertFalse(details.toString().contains("a".repeat(64)))
+    }
+
     @Test fun readOnlyOcrPanelDoesNotInvokeComposeSelectionOrItsSmartSelectionPath() {
         // Compose selection can hand the displayed string to a platform text classifier before an explicit copy.
         val compiledPanel = checkNotNull(javaClass.getResourceAsStream("SavedPageOcrDetailsKt.class"))

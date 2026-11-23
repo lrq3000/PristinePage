@@ -53,6 +53,7 @@ class PageEditorScreen(
     private val previousPage: (() -> Unit)? = null,
     private val nextPage: (() -> Unit)? = null,
     private val savedOcr: SavedPageOcrReader? = null,
+    private val showOcrDiagnostics: Boolean = false,
 ) : EditorContent {
     @Composable override fun Content(session: EditorSession, onExit: () -> Unit) {
         val state by session.state.collectAsStateWithLifecycle()
@@ -324,7 +325,7 @@ class PageEditorScreen(
         }
         if (guidedStep == null && savedOcr != null) {
             val shown = ocrPanel
-            if (shown != null) SavedPageOcrDetails(shown, state.page, savedOcr) { ocrPanel = null }
+            if (shown != null) SavedPageOcrDetails(shown, state.page, savedOcr, showOcrDiagnostics) { ocrPanel = null }
         }
         if (information) AlertDialog(onDismissRequest = { information = false },
             title = { Text(stringResource(R.string.atelier_info)) },

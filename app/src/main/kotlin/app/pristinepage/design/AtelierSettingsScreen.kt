@@ -87,6 +87,8 @@ internal fun AtelierSettingsScreen(page: SettingsPage, preferences: AtelierPrefe
                     SettingsPage.OCR -> {
                         Text(stringResource(ocrStatus))
                         SettingsLink(SettingsPage.OCR_LANGUAGES, navigate)
+                        SettingsSwitch(R.string.settings_ocr_diagnostics, settings.ocrDiagnostics, "settings-ocr-diagnostics", preferences::setOcrDiagnostics)
+                        Text(stringResource(R.string.settings_ocr_diagnostics_help), style = MaterialTheme.typography.bodySmall)
                     }
                     SettingsPage.TITLE -> AlbumTemplateSettings(settings.albumTitleTemplate) { template ->
                         preferences.setAlbumTitleTemplate(template)

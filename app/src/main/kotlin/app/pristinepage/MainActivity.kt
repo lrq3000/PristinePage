@@ -242,7 +242,7 @@ class MainActivity : ComponentActivity() {
                             },
                         )
                     }
-                    PageEditorScreen(loadOriginal = loadOriginal, savedOcr = savedOcr,
+                     PageEditorScreen(loadOriginal = loadOriginal, savedOcr = savedOcr, showOcrDiagnostics = settings.ocrDiagnostics,
                         pageNumber = fallback?.ordinal?.plus(1), albumPageCount = orderedPages.size,
                         previousPage = destination(-1), nextPage = destination(1), originalOnLoadFailure = {
                             if (fallback != null) key(fallback) {
