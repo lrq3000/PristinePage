@@ -1,8 +1,10 @@
 """Host-only release-gate controls; never touch the allocator or an Android device."""
 
 import subprocess
+import sys
 import unittest
 import xml.etree.ElementTree as ET
+from pathlib import Path
 
 from local_ocr_files_journey import LocalFilesJourney
 from run_local_ocr_guest import APP, CASE, TEST, install_flags, normalize_config, passed_case, recovery_pid
@@ -14,6 +16,20 @@ def block(class_name, method, code):
 
 
 class LocalOcrGuestTest(unittest.TestCase):
+    def test_language_and_rerun_modes_refuse_unscoped_arguments_before_apk_admission(self):
+        runner = Path(__file__).with_name("run_local_ocr_guest.py")
+        for flags, message in (
+            (["--manual-rerun", ""], "Rerun requires an exact existing synthetic recovery title"),
+            (["--manual-rerun", "OCR recovery 0123456789ab", "--enable-local-adb"], "Guest configuration is not part of language or rerun validation"),
+            (["--language-controls", "unused", "--enable-local-adb"], "Guest configuration is not part of language or rerun validation"),
+        ):
+            with self.subTest(flags=flags):
+                completed = subprocess.run([sys.executable, "-B", runner, "--existing", "unused", *flags,
+                                            "unused", "unused", "unused", "unused", "unused"],
+                                           capture_output=True, text=True, timeout=15)
+                self.assertEqual(2, completed.returncode, completed.stderr)
+                self.assertIn(message, completed.stderr)
+
     def test_recovery_requires_exact_checkpoint_and_android_process_death(self):
         started = block("app.pristinepage.ocr.LocalOcrWorkDeathTest", "interruptRealNativeRecognition", 1)
         checkpoint = "INSTRUMENTATION_STATUS: ocrRecoveryCheckpoint=2\nINSTRUMENTATION_STATUS: ocrRecoveryPid=8524\nINSTRUMENTATION_STATUS_CODE: 64\n"

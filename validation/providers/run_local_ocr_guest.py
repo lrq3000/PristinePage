@@ -334,7 +334,7 @@ def run_type(ns):
                 self.lock.rmdir()
             raise RuntimeError("Unverified provisioning/launch; retained the exact allocator cleanup obligation")
 
-        def witness(self, pair, hashes, fresh, files_source, saved_album, backfill, recovery, controls, rerun, diagnosis, previous_test):
+        def witness(self, pair, hashes, fresh, files_source, saved_album, backfill, recovery, controls, rerun, diagnosis, previous_test, settings_restart=False):
             record = self.owned()
             row = self.exact(self.inventory())
             need([int(row[i]) for i in (5, 6)] == [item[0] for item in record["runtime_processes"]], "Target processes changed")
@@ -345,6 +345,9 @@ def run_type(ns):
             present = set(self.command([*target, "shell", "pm", "list", "packages", APP]).splitlines())
             need(present <= {f"package:{APP}", f"package:{TEST}"} and (not fresh or not present),
                  "Fresh guest already contains an unrelated PristinePage app")
+            if settings_restart:
+                need(present == {f"package:{APP}", f"package:{TEST}"} and previous_test is None,
+                     "Settings restart must reuse both exact installed APKs")
             for package, path in pair.items():
                 need(sha(path) == hashes[package], "APK changed before install")
                 installed = self.installed_hash(package) if f"package:{package}" in present else None
@@ -356,6 +359,11 @@ def run_type(ns):
             registry = self.command([*target, "shell", "pm", "list", "instrumentation", APP]).splitlines()
             need(registry == [f"instrumentation:{RUNNER} (target={APP})"], "Unexpected registered instrumentation target")
             self.save(self.path("installed.json"), {"sha256": hashes, "runner": registry}, durable=True)
+            if settings_restart:
+                from local_ocr_files_journey import LocalOcrSettingsRestart
+                settings = LocalOcrSettingsRestart(self, target, APP)
+                self.save(self.path("settings-restart.json"), settings.verify(), durable=True)
+                return
             if diagnosis and diagnosis != "files":
                 self.inspect_saved_wakes(target, recovery_title=None if diagnosis == "work" else diagnosis)
                 return
@@ -501,6 +509,7 @@ def main():
     files.add_argument("--native-recovery", action="store_true")
     files.add_argument("--language-controls", type=lambda v: Path(v).resolve())
     files.add_argument("--manual-rerun")
+    files.add_argument("--settings-restart", action="store_true")
     files.add_argument("--diagnose-work", action="store_const", const="work", dest="diagnosis")
     files.add_argument("--diagnose-files", action="store_const", const="files", dest="diagnosis")
     files.add_argument("--diagnose-recovery", dest="diagnosis")
@@ -519,8 +528,12 @@ def main():
         parser.error("Only the exact saved synthetic Files album may be resumed")
     if (args.startup_backfill or args.native_recovery or args.language_controls or args.manual_rerun) and not args.existing:
         parser.error("Backfill, recovery, language and rerun validation require the exact retained OCR guest")
-    if args.manual_rerun and not re.fullmatch(r"OCR recovery [a-f0-9]{12}", args.manual_rerun):
+    if args.manual_rerun is not None and not re.fullmatch(r"OCR recovery [a-f0-9]{12}", args.manual_rerun):
         parser.error("Rerun requires an exact existing synthetic recovery title")
+    if args.enable_local_adb and (args.language_controls or args.manual_rerun):
+        parser.error("Guest configuration is not part of language or rerun validation")
+    if args.settings_restart and (not args.existing or args.previous_test_sha or args.enable_local_adb):
+        parser.error("Settings restart requires the retained guest and unchanged installed APKs and guest settings")
     if args.diagnosis and (not args.existing or args.enable_local_adb):
         parser.error("Diagnosis requires only the released OCR guest")
     if args.diagnosis and args.diagnosis not in ("work", "files") and not re.fullmatch(r"OCR recovery [a-f0-9]{12}", args.diagnosis):
@@ -555,7 +568,7 @@ def main():
         run.prepare(args.new, args.recover_provision[1] if args.recover_provision else None, args.enable_local_adb)
         run.witness(pair, hashes, args.new or bool(args.recover_provision), args.files_source, args.files_saved_album,
                     args.startup_backfill, args.native_recovery, args.language_controls, args.manual_rerun, args.diagnosis,
-                    args.previous_test_sha)
+                    args.previous_test_sha, settings_restart=args.settings_restart)
         if not args.diagnosis:
             print("Verified search, reopen and private JPEG export of the previously saved Files scan." if args.files_saved_album else
                   "Verified the Files picker journey." if args.files_source else
@@ -563,6 +576,7 @@ def main():
                   "Verified terminal recovery after three observed native interruptions." if args.native_recovery else
                   "Verified exact multilingual OCR controls." if args.language_controls else
                   "Verified explicit rerun with saved and default OCR settings." if args.manual_rerun else
+                  "Verified OCR defaults across an app process restart and restored the initial order." if args.settings_restart else
                   "The real import, background OCR, and exact-page Home smoke passed.", flush=True)
     finally:
         run.close_owned()

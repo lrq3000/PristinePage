@@ -171,3 +171,88 @@ class LocalFilesJourney:
                                                                 "correction": "Natural lightness"}, durable=True)
         self.tap("Back to my scans")
         return title
+
+
+class LocalOcrSettingsRestart(LocalFilesJourney):
+    """Exercise the installed app's Settings without instrumentation, a guest reset or a new build."""
+
+    BASE = "Recognition order: English, French"
+    REVERSED = "Recognition order: French, English"
+    FRENCH_ONLY = "Recognition order: French"
+    ENGLISH_ONLY = "Recognition order: English"
+
+    def __init__(self, run, target, app):
+        super().__init__(run, target, app, None)
+
+    def open_languages(self):
+        for label in ("Settings", "Text recognition (OCR)", "OCR languages"):
+            self.tap(label)
+
+    def order(self):
+        def read(tree, _):
+            labels = self.labels(tree)
+            orders = {label for label in labels if label.startswith("Recognition order: ")}
+            if len(orders) > 1:
+                raise RuntimeError("Ambiguous OCR recognition order")
+            return next(iter(orders)) if orders else None
+
+        return self.wait({self.app}, read)
+
+    def expect(self, order):
+        if self.order() != order:
+            raise RuntimeError(f"Expected the OCR Settings UI to display {order}")
+
+    def process(self):
+        pid = self.command("shell", "pidof", self.app, allowed=(0, 1)).strip()
+        if pid and not re.fullmatch(r"[1-9][0-9]*", pid):
+            raise RuntimeError("App process identity is ambiguous")
+        return pid
+
+    def stop_process(self):
+        self.command("shell", "am", "force-stop", self.app)
+        if self.process():
+            raise RuntimeError("App process did not exit")
+
+    def restore(self):
+        # Start at Home after any interruption, then use only the exact observed Settings state to choose the corrective tap.
+        self.stop_process()
+        self.launch()
+        self.open_languages()
+        order = self.order()
+        if order == self.FRENCH_ONLY:
+            self.tap("English")
+            self.expect(self.REVERSED)
+            order = self.REVERSED
+        if order == self.REVERSED:
+            self.tap("French")
+            self.expect(self.ENGLISH_ONLY)
+            order = self.ENGLISH_ONLY
+        if order == self.ENGLISH_ONLY:
+            self.tap("French")
+        self.expect(self.BASE)
+
+    def verify(self):
+        if self.process():
+            raise RuntimeError("Settings witness requires the app process to be absent at entry")
+        self.launch()
+        self.open_languages()
+        self.expect(self.BASE)
+        first_pid = self.process()
+        if not first_pid:
+            raise RuntimeError("No initial app process")
+        try:
+            self.tap("English")
+            self.expect(self.FRENCH_ONLY)
+            self.tap("English")
+            self.expect(self.REVERSED)
+            self.stop_process()
+            self.launch()
+            second_pid = self.process()
+            if not second_pid or second_pid == first_pid:
+                raise RuntimeError("No distinct cold app process")
+            self.open_languages()
+            self.expect(self.REVERSED)
+        finally:
+            self.restore()
+        return {"initial": ["eng", "fra"], "afterColdStart": ["fra", "eng"],
+                "restored": ["eng", "fra"], "distinctAppProcesses": True}
