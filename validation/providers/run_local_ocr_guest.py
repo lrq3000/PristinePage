@@ -205,7 +205,8 @@ def run_type(ns):
                     need(record["name"] == name and record["installation"] == str(console.parent)
                          and record.get("purpose") == "pristinepage-ocr-qualification"
                          and record["owner"] is None and record["state"] == "stopped-released" and record["shutdown_verified"]
-                         and not record["keep_running"] and not record["handoff_to"], "Not this released OCR guest")
+                          and not record["keep_running"] and not record["handoff_to"]
+                          and not record.get("radio_recovery_required"), "Not this released OCR guest, or radio restoration needs reconciliation")
                     self.index = record["index"]
                     self.require_stopped(self.exact(before))
                     for pid, start in record["shutdown_processes"]:

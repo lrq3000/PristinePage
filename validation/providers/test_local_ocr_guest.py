@@ -61,6 +61,28 @@ class LocalOcrGuestTest(unittest.TestCase):
         self.assertFalse(isolated(dict(radio, wifi_on="1"), networks, "Wi-Fi is disabled"))
         self.assertFalse(isolated(dict(radio, mobile_data="1"), networks, "Wi-Fi is disabled"))
 
+    def test_cold_files_runner_needs_a_complete_named_pass_and_exact_witness(self):
+        from run_local_ocr_airplane import CASE as AIRPLANE_CASE, MARKER, witnessed
+
+        started = block(*AIRPLANE_CASE, 1)
+        passed = block(*AIRPLANE_CASE, 0)
+        marker = f"INSTRUMENTATION_RESULT: offlineOcrWitness={MARKER}\n"
+        ending = "OK (1 test)\nINSTRUMENTATION_CODE: -1\n"
+        self.assertTrue(witnessed(started + passed + marker + ending))
+        for transcript in (started + passed + ending, started + passed + marker * 2 + ending,
+                           started + block(*AIRPLANE_CASE, -4) + marker + ending, started + passed + marker):
+            self.assertFalse(witnessed(transcript))
+
+    def test_cold_files_runner_rejects_missing_or_connected_radio_readback(self):
+        from run_local_ocr_airplane import radio_proven
+
+        good = {"before-state": "1\n0\n0\n", "before-wifi": "Wi-Fi is disabled\n",
+                "before-networks": "Active default network: none\nCurrent Networks:\nNetwork Requests:\n"}
+        self.assertTrue(radio_proven(good, "before"))
+        self.assertFalse(radio_proven(good, "after"))
+        self.assertFalse(radio_proven(dict(good, **{"before-wifi": "Wi-Fi is enabled\n"}), "before"))
+        self.assertFalse(radio_proven(dict(good, **{"before-state": "1\n2\n0\n"}), "before"))
+
     def test_language_and_rerun_modes_refuse_unscoped_arguments_before_apk_admission(self):
         runner = Path(__file__).with_name("run_local_ocr_guest.py")
         for flags, message in (
