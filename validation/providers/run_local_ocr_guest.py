@@ -32,6 +32,14 @@ LANGUAGE_CASE = ("app.pristinepage.ocr.LocalOcrLanguageJourneyTest", "settingsSe
 JAPANESE_CASE = (LANGUAGE_CASE[0], "japaneseSparseLayoutRemainsBoundToTheExactSearchHit")
 MANUAL_CASE = ("app.pristinepage.ocr.LocalOcrManualRerunTest", "terminalPageCanRerunWithSavedSettingsAndThenDefaults")
 LANGUAGE_CONTROLS = ("eng", "fra", "blank", "ara-eng", "ara", "chi_sim")
+LANGUAGE_SUITES = {
+    "baseline": (LANGUAGE_CASE, LANGUAGE_CONTROLS),
+    "japanese": (JAPANESE_CASE, ("jpn",)),
+    "latin": ((LANGUAGE_CASE[0], "remainingLatinLanguagesReachTheExactHomePage"),
+              ("spa", "deu", "ita", "por", "nld", "pol", "tur")),
+    "non-latin": ((LANGUAGE_CASE[0], "remainingNonLatinLanguagesReachTheExactHomePage"),
+                  ("rus", "ukr", "ell", "heb", "hin", "kor", "vie", "ind")),
+}
 LANGUAGE_RECEIPT = "7d7f418e3b20eea85ed795151c54df8ac2b920d6c09cc5d443a6559c7c5ec093"
 SIGNER = "7ef552d3eab5d93fac15b3d2dd7233f1b50a170d2baf68460b12f6085f8dadee"
 ALLOCATOR = "ebc068885e9e6af8c836fb658edebc245a4b8c3adf52bf6c040fa4fdac263c1d"
@@ -44,8 +52,8 @@ def need(ok, message):
         raise RuntimeError(message)
 
 
-def checked_language_results(output, japanese=False):
-    case, controls = (JAPANESE_CASE, ("jpn",)) if japanese else (LANGUAGE_CASE, LANGUAGE_CONTROLS)
+def checked_language_results(output, suite="baseline"):
+    case, controls = LANGUAGE_SUITES[suite]
     marker = re.compile(r"(?m)^INSTRUMENTATION_STATUS: ocrLanguageControl=([a-z_-]+)\nINSTRUMENTATION_STATUS_CODE: 65\n")
     normalized = output.replace("\r\n", "\n")
     marks = tuple(marker.findall(normalized))
@@ -482,7 +490,7 @@ def run_type(ns):
             need(passed_case(output, RECOVER_CASE), "Missing terminal recovery witness")
             self.save(self.path("recovery-outcome.json"), {"phase": "FAILED", "error": "INTERRUPTED", "starts": 3}, durable=True)
 
-        def language_journey(self, target, controls, japanese=False):
+        def language_journey(self, target, controls, suite="baseline"):
             prefix = uuid.uuid4().hex[:12]
             folder = "/sdcard/Download/pristinepage-ocr-" + prefix
             probe = controls.parents[2]
@@ -490,19 +498,20 @@ def run_type(ns):
             verify_stage(probe, LANGUAGE_RECEIPT)
             cases = {case["id"]: case for case in json.loads((controls.parent / "manifest.json").read_text(encoding="utf-8"))["cases"]}
             self.command([*target, "shell", "mkdir", folder])
-            for control in ("jpn",) if japanese else LANGUAGE_CONTROLS:
+            case, control_ids = LANGUAGE_SUITES[suite]
+            for control in control_ids:
                 name = control + ".png"
                 source = controls / name
                 identity = cases[control]
                 need(0 < identity["imageBytes"] < 32 * 1024, "Invalid synthetic control length")
                 verify_file(source, identity["imageBytes"], identity["imageSha256"])
                 self.command([*target, "push", source, f"{folder}/{name}"], timeout=20)
-            case = JAPANESE_CASE if japanese else LANGUAGE_CASE
             output = self.command([*target, "shell", "am", "instrument", "-w", "-r", "-e", "class",
-                                   "#".join(case), "-e", "ocrFixture", prefix, RUNNER], timeout=230 if japanese else 830)
-            self.path("language-instrumentation.txt").write_text(output, encoding="utf-8")
-            marks = checked_language_results(output, japanese)
-            self.save(self.path("language-outcomes.json"), {"controls": marks, "passed": True}, durable=True)
+                                   "#".join(case), "-e", "ocrFixture", prefix, RUNNER], timeout=60 + 150 * len(control_ids))
+            label = "language" if suite in ("baseline", "japanese") else f"language-{suite}"
+            self.path(f"{label}-instrumentation.txt").write_text(output, encoding="utf-8")
+            marks = checked_language_results(output, suite)
+            self.save(self.path(f"{label}-outcomes.json"), {"controls": marks, "passed": True}, durable=True)
 
         def inspect_files_failure(self, target):
             for name, argv in (

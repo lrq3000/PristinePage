@@ -295,8 +295,45 @@ class LocalOcrGuestTest(unittest.TestCase):
         marker = "INSTRUMENTATION_STATUS: ocrLanguageControl=jpn\r\nINSTRUMENTATION_STATUS_CODE: 65\r\n"
         done = block(*case, 0) + "OK (1 test)\r\nINSTRUMENTATION_CODE: -1\r\n"
         start = block(*case, 1)
-        self.assertEqual(("jpn",), guest.checked_language_results(start + marker + done, japanese=True))
+        self.assertEqual(("jpn",), guest.checked_language_results(start + marker + done, suite="japanese"))
         for invalid in (start + done, start + marker + marker + done,
                         start + marker.replace("jpn", "eng") + done, block(*guest.LANGUAGE_CASE, 1) + marker + done):
             with self.subTest(invalid=invalid), self.assertRaises(RuntimeError):
-                guest.checked_language_results(invalid, japanese=True)
+                guest.checked_language_results(invalid, suite="japanese")
+
+    def test_remaining_script_batch_requires_each_marker_in_order(self):
+        import run_local_ocr_guest as guest
+
+        case = (guest.LANGUAGE_CASE[0], "remainingLatinLanguagesReachTheExactHomePage")
+        ids = ("spa", "deu", "ita", "por", "nld", "pol", "tur")
+        markers = [f"INSTRUMENTATION_STATUS: ocrLanguageControl={control}\nINSTRUMENTATION_STATUS_CODE: 65\n" for control in ids]
+        done = block(*case, 0) + "\nOK (1 test)\nINSTRUMENTATION_CODE: -1\n"
+        start = block(*case, 1)
+        self.assertEqual(ids, guest.checked_language_results(start + "".join(markers) + done, suite="latin"))
+        for reordered in (markers[:-1], markers + markers[:1], markers[::-1]):
+            with self.assertRaises(RuntimeError):
+                guest.checked_language_results(start + "".join(reordered) + done, suite="latin")
+
+    def test_offline_script_batch_cannot_substitute_the_files_marker(self):
+        from run_local_ocr_airplane import invocation
+        from run_local_ocr_guest import LANGUAGE_SUITES
+
+        case, option, limit = invocation("latin")
+        self.assertEqual(LANGUAGE_SUITES["latin"][0], case)
+        self.assertEqual("ocrFixture", option)
+        self.assertTrue(0 < limit < 1500)
+        self.assertEqual("offlineOcrFixture", invocation(None)[1])
+        with self.assertRaises(RuntimeError):
+            invocation("not-a-qualified-batch")
+
+    def test_offline_source_is_confined_and_profile_specific(self):
+        from run_local_ocr_airplane import offline_source
+
+        root = Path.cwd()
+        stage = root / "validation/raw/providers/synthetic-qualified-stage"
+        self.assertEqual(stage, offline_source(root, stage, "latin"))
+        for path in (root, stage / ".." / ".." / "storage", root.parent / "another-worktree"):
+            with self.assertRaises(RuntimeError):
+                offline_source(root, path, "latin")
+        with self.assertRaises(RuntimeError):
+            offline_source(root, stage, None)

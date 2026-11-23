@@ -19,6 +19,8 @@ import app.pristinepage.PristinePageApplication
 import app.pristinepage.R
 import app.pristinepage.core.ocr.OcrLayout
 import app.pristinepage.data.model.IngestResult
+import app.pristinepage.data.model.DocumentId
+import app.pristinepage.data.model.PageId
 import app.pristinepage.data.repository.SavedOcrWork
 import app.pristinepage.design.OcrLanguage
 import app.pristinepage.editor.EditorViewModel
@@ -60,7 +62,17 @@ class LocalOcrLanguageJourneyTest {
         recognize(listOf(listOf("jpn") to listOf(JAPANESE)), OcrLayout.SPARSE_TEXT)
     }
 
-    private suspend fun recognize(groups: List<Pair<List<String>, List<Control>>>, layout: OcrLayout) {
+    @Test
+    fun remainingLatinLanguagesReachTheExactHomePage(): Unit = runBlocking {
+        recognize(PinnedOcrScriptControls.latin.map { listOf(it.id) to listOf(it) }, OcrLayout.SINGLE_BLOCK)
+    }
+
+    @Test
+    fun remainingNonLatinLanguagesReachTheExactHomePage(): Unit = runBlocking {
+        recognize(PinnedOcrScriptControls.mixedScripts.map { listOf(it.id) to listOf(it) }, OcrLayout.SINGLE_BLOCK)
+    }
+
+    private suspend fun recognize(groups: List<Pair<List<String>, List<OcrScriptControl>>>, layout: OcrLayout) {
         val instrumentation = InstrumentationRegistry.getInstrumentation()
         val context = instrumentation.targetContext
         val app = context.applicationContext as PristinePageApplication
@@ -77,10 +89,10 @@ class LocalOcrLanguageJourneyTest {
         assertEquals(listOf("eng", "fra"), initial)
         val initialLayout = app.atelierPreferences.settings.value.ocrLayout
         assertEquals(OcrLayout.AUTOMATIC, initialLayout)
-        val completed = mutableListOf<Pair<String, List<String>>>()
+        val completed = mutableListOf<Triple<DocumentId, PageId, List<String>>>()
         var sparseProducer: SavedOcrWork.Hit? = null
         try {
-            if (layout == OcrLayout.SPARSE_TEXT) selectLayout(app, "settings-ocr-layout-sparse_text", layout)
+            if (layout != initialLayout) selectLayout(app, layout)
             for ((order, controls) in groups) {
                 applyOrder(app, order)
                 for (control in controls) {
@@ -136,22 +148,22 @@ class LocalOcrLanguageJourneyTest {
                         compose.waitUntil(15_000) { compose.onAllNodesWithTag("atelier-home-back").fetchSemanticsNodes().size == 1 }
                         compose.onNodeWithTag("atelier-home-back").performClick()
                     }
-                    completed += title to order
+                    completed += Triple(document, page, order)
                     instrumentation.sendStatus(65, android.os.Bundle().apply { putString("ocrLanguageControl", control.id) })
                 }
             }
             if (layout == OcrLayout.SPARSE_TEXT) {
-                selectLayout(app, "settings-ocr-layout-automatic", initialLayout)
+                selectLayout(app, initialLayout)
                 // The admitted hit retains the original producer, so equality of the displayed layout alone cannot hide replacement.
                 assertTrue(graph.store.savedOcr.canOpen(checkNotNull(sparseProducer)))
             }
-            for ((title, order) in completed) {
-                val document = graph.store.catalog.list(null, 50).single { it.title == title }
-                val page = graph.store.catalog.load(document.documentId).pages.single().pageId
-                assertEquals(1, graph.store.savedOcr.readStatus(document.documentId, page)?.attemptsStarted)
-                assertEquals(order, graph.store.savedOcr.readText(document.documentId, page)?.configuration?.languagePacks?.ordered?.map { it.code })
-                assertEquals(layout, graph.store.savedOcr.readStatus(document.documentId, page)?.configuration?.layout)
-                assertEquals(layout, graph.store.savedOcr.readText(document.documentId, page)?.configuration?.layout)
+            for ((document, page, order) in completed) {
+                val status = checkNotNull(graph.store.savedOcr.readStatus(document, page))
+                val text = checkNotNull(graph.store.savedOcr.readText(document, page))
+                assertEquals(1, status.attemptsStarted)
+                assertEquals(order, text.configuration.languagePacks?.ordered?.map { it.code })
+                assertEquals(layout, status.configuration.layout)
+                assertEquals(layout, text.configuration.layout)
             }
         } finally {
             // Restore only this test's preference even when a failed assertion leaves a non-Home screen open.
@@ -167,10 +179,10 @@ class LocalOcrLanguageJourneyTest {
         }
     }
 
-    private fun selectLayout(app: PristinePageApplication, tag: String, expected: OcrLayout) {
+    private fun selectLayout(app: PristinePageApplication, expected: OcrLayout) {
         compose.onNodeWithTag("atelier-settings").performClick()
         compose.onNodeWithTag("settings-open-ocr").performClick()
-        compose.onNodeWithTag(tag).performScrollTo().performClick()
+        compose.onNodeWithTag("settings-ocr-layout-${expected.name.lowercase(java.util.Locale.ROOT)}").performScrollTo().performClick()
         assertEquals(expected, app.atelierPreferences.settings.value.ocrLayout)
         repeat(2) { compose.onNodeWithTag("settings-back").performClick() }
     }
@@ -191,15 +203,13 @@ class LocalOcrLanguageJourneyTest {
         repeat(3) { compose.onNodeWithTag("settings-back").performClick() }
     }
 
-    private data class Control(val id: String, val bytes: Int, val sha: String, val queries: List<String>)
-
     companion object {
-        private val ENGLISH = Control("eng", 7242, "f4585967198db8a51a7d8afae50e449bdead2ad3b4122d1478afffc5fbd5608f", listOf("customer"))
-        private val FRENCH = Control("fra", 6329, "eaff0fce642ed42cd90a79508fe42e8a7ab44680bc7ed8a0cc9b2a771fda5884", listOf("montant"))
-        private val BLANK = Control("blank", 556, "ff448c425e99fc723185ad8de20a82d9d125b9831c375ff8501baf95487a3ac4", emptyList())
-        private val ARABIC = Control("ara", 6525, "d05adf97c5b5e716546e001b36632aac0b81c548ad83410f6f01f4f5052f0dc0", listOf("مكتوب"))
-        private val CHINESE = Control("chi_sim", 7653, "2007a8158c43d0a9235a4897aa94532cf069439769bc63c8c2f5b3408eff3304", listOf("付款总额"))
-        private val MIXED = Control("ara-eng", 13032, "3b0deec873bac14e914bc45fd66c41486269c85cda20b3a9ae8d2bb7911910cb", listOf("customer", "مكتوب"))
-        private val JAPANESE = Control("jpn", 14002, "26ee4767e3823ac846ffe0f9fe1e48d0bcc4a0d646487c53cb28fd13f100b8df", listOf("領収書"))
+        private val ENGLISH = OcrScriptControl("eng", 7242, "f4585967198db8a51a7d8afae50e449bdead2ad3b4122d1478afffc5fbd5608f", listOf("customer"))
+        private val FRENCH = OcrScriptControl("fra", 6329, "eaff0fce642ed42cd90a79508fe42e8a7ab44680bc7ed8a0cc9b2a771fda5884", listOf("montant"))
+        private val BLANK = OcrScriptControl("blank", 556, "ff448c425e99fc723185ad8de20a82d9d125b9831c375ff8501baf95487a3ac4", emptyList())
+        private val ARABIC = OcrScriptControl("ara", 6525, "d05adf97c5b5e716546e001b36632aac0b81c548ad83410f6f01f4f5052f0dc0", listOf("مكتوب"))
+        private val CHINESE = OcrScriptControl("chi_sim", 7653, "2007a8158c43d0a9235a4897aa94532cf069439769bc63c8c2f5b3408eff3304", listOf("付款总额"))
+        private val MIXED = OcrScriptControl("ara-eng", 13032, "3b0deec873bac14e914bc45fd66c41486269c85cda20b3a9ae8d2bb7911910cb", listOf("customer", "مكتوب"))
+        private val JAPANESE = OcrScriptControl("jpn", 14002, "26ee4767e3823ac846ffe0f9fe1e48d0bcc4a0d646487c53cb28fd13f100b8df", listOf("領収書"))
     }
 }
