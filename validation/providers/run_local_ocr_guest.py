@@ -15,6 +15,7 @@ import time
 import uuid
 from zipfile import ZipFile
 
+from prepare_ocr_android_probe import verify_file, verify_stage
 from prepare_ocr_local_app import verify_candidate, verify_ocr_members
 
 
@@ -27,6 +28,10 @@ FILES_CASE = (CASE[0], "coldHomeSearchReopensTheSavedFilesPageAndCreatesJpeg")
 BACKFILL_CASE = ("app.pristinepage.ocr.LocalOcrStartupBackfillTest", "firstActivityLaunchFindsAndIndexesAnExistingUnqueuedPage")
 DEATH_CASE = ("app.pristinepage.ocr.LocalOcrWorkDeathTest", "interruptRealNativeRecognition")
 RECOVER_CASE = (DEATH_CASE[0], "thirdInterruptionIsTerminalAfterOrdinaryLaunch")
+LANGUAGE_CASE = ("app.pristinepage.ocr.LocalOcrLanguageJourneyTest", "settingsSelectedScriptsReachTheExactHomePage")
+MANUAL_CASE = ("app.pristinepage.ocr.LocalOcrManualRerunTest", "terminalPageCanRerunWithSavedSettingsAndThenDefaults")
+LANGUAGE_CONTROLS = ("eng", "fra", "blank", "ara-eng", "ara", "chi_sim")
+LANGUAGE_RECEIPT = "7d7f418e3b20eea85ed795151c54df8ac2b920d6c09cc5d443a6559c7c5ec093"
 SIGNER = "7ef552d3eab5d93fac15b3d2dd7233f1b50a170d2baf68460b12f6085f8dadee"
 ALLOCATOR = "ebc068885e9e6af8c836fb658edebc245a4b8c3adf52bf6c040fa4fdac263c1d"
 GUEST_PATTERN = r"agent-pristinepage-ocr-[a-f0-9]{12}"
@@ -329,7 +334,7 @@ def run_type(ns):
                 self.lock.rmdir()
             raise RuntimeError("Unverified provisioning/launch; retained the exact allocator cleanup obligation")
 
-        def witness(self, pair, hashes, fresh, files_source, saved_album, backfill, recovery, diagnosis, previous_test):
+        def witness(self, pair, hashes, fresh, files_source, saved_album, backfill, recovery, controls, rerun, diagnosis, previous_test):
             record = self.owned()
             row = self.exact(self.inventory())
             need([int(row[i]) for i in (5, 6)] == [item[0] for item in record["runtime_processes"]], "Target processes changed")
@@ -360,6 +365,9 @@ def run_type(ns):
             if recovery:
                 self.interrupt_and_recover(target)
                 return
+            if controls:
+                self.language_journey(target, controls)
+                return
             if files_source:
                 from local_ocr_files_journey import LocalFilesJourney
                 journey = LocalFilesJourney(self, target, APP, files_source)
@@ -369,10 +377,10 @@ def run_type(ns):
                     # Preserve crash and resolver evidence before shutting down; do not reissue the unsuccessful UI action.
                     self.inspect_files_failure(target)
                     raise
-            case = FILES_CASE if saved_album else BACKFILL_CASE if backfill else CASE
-            extras = ["-e", "filesSavedAlbum", saved_album] if saved_album else []
+            case = FILES_CASE if saved_album else BACKFILL_CASE if backfill else MANUAL_CASE if rerun else CASE
+            extras = ["-e", "filesSavedAlbum", saved_album] if saved_album else ["-e", "recoveryAlbum", f"'{rerun}'"] if rerun else []
             output = self.command([*target, "shell", "am", "instrument", "-w", "-r", "-e", "class",
-                                   "#".join(case), *extras, RUNNER], timeout=250)
+                                   "#".join(case), *extras, RUNNER], timeout=320 if rerun else 250)
             self.path("instrumentation.txt").write_text(output, encoding="utf-8")
             need(passed_case(output, case),
                  "Ordinary OCR instrumentation failed or skipped; inspect the exact transcript")
@@ -398,6 +406,31 @@ def run_type(ns):
             self.path("recovery-terminal.txt").write_text(output, encoding="utf-8")
             need(passed_case(output, RECOVER_CASE), "Missing terminal recovery witness")
             self.save(self.path("recovery-outcome.json"), {"phase": "FAILED", "error": "INTERRUPTED", "starts": 3}, durable=True)
+
+        def language_journey(self, target, controls):
+            prefix = uuid.uuid4().hex[:12]
+            folder = "/sdcard/Download/pristinepage-ocr-" + prefix
+            probe = controls.parents[2]
+            need(controls == probe / "assets/ocr-probe/controls", "Unexpected synthetic control location")
+            verify_stage(probe, LANGUAGE_RECEIPT)
+            cases = {case["id"]: case for case in json.loads((controls.parent / "manifest.json").read_text(encoding="utf-8"))["cases"]}
+            self.command([*target, "shell", "mkdir", folder])
+            for control in LANGUAGE_CONTROLS:
+                name = control + ".png"
+                source = controls / name
+                identity = cases[control]
+                need(0 < identity["imageBytes"] < 32 * 1024, "Invalid synthetic control length")
+                verify_file(source, identity["imageBytes"], identity["imageSha256"])
+                self.command([*target, "push", source, f"{folder}/{name}"], timeout=20)
+            output = self.command([*target, "shell", "am", "instrument", "-w", "-r", "-e", "class",
+                                   "#".join(LANGUAGE_CASE), "-e", "ocrFixture", prefix, RUNNER], timeout=830)
+            self.path("language-instrumentation.txt").write_text(output, encoding="utf-8")
+            normalized = output.replace("\r\n", "\n")
+            marks = re.findall(r"(?m)^INSTRUMENTATION_STATUS: ocrLanguageControl=([a-z_-]+)\nINSTRUMENTATION_STATUS_CODE: 65\n", normalized)
+            clean = re.sub(r"(?m)^INSTRUMENTATION_STATUS: ocrLanguageControl=[a-z_-]+\nINSTRUMENTATION_STATUS_CODE: 65\n", "", normalized)
+            need(tuple(marks) == LANGUAGE_CONTROLS and passed_case(clean, LANGUAGE_CASE),
+                 "Not all exact language controls completed; inspect the transcript")
+            self.save(self.path("language-outcomes.json"), {"controls": marks, "passed": True}, durable=True)
 
         def inspect_files_failure(self, target):
             for name, argv in (
@@ -466,10 +499,11 @@ def main():
     files.add_argument("--files-saved-album")
     files.add_argument("--startup-backfill", action="store_true")
     files.add_argument("--native-recovery", action="store_true")
-    diagnose = parser.add_mutually_exclusive_group()
-    diagnose.add_argument("--diagnose-work", action="store_const", const="work", dest="diagnosis")
-    diagnose.add_argument("--diagnose-files", action="store_const", const="files", dest="diagnosis")
-    diagnose.add_argument("--diagnose-recovery", dest="diagnosis")
+    files.add_argument("--language-controls", type=lambda v: Path(v).resolve())
+    files.add_argument("--manual-rerun")
+    files.add_argument("--diagnose-work", action="store_const", const="work", dest="diagnosis")
+    files.add_argument("--diagnose-files", action="store_const", const="files", dest="diagnosis")
+    files.add_argument("--diagnose-recovery", dest="diagnosis")
     parser.add_argument("--previous-test-sha")
     parser.add_argument("stage", type=lambda v: Path(v).absolute())
     parser.add_argument("app", type=Path)
@@ -483,10 +517,11 @@ def main():
         parser.error("Files UI validation requires the released OCR guest after the initial smoke")
     if args.files_saved_album and not re.fullmatch(r"pristinepage_\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2}", args.files_saved_album):
         parser.error("Only the exact saved synthetic Files album may be resumed")
-    if (args.startup_backfill or args.native_recovery) and not args.existing:
-        parser.error("Backfill and recovery validation require the exact retained OCR guest")
-    if args.diagnosis and (not args.existing or args.files_source or args.files_saved_album or args.startup_backfill
-                           or args.native_recovery or args.enable_local_adb):
+    if (args.startup_backfill or args.native_recovery or args.language_controls or args.manual_rerun) and not args.existing:
+        parser.error("Backfill, recovery, language and rerun validation require the exact retained OCR guest")
+    if args.manual_rerun and not re.fullmatch(r"OCR recovery [a-f0-9]{12}", args.manual_rerun):
+        parser.error("Rerun requires an exact existing synthetic recovery title")
+    if args.diagnosis and (not args.existing or args.enable_local_adb):
         parser.error("Diagnosis requires only the released OCR guest")
     if args.diagnosis and args.diagnosis not in ("work", "files") and not re.fullmatch(r"OCR recovery [a-f0-9]{12}", args.diagnosis):
         parser.error("Recovery diagnosis requires an exact existing synthetic recovery title")
@@ -495,6 +530,10 @@ def main():
         parser.error("An exact installed test digest is accepted only for test APK updates on the OCR guest")
     root = Path.cwd().resolve()
     need(root.name == "ocr-background-search" and root.parent.name == ".worktrees", "Use the authorized OCR worktree")
+    if args.language_controls:
+        raw = root / "validation/raw/providers"
+        need(args.language_controls.is_dir() and args.language_controls.is_relative_to(raw)
+             and args.language_controls.name == "controls", "Only the retained synthetic control directory is permitted")
     proofs = [exact_apk(args.app, args.app_sha, args.stage, False), exact_apk(args.test, args.test_sha, args.stage, True)]
     if args.preflight:
         print("Verified exact OCR APK pair; no guest mutation")
@@ -515,13 +554,15 @@ def main():
     try:
         run.prepare(args.new, args.recover_provision[1] if args.recover_provision else None, args.enable_local_adb)
         run.witness(pair, hashes, args.new or bool(args.recover_provision), args.files_source, args.files_saved_album,
-                    args.startup_backfill, args.native_recovery, args.diagnosis,
+                    args.startup_backfill, args.native_recovery, args.language_controls, args.manual_rerun, args.diagnosis,
                     args.previous_test_sha)
         if not args.diagnosis:
             print("Verified search, reopen and private JPEG export of the previously saved Files scan." if args.files_saved_album else
                   "Verified the Files picker journey." if args.files_source else
                   "Verified automatic startup backfill and exact Home navigation." if args.startup_backfill else
                   "Verified terminal recovery after three observed native interruptions." if args.native_recovery else
+                  "Verified exact multilingual OCR controls." if args.language_controls else
+                  "Verified explicit rerun with saved and default OCR settings." if args.manual_rerun else
                   "The real import, background OCR, and exact-page Home smoke passed.", flush=True)
     finally:
         run.close_owned()
