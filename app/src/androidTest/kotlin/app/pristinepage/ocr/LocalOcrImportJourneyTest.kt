@@ -10,12 +10,13 @@ import android.os.Bundle
 import android.os.ParcelFileDescriptor
 import android.os.Process
 import android.os.SystemClock
-import android.graphics.Rect
 import android.util.Log
-import android.view.accessibility.AccessibilityNodeInfo
 import androidx.compose.ui.test.assertIsEnabled
 import androidx.compose.ui.test.assertIsDisplayed
+import androidx.compose.ui.test.hasAnyAncestor
+import androidx.compose.ui.test.hasAnyDescendant
 import androidx.compose.ui.test.hasText
+import androidx.compose.ui.test.isDialog
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.compose.ui.test.junit4.createEmptyComposeRule
 import androidx.compose.ui.test.onAllNodesWithTag
@@ -27,6 +28,7 @@ import androidx.compose.ui.test.performSemanticsAction
 import androidx.compose.ui.test.performScrollTo
 import androidx.compose.ui.test.performScrollToNode
 import androidx.compose.ui.test.performTextInput
+import androidx.compose.ui.test.performTextReplacement
 import androidx.compose.ui.semantics.SemanticsActions
 import androidx.lifecycle.ViewModelProvider
 import androidx.test.core.app.ActivityScenario
@@ -65,6 +67,7 @@ import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
@@ -202,10 +205,11 @@ class LocalOcrImportJourneyTest {
         val saved = graph.store.editablePages.load(document.documentId, page.pageId)
         val inspectPicker = InstrumentationRegistry.getArguments().getString("filesInspectPicker") == "1"
         val textChooserMode = InstrumentationRegistry.getArguments().getString("filesInspectTextChooser")
-        require(textChooserMode == null || textChooserMode in setOf("1", "2", "3", "4"))
+        require(textChooserMode == null || textChooserMode in setOf("1", "3", "4"))
         val inspectTextChooser = textChooserMode != null
+        val inspectDetails = InstrumentationRegistry.getArguments().getString("filesInspectOcrDetails") == "1"
         require(!inspectPicker || !inspectTextChooser)
-        if (inspectPicker || inspectTextChooser) {
+        if (inspectPicker || inspectTextChooser || inspectDetails) {
             val original = graph.store.committedSources.load(saved.sourceId)
             assertEquals("Save as is permitted only for the exact synthetic Files input",
                 "f4585967198db8a51a7d8afae50e449bdead2ad3b4122d1478afffc5fbd5608f", original.sourceByteHash)
@@ -216,6 +220,14 @@ class LocalOcrImportJourneyTest {
         }
         assertFalse(text.previousGeneration)
         assertTrue("Expected fixture words in the saved OCR result", text.text.value.contains("customer paid", ignoreCase = true))
+        if (inspectDetails) {
+            // The prior controlled interruption deliberately left a durable notice. Do not let it overlay this panel.
+            val owner = compose.runOnUiThread { ViewModelProvider(compose.activity)[OcrTextSaveViewModel::class.java] }
+            if (owner.state.value.pastWriteNeedsVerification) {
+                closeOcrDialog(context, R.string.ocr_save_text_interrupted)
+                assertFalse(owner.state.value.pastWriteNeedsVerification)
+            }
+        }
         val hit = context.getString(R.string.home_matching_page, name, 1)
         compose.onNodeWithTag("home-album-search").performTextInput("customer")
         val library = compose.runOnUiThread { ViewModelProvider(compose.activity)[ImportLibraryViewModel::class.java].session }
@@ -228,6 +240,12 @@ class LocalOcrImportJourneyTest {
         val editor = compose.runOnUiThread { ViewModelProvider(compose.activity)[EditorViewModel::class.java] }
         compose.waitUntil(15_000) { editor.session.value?.state?.value?.page != null }
         assertEquals(page.pageId, editor.session.value?.state?.value?.page?.pageId)
+        if (inspectDetails) {
+            require(!inspectTextChooser && !inspectPicker)
+            verifyOptInProcessingDetails(app, context, library, editor, document.documentId, page.pageId, saved.recipeRevision, hit, text.text.value)
+            instrumentation.addResults(Bundle().apply { putString("filesWitness", "OCR_DETAILS_OPT_IN_SAME_PRODUCER") })
+            return@runBlocking
+        }
         if (InstrumentationRegistry.getArguments().getString("filesSearchOnly") == "1") {
             require(!inspectPicker)
             instrumentation.addResults(Bundle().apply { putString("filesWitness", "EXACT_PAGE_SEARCH") })
@@ -277,20 +295,10 @@ class LocalOcrImportJourneyTest {
                     })
                     Process.killProcess(Process.myPid())
                     error("The exact app process did not exit")
-                } else {
-                    val outputToken = checkNotNull(InstrumentationRegistry.getArguments().getString("filesTextOutput"))
-                    check(outputToken.matches(Regex("[a-f0-9]{12}")))
-                    val save = SyntheticTextDestination(automation, outputToken)
-                    save.confirmNewLocalFile()
-                    compose.waitUntil(30_000) { owner.state.value.let { !it.busy && it.consent == null } }
-                    assertEquals(R.string.ocr_save_text_verified, owner.state.value.notice)
-                    compose.onNodeWithText(context.getString(R.string.ocr_save_text_verified)).assertExists()
-                    save.verifyBytes(text.text.value.encodeToByteArray())
-                    instrumentation.addResults(Bundle().apply { putString("filesWitness", "LOCAL_TEXT_DESTINATION_READBACK") })
                 }
                 return@runBlocking
             }
-            compose.onNodeWithText(context.getString(R.string.atelier_close)).performClick()
+            closeOcrDialog(context, R.string.ocr_text)
         }
         compose.onNodeWithTag("editor-back").performClick()
         compose.waitUntil(15_000) { compose.onAllNodesWithTag("album-export-all").fetchSemanticsNodes().size == 1 }
@@ -351,6 +359,11 @@ class LocalOcrImportJourneyTest {
         }
         // Prove only that the chooser actually opened. No input or destination selection is allowed inside it.
         instrumentation.addResults(Bundle().apply { putString("filesWitness", "PICKER_OPENED_WITHOUT_CONFIRMATION") })
+    }
+
+    private fun closeOcrDialog(context: android.content.Context, title: Int) {
+        val scope = isDialog() and hasAnyDescendant(hasText(context.getString(title)))
+        compose.onNode(hasText(context.getString(R.string.atelier_close)) and hasAnyAncestor(scope)).performClick()
     }
 
     @Test
@@ -416,110 +429,163 @@ class LocalOcrImportJourneyTest {
         instrumentation.addResults(Bundle().apply { putString("filesWitness", "LOCAL_TEXT_APP_VERIFIED") })
     }
 
+    private suspend fun verifyOptInProcessingDetails(
+        app: PristinePageApplication,
+        context: android.content.Context,
+        library: app.pristinepage.library.LibrarySession,
+        editor: EditorViewModel,
+        document: app.pristinepage.data.model.DocumentId,
+        page: app.pristinepage.data.model.PageId,
+        revision: Long,
+        hitLabel: String,
+        recognizedText: String,
+    ) {
+        val preferences = app.atelierPreferences
+        assertFalse(preferences.settings.value.ocrDiagnostics)
+        val work = app.services.imports().store.savedOcr
+        val hit = work.find("customer", null, 50).hits.single { it.document == document && it.page == page }
+        val original = checkNotNull(work.readStatus(document, page, revision))
+        val input = context.getString(R.string.ocr_details_planned_input, 1500, 232)
+        val appearance = context.getString(R.string.ocr_details_planned_appearance, context.getString(R.string.editor_look_natural))
+        fun planned(enabled: Boolean) {
+            compose.onNodeWithTag("editor-tool-processing-details").performScrollTo().assertIsEnabled()
+                .performSemanticsAction(SemanticsActions.OnClick) { check(it()) }
+            val noErrors = context.getString(R.string.ocr_details_no_errors)
+            compose.waitUntil(15_000) { compose.onAllNodesWithText(noErrors).fetchSemanticsNodes().size == 1 }
+            compose.onNodeWithText(context.getString(R.string.ocr_details_ready)).assertExists()
+            compose.onNodeWithText(context.getString(R.string.ocr_details_attempts, original.attemptsStarted)).assertExists()
+            assertTrue("Processing details must not expose the saved OCR result",
+                compose.onAllNodesWithText(recognizedText).fetchSemanticsNodes().isEmpty())
+            if (enabled) {
+                compose.onNodeWithText(input).assertExists()
+                compose.onNodeWithText(appearance).assertExists()
+            } else {
+                compose.onNodeWithText(input).assertDoesNotExist()
+                compose.onNodeWithText(appearance).assertDoesNotExist()
+            }
+            closeOcrDialog(context, R.string.ocr_processing_details)
+        }
+        planned(false)
+        try {
+            compose.onNodeWithTag("editor-back").performClick()
+            compose.waitUntil(15_000) { compose.onAllNodesWithTag("atelier-home-back").fetchSemanticsNodes().size == 1 }
+            compose.onNodeWithTag("atelier-home-back").performClick()
+            compose.onNodeWithTag("atelier-settings").performClick()
+            compose.onNodeWithTag("settings-open-ocr").performClick()
+            compose.onNodeWithTag("settings-ocr-diagnostics").performScrollTo().performClick()
+            assertTrue(preferences.settings.value.ocrDiagnostics)
+            repeat(2) { compose.onNodeWithTag("settings-back").performClick() }
+            compose.onNodeWithTag("home-album-search").performTextReplacement("customer")
+            compose.waitUntil(15_000) { library.state.value.pageMatches.any { it.document == document && it.page == page } }
+            compose.onNodeWithTag("atelier-album-list").performScrollToNode(hasText(hitLabel))
+            compose.onNodeWithText(hitLabel).performClick()
+            compose.waitUntil(15_000) { editor.session.value?.state?.value?.page?.let { it.pageId == page && it.recipeRevision == revision } == true }
+            planned(true)
+            assertEquals(original.attemptsStarted, work.readStatus(document, page, revision)?.attemptsStarted)
+            assertTrue(work.canOpen(hit))
+        } finally {
+            compose.runOnUiThread { preferences.setOcrDiagnostics(false) }
+            assertFalse(preferences.settings.value.ocrDiagnostics)
+        }
+    }
+
     private companion object {
         val FILES_PACKAGES = setOf("com.android.documentsui", "com.google.android.documentsui")
         val RESUMED_COMPONENT = Regex("""(?:mResumedActivity:|topResumedActivity=)\s+ActivityRecord\{[^}\r\n]*?\bu\d+\s+([A-Za-z0-9_.]+/[A-Za-z0-9_.$]+)\s""")
     }
 
-    /** Only the exact new guest Downloads folder supplied by the exclusive host driver can authorize the Save button in this test. */
-    private class SyntheticTextDestination(private val ui: android.app.UiAutomation, token: String) {
-        private val folder = "PristinePage-Export-$token"
-        private val local = "/sdcard/Download/$folder"
-        private val leaf = "recognized-text.txt"
-
-        private fun command(cmd: String) = ParcelFileDescriptor.AutoCloseInputStream(ui.executeShellCommand(cmd))
-            .bufferedReader().use { it.readText() }
-
-        private fun picker(): AccessibilityNodeInfo? = ui.rootInActiveWindow
-            ?.takeIf { it.packageName?.toString() in FILES_PACKAGES }
-
-        private fun match(root: AccessibilityNodeInfo, predicate: (AccessibilityNodeInfo) -> Boolean): AccessibilityNodeInfo? {
-            val queue = ArrayDeque<AccessibilityNodeInfo>().apply { add(root) }
-            val found = mutableListOf<AccessibilityNodeInfo>()
-            var visited = 0
-            while (queue.isNotEmpty()) {
-                check(++visited <= 1_000)
-                val node = queue.removeFirst()
-                repeat(node.childCount) { node.getChild(it)?.let(queue::addLast) }
-                if (node.packageName == root.packageName && node.isVisibleToUser && node.isEnabled && predicate(node)) found += node
-            }
-            check(found.size <= 1)
-            return found.singleOrNull()
-        }
-
-        private suspend fun control(check: (AccessibilityNodeInfo) -> Boolean): AccessibilityNodeInfo =
-            withTimeout(15_000) { waitFor { picker()?.let { match(it, check) } } }
-
-        private suspend fun tapLabels(labels: Set<String>, directory: Boolean = false) {
-            val node = control {
-                if (directory) it.viewIdResourceName == "android:id/title" && it.text?.toString() in labels
-                else (it.text?.toString() in labels || it.contentDescription?.toString() in labels) && it.isClickable
-            }
-            check(picker()?.windowId == node.windowId && node.refresh())
-            if (!directory) {
-                check(node.performAction(AccessibilityNodeInfo.ACTION_CLICK))
-                return
-            }
-            val row = generateSequence(node) { it.parent }.first {
-                it.parent?.viewIdResourceName?.endsWith(":id/dir_list") == true
-            }
-            check(row.isFocusable && row.isEnabled && row.isVisibleToUser)
-            val bounds = Rect().also(row::getBoundsInScreen)
-            check(!bounds.isEmpty)
-            command("input tap ${bounds.centerX()} ${bounds.centerY()}")
-        }
-
-        suspend fun confirmNewLocalFile() {
-            val real = command("cd $local && pwd -P").trim()
-            check(real.matches(Regex("/(?:storage/emulated/0|mnt/shell/emulated/0)/Download/$folder")))
-            check(command("ls -A $local").isBlank())
-            tapLabels(setOf("Show roots", "Afficher les répertoires racines"))
-            tapLabels(setOf("Downloads", "Téléchargements"))
-            tapLabels(setOf(folder), directory = true)
-            control { it.viewIdResourceName == "android:id/title" && it.className == "android.widget.TextView" && it.text == folder }
-            val title = control {
-                it.viewIdResourceName == "android:id/title" && it.className == "android.widget.EditText" && it.text == leaf
-            }
-            val button = control {
-                it.viewIdResourceName == "android:id/button1" && it.isClickable && it.text?.toString()?.lowercase(java.util.Locale.ROOT) in setOf("save", "enregistrer")
-            }
-            val owner = checkNotNull(picker()).packageName.toString()
-            val activity = command("dumpsys activity top -a")
-            val component = Regex("(?m)^  ACTIVITY ${Regex.escape(owner)}/(?:\\.|${Regex.escape(owner)}\\.)picker\\.PickActivity ").findAll(activity).toList().single()
-            val block = activity.substring(component.range.last).substringBefore("\n  ACTIVITY ")
-            val active = block.substringAfter("Active Fragments in ", "").substringBefore("Added Fragments:")
-            val added = block.substringAfter("Added Fragments:", "").substringBefore("FragmentManager misc state:")
-            val fragment = Regex("(?m)^        #\\d+: DirectoryFragment\\{([^}\\r\\n]+)}$")
-            val identity = fragment.findAll(added).single().groupValues[1]
-            val activeFragment = fragment.findAll(active).single { it.groupValues[1] == identity }
-            val body = active.substring(activeFragment.range.last).split(Regex("(?m)^        #\\d+:"), limit = 2).first()
-            val directory = body.lineSequence().single { it.contains("mArguments=Bundle[") && it.contains("document=DocumentInfo{") }
-            val authority = "com.android.providers.downloads.documents"
-            require(body.contains("mAdded=true mRemoving=false") && body.contains("mHidden=false mDetached=false") &&
-                directory.contains("authority=$authority, rootId=downloads,") &&
-                directory.contains("content://$authority/root/downloads") &&
-                directory.contains("docId=raw:$real, name=$folder,") &&
-                android.net.Uri.decode(directory).contains("content://$authority/document/raw:$real") &&
-                directory.contains("isCreateSupported=true"))
-            check(command("ls -A $local").isBlank() && picker()?.windowId == button.windowId &&
-                title.windowId == button.windowId && title.refresh() && title.text == leaf &&
-                button.refresh() && button.isVisibleToUser && button.isEnabled)
-            check(button.performAction(AccessibilityNodeInfo.ACTION_CLICK))
-        }
-
-        fun verifyBytes(expected: ByteArray) {
-            check(command("ls -A $local").trim() == leaf)
-            val digest = java.security.MessageDigest.getInstance("SHA-256").digest(expected).joinToString("") { "%02x".format(it) }
-            check(command("stat -c %s $local/$leaf").trim().toLong() == expected.size.toLong())
-            check(command("sha256sum $local/$leaf").substringBefore(' ') == digest)
-        }
-    }
 }
 
 /** Uses a real cold start after the owning application/test process ended with the system chooser open. */
 @RunWith(AndroidJUnit4::class)
 class LocalOcrTextDeathTest {
     @get:Rule val compose = createAndroidComposeRule<MainActivity>()
+
+    @Test fun endProcessAfterClosingTheControlledTextFileBeforeAcknowledgment(): Unit = runBlocking {
+        val instrumentation = InstrumentationRegistry.getInstrumentation()
+        val context = instrumentation.targetContext
+        val app = context.applicationContext as PristinePageApplication
+        val token = InstrumentationRegistry.getArguments().getString("ocrTextOwnedFile")
+        val album = InstrumentationRegistry.getArguments().getString("filesSavedAlbum")
+        assumeTrue("Requires an explicit synthetic readback interruption", app.hasBundledOcr && token != null && album != null)
+        val key = checkNotNull(token)
+        val file = controlledTextFile(context, key)
+        val graph = app.services.imports()
+        val document = graph.store.catalog.list(null, 50).single { it.title == album }.documentId
+        val page = graph.store.catalog.load(document).pages.single()
+        val saved = graph.store.editablePages.load(document, page.pageId)
+        val source = graph.store.committedSources.load(saved.sourceId)
+        assertEquals("f4585967198db8a51a7d8afae50e449bdead2ad3b4122d1478afffc5fbd5608f", source.sourceByteHash)
+        val work = graph.store.savedOcr
+        val text = checkNotNull(work.readText(document, page.pageId, saved.recipeRevision))
+        val frozen = checkNotNull(work.prepareTextExport(text.exportObservation))
+        assertTrue(frozen.byteCount > 0)
+        assertFalse(file.exists())
+        val locator = "content://app.pristinepage.debug.test.synthetic/document/$key"
+        var consent: String? = null
+        work.publishPreparedText(frozen, choose = { consent = it; locator }) { destination, bytes ->
+            assertEquals(locator, destination)
+            // Exercise the actual nontruncating descriptor writer. The callback is a controlled private file, not a SAF provider.
+            writeOcrTextDocument(bytes, frozen.byteSha256, open = {
+                check(file.createNewFile())
+                ParcelFileDescriptor.open(file, ParcelFileDescriptor.MODE_READ_WRITE)
+            }, reopen = {
+                val durable = checkNotNull(consent)
+                assertEquals("WRITING" to true, readTextConsent(context, durable, locator))
+                java.io.RandomAccessFile(file, "rw").use { it.fd.sync() }
+                assertArrayEquals(bytes, file.readBytes())
+                instrumentation.sendStatus(69, Bundle().apply {
+                    putString("ocrTextDeathConsent", durable)
+                    putInt("ocrTextDeathPid", Process.myPid())
+                    putString("ocrTextClosedSha", frozen.byteSha256)
+                    putLong("ocrTextClosedBytes", frozen.byteCount)
+                })
+                Process.killProcess(Process.myPid())
+                error("The exact app process did not exit during transfer readback")
+            })
+        }
+        error("The interrupted transfer must not finish")
+    }
+
+    @Test fun coldLaunchKeepsControlledTextFileWithoutAcknowledgingOrReplayingIt(): Unit = runBlocking {
+        val instrumentation = InstrumentationRegistry.getInstrumentation()
+        val context = instrumentation.targetContext
+        val app = context.applicationContext as PristinePageApplication
+        val args = InstrumentationRegistry.getArguments()
+        val token = args.getString("ocrTextOwnedFile")
+        val id = args.getString("ocrTextDeathConsent")
+        assumeTrue("Requires the exact previously interrupted controlled text transfer", app.hasBundledOcr && token != null && id != null)
+        val exactConsent = checkNotNull(id)
+        require(UUID.fromString(exactConsent).toString() == exactConsent)
+        val file = controlledTextFile(context, checkNotNull(token))
+        val extent = checkNotNull(args.getString("ocrTextClosedBytes")).toLong()
+        val digest = checkNotNull(args.getString("ocrTextClosedSha"))
+        require(extent in 1..393_216 && digest.matches(Regex("[a-f0-9]{64}")))
+        assertEquals(extent, file.length())
+        val hash = java.security.MessageDigest.getInstance("SHA-256").digest(file.readBytes()).joinToString("") { "%02x".format(it) }
+        assertEquals(digest, hash)
+        val owner = compose.runOnUiThread { ViewModelProvider(compose.activity)[OcrTextSaveViewModel::class.java] }
+        compose.waitUntil(20_000) { owner.state.value.pastWriteNeedsVerification }
+        val locator = "content://app.pristinepage.debug.test.synthetic/document/$token"
+        assertEquals("NEEDS_VERIFICATION" to true, readTextConsent(context, exactConsent, locator))
+        assertNull(owner.state.value.consent)
+        assertFalse(owner.state.value.launchRequested)
+        assertTrue(owner.state.value.mayRetry)
+        compose.onNodeWithText(context.getString(R.string.ocr_save_text_interrupted)).assertIsDisplayed()
+        compose.onNodeWithText(context.getString(R.string.atelier_close)).performClick()
+        compose.onNodeWithTag("home-album-search").assertIsDisplayed()
+        assertEquals(extent, file.length())
+        assertEquals(hash, java.security.MessageDigest.getInstance("SHA-256").digest(file.readBytes()).joinToString("") { "%02x".format(it) })
+        instrumentation.addResults(Bundle().apply {
+            putString("ocrTextRecoveryWitness", "CLOSED_CONTROLLED_FILE_UNCHANGED")
+            putInt("ocrTextRecoveryPid", Process.myPid())
+        })
+    }
+
+    private fun controlledTextFile(context: android.content.Context, token: String): File {
+        require(token.matches(Regex("[a-f0-9]{12}")))
+        return File(context.filesDir, "ocr-closed-control-$token.txt")
+    }
 
     @Test fun coldLaunchReportsInterruptedChooserWithoutReopeningIt(): Unit = runBlocking {
         val instrumentation = InstrumentationRegistry.getInstrumentation()
@@ -559,9 +625,11 @@ class LocalOcrTextDeathTest {
 }
 
 /** Bound a scalar test read to the consent observed in-process; do not open the provider or materialize a destination. */
-private fun readTextConsent(context: android.content.Context, consent: String): Pair<String, Boolean> =
+private fun readTextConsent(context: android.content.Context, consent: String, target: String? = null): Pair<String, Boolean> =
     SQLiteDatabase.openDatabase(context.getDatabasePath("pristinepage.db").path, null, SQLiteDatabase.OPEN_READONLY).use { db ->
-        db.rawQuery("SELECT state, targetUri IS NULL FROM OcrTextPublication WHERE consentId = ?", arrayOf(consent)).use { cursor ->
+        val targetMatches = if (target == null) "targetUri IS NULL" else "targetUri = ?"
+        val args = if (target == null) arrayOf(consent) else arrayOf(target, consent)
+        db.rawQuery("SELECT state, $targetMatches FROM OcrTextPublication WHERE consentId = ?", args).use { cursor ->
             check(cursor.moveToFirst())
             val result = cursor.getString(0) to (cursor.getInt(1) == 1)
             check(!cursor.moveToNext())

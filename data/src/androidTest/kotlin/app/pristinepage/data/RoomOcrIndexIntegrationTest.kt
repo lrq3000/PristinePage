@@ -679,6 +679,55 @@ class RoomOcrIndexIntegrationTest {
         assertEquals("1", f.sql.scalar("SELECT COUNT(*) FROM OcrTextPublication"))
     }
 
+    @Test fun ocrTextRetryRefusesItsEarlierUriBeforeCallingTheWriter() = withOcrAttempts(publicStore = true) { f ->
+        val work = f.ocrPort()
+        f.results.publish(f.request, f.start(), OcrText(""))
+        val frozen = checkNotNull(work.prepareTextExport(
+            checkNotNull(work.readText(DocumentId(DOCUMENT), PageId(PAGE), 1)).exportObservation))
+        val prior = "content://fixture/document/previous-empty"
+        assertEquals(SavedOcrWork.TextSaveOutcome.NEEDS_VERIFICATION,
+            work.publishPreparedText(frozen, choose = { prior }) { _, _ -> SavedOcrWork.TextSaveOutcome.NEEDS_VERIFICATION })
+        val savedRecord = f.sql.scalar("SELECT consentId || ':' || state || ':' || targetUri FROM OcrTextPublication")
+        val file = checkedPrivateOcrFile(f.sql, f.sql.scalar("SELECT finalPath FROM FileTransaction WHERE kind='OCR_TEXT' AND state='COMMITTED'"))
+        var calls = 0
+        try {
+            file.writeBytes(byteArrayOf(1)) // Any early reading of the frozen bytes would now fail.
+            assertEquals(SavedOcrWork.TextSaveOutcome.DESTINATION_REFUSED,
+                work.publishPreparedText(frozen, choose = { prior }) { _, _ ->
+                    calls++
+                    SavedOcrWork.TextSaveOutcome.READBACK_VERIFIED
+                })
+        } finally { file.writeBytes(byteArrayOf()) }
+        assertEquals(0, calls)
+        assertEquals(savedRecord, f.sql.scalar("SELECT consentId || ':' || state || ':' || targetUri FROM OcrTextPublication WHERE targetUri IS NOT NULL"))
+        assertEquals("1", f.sql.scalar("SELECT COUNT(*) FROM OcrTextPublication WHERE state='NEEDS_VERIFICATION' AND targetUri IS NOT NULL"))
+        assertEquals("1", f.sql.scalar("SELECT COUNT(*) FROM OcrTextPublication WHERE state='CANCELED' AND targetUri IS NULL"))
+        val next = "content://fixture/document/different-empty"
+        assertEquals(SavedOcrWork.TextSaveOutcome.READBACK_VERIFIED,
+            work.publishPreparedText(frozen, choose = { next }) { target, bytes ->
+                assertEquals(next, target)
+                assertArrayEquals(byteArrayOf(), bytes)
+                SavedOcrWork.TextSaveOutcome.READBACK_VERIFIED
+            })
+    }
+
+    @Test fun repeatedOcrTextDestinationRollsBackAPriorRecordChangeDuringRefusal() = withOcrAttempts(publicStore = true) { f ->
+        val work = f.ocrPort()
+        f.results.publish(f.request, f.start(), OcrText("Keep the prior record"))
+        val frozen = checkNotNull(work.prepareTextExport(
+            checkNotNull(work.readText(DocumentId(DOCUMENT), PageId(PAGE), 1)).exportObservation))
+        val prior = "content://fixture/document/preserve-prior"
+        assertEquals(SavedOcrWork.TextSaveOutcome.NEEDS_VERIFICATION,
+            work.publishPreparedText(frozen, choose = { prior }) { _, _ -> SavedOcrWork.TextSaveOutcome.NEEDS_VERIFICATION })
+        f.sql.execSQL("""CREATE TRIGGER disturb_prior_text_destination AFTER UPDATE ON OcrTextPublication
+            WHEN NEW.state='CANCELED' BEGIN UPDATE OcrTextPublication SET targetUri=NULL WHERE consentId<>NEW.consentId; END""")
+        val failure = runCatching {
+            work.publishPreparedText(frozen, choose = { prior }) { _, _ -> throw AssertionError("Unexpected provider write") }
+        }.exceptionOrNull() as? RepositoryFailure
+        assertEquals(OperationErrorCode.INTEGRITY_FAILED, failure?.error?.code)
+        assertEquals(prior, f.sql.scalar("SELECT targetUri FROM OcrTextPublication WHERE targetUri IS NOT NULL"))
+    }
+
     @Test fun ignoredPrivateOcrTextCompletionNeverReturnsReady() =
         refusesPrivateOcrTextCommit("""CREATE TRIGGER ignore_ocr_artifact_commit BEFORE UPDATE ON FileTransaction
             WHEN OLD.kind='OCR_TEXT' AND NEW.state='COMMITTED' BEGIN SELECT RAISE(IGNORE); END""")

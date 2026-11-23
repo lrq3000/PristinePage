@@ -26,6 +26,8 @@ internal data class OcrTextPublicationRow(
 internal data class OcrTextPublicationOwner(val consentId: String, val ownerId: String, val state: String)
 internal class OcrTextPublicationRecoveryRow(val transactionId: String, val targetUri: String?, val byteSha256: String, val byteCount: Long)
 internal class OcrTextPublicationSeal(val payload: ByteArray, val sealSha256: String)
+internal data class OcrTextPublicationTarget(val consentId: String, val ownerId: String, val byteSha256: String,
+    val byteCount: Long, val state: String, val updatedAt: Long)
 
 @Dao
 internal abstract class OcrTextPublicationDao {
@@ -35,6 +37,17 @@ internal abstract class OcrTextPublicationDao {
         AND state NOT IN ('CANCELED','PARTIAL_EXTERNAL','NEEDS_VERIFICATION','DESTINATION_REFUSED','PERMISSION_LOST'))""")
     internal abstract fun canStart(tx: String): Boolean
 
+    @Query("""SELECT consentId,ownerId,byteSha256,byteCount,state,updatedAt FROM OcrTextPublication
+        WHERE transactionId=:tx AND targetUri=:uri AND consentId<>:exclude
+        AND length(CAST(consentId AS BLOB))=36 AND length(CAST(ownerId AS BLOB))=36
+        AND length(CAST(byteSha256 AS BLOB))=64 AND length(CAST(state AS BLOB)) BETWEEN 1 AND 24
+        ORDER BY consentId LIMIT 1""")
+    internal abstract fun recordedTarget(tx: String, uri: String, exclude: String): OcrTextPublicationTarget?
+
+    @Query("""SELECT EXISTS(SELECT 1 FROM OcrTextPublication
+        WHERE transactionId=:tx AND targetUri=:uri AND consentId<>:exclude)""")
+    internal abstract fun hasRecordedTarget(tx: String, uri: String, exclude: String): Boolean
+
     /** A terminal acknowledgement is not replayable, and a result for another attempt cannot change the bound target. */
     @Query("""UPDATE OcrTextPublication SET state=:next, targetUri=:uri, updatedAt=:now
         WHERE consentId=:id AND transactionId=:tx AND ownerId=:owner AND state=:previous
@@ -42,7 +55,8 @@ internal abstract class OcrTextPublicationDao {
         AND targetUri IS :previousUri
         AND ((:previous='WAITING_DESTINATION' AND :previousUri IS NULL AND
             ((:next='CANCELED' AND :uri IS NULL) OR
-             (:next='WRITING' AND :uri GLOB 'content://?*' AND length(CAST(:uri AS BLOB))<=4096)))
+              (:next='WRITING' AND :uri GLOB 'content://?*' AND length(CAST(:uri AS BLOB))<=4096
+                  AND NOT EXISTS(SELECT 1 FROM OcrTextPublication AS prior WHERE prior.transactionId=:tx AND prior.targetUri=:uri))))
           OR (:previous='WRITING' AND :uri=:previousUri AND :next IN
             ('READBACK_VERIFIED','OUTPUT_COMPLETED','PARTIAL_EXTERNAL','NEEDS_VERIFICATION','DESTINATION_REFUSED','PERMISSION_LOST')))""")
     internal abstract fun advance(id: String, tx: String, owner: String, digest: String, size: Long,

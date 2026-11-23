@@ -39,13 +39,15 @@ internal class RoomOcrTextPublication(
             if (!dao.matches(id, tx, owner, intent.textSha256, intent.byteCount, phase, uri)) mismatch()
             active.ensureActive()
         }
+        fun change(previous: String, next: String, before: String?, after: String?): Boolean {
+            verify(previous, before)
+            if (dao.advance(id, tx, owner, intent.textSha256, intent.byteCount, previous, next, before, after,
+                    System.currentTimeMillis()) != 1) return false
+            verify(next, after)
+            return true
+        }
         suspend fun advance(previous: String, next: String, before: String?, after: String?) = withContext(Dispatchers.IO) {
-            metadata.transaction {
-                verify(previous, before)
-                if (dao.advance(id, tx, owner, intent.textSha256, intent.byteCount, previous, next, before, after,
-                        System.currentTimeMillis()) != 1) mismatch()
-                verify(next, after)
-            }
+            metadata.transaction { if (!change(previous, next, before, after)) mismatch() }
         }
         try {
             withContext(Dispatchers.IO) {
@@ -66,7 +68,22 @@ internal class RoomOcrTextPublication(
             require(target.startsWith("content://") && target.length in 11..4096 &&
                 target.none(Char::isISOControl) && target.encodeToByteArray().size <= 4096)
             // Bind the selected document immediately. It may already exist even if private verification now fails.
-            advance("WAITING_DESTINATION", "WRITING", null, target)
+            val admitted = withContext(Dispatchers.IO) {
+                metadata.transaction {
+                    // A provider can return the same empty document under a new grant. Never consume it again for these frozen bytes.
+                    val prior = dao.recordedTarget(tx, target, id)
+                    if (prior != null) {
+                        if (!change("WAITING_DESTINATION", "CANCELED", null, null) ||
+                            dao.recordedTarget(tx, target, id) != prior) mismatch()
+                        false
+                    } else {
+                        if (!change("WAITING_DESTINATION", "WRITING", null, target) ||
+                            dao.hasRecordedTarget(tx, target, id)) mismatch()
+                        true
+                    }
+                }
+            }
+            if (!admitted) return@run TextSaveOutcome.DESTINATION_REFUSED
             val bytes = try {
                 exports.read(receipt)
             } catch (canceled: kotlinx.coroutines.CancellationException) {

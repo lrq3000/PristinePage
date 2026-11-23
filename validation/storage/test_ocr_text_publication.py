@@ -112,3 +112,17 @@ class OcrTextPublicationSqlTest(unittest.TestCase):
         self.assertEqual((1,), self.query("canStart", tx="tx").fetchone())
         self.assertEqual(("DESTINATION_REFUSED", URI),
                          self.db.execute("SELECT state,targetUri FROM OcrTextPublication").fetchone())
+
+    def test_a_new_consent_cannot_bind_the_same_earlier_destination(self):
+        self.insert()
+        self.assertEqual(1, self.advance("WAITING_DESTINATION", "WRITING", after=URI))
+        self.assertEqual(1, self.advance("WRITING", "NEEDS_VERIFICATION", URI, URI))
+        self.assertEqual((1,), self.query("hasRecordedTarget", tx="tx", uri=URI, exclude="retry").fetchone())
+        self.assertEqual((0,), self.query("hasRecordedTarget", tx="tx", uri=URI, exclude="consent").fetchone())
+        self.assertEqual((0,), self.query("hasRecordedTarget", tx="tx", uri=URI + "-new", exclude="retry").fetchone())
+        self.identity = self.identity | dict(id="retry")
+        self.insert()
+        self.assertEqual(0, self.advance("WAITING_DESTINATION", "WRITING", after=URI))
+        self.assertEqual(("WAITING_DESTINATION", None), self.db.execute(
+            "SELECT state,targetUri FROM OcrTextPublication WHERE consentId='retry'").fetchone())
+        self.assertEqual(1, self.advance("WAITING_DESTINATION", "WRITING", after=URI + "-new"))

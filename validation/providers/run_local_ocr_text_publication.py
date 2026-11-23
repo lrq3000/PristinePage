@@ -91,6 +91,10 @@ def exercise(run, ns, target, title, token, *, blank=False):
             journey.tap(("Downloads", "Téléchargements"), FILES)
             journey.tap(folder, FILES, document_row=True)
             point = journey.wait({owner}, lambda tree, _: confirmation_point(tree, owner, folder), seconds=20)
+            verify_target(run, ns)
+            run.save(run.path("pre-confirmation.json"), {"picker": owner, "directory": real, "leaf": LEAF,
+                     "expectedBytes": expected[0], "expectedSha256": expected[1]}, durable=True)
+            # The durable intent is not permission to tap. Refresh the active provider, directory, focus and exact UI last.
             block = journey.command("shell", "dumpsys", "activity", "top", "-a", timeout=18)
             component, = [part for part in (f"{owner}/.picker.PickActivity", f"{owner}/{owner}.picker.PickActivity")
                           if matches_local_downloads(block, part, real)]
@@ -101,9 +105,6 @@ def exercise(run, ns, target, title, token, *, blank=False):
             need(foreground == owner and confirmation_point(tree, owner, folder) == point and
                  not journey.command("shell", "ls", "-A", directory).strip() and proc.poll() is None,
                  "The exact filename or new local destination changed")
-            verify_target(run, ns)
-            run.save(run.path("pre-confirmation.json"), {"component": component, "directory": real, "leaf": LEAF,
-                     "expectedBytes": expected[0], "expectedSha256": expected[1]}, durable=True)
             # Record the confirmation boundary before the sole tap. A timeout afterwards never authorizes replay.
             journey.command("shell", "input", "tap", *point)
             need(proc.wait(timeout=42) == 0, "The app-side verification did not finish")
