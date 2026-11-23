@@ -7,6 +7,10 @@ import android.content.pm.PackageManager
 import android.database.sqlite.SQLiteDatabase
 import android.graphics.Bitmap
 import android.graphics.Color
+import android.os.Bundle
+import android.os.ParcelFileDescriptor
+import android.os.Process
+import android.system.Os
 import android.util.Log
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
@@ -46,13 +50,18 @@ import app.pristinepage.image.render.ClassicalRecipeAdmission
 import app.pristinepage.image.render.DefaultRenderCoordinator
 import app.pristinepage.image.render.GeometryEngine
 import com.googlecode.leptonica.android.Pix
+import com.googlecode.tesseract.android.TessBaseAPI
+import java.io.ByteArrayOutputStream
 import java.io.File
+import java.io.FileDescriptor
 import java.nio.ByteBuffer
 import java.nio.channels.FileChannel
 import java.nio.file.LinkOption.NOFOLLOW_LINKS
 import java.nio.file.StandardOpenOption.WRITE
 import java.security.MessageDigest
 import java.util.UUID
+import java.util.concurrent.FutureTask
+import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicReference
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.cancel
@@ -68,6 +77,93 @@ import org.junit.runner.RunWith
 /** The explicit probe build alone admits this isolated, synthetic native recognition-to-search journey. */
 @RunWith(AndroidJUnit4::class)
 class LocalSavedOcrIntegrationTest {
+    @Test fun classifiesMissingPackNativeInitializationSinks() {
+        val instrumentation = InstrumentationRegistry.getInstrumentation()
+        val context = instrumentation.targetContext
+        assertEquals("app.pristinepage.debug.test", context.packageName)
+        assertEquals(instrumentation.context.packageName, context.packageName)
+        assertFalse(context.packageManager.getPackageInfo(context.packageName, PackageManager.GET_PERMISSIONS)
+            .requestedPermissions.orEmpty().contains("android.permission.INTERNET"))
+        val token = UUID.randomUUID().toString()
+        val root = newDirectory(context.filesDir, "ocr-native-sink-$token")
+        val data = newDirectory(root, "tessdata")
+        assertTrue(data.list()?.isEmpty() == true)
+        val tag = "PristineOcrInitSink"
+        val engine = TessBaseAPI()
+        assertEquals("5.5.1", engine.version)
+        val descriptors = ParcelFileDescriptor.createPipe()
+        val reader = FutureTask {
+            ParcelFileDescriptor.AutoCloseInputStream(descriptors[0]).use { stream ->
+                val out = ByteArrayOutputStream()
+                val buffer = ByteArray(1024)
+                var overflow = false
+                while (true) {
+                    val n = stream.read(buffer)
+                    if (n < 0) break
+                    if (n > 32_768 - out.size()) overflow = true
+                    if (!overflow) out.write(buffer, 0, n)
+                }
+                assertFalse("Native stderr exceeded the synthetic capture bound", overflow)
+                out.toString(Charsets.UTF_8.name())
+            }
+        }
+        val original = ParcelFileDescriptor.fromFd(2)
+        Thread(reader, "ocr-synthetic-stderr").apply { isDaemon = true; start() }
+        fun canary(pipe: FileDescriptor, suffix: String) {
+            val bytes = "\n$token/$suffix\n".encodeToByteArray()
+            assertEquals(bytes.size, Os.write(pipe, bytes, 0, bytes.size))
+        }
+        try {
+            // Descriptor 2 is shared in the isolated self-target test process. Never redirect stdout/stderr in the app.
+            val pipe = descriptors[1].fileDescriptor
+            val redirected = Os.dup2(pipe, 2)
+            val destination = Os.fstat(redirected)
+            val expected = Os.fstat(pipe)
+            assertTrue("Descriptor 2 is not attached to the expected pipe",
+                destination.st_dev == expected.st_dev && destination.st_ino == expected.st_ino)
+            canary(pipe, "start")
+            Log.i(tag, "$token/start")
+            assertFalse("A genuinely absent English pack must be refused by the native initializer",
+                engine.init(root.absolutePath, "eng", TessBaseAPI.OEM_LSTM_ONLY))
+            engine.recycle()
+            Log.i(tag, "$token/end")
+            canary(pipe, "end")
+        } finally {
+            try { Os.dup2(original.fileDescriptor, 2) } finally {
+                try { original.close() } finally { descriptors[1].close() }
+            }
+        }
+        val stderr = reader.get(10, TimeUnit.SECONDS).lineSequence().toList()
+        val before = "$token/start"
+        val after = "$token/end"
+        // Other test-process threads can write around these canaries. Require exactly one ordered pair, then count only between them.
+        val first = stderr.indexOf(before)
+        val last = stderr.indexOf(after)
+        assertTrue("Incomplete stderr window (lines=${stderr.size}, start=$first, end=$last)",
+            first >= 0 && last > first && stderr.lastIndexOf(before) == first && stderr.lastIndexOf(after) == last)
+        fun countPaths(lines: List<String>) = lines.count { it.contains(token) || it.contains(".traineddata") }
+        val stdio = stderr.subList(first + 1, last).filter(String::isNotBlank)
+        val dump = instrumentation.uiAutomation.executeShellCommand("logcat -d -t 800 -v brief --pid=${Process.myPid()} -b main -b system -b crash")
+        val logs = ParcelFileDescriptor.AutoCloseInputStream(dump).bufferedReader().useLines { lines ->
+            val window = mutableListOf<String>()
+            var phase = 0
+            lines.forEach { line ->
+                when {
+                    line.startsWith("I/$tag") && line.endsWith("$token/start") -> { check(phase == 0); phase = 1 }
+                    line.startsWith("I/$tag") && line.endsWith("$token/end") -> { check(phase == 1); phase = 2 }
+                    phase == 1 -> window.add(line)
+                }
+            }
+            assertEquals("No complete Android log window", 2, phase)
+            window
+        }
+        assertTrue(data.list()?.isEmpty() == true)
+        instrumentation.addResults(Bundle().apply {
+            putString("ocrNativeInitSinks", "stderrLines=${stdio.size};stderrPathLines=${countPaths(stdio)};" +
+                "logcatLines=${logs.size};logcatPathLines=${countPaths(logs)}")
+        })
+    }
+
     @Test fun savedSyntheticPagesAreRecognizedAndSearchableAfterReopen() = runBlocking {
         val instrumentation = InstrumentationRegistry.getInstrumentation()
         val context = instrumentation.targetContext
