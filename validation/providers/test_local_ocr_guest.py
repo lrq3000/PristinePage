@@ -187,11 +187,18 @@ class LocalOcrGuestTest(unittest.TestCase):
         component = "com.android.documentsui/.picker.PickActivity"
         dump = (
             f"  ACTIVITY {component} abc123 pid=42\n"
-            "        #2: DirectoryFragment{def456 #2 id=0x7f090044}\n"
-            f"          mArguments=Bundle[{{root=Root{{authority={authority}, rootId=downloads, title=Downloads, "
+            "      Active Fragments in 74a9797:\n"
+            "        #2: null\n"
+            "        #3: DirectoryFragment{def456 #4 id=0x7f090044}\n"
+            "          mAdded=true mRemoving=false mFromLayout=false mInLayout=false\n"
+            "          mHidden=false mDetached=false mMenuVisible=true mHasMenu=false\n"
+            f"          mArguments=Bundle[{{selection=size=0, items=[], root=Root{{authority={authority}, rootId=downloads, title=Downloads, "
             f"isUsb=false, isSd=false, isMtp=false}} @ content://{authority}/root/downloads, "
             f"document=DocumentInfo{{docId=raw:{path}, name={folder}, mimeType=vnd.android.document/directory, "
-            f"isContainer=true, isDirectory=true, isCreateSupported=true}} @ {uri}}}]\n"
+            f"isContainer=true, isDirectory=true, isCreateSupported=true}} @ {uri}, ignoreState=true}}]\n"
+            "      Added Fragments:\n"
+            "        #2: DirectoryFragment{def456 #4 id=0x7f090044}\n"
+            "      FragmentManager misc state:\n"
         )
         self.assertTrue(matches_local_downloads(dump, component, path))
         for invalid in (
@@ -199,6 +206,13 @@ class LocalOcrGuestTest(unittest.TestCase):
             dump.replace("%2FDownload%2F", "%2FOther%2F"), dump.replace("isCreateSupported=true", "isCreateSupported=false"),
             dump.replace("DirectoryFragment", "OtherFragment"), dump + dump,
             dump.replace(component, "elsewhere/.Picker"), dump.replace("isUsb=false", "isUsb=true"),
+            dump.replace("mHidden=false", "mHidden=true"), dump.replace("mAdded=true", "mAdded=false"),
+            dump.replace("Added Fragments:", "Historical Fragments:"),
+            dump.replace("Active Fragments in 74a9797:", "Active Fragments in another manager:"),
+            dump.replace("Active Fragments in 74a9797:", "Active Fragments in 1234:\n      Active Fragments in 74a9797:"),
+            dump.replace("Added Fragments:\n        #2: DirectoryFragment{def456", "Added Fragments:\n        #2: DirectoryFragment{abc123"),
+            dump.replace("          mAdded=true", "        #4: Unparsed.Fragment{abcdef}\n          mAdded=true"),
+            dump.replace("ignoreState=true", "unrecognized=value"),
         ):
             self.assertFalse(matches_local_downloads(invalid, component, path))
 
