@@ -14,6 +14,7 @@ from run_local_ocr_guest import APP, GUEST_PATTERN, RUNNER, TEST, exact_apk, ins
 CASE = ("app.pristinepage.ocr.LocalOcrStartupBackfillTest", "largerSavedPageCompletesItsExactWakeAndOpensFromTheFooter")
 APP_SHA = "d412ad7bb8113d97308f9e18129f4d516cff14dc527fba59d9b3e30885355429"
 TEST_PREDECESSOR = "0c5ac42310137ab098f2754dd3789f172dfd42c948a67b0d91fc2edd0372b49b"
+DENSE_TEST = "2c9748c05ab9d7a2b37d45c6d4d01b7e9f53e9db870a697248d8d51fcfebf632"
 SAMPLE = re.compile(r"(?m)^INSTRUMENTATION_STATUS: ocrLargePageSample=([A-Za-z0-9=;_,:]+)\nINSTRUMENTATION_STATUS_CODE: 66\n")
 
 
@@ -21,9 +22,11 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("guest", help="The already authorized, released synthetic OCR guest")
     parser.add_argument("test_sha")
+    parser.add_argument("--logcat", action="store_true", help="Check retained app-PID logcat markers and report only counts")
     args = parser.parse_args()
     need(re.fullmatch(GUEST_PATTERN, args.guest), "Require the exact authorized OCR guest name")
-    need(re.fullmatch(r"[a-f0-9]{64}", args.test_sha) and args.test_sha != TEST_PREDECESSOR, "Require the reviewed larger-page test APK digest")
+    previous_test = DENSE_TEST if args.logcat else TEST_PREDECESSOR
+    need(re.fullmatch(r"[a-f0-9]{64}", args.test_sha) and args.test_sha != previous_test, "Require the reviewed successor test APK digest")
     need(not any(os.environ.get(name) for name in LOCAL_ADB_OVERRIDES), "Refusing ADB overrides")
     root = Path.cwd().resolve()
     need(root.name == "ocr-current-validation" and root.parent.name == ".worktrees", "Unexpected OCR worktree")
@@ -47,7 +50,7 @@ def main():
         target = [ns["ADB"], "-s", run.serial]
         need(run.installed_hash(APP) == APP_SHA, "Refusing to replace or downgrade the app")
         predecessor = run.installed_hash(TEST)
-        flags = install_flags(TEST, predecessor, args.test_sha, TEST_PREDECESSOR, require_installed=True)
+        flags = install_flags(TEST, predecessor, args.test_sha, previous_test, require_installed=True)
         if flags is not None:
             verify_target(run, ns)
             need(sha(test) == args.test_sha, "Test APK changed before install")
@@ -58,8 +61,9 @@ def main():
              [f"instrumentation:{RUNNER} (target={APP})"], "Installed APK bytes or runner drifted")
         run.save(run.path("installed.json"), {"app": APP_SHA, "test": args.test_sha, "testBefore": predecessor}, durable=True)
         need(not run.command([*target, "shell", "pidof", APP], allowed=(0, 1)).strip(), "The ordinary app process must start cold")
+        log_args = ["-e", "ocrLargePageLogcat", "1"] if args.logcat else []
         output = run.command([*target, "shell", "am", "instrument", "-w", "-r", "-e", "class", "#".join(CASE),
-                              "-e", "ocrLargePage", "1", RUNNER], timeout=245)
+                              "-e", "ocrLargePage", "1", *log_args, RUNNER], timeout=245)
         run.path("witness.txt").write_text(output, encoding="utf-8")
         normalized = output.replace("\r\n", "\n")
         samples = SAMPLE.findall(normalized)
@@ -69,6 +73,10 @@ def main():
              ["EXACT_DENSE_PAGE_WAKE_AND_REOPEN"] and samples and
              re.fullmatch(r"phase=READY;starts=1;error=null;wakes=SUCCEEDED:\d+", samples[-1]),
              "The exact dense-page witness did not pass; preserve the observed wake and Room state")
+        if args.logcat:
+            log_counts = re.findall(r"(?m)^INSTRUMENTATION_RESULT: ocrLargePageLogcat=(lines=\d+;nativeMentions=\d+;controlMentions=\d+;packMentions=\d+)$", normalized)
+            need(len(log_counts) == 1, "The bounded app-PID logcat observation is absent")
+            print(f"Dense-page logcat: {log_counts[0]}; not a native stdout/stderr or failure audit", flush=True)
         print(f"Dense page reached READY and exact Home reopen; launch-to-ready observation: {ready_ms[0]} ms", flush=True)
     finally:
         run.close_owned()

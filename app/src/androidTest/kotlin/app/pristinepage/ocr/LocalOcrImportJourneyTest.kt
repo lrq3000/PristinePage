@@ -7,8 +7,10 @@ import android.graphics.Paint
 import android.graphics.Typeface
 import android.os.Bundle
 import android.os.ParcelFileDescriptor
+import android.os.Process
 import android.os.SystemClock
 import android.graphics.Rect
+import android.util.Log
 import android.view.accessibility.AccessibilityNodeInfo
 import androidx.compose.ui.test.assertIsEnabled
 import androidx.compose.ui.test.hasText
@@ -481,6 +483,7 @@ class LocalOcrStartupBackfillTest {
         val settings = app.atelierPreferences.settings.value
         assertEquals(listOf("eng", "fra"), settings.ocrLanguages.map { it.packCode })
         assertEquals(OcrLayout.AUTOMATIC, settings.ocrLayout)
+        assertFalse(settings.ocrDiagnostics)
         val graph = app.services.imports()
         val work = graph.store.savedOcr
         val title = "Larger OCR control ${UUID.randomUUID()}"
@@ -504,6 +507,9 @@ class LocalOcrStartupBackfillTest {
             val target = async(start = CoroutineStart.UNDISPATCHED) {
                 withTimeout(35_000) { work.observePendingTarget(document, pageId, revision).filterNotNull().first() }
             }
+            val auditLog = InstrumentationRegistry.getArguments().getString("ocrLargePageLogcat") == "1"
+            val logMark = "ocr-window-${UUID.randomUUID()}"
+            if (auditLog) Log.i("PristineOcrAudit", "$logMark/start")
             val startedAt = SystemClock.elapsedRealtime()
             ActivityScenario.launch(MainActivity::class.java).use { scenario ->
                 val admitted = target.await()
@@ -555,9 +561,48 @@ class LocalOcrStartupBackfillTest {
                 instrumentation.addResults(Bundle().apply {
                     putString("ocrLargePageWitness", "EXACT_DENSE_PAGE_WAKE_AND_REOPEN")
                     putLong("ocrLargePageReadyMs", readyMs)
+                    if (auditLog) {
+                        Log.i("PristineOcrAudit", "$logMark/end")
+                        putString("ocrLargePageLogcat", sampleOcrLogcat(logMark))
+                    }
                 })
             }
         }
+    }
+
+    /** Capture only this synthetic app process between positive log markers. Retain counts, never raw paths or OCR strings. */
+    private fun sampleOcrLogcat(mark: String): String {
+        val automation = InstrumentationRegistry.getInstrumentation().uiAutomation
+        val descriptor = automation.executeShellCommand("logcat -b main -b system -b crash -d --pid=${Process.myPid()} -t 512 -v brief")
+        var inWindow = false
+        var starts = 0
+        var ends = 0
+        var lines = 0
+        var nativeTagged = 0
+        var contentSuspect = 0
+        var packPathSuspect = 0
+        ParcelFileDescriptor.AutoCloseInputStream(descriptor).bufferedReader().useLines { log ->
+            for (line in log) {
+                when {
+                    line.startsWith("I/PristineOcrAudit") && line.endsWith("$mark/start") -> {
+                        starts++
+                        inWindow = true
+                    }
+                    line.startsWith("I/PristineOcrAudit") && line.endsWith("$mark/end") -> {
+                        ends++
+                        inWindow = false
+                    }
+                    inWindow -> {
+                        lines++
+                        if (line.contains("tesseract", ignoreCase = true) || line.contains("leptonica", ignoreCase = true)) nativeTagged++
+                        if (line.contains("IRONWOOD", ignoreCase = true) || line.contains("ELDERFLOWER", ignoreCase = true)) contentSuspect++
+                        if (line.contains("ocr-packs-", ignoreCase = true) || line.contains(".traineddata", ignoreCase = true)) packPathSuspect++
+                    }
+                }
+            }
+        }
+        assertTrue("Scoped logcat capture did not retain both ordered control markers", starts == 1 && ends == 1 && !inWindow)
+        return "lines=$lines;nativeMentions=$nativeTagged;controlMentions=$contentSuspect;packMentions=$packPathSuspect"
     }
 
     private fun makeDensePage(file: File) {
