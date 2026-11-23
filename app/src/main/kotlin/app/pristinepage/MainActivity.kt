@@ -102,7 +102,6 @@ class MainActivity : ComponentActivity() {
     private fun start(restored: LibraryIdentity, restoredEditor: EditorIdentity? = null) {
         val app = application as PristinePageApplication
         val services = app.services
-        app.savedOcrSignals.onStartup()
         val factory = object : ViewModelProvider.Factory {
             @Suppress("UNCHECKED_CAST") override fun <T : ViewModel> create(modelClass: Class<T>): T {
                 require(modelClass == ImportLibraryViewModel::class.java)
@@ -148,7 +147,13 @@ class MainActivity : ComponentActivity() {
         val binding = LibraryPickerBinding(activityResultRegistry, retained)
         picker = binding
         binding.synchronize()
-        observing = lifecycleScope.launch { repeatOnLifecycle(Lifecycle.State.STARTED) { retained.state.collect { binding.synchronize() } } }
+        observing = lifecycleScope.launch {
+            repeatOnLifecycle(Lifecycle.State.STARTED) {
+                // A failed or unavailable earlier reconciliation may recover on the next foreground visit.
+                app.savedOcrSignals.onStartup()
+                retained.state.collect { binding.synchronize() }
+            }
+        }
         val loadOriginal: suspend (String) -> OriginalPreviewBitmap = { source ->
             services.imports().originalPreview(source)
         }

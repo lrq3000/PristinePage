@@ -61,6 +61,105 @@ class SavedOcrAppSignalsTest {
         assertEquals(2, scans)
     }
 
+    @Test fun nextForegroundRetriesBackfillWhenRuntimeWasUnavailableOnFirstStart() = runTest {
+        var available = false
+        var scans = 0
+        val previouslySaved = SavedOcrWork.Target(first, job)
+        val delivered = mutableListOf<SavedOcrWork.Target>()
+        val work = session(discover = { scans++ }, pending = { listOf(previouslySaved) })
+        val signals = SavedOcrAppSignals(backgroundScope, SavedOcrScheduling({ work.takeIf { available } }) {
+            delivered += it
+        })
+        signals.onStartup()
+        runCurrent()
+        assertEquals(0, scans)
+        assertTrue(delivered.isEmpty())
+
+        available = true
+        signals.onStartup()
+        signals.onStartup()
+        runCurrent()
+        assertEquals(listOf(previouslySaved), delivered)
+        signals.onStartup()
+        runCurrent()
+        assertEquals(1, scans)
+    }
+
+    @Test fun foregroundDuringAnInFlightRefusalIsNotLost() = runTest {
+        val finishFirstProbe = CompletableDeferred<Unit>()
+        var probes = 0
+        val target = SavedOcrWork.Target(first, job)
+        val delivered = mutableListOf<SavedOcrWork.Target>()
+        val work = session(discover = {}, pending = { listOf(target) })
+        val signals = SavedOcrAppSignals(backgroundScope, SavedOcrScheduling({
+            if (++probes == 1) {
+                finishFirstProbe.await()
+                null
+            } else work
+        }) { delivered += it })
+        signals.onStartup()
+        runCurrent()
+        assertEquals(1, probes)
+        signals.onStartup()
+        signals.onStartup()
+        runCurrent()
+        assertEquals(1, probes)
+        finishFirstProbe.complete(Unit)
+        runCurrent()
+        assertEquals(listOf(target), delivered)
+        assertEquals(2, probes)
+    }
+
+    @Test fun failedSaveWakeAfterCompletedStartupIsRecoveredOnForeground() = runTest {
+        val target = SavedOcrWork.Target(first, job)
+        var saved = false
+        var ready = true
+        var scans = 0
+        val delivered = mutableListOf<SavedOcrWork.Target>()
+        val work = session(discover = { scans++ }, pending = { if (saved) listOf(target) else emptyList() })
+        val signals = SavedOcrAppSignals(backgroundScope, SavedOcrScheduling({ work.takeIf { ready } }) { delivered += it })
+        signals.onStartup()
+        runCurrent()
+        assertEquals(1, scans)
+        saved = true
+        ready = false
+        signals.onPagesSaved(document, listOf(first))
+        runCurrent()
+        ready = true
+        assertTrue(delivered.isEmpty())
+        signals.onStartup()
+        runCurrent()
+        assertEquals(listOf(target), delivered)
+        assertEquals(2, scans)
+    }
+
+    @Test fun aPassThatHasAlreadyScannedPastAFailedSaveCannotMarkStartupComplete() = runTest {
+        val finishedScanning = CompletableDeferred<Unit>()
+        val target = SavedOcrWork.Target(first, job)
+        var ready = true
+        var scans = 0
+        val delivered = mutableListOf<SavedOcrWork.Target>()
+        val work = session(
+            discover = { if (++scans == 1) finishedScanning.await() },
+            pending = { if (scans > 1) listOf(target) else emptyList() },
+        )
+        val signals = SavedOcrAppSignals(backgroundScope, SavedOcrScheduling({ work.takeIf { ready } }) { delivered += it })
+        signals.onStartup()
+        runCurrent()
+        ready = false
+        signals.onPagesSaved(document, listOf(first))
+        runCurrent()
+        ready = true
+        finishedScanning.complete(Unit)
+        runCurrent()
+        assertEquals(1, scans)
+        assertTrue(delivered.isEmpty())
+        signals.onStartup()
+        runCurrent()
+        assertEquals(listOf(target), delivered)
+        assertEquals(2, scans)
+    }
+
     @Test fun savesDetachExactPageIdsAndOneFailedWakeDoesNotBlockTheNext() = runTest {
         val reconciled = mutableListOf<Pair<DocumentId, PageId>>()
         val delivered = mutableListOf<PageId>()
@@ -186,6 +285,7 @@ class SavedOcrAppSignalsTest {
         pending: () -> List<SavedOcrWork.Target> = { emptyList() },
         saved: suspend (DocumentId, PageId) -> SavedOcrWork.Target? = { _, _ -> error("Expected startup discovery") },
     ): SavedOcrScheduling.QualifiedSession = object : SavedOcrScheduling.QualifiedSession {
+        override val canCreateJobs = true
         override fun pendingPages(): Flow<SavedOcrWork.Target> = flow {
             discover()
             for (target in pending()) emit(target)

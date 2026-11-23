@@ -14,13 +14,15 @@ from local_ocr_airplane import AirplaneJourney, isolated
 from local_ocr_files_journey import CONTROL_SHA256
 from run_local_ocr_guest import (
     APP, TEST, RUNNER, GUEST_PATTERN, LANGUAGE_RECEIPT, LANGUAGE_SUITES, checked_language_results,
-    exact_apk, install_flags, load_allocator, need, passed_case, run_type, sha, verify_file, verify_stage,
+    check_installed_pair, exact_apk, install_flags, load_allocator, need, passed_case, run_type, sha, verify_file, verify_stage,
 )
 
 
 CASE = ("app.pristinepage.ocr.LocalOcrAirplaneFilesTest",
         "coldFilesImportCorrectsRecognizesAndReopensTheExactPageInAirplaneMode")
 MARKER = "EXACT_COLD_FILES_PAGE_IN_AIRPLANE_MODE"
+RECOVERY_CASE = (CASE[0], "filesStillSavesAndThenAutomaticallyRecoversAfterPackRefusal")
+RECOVERY_MARKER = "EXACT_FILES_SAVE_AND_AUTOMATIC_OCR_RECOVERY"
 BASELINE = {"airplane_mode_on": "0", "wifi_on": "1", "mobile_data": "1"}
 LOCAL_ADB_OVERRIDES = ("ADB_SERVER_SOCKET", "ANDROID_ADB_SERVER_ADDRESS", "ANDROID_ADB_SERVER_PORT", "ADB_SERVER_PORT")
 
@@ -105,12 +107,16 @@ record_isolation after
 """
 
 
-def witnessed(transcript):
-    return (passed_case(transcript, CASE) and
-            re.findall(r"(?m)^INSTRUMENTATION_RESULT: offlineOcrWitness=([^\s]+)[ \r]*$", transcript) == [MARKER])
+def witnessed(transcript, *, recover_runtime=False):
+    case, marker = (RECOVERY_CASE, RECOVERY_MARKER) if recover_runtime else (CASE, MARKER)
+    return (passed_case(transcript, case) and
+            re.findall(r"(?m)^INSTRUMENTATION_RESULT: offlineOcrWitness=([^\s]+)[ \r]*$", transcript) == [marker])
 
 
-def invocation(suite):
+def invocation(suite, *, recover_runtime=False):
+    if recover_runtime:
+        need(suite is None, "Fault recovery uses only the exact synthetic Files fixture")
+        return RECOVERY_CASE, "offlineOcrFixture", 320
     if suite is None:
         return CASE, "offlineOcrFixture", 265
     need(suite in LANGUAGE_SUITES, "No qualified offline script batch")
@@ -169,10 +175,10 @@ def verify_target(run, ns):
          "Current guest processes, local ADB and exact serial must match the active claim")
 
 
-def exercise(run, ns, source, hashes, test, previous, *, suite=None, diagnostic_shell=False):
+def exercise(run, ns, source, hashes, test, previous, *, suite=None, diagnostic_shell=False, recover_runtime=False):
     target = [ns["ADB"], "-s", run.serial]
     radio = AirplaneJourney(run, target)
-    case, option, limit = invocation(suite)
+    case, option, limit = invocation(suite, recover_runtime=recover_runtime)
     installed = {pkg: run.installed_hash(pkg) for pkg in hashes}
     need(installed[APP] == hashes[APP], "The exact application must already be installed")
     flags = install_flags(TEST, installed[TEST], hashes[TEST], previous, require_installed=True)
@@ -279,7 +285,7 @@ def exercise(run, ns, source, hashes, test, previous, *, suite=None, diagnostic_
     result = {"case": "#".join(case), "coldAppProcessAtInstrumentationStart": True, "isolated": True,
               "restored": True, "instrumentationPassed": True}
     if suite is None:
-        need(witnessed(evidence["instrumentation"]), "The ordinary cold Files OCR journey did not complete")
+        need(witnessed(evidence["instrumentation"], recover_runtime=recover_runtime), "The named cold Files OCR journey did not complete")
     else:
         result["controls"] = checked_language_results(evidence["instrumentation"], suite)
     run.save(run.path("outcomes.json"), result, durable=True)
@@ -288,14 +294,22 @@ def exercise(run, ns, source, hashes, test, previous, *, suite=None, diagnostic_
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--existing", required=True)
+    parser.add_argument("--previous-app-sha")
     parser.add_argument("--previous-test-sha")
-    parser.add_argument("--language-suite", action="append", choices=LANGUAGE_SUITES,
-                        help="Cold-start one named script suite from the retained probe stage; repeat for additional suites")
+    cases = parser.add_mutually_exclusive_group()
+    cases.add_argument("--language-suite", action="append", choices=LANGUAGE_SUITES,
+                       help="Cold-start one named script suite from the retained probe stage; repeat for additional suites")
+    cases.add_argument("--recover-runtime", action="store_true",
+                       help="Exercise a bounded pack-lock refusal and foreground backfill on a retained installation")
     for name in ("stage", "app", "test", "source"):
-        parser.add_argument(name, type=lambda arg: Path(arg).resolve(strict=True))
+        parser.add_argument(name, type=Path)
     parser.add_argument("app_sha")
     parser.add_argument("test_sha")
     args = parser.parse_args()
+    if args.previous_app_sha is not None and not all(
+        digest and re.fullmatch(r"[a-f0-9]{64}", digest) for digest in (args.previous_app_sha, args.previous_test_sha)
+    ):
+        parser.error("An app update requires both exact predecessor digests")
     root = Path.cwd().resolve()
     need(not any(os.environ.get(name) for name in LOCAL_ADB_OVERRIDES), "Do not override the local shared ADB server")
     need(root.name in ("ocr-background-search", "ocr-current-validation") and root.parent.name == ".worktrees",
@@ -305,6 +319,8 @@ def main():
          "Require the exact retained guest and, if updating instrumentation, the exact prior digest")
     suites = tuple(args.language_suite or ())
     need(len(suites) == len(set(suites)), "Do not repeat a suite in one claim")
+    for name in ("stage", "app", "test", "source"):
+        setattr(args, name, getattr(args, name).resolve(strict=True))
     source = offline_source(root, args.source, suites[0] if suites else None)
     if suites:
         verify_stage(source, LANGUAGE_RECEIPT)
@@ -323,13 +339,29 @@ def main():
     try:
         run.prepare(False, None, False)
         verify_target(run, ns)
+        if args.previous_app_sha:
+            previous = {APP: args.previous_app_sha, TEST: args.previous_test_sha}
+            installed = {package: run.installed_hash(package) for package in hashes}
+            check_installed_pair(installed, previous, hashes)
+            run.save(run.path("installed-before.json"), {"sha256": installed}, durable=True)
+            for package, artifact in ((APP, args.app), (TEST, args.test)):
+                flags = install_flags(package, installed[package], hashes[package], args.previous_test_sha,
+                                      args.previous_app_sha, require_installed=True)
+                if flags is not None:
+                    verify_target(run, ns)
+                    need(sha(artifact) == hashes[package], "Scoped successor artifact changed before install")
+                    command = [ns["ADB"], "-s", run.serial, "install", *flags, "--no-streaming", artifact]
+                    need(run.command(command, timeout=130).strip().splitlines()[-1] == "Success",
+                         "Scoped successor install was not acknowledged")
+                need(run.installed_hash(package) == hashes[package], "Installed successor bytes did not match")
         if suites:
             for suite in suites:
                 exercise(EvidenceScope(run, suite), ns, source, hashes, args.test, args.previous_test_sha, suite=suite)
                 print(f"Exact native batch {suite} passed with verified radio isolation and restoration.", flush=True)
         else:
-            exercise(run, ns, source, hashes, args.test, args.previous_test_sha)
-            print("The cold real Files import, correction, background OCR and exact Home reopen passed in airplane mode.", flush=True)
+            exercise(run, ns, source, hashes, args.test, args.previous_test_sha, recover_runtime=args.recover_runtime)
+            print("Saving with OCR unavailable and automatic recovery both passed in airplane mode." if args.recover_runtime else
+                  "The cold real Files import, correction, background OCR and exact Home reopen passed in airplane mode.", flush=True)
     finally:
         run.close_owned()
 

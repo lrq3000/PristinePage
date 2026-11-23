@@ -104,6 +104,33 @@ class LocalOcrGuestTest(unittest.TestCase):
         self.assertFalse(radio_proven(dict(good, **{"before-wifi": "Wi-Fi is enabled\n"}), "before"))
         self.assertFalse(radio_proven(dict(good, **{"before-state": "1\n2\n0\n"}), "before"))
 
+    def test_ocr_refusal_journey_requires_its_own_instrumented_pass_and_marker(self):
+        from run_local_ocr_airplane import RECOVERY_CASE, RECOVERY_MARKER, invocation, witnessed
+
+        case, option, _ = invocation(None, recover_runtime=True)
+        self.assertEqual(RECOVERY_CASE, case)
+        self.assertEqual("offlineOcrFixture", option)
+        ending = "OK (1 test)\nINSTRUMENTATION_CODE: -1\n"
+        transcript = block(*case, 1) + block(*case, 0) + f"INSTRUMENTATION_RESULT: offlineOcrWitness={RECOVERY_MARKER}\n" + ending
+        self.assertTrue(witnessed(transcript, recover_runtime=True))
+        self.assertFalse(witnessed(transcript))
+        self.assertFalse(witnessed(transcript.replace(RECOVERY_MARKER, "EXACT_COLD_FILES_PAGE_IN_AIRPLANE_MODE"), recover_runtime=True))
+        with self.assertRaises(RuntimeError):
+            invocation("latin", recover_runtime=True)
+
+    def test_offline_app_update_requires_an_exact_predecessor_for_both_packages(self):
+        runner = Path(__file__).with_name("run_local_ocr_airplane.py")
+        for flags in (["--previous-app-sha", "a" * 64],
+                      ["--previous-app-sha", "bad", "--previous-test-sha", "b" * 64]):
+            with self.subTest(flags=flags):
+                completed = subprocess.run(
+                    [sys.executable, "-B", runner, "--existing", "unused", *flags,
+                     "unused", "unused", "unused", "unused", "unused", "unused"],
+                    capture_output=True, text=True, timeout=15,
+                )
+                self.assertEqual(2, completed.returncode, completed.stderr)
+                self.assertIn("An app update requires both exact predecessor digests", completed.stderr)
+
     def test_language_and_rerun_modes_refuse_unscoped_arguments_before_apk_admission(self):
         runner = Path(__file__).with_name("run_local_ocr_guest.py")
         for flags, message in (

@@ -4,8 +4,10 @@ import app.pristinepage.core.ocr.OcrLanguagePack
 import app.pristinepage.core.ocr.OcrLanguagePacks
 import java.io.ByteArrayInputStream
 import java.lang.reflect.Modifier
+import java.nio.channels.FileChannel
 import java.nio.file.Files
 import java.nio.file.Path
+import java.nio.file.StandardOpenOption.WRITE
 import java.util.concurrent.CancellationException
 import org.junit.Assert.*
 import org.junit.Rule
@@ -86,6 +88,21 @@ class PrivateOcrPackOwnerTest {
         assertEquals(englishOnly, resolved)
         // Both paths must authenticate the same two files once; the same real filesystem and checkpoint surround both scans.
         assertEquals(acquisitionChecks, resolutionChecks)
+    }
+
+    @Test fun anAlreadyHeldCatalogLockDefersAdmissionWithoutReplacingThePackSet() {
+        val root = fixture.newFolder().toPath()
+        val installed = owner(root)
+        assertTrue(installed.install { pack(it) })
+        val ready = checkNotNull(installed.acquire(chosen))
+        val guard = Files.newDirectoryStream(root, ".ocr-packs-*.lock").use { it.single() }
+        FileChannel.open(guard, WRITE).use { channel ->
+            channel.lock().use {
+                assertFalse(owner(root).install { error("The locked catalog must not be replaced") })
+            }
+        }
+        assertTrue(owner(root).install { error("The original catalog must be reused") })
+        assertEquals(ready, owner(root).acquire(chosen))
     }
 
     @Test fun callersCannotSupplyATrustedDirectoryOrOwnershipPredicate() {

@@ -21,6 +21,7 @@ class SavedOcrApplicationTest {
     private val target = SavedOcrWork.Target(PageId("aaaaaaaa-aaaa-4aaa-8aaa-000000000001"), JobId("aaaaaaaa-aaaa-4aaa-8aaa-000000000002"))
     private val factory = SavedOcrPreparer.SessionFactory { _, _, _ -> error("Test does not open the native engine") }
     private val session = object : SavedOcrScheduling.QualifiedSession {
+        override val canCreateJobs = true
         override suspend fun reconcilePage(document: DocumentId, page: PageId): SavedOcrWork.Target? = null
         override fun pendingPages() = emptyFlow<SavedOcrWork.Target>()
     }
