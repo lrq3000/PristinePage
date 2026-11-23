@@ -29,6 +29,7 @@ BACKFILL_CASE = ("app.pristinepage.ocr.LocalOcrStartupBackfillTest", "firstActiv
 DEATH_CASE = ("app.pristinepage.ocr.LocalOcrWorkDeathTest", "interruptRealNativeRecognition")
 RECOVER_CASE = (DEATH_CASE[0], "thirdInterruptionIsTerminalAfterOrdinaryLaunch")
 LANGUAGE_CASE = ("app.pristinepage.ocr.LocalOcrLanguageJourneyTest", "settingsSelectedScriptsReachTheExactHomePage")
+JAPANESE_CASE = (LANGUAGE_CASE[0], "japaneseSparseLayoutRemainsBoundToTheExactSearchHit")
 MANUAL_CASE = ("app.pristinepage.ocr.LocalOcrManualRerunTest", "terminalPageCanRerunWithSavedSettingsAndThenDefaults")
 LANGUAGE_CONTROLS = ("eng", "fra", "blank", "ara-eng", "ara", "chi_sim")
 LANGUAGE_RECEIPT = "7d7f418e3b20eea85ed795151c54df8ac2b920d6c09cc5d443a6559c7c5ec093"
@@ -41,6 +42,16 @@ RAM_KIB = 4 * 1024**2
 def need(ok, message):
     if not ok:
         raise RuntimeError(message)
+
+
+def checked_language_results(output, japanese=False):
+    case, controls = (JAPANESE_CASE, ("jpn",)) if japanese else (LANGUAGE_CASE, LANGUAGE_CONTROLS)
+    marker = re.compile(r"(?m)^INSTRUMENTATION_STATUS: ocrLanguageControl=([a-z_-]+)\nINSTRUMENTATION_STATUS_CODE: 65\n")
+    normalized = output.replace("\r\n", "\n")
+    marks = tuple(marker.findall(normalized))
+    need(marks == controls and passed_case(marker.sub("", normalized), case),
+         "Not all exact language controls completed; inspect the transcript")
+    return marks
 
 
 def inspect_fresh_registration(before, after, name, installation):
@@ -471,7 +482,7 @@ def run_type(ns):
             need(passed_case(output, RECOVER_CASE), "Missing terminal recovery witness")
             self.save(self.path("recovery-outcome.json"), {"phase": "FAILED", "error": "INTERRUPTED", "starts": 3}, durable=True)
 
-        def language_journey(self, target, controls):
+        def language_journey(self, target, controls, japanese=False):
             prefix = uuid.uuid4().hex[:12]
             folder = "/sdcard/Download/pristinepage-ocr-" + prefix
             probe = controls.parents[2]
@@ -479,21 +490,18 @@ def run_type(ns):
             verify_stage(probe, LANGUAGE_RECEIPT)
             cases = {case["id"]: case for case in json.loads((controls.parent / "manifest.json").read_text(encoding="utf-8"))["cases"]}
             self.command([*target, "shell", "mkdir", folder])
-            for control in LANGUAGE_CONTROLS:
+            for control in ("jpn",) if japanese else LANGUAGE_CONTROLS:
                 name = control + ".png"
                 source = controls / name
                 identity = cases[control]
                 need(0 < identity["imageBytes"] < 32 * 1024, "Invalid synthetic control length")
                 verify_file(source, identity["imageBytes"], identity["imageSha256"])
                 self.command([*target, "push", source, f"{folder}/{name}"], timeout=20)
+            case = JAPANESE_CASE if japanese else LANGUAGE_CASE
             output = self.command([*target, "shell", "am", "instrument", "-w", "-r", "-e", "class",
-                                   "#".join(LANGUAGE_CASE), "-e", "ocrFixture", prefix, RUNNER], timeout=830)
+                                   "#".join(case), "-e", "ocrFixture", prefix, RUNNER], timeout=230 if japanese else 830)
             self.path("language-instrumentation.txt").write_text(output, encoding="utf-8")
-            normalized = output.replace("\r\n", "\n")
-            marks = re.findall(r"(?m)^INSTRUMENTATION_STATUS: ocrLanguageControl=([a-z_-]+)\nINSTRUMENTATION_STATUS_CODE: 65\n", normalized)
-            clean = re.sub(r"(?m)^INSTRUMENTATION_STATUS: ocrLanguageControl=[a-z_-]+\nINSTRUMENTATION_STATUS_CODE: 65\n", "", normalized)
-            need(tuple(marks) == LANGUAGE_CONTROLS and passed_case(clean, LANGUAGE_CASE),
-                 "Not all exact language controls completed; inspect the transcript")
+            marks = checked_language_results(output, japanese)
             self.save(self.path("language-outcomes.json"), {"controls": marks, "passed": True}, durable=True)
 
         def inspect_files_failure(self, target):

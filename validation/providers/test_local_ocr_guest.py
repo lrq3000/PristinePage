@@ -287,3 +287,16 @@ class LocalOcrGuestTest(unittest.TestCase):
         ):
             with self.subTest(output=output):
                 self.assertFalse(passed_case(output, CASE))
+
+    def test_sparse_layout_requires_its_own_case_and_single_exact_marker(self):
+        import run_local_ocr_guest as guest
+
+        case = (guest.LANGUAGE_CASE[0], "japaneseSparseLayoutRemainsBoundToTheExactSearchHit")
+        marker = "INSTRUMENTATION_STATUS: ocrLanguageControl=jpn\r\nINSTRUMENTATION_STATUS_CODE: 65\r\n"
+        done = block(*case, 0) + "OK (1 test)\r\nINSTRUMENTATION_CODE: -1\r\n"
+        start = block(*case, 1)
+        self.assertEqual(("jpn",), guest.checked_language_results(start + marker + done, japanese=True))
+        for invalid in (start + done, start + marker + marker + done,
+                        start + marker.replace("jpn", "eng") + done, block(*guest.LANGUAGE_CASE, 1) + marker + done):
+            with self.subTest(invalid=invalid), self.assertRaises(RuntimeError):
+                guest.checked_language_results(invalid, japanese=True)
