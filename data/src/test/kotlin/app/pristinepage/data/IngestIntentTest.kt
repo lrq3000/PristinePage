@@ -28,15 +28,23 @@ class IngestIntentTest {
         var now = 1000L
         var rejectChildUpdate = false
         var rejectPhaseState: String? = null
+        var retainedOtherDraftAttempts = 0L
+        var promotedAtelierDocument = false
         val metadata = object : MetadataAccess {
             override val queries: CatalogQueries get() = catalog
             override fun isHiddenAtelierDraft(documentId: String): Boolean = catalog.isHiddenAtelierDraft(documentId)
+            override fun hasAtelierCopyOwner(documentId: String): Boolean =
+                promotedAtelierDocument && documentId == document.value || isHiddenAtelierDraft(documentId)
             override fun retainedAtelierCopyAttempts(documentId: String): Long {
                 check(catalog.inTransaction)
                 return files.values.count {
                     val item = sessions[it.ownerId]
                     it.kind == "INGEST" && item?.kind == "ITEM" && item.documentId == documentId
                 }.toLong()
+            }
+            override fun retainedStagingCopyAttempts(limit: Int): Int {
+                check(catalog.inTransaction)
+                return minOf(limit.toLong(), retainedOtherDraftAttempts + retainedAtelierCopyAttempts(document.value)).toInt()
             }
             override fun <T> transaction(action: () -> T): T {
                 val s = sessions.toMap(); val f = files.toMap(); val j = jobs.toMap(); val b = blobs.toMap(); val dates = captureDays.toMap()
@@ -178,6 +186,36 @@ class IngestIntentTest {
         assertEquals(OperationErrorCode.STORAGE_FAILED, failure.error.code)
         assertTrue(f.files.isEmpty()); assertTrue(f.jobs.isEmpty())
         assertEquals("BOUND", f.sessions[f.child.value]!!.state); assertNull(f.sessions[f.child.value]!!.transactionId)
+    }
+
+    @Test fun fullSharedStagingAllowanceRefusesAHiddenDraftBeforeWritingAnIntent() {
+        val f = Fixture()
+        f.catalog.hiddenDraftDocuments.add(f.document.value)
+        f.retainedOtherDraftAttempts = 16
+        val failure = assertThrows(RepositoryFailure::class.java) { f.commands.prepare(f.child, f.uri) }
+        assertEquals(OperationErrorCode.RESOURCE_LIMIT, failure.error.code)
+        assertEquals("draft_staging_full", failure.error.safeMessageKey)
+        assertTrue(f.files.isEmpty())
+        assertTrue(f.jobs.isEmpty())
+        assertNull(f.sessions.getValue(f.child.value).transactionId)
+    }
+
+    @Test fun aPromotedStagingDocumentCannotAddUnchargedOrdinaryAttempts() {
+        val f = Fixture()
+        f.promotedAtelierDocument = true
+        f.retainedOtherDraftAttempts = 16
+        val failure = assertThrows(RepositoryFailure::class.java) { f.commands.prepare(f.child, f.uri) }
+        assertEquals("draft_staging_full", failure.error.safeMessageKey)
+        assertTrue(f.files.isEmpty())
+        assertTrue(f.jobs.isEmpty())
+    }
+
+    @Test fun unrelatedOrdinaryDocumentsDoNotUseTheAtelierAllowance() {
+        val f = Fixture()
+        f.retainedOtherDraftAttempts = 16
+        val intent = f.commands.prepare(f.child, f.uri)
+        assertEquals(f.document, intent.documentId)
+        assertNotNull(f.files[intent.transactionId.value])
     }
 
     @Test fun retainedIntentCannotBeReboundToAnotherDocumentDuringReplay() {

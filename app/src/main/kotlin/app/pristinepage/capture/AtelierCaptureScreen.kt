@@ -85,7 +85,7 @@ import kotlinx.coroutines.withTimeoutOrNull
         Column(Modifier.fillMaxSize().safeDrawingPadding().padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
             Text(stringResource(R.string.atelier_import_resume_title), style = MaterialTheme.typography.headlineSmall)
             Text(stringResource(if (draft?.target == null) R.string.atelier_import_resume_new else R.string.atelier_import_resume_append))
-            state.error?.let { Text(errorText(it), color = MaterialTheme.colorScheme.error) }
+            state.error?.let { Text(acquisitionError(it), color = MaterialTheme.colorScheme.error) }
             Button(owner::resumeChoice, enabled = !state.busy) { Text(stringResource(R.string.atelier_import_resume)) }
             TextButton({ owner.leave(false) }, enabled = !state.busy) { Text(stringResource(R.string.atelier_back)) }
             TextButton({ confirmExit = true }, enabled = !state.busy && draft?.pending == null) { Text(stringResource(R.string.atelier_import_abandon)) }
@@ -104,7 +104,7 @@ import kotlinx.coroutines.withTimeoutOrNull
                         { Text(stringResource(R.string.page_number, index + 1)) }, enabled = move)
                 }
             }
-            state.error?.let { Text(errorText(it), color = MaterialTheme.colorScheme.error) }
+            state.error?.let { Text(acquisitionError(it), color = MaterialTheme.colorScheme.error) }
             Box(Modifier.weight(1f)) {
                 key(editor, draft.step) {
                     PageEditorScreen(loadOriginal = loadOriginal, guidedStep = draft.step, guidedBusy = state.busy || confirmExit || confirmSkip)
@@ -129,7 +129,7 @@ import kotlinx.coroutines.withTimeoutOrNull
             Text(stringResource(R.string.atelier_review_import), style = MaterialTheme.typography.headlineSmall)
             Text(stringResource(R.string.atelier_import_count, draft.pages.size))
             AtelierImportStrip(draft.pages, loadQueueTile)
-            state.error?.let { Text(errorText(it), color = MaterialTheme.colorScheme.error) }
+            state.error?.let { Text(acquisitionError(it), color = MaterialTheme.colorScheme.error) }
             AtelierImportFeedback(state.importIssues)
             if (state.busy) LinearProgressIndicator(Modifier.fillMaxWidth())
             OutlinedButton({ review = false }, enabled = !state.busy) { Text(stringResource(R.string.atelier_review_add_more)) }
@@ -242,7 +242,7 @@ import kotlinx.coroutines.withTimeoutOrNull
             Text(stringResource(R.string.take_photo), style = MaterialTheme.typography.titleLarge)
             Text(stringResource(R.string.atelier_import_count, draft?.pages?.size ?: 0))
         }
-        state.error?.let { Text(errorText(it), color = MaterialTheme.colorScheme.error) }
+        state.error?.let { Text(acquisitionError(it), color = MaterialTheme.colorScheme.error) }
         AtelierImportFeedback(state.importIssues)
         cameraError?.let { Text(errorText(it), color = MaterialTheme.colorScheme.error) }
         if (granted && cameraError != null && !ready && idle) {

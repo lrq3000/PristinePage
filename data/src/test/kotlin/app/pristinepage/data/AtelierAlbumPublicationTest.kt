@@ -141,7 +141,15 @@ class AtelierAlbumPublicationTest {
         } finally { resume.complete(Unit) }
     }
 
-    private class Fixture(primary: Fixture? = null, newAlbum: Boolean = false) {
+    @Test fun retiredSingleCopyDraftsDoNotPreventOpeningANewScan() = runBlocking {
+        val fixture = Fixture(onlyRetiredDrafts = true)
+        val draft = fixture.openFreshDraft()
+        assertEquals("ACQUIRING", draft.state)
+        assertNull(draft.activeBatchId)
+        assertTrue(fixture.base.metadata.activePages(draft.stagingDocumentId).isEmpty())
+    }
+
+    private class Fixture(primary: Fixture? = null, newAlbum: Boolean = false, private val onlyRetiredDrafts: Boolean = false) {
         val base: RepositoryFixture = primary?.base ?: RepositoryFixture()
         val target: DocumentId = primary?.target ?: DocumentId(UUID.randomUUID().toString())
         val id: String = primary?.id ?: UUID.randomUUID().toString()
@@ -149,7 +157,7 @@ class AtelierAlbumPublicationTest {
         var renders = 0
         var beforeReturn: suspend (Int) -> Unit = {}
         private var record = AtelierDraftRow(id, base.document.value, target.value.takeUnless { newAlbum }, 1L.takeUnless { newAlbum },
-            "EDITING", 4, 2, base.pageIds.first().value, null, 0)
+            if (onlyRetiredDrafts) "ABANDONED" else "EDITING", 4, 2, base.pageIds.first().value, null, 0)
         private val q = base.metadata
         val dao: AtelierDraftDao = object : AtelierDraftDao() {
             override fun savedDocumentIsHidden(id: String) = if (q.document(id) == null) null else
@@ -165,9 +173,13 @@ class AtelierAlbumPublicationTest {
             override fun refusesDraftIngest(id: String, batchId: String) = true
             override fun attemptedItems(id: String) = 0L
             override fun retainedCopyAttempts(id: String) = 0L
-            override fun unfinished() = listOf(record)
-            override fun hiddenCount() = 1
-            override fun insert(row: AtelierDraftRow) = error("Publication must update its existing draft")
+            override fun unfinished() = listOf(record).filter { it.state == "EDITING" || it.state == "ACQUIRING" }
+            override fun hasCopyOwner(id: String) = id == record.stagingDocumentId
+            override fun retainedStagingCopyAttempts(limit: Int) = if (onlyRetiredDrafts) 2 else 0
+            override fun insert(row: AtelierDraftRow) {
+                check(onlyRetiredDrafts && q.inTransaction && record.state == "ABANDONED")
+                record = row
+            }
             override fun update(row: AtelierDraftRow): Int {
                 check(q.inTransaction)
                 record = row
@@ -197,6 +209,9 @@ class AtelierAlbumPublicationTest {
         }
 
         fun snapshot() = listOf(record, q.documents.toMap(), q.pages.toMap(), q.recipes.toMap(), q.references.toMap(), q.sources.toMap())
+
+        suspend fun openFreshDraft() = RoomAtelierDrafts(access, dao, RoomImportSessions(access, IngestIntentTest.Fixture()))
+            .create("New scan", null, null)
 
         suspend fun publish(witness: List<AtelierPageWitness> = witnesses, drafts: AtelierDraftDao = dao): AtelierPublicationReceipt =
             repository.publishAtelierDraft(drafts, id, 4L, witness, renderer)

@@ -25,7 +25,7 @@ internal data class AtelierCaptureState(
     val draft: AtelierDraftView? = null,
     val busy: Boolean = false,
     val request: PhotoImportRequest? = null,
-    val error: OperationErrorCode? = null,
+    val error: OperationError? = null,
     val saved: DocumentId? = null,
     val editor: EditorSession? = null,
     val resumeChoice: Boolean = false,
@@ -79,7 +79,7 @@ internal class AtelierCaptureViewModel(
         run {
             current.value = current.value.copy(importIssues = emptyList())
             val api = graph().store.atelier
-            val request = PhotoImportRequest(api.begin(draft).value, kind)
+            val request = PhotoImportRequest(api.begin(draft, camera = kind == PhotoImportKind.CAMERA).value, kind)
             dispatched = null
             current.value = current.value.copy(draft = api.refresh(draft), request = request, busy = false)
         }
@@ -228,8 +228,8 @@ internal class AtelierCaptureViewModel(
         viewModelScope.launch {
             try { action() }
             catch (canceled: CancellationException) { throw canceled }
-            catch (failure: RepositoryFailure) { current.value = current.value.copy(error = failure.error.code) }
-            catch (_: Exception) { current.value = current.value.copy(error = OperationErrorCode.STORAGE_FAILED) }
+            catch (failure: RepositoryFailure) { current.value = current.value.copy(error = failure.error.copy(affectedId = null)) }
+            catch (_: Exception) { current.value = current.value.copy(error = OperationError(OperationErrorCode.STORAGE_FAILED, true, "draft_storage_failed", null)) }
             finally {
                 departing?.setCurveTransition(false)
                 current.value = current.value.copy(busy = false)

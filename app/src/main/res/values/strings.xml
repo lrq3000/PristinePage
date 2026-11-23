@@ -119,6 +119,9 @@
     <string name="camera_capture_failed">The photo could not be taken. Try again or import a photo.</string>
     <string name="gallery_unavailable">No compatible photo gallery could be opened. You can still choose Import files.</string>
     <string name="files_picker_unavailable">The system file picker could not be opened.</string>
+    <string name="atelier_staging_full">PristinePage has reached its temporary scan limit. If this scan already has pages, review and save them. Saved scans are not affected.</string>
+    <string name="atelier_staging_selection_limit">There is not enough room in temporary scan storage for this selection. Select fewer photos.</string>
+    <string name="atelier_draft_copy_limit">This scan has reached its import attempt limit. Review any pages already added, or start a new scan.</string>
     <string name="new_document">New document</string>
     <string name="library_notice">Photos are stored privately on this device.</string>
     <string name="refresh_library">Refresh library</string>

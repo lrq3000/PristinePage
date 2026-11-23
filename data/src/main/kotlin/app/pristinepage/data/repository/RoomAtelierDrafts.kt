@@ -23,7 +23,7 @@ internal class RoomAtelierDrafts(
         // Bound interrupted/failed as well as successful items until the reference-aware retired draft lifecycle is available.
         const val MAX_ITEMS_PER_DRAFT = 8
         const val MAX_COPY_ATTEMPTS_PER_DRAFT = 8
-        private const val MAX_HIDDEN_DRAFTS = 2
+        const val MAX_RETAINED_STAGING_COPY_ATTEMPTS = 16
     }
 
     suspend fun resume(): AtelierDraftRow? = command {
@@ -61,7 +61,6 @@ internal class RoomAtelierDrafts(
         if (name.length !in 1..160 || (target == null) != (expectedRevision == null)) refuse(OperationErrorCode.INVALID_INPUT, "invalid_draft_input")
         try { requireWellFormedUnicode(name) } catch (_: IllegalArgumentException) { refuse(OperationErrorCode.INVALID_INPUT, "invalid_document_title") }
         if (drafts.unfinished().isNotEmpty()) refuse(OperationErrorCode.REVISION_CONFLICT, "unfinished_draft_exists")
-        if (drafts.hiddenCount() >= MAX_HIDDEN_DRAFTS) refuse(OperationErrorCode.RESOURCE_LIMIT, "draft_retention_limit")
         if (target != null) {
             if (drafts.savedDocumentIsHidden(target.value) != false) refuse(OperationErrorCode.SOURCE_UNAVAILABLE, "document_unavailable")
             val current = metadata.queries.document(target.value) ?: refuse(OperationErrorCode.SOURCE_UNAVAILABLE, "document_unavailable")
@@ -77,9 +76,11 @@ internal class RoomAtelierDrafts(
             .also(drafts::insert)
     }
 
-    suspend fun reserve(draftId: String, generation: Long): ImportSessionId = command { context ->
+    suspend fun reserve(draftId: String, generation: Long, camera: Boolean = false): ImportSessionId = command { context ->
         val draft = current(draftId, generation, "ACQUIRING")
         if (drafts.attemptedItems(draft.stagingDocumentId) >= MAX_ITEMS_PER_DRAFT) refuse(OperationErrorCode.RESOURCE_LIMIT, "document_page_limit")
+        // A shutter writes a JPEG before the picker-style result bind. Refuse known copy exhaustion before asking CameraX to take it.
+        if (camera) requireAtelierCopyAllowance(metadata, draft.stagingDocumentId, 1, draftId, hidden = true)
         val album = metadata.queries.document(draft.stagingDocumentId) ?: refuse(OperationErrorCode.INTEGRITY_FAILED, "draft_album_missing")
         val batch = sessions.beginLocked(DocumentId(album.documentId), album.documentRevision, null, context)
         write(draft.copy(activeBatchId = batch.parentId.value))

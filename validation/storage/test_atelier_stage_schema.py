@@ -159,16 +159,16 @@ class AtelierStageSchemaTest(unittest.TestCase):
         self.db.execute("UPDATE AtelierDraft SET generation=5.25")
         self.assertEqual(0, bounded())
 
-    def test_retention_budget_counts_only_active_drafts_and_unreconciled_terminal_copies(self):
+    def test_retention_budget_charges_copy_attempts_across_drafts_not_draft_rows(self):
         migrate(self.db)
         source = (DB / "AtelierDraftDao.kt").read_text(encoding="utf-8")
-        query = re.search(r'@Query\("""([^"]+)"""\)\s*abstract fun hiddenCount', source)
+        query = re.search(r'@Query\("""([^"]+)"""\)\s*abstract fun retainedStagingCopyAttempts', source)
         self.assertIsNotNone(query)
-        count = lambda: self.db.execute(query[1]).fetchone()[0]
+        count = lambda limit=16: self.db.execute(query[1], {"limit": limit}).fetchone()[0]
         self.db.execute("INSERT INTO Document VALUES ('stage','Scan',1,'ACTIVE',0,0,NULL)")
         self.db.execute("""INSERT INTO AtelierDraft(draftId,stagingDocumentId,state,generation,step,createdAt)
              VALUES ('draft','stage','ACQUIRING',1,0,0)""")
-        self.assertEqual(1, count())
+        self.assertEqual(0, count(), "An empty active draft owns no copy")
         self.db.execute("UPDATE AtelierDraft SET state='ABANDONED'")
         self.assertEqual(0, count())
         self.db.execute("""INSERT INTO ImportSession(sessionId,kind,documentId,state,expectedMembershipToken,createdAt,expiresAt)
@@ -176,12 +176,24 @@ class AtelierStageSchemaTest(unittest.TestCase):
         self.db.execute("""INSERT INTO FileTransaction(transactionId,kind,ownerId,state,payload,attempt,updatedAt)
             VALUES ('saved','INGEST','item','COMMITTED',X'01',1,0)""")
         self.assertEqual(1, count(), "Abandoned originals still belong to the draft")
-        self.db.execute("""UPDATE AtelierDraft SET state='COMMITTED',step=2,targetDocumentId='target',
-            targetRevision=1,committedDocumentId='target',receiptPageIds='validated-receipt'""")
+        self.db.execute("""UPDATE AtelierDraft SET state='COMMITTED',generation=2,step=2,targetDocumentId='target',
+            targetRevision=1,committedDocumentId='target'""")
+        self.assertEqual(1, count(), "An unsupported COMMITTED row cannot release a charge")
+        self.db.execute("UPDATE AtelierDraft SET receiptPageIds=?", ("atelier-publish-v1\n1\ntarget\n" + "a" * 200,))
         self.assertEqual(0, count(), "An appended original already belongs to the saved library")
         self.db.execute("""INSERT INTO FileTransaction(transactionId,kind,ownerId,state,payload,attempt,updatedAt)
             VALUES ('failed','INGEST','item','QUARANTINED',X'01',2,0)""")
         self.assertEqual(1, count(), "A successful album does not uncharge a retained partial")
+        self.db.execute("INSERT INTO Document VALUES ('stage2','Scan',1,'ACTIVE',0,0,NULL)")
+        self.db.execute("""INSERT INTO AtelierDraft(draftId,stagingDocumentId,state,generation,step,createdAt)
+             VALUES ('draft2','stage2','ACQUIRING',1,0,0)""")
+        self.db.execute("""INSERT INTO ImportSession(sessionId,kind,documentId,state,expectedMembershipToken,createdAt,expiresAt)
+            VALUES ('active-item','ITEM','stage2','INGESTING',?,0,10)""", ("a" * 64,))
+        self.db.executemany("""INSERT INTO FileTransaction(transactionId,kind,ownerId,state,payload,attempt,updatedAt)
+            VALUES (?,'INGEST','active-item','INTENT',X'01',?,0)""",
+            [(f"active-{i}", i) for i in range(1, 16)])
+        self.assertEqual(16, count(), "An outstanding reservation counts before copying any bytes")
+        self.assertEqual(15, count(15), "The admission query stops after finding the needed number of rows")
 
 
 if __name__ == "__main__":

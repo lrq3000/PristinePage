@@ -32,4 +32,6 @@ fun interface ImportSelections {
 /** Explicitly abandon unresolved insertion, not remove a page/source or promise provider IO already stopped. Terminal children and all files/journals/leases/pins survive; parent cancellation fences late completion. */
 fun interface ImportSessionLifecycle {
     suspend fun cancelBatch(sessionId: ImportSessionId): ImportBatch
+    /** Close a rejected picker reservation only if no selection has bound in the meantime. */
+    suspend fun cancelUnboundBatch(sessionId: ImportSessionId): Boolean = false
 }
