@@ -2,6 +2,12 @@
 
 This checklist is the live PristinePage application task-state authority, not the historical documentation receipt. The operator approved local implementation under [P-01](OPERATIONAL_PLAN.md) on 2026-11-14. All acceptance checkboxes remain unimplemented/unverified at setup. Use [IMPLEMENTATION_PLAN.md](IMPLEMENTATION_PLAN.md) for exact files, interfaces, test steps and commands. Claim metadata belongs here; cross-file requirements/test links belong in [REQUIREMENTS_TRACEABILITY.md](REQUIREMENTS_TRACEABILITY.md).
 
+### Library storage and backup — T-03 / LIBRARY-PORTABILITY-01
+
+Coordinator on `feat/library-portability`, public input `01941bc`. User-approved [library portability contract](DATA_MODEL_AND_STORAGE.md#library-portability-amendment): new format, shared conflict planner and transfer protocol, verified temporary catalog, missing-object copies only, and explicit copy versus move semantics. Start with the pure `core/.../library` planner and its JVM tests. Whole-library round trip (private/default and selected roots), live Room cutover/rollback, background ownership, capacity, and the Android Settings/permission flow remain open. Use SimpleStorage only at the permission adapter boundary after exact dependency admission; do not upgrade the existing toolchain implicitly.
+
+Planner checkpoint: independent source review found no Critical issues and three Important cases. Four focused host tests reproduced reused-ID/name mismatches (including cross-album IDs) and Greek final-sigma mismatch. All four passed after correction; the strict-offline run recorded 317 core and 15 fixture cases, no failures or skips, including 14 planner cases. Same-digest/different-length and fingerprint-only mismatches have direct controls. The planner consumes stable, bounded metadata; it does not prove byte equality, remap catalog rows or make retries durable. Next course check is after the missing-object transfer witness and before trusting it in a staged Room round trip, or within 30 active minutes. Keep APK, dependency acquisition, devices and other feature work outside this host-only block.
+
 ### Current coordination: transition to `main`
 
 - [x] Operator approved the local fast-forward and `main`-based PR/handoff cadence; see [operational authority](OPERATIONAL_PLAN.md) and [queue rules](PARALLEL_EXECUTION_PLAN.md#coordination). Earlier branch/base references below describe their historical claims.

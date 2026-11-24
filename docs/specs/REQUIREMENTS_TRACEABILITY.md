@@ -6,6 +6,8 @@ U-06 adds a separate [OCR and Home search contract](OCR_SEARCH.md). T-03/T-10 go
 
 U-06 source-metadata evidence is tracked separately under `OCR-SOURCE-METADATA-54` through `OCR-CAPTURE-HOME-63` in [TODO](TODO.md). The capture-day chain verifies an opted-in byte-bound ingest, an additive empty schema upgrade, atomic projection/recovery, and exact-page lookup. It is not real OCR, a migration of existing originals' capture dates, or ordinary-app acceptance.
 
+[Library storage and backup](DATA_MODEL_AND_STORAGE.md#library-portability-amendment) extends FR-11 and NFR-04/05 under T-03/T-10. The planner's `LibraryMergePlannerTest` verifies name/original conflict decisions only (V-01). V-02/V-04/V-07 must separately verify a coherent export → fresh import with ordered pages, original bytes, edits and searchable saved OCR; copy leaves its source and active root unchanged; a confirmed move switches only to a reopened, verified candidate and cannot remove or overwrite unrelated content. Include same-root or aliased grants, missing or unmounted roots, unavailable capacity, interrupted transfers, duplicate replay and cleanup refusal.
+
 | Requirement | Authoritative specification | Owning tasks | Required acceptance evidence |
 |---|---|---|---|
 | FR-01 | CAPTURE_IMPORT_EXPORT; UX_SPECIFICATION | T-05 | CaptureLifecycleTest, denial/revocation, orientation/mirror, manual shutter without models; V-04,V-06. |
