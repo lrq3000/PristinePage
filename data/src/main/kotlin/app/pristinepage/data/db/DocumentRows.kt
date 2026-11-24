@@ -20,8 +20,14 @@ data class SourceRow(@PrimaryKey val sourceId: String, val sourceBlobId: String,
     ForeignKey(entity = DocumentRow::class, parentColumns = ["documentId"], childColumns = ["documentId"], onDelete = ForeignKey.RESTRICT),
     ForeignKey(entity = SourceRow::class, parentColumns = ["sourceId"], childColumns = ["sourceId"], onDelete = ForeignKey.RESTRICT),
     ForeignKey(entity = RecipeRevisionRow::class, parentColumns = ["pageId", "recipeRevision"], childColumns = ["pageId", "currentRecipeRevision"], deferred = true),
-], indices = [Index(value = ["documentId", "state", "ordinal"]), Index(value = ["documentId", "ordinal"], unique = true), Index(value = ["sourceId"]), Index(value = ["pageId", "currentRecipeRevision"])])
+], indices = [Index(value = ["documentId", "state", "ordinal"]), Index(value = ["documentId", "ordinal"], unique = true), Index(value = ["sourceId"]), Index(value = ["pageId", "currentRecipeRevision"]), Index(value = ["pageId", "documentId"], unique = true)])
 data class PageRow(@PrimaryKey val pageId: String, val documentId: String, val sourceId: String, val currentRecipeRevision: Long, val state: String, val ordinal: Int?, val removedAt: Long?, val createdAt: Long)
+
+/** A logical filename belongs to one ordered scan slot. Its comparison key is supplied by the shared name allocator, never by a provider or SQLite's ASCII-only NOCASE. */
+@Entity(tableName = "LibraryScanName", foreignKeys = [
+    ForeignKey(entity = PageRow::class, parentColumns = ["pageId", "documentId"], childColumns = ["pageId", "documentId"], onDelete = ForeignKey.CASCADE),
+], indices = [Index(value = ["pageId", "documentId"]), Index(value = ["documentId", "comparisonKey"], unique = true)])
+internal data class LibraryScanNameRow(@PrimaryKey val pageId: String, val documentId: String, val filename: String, val comparisonKey: String)
 
 @Entity(tableName = "RecipeRevision", primaryKeys = ["pageId", "recipeRevision"], foreignKeys = [
     ForeignKey(entity = PageRow::class, parentColumns = ["pageId"], childColumns = ["pageId"], onDelete = ForeignKey.RESTRICT),

@@ -12,7 +12,7 @@ from test_ocr_index import create_tables, sync_triggers
 
 ROOT = Path(__file__).resolve().parents[2]
 READER = ROOT / "data/src/main/kotlin/app/pristinepage/data/library/RoomLibraryCatalogReader.kt"
-SCHEMA = ROOT / "data/schemas/app.pristinepage.data.db.PristineDatabase/7.json"
+SCHEMA = ROOT / "data/schemas/app.pristinepage.data.db.PristineDatabase/8.json"
 
 
 class LibraryCatalogReaderSqlTest(unittest.TestCase):
@@ -20,7 +20,7 @@ class LibraryCatalogReaderSqlTest(unittest.TestCase):
         cli = shutil.which("sqlite3")
         self.assertIsNotNone(cli, "The repository's FTS4-capable SQLite CLI is required")
         schema = json.loads(SCHEMA.read_text(encoding="utf-8"))["database"]
-        statements = create_tables(7) + sync_triggers() + schema["setupQueries"] + list(statements)
+        statements = create_tables(schema["version"]) + sync_triggers() + schema["setupQueries"] + list(statements)
         process = subprocess.run(
             [cli, "-batch", "-bail", "-json", ":memory:"],
             input=";\n".join(sql.strip().rstrip(";") for sql in statements) + ";\n",
@@ -41,7 +41,8 @@ class LibraryCatalogReaderSqlTest(unittest.TestCase):
         self.assertTrue(100 < len(records) < 128)
         self.assertTrue(all(list(row.values())[0] == 1 for row in records))
         self.assertTrue(any("room_fts_content_sync_OcrResultFts" in str(row) for row in records))
-        self.assertEqual([{"identity_hash": "dffd390228ea6f76e20e514f48e923bb"}], self.sqlite(identity))
+        expected = json.loads(SCHEMA.read_text(encoding="utf-8"))["database"]["identityHash"]
+        self.assertEqual([{"identity_hash": expected}], self.sqlite(identity))
 
     def test_oversized_schema_sql_is_refused_without_materializing_the_sql(self):
         query, _ = self.actual_queries()

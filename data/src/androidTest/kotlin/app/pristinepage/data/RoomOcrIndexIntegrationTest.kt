@@ -27,6 +27,7 @@ import app.pristinepage.data.db.OcrWorkMigration
 import app.pristinepage.data.db.SourceCaptureDayMigration
 import app.pristinepage.data.db.OcrTextPublicationMigration
 import app.pristinepage.data.db.OcrTextPublicationRetryMigration
+import app.pristinepage.data.db.LibraryScanNameMigration
 import app.pristinepage.data.db.PristineDatabase
 import app.pristinepage.data.files.SourceInspector
 import app.pristinepage.data.model.DocumentId
@@ -90,13 +91,13 @@ class RoomOcrIndexIntegrationTest {
     private val context = instrumentation.targetContext
     @get:Rule val migration = MigrationTestHelper(instrumentation, PristineDatabase::class.java)
 
-    @Test fun populatedV1ToV6MigrateWithoutInventingWorkDatesOrConsentAndRetainTheIndexOnReopen() {
-        for (version in 1..6) {
+    @Test fun populatedV1ToV7MigrateWithoutInventingWorkDatesConsentOrNamesAndRetainTheIndexOnReopen() {
+        for (version in 1..7) {
             val name = "ocr-migration-${UUID.randomUUID()}"
             assertFalse(context.getDatabasePath(name).exists())
             fun open() = Room.databaseBuilder(context, PristineDatabase::class.java, name)
                 .addMigrations(AtelierDraftMigration, OcrIndexMigration, OcrWorkMigration, SourceCaptureDayMigration,
-                    OcrTextPublicationMigration, OcrTextPublicationRetryMigration).build()
+                    OcrTextPublicationMigration, OcrTextPublicationRetryMigration, LibraryScanNameMigration).build()
             migration.createDatabase(name, version).use { sql ->
                 seed(sql)
                 if (version >= 3) insertText(sql)
@@ -104,7 +105,7 @@ class RoomOcrIndexIntegrationTest {
             val database = open()
             try {
                 val sql = database.openHelper.writableDatabase
-                assertEquals(7, sql.version)
+                assertEquals(8, sql.version)
                 assertEquals("010203", sql.scalar("SELECT hex(canonicalRecipe) FROM RecipeRevision"))
                 assertEquals("Existing album", sql.scalar("SELECT title FROM Document"))
                 assertEquals("0", sql.scalar("SELECT COUNT(*) FROM OcrPageWork"))
@@ -112,6 +113,7 @@ class RoomOcrIndexIntegrationTest {
                 assertEquals(if (version >= 3) "1" else "0", sql.scalar("SELECT COUNT(*) FROM OcrResult"))
                 assertEquals("0", sql.scalar("SELECT COUNT(*) FROM SourceCaptureDay"))
                 assertEquals("0", sql.scalar("SELECT COUNT(*) FROM OcrTextPublication"))
+                assertEquals("0", sql.scalar("SELECT COUNT(*) FROM LibraryScanName"))
                 assertEquals("1", sql.scalar("SELECT COUNT(*) FROM SourceBlob"))
                 if (version < 3) insertText(sql)
                 assertEquals("1", sql.scalar("SELECT COUNT(*) FROM OcrResultFts WHERE OcrResultFts MATCH 'ecole'"))
