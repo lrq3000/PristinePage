@@ -74,7 +74,7 @@ object AtelierEdgeDetector {
             if (predicted != null && !AtelierRegionOutline.agrees(predicted, next, 4.0)) return null
             if (predicted == null) predicted = next
         }
-        return predicted?.let { normalize(it, width, height) }
+        return (predicted ?: AtelierBoundaryVotes.detect(width, height, packed, checkpoint))?.let { normalize(it, width, height) }
     }
 
     private fun regions(workspace: AtelierRegionOutline.Workspace, width: Int, height: Int, pixels: IntArray,

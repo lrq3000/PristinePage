@@ -7,12 +7,15 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.test.*
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.test.ext.junit.runners.AndroidJUnit4
-import app.pristinepage.core.pipeline.Recipe
+import androidx.test.platform.app.InstrumentationRegistry
+import app.pristinepage.core.geometry.GeometrySizing
+import app.pristinepage.core.pipeline.*
 import app.pristinepage.core.recipe.*
 import app.pristinepage.data.model.*
 import app.pristinepage.editor.*
 import app.pristinepage.image.preview.RenderedPreviewBitmapLoader
 import java.io.ByteArrayOutputStream
+import kotlin.math.hypot
 import kotlinx.coroutines.*
 import org.junit.Assert.*
 import org.junit.Rule
@@ -23,6 +26,74 @@ import org.junit.runner.RunWith
 @RunWith(AndroidJUnit4::class)
 class EditorComparisonScreenTest {
     @get:Rule val compose = createAndroidComposeRule<MainActivity>()
+
+    @Test fun fullBleedMagazineImportsSeedsRectifiesAndSavesWithoutAlteringTheOriginal() = runBlocking<Unit> {
+        val png = InstrumentationRegistry.getInstrumentation().context.assets.open("geometry/blue-hour-magazine.png").use { it.readBytes() }
+        // This journey asserts output and durability, not a low-headroom refusal during concurrent preview work.
+        DocumentCatalogIntegrationTest.Fixture(png, memoryClassMiB = 128).use { f ->
+            val graph = f.open()
+            val doc = graph.store.documents.createDocument("Blue Hour regression")
+            val batch = graph.store.imports.beginImport(doc, 1, null)
+            val page = graph.photoImports.importProviderReferences(listOf(f.good), batch.parentId).single() as IngestResult.Committed
+            f.forbid = true
+            val job = SupervisorJob()
+            val scope = CoroutineScope(job + Dispatchers.Main.immediate)
+            val session = withContext(Dispatchers.Main) {
+                EditorSession(doc.value, page.pageId.value, ApplicationEditorActions { graph }, graph.renderer, scope,
+                    RenderedPreviewBitmapLoader(graph.budget), graph.budget)
+            }
+            try {
+                compose.runOnUiThread {
+                    compose.activity.setContent {
+                        MaterialTheme { PageEditorScreen(loadOriginal = { graph.originalPreview(it) }, guidedStep = 0).Content(session) {} }
+                    }
+                }
+                compose.waitUntil(15_000) { session.preview.value.display?.request?.recipe?.geometry is GeometryRecipe.Perspective }
+                val quad = (checkNotNull(session.state.value.draft).geometry as GeometryRecipe.Perspective).quad
+                for ((p, expected) in quad.points().zip(listOf(400 to 80, 1478 to 60, 1500 to 853, 395 to 876))) {
+                    assertTrue("Unexpected outline point $p for $expected", hypot(p.x * 1999 - expected.first, p.y * 909 - expected.second) <= 22)
+                }
+                assertEquals(1L, graph.store.editablePages.load(doc, page.pageId).recipeRevision)
+                compose.runOnUiThread { session.rotateCounterclockwise() }
+                val upright = checkNotNull(session.state.value.draft)
+                waitFor(session, upright, EditorView.RESULT)
+                compose.runOnUiThread {
+                    val bitmap = checkNotNull(session.preview.value.display).bitmap
+                    assertTrue("Portrait aspect after rectification", bitmap.width.toDouble() / bitmap.height in .68..0.76)
+                    val blue = bitmap.getPixel(bitmap.width / 8, bitmap.height / 4)
+                    assertTrue("Retain the colored paper artwork", android.graphics.Color.blue(blue) > android.graphics.Color.red(blue) + 24)
+                }
+                compose.runOnUiThread { session.apply() }
+                compose.waitUntil(15_000) { session.state.value.page?.recipeRevision == 2L && !session.state.value.saving }
+                assertEquals(upright, graph.store.editablePages.load(doc, page.pageId).recipe)
+                assertArrayEquals(png, graph.store.committedSources.load(page.sourceId).file.readBytes())
+                assertEquals(1, f.providerOpens)
+            } finally {
+                compose.runOnUiThread { compose.activity.setContent {}; session.close() }
+                job.cancelAndJoin()
+                compose.waitUntil(10_000) { graph.budget.usedBytes == 0L }
+            }
+            val reopened = f.reopen()
+            val saved = reopened.store.editablePages.load(doc, page.pageId)
+            assertEquals(2L, saved.recipeRevision)
+            assertEquals(3, saved.recipe.geometry.outputQuarterTurns)
+            assertTrue(saved.recipe.geometry is GeometryRecipe.Perspective)
+            assertArrayEquals(png, reopened.store.committedSources.load(page.sourceId).file.readBytes())
+            val fullSize = GeometrySizing.target(saved.recipe.geometry)
+            val request = RenderRequest(page.sourceId.value, saved.recipe.geometry.source.sourcePixelHash, page.pageId.value,
+                saved.recipeRevision, saved.recipe, OutputSpec(fullSize, RenderPurpose.EXPORT), 1, null, FallbackPolicy.FAIL)
+            reopened.renderer.render(request).use { result ->
+                assertEquals(RenderStatus.OK, result.status)
+                val image = checkNotNull(result.image)
+                assertEquals(fullSize.width, image.width)
+                assertEquals(fullSize.height, image.height)
+                val x = image.width / 8
+                val y = image.height / 4
+                assertTrue(image.getUnsigned(x, y, 2) > image.getUnsigned(x, y, 0) + 24)
+            }
+            assertEquals(0L, reopened.budget.usedBytes)
+        }
+    }
 
     @Test fun guidedPerspectiveSeedsAnEditableOutlineAfterTheOriginalIsReady() = runBlocking<Unit> {
         val bitmap = Bitmap.createBitmap(200, 160, Bitmap.Config.ARGB_8888)
