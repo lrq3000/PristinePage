@@ -171,6 +171,8 @@
     <string name="editor_view_result">Result</string>
     <string name="editor_view_input">Input after shape</string>
     <string name="editor_view_original">Original photograph</string>
+    <string name="editor_zoom_in">Zoom in</string>
+    <string name="editor_zoom_fit">Fit</string>
     <string name="settings_ocr_find_language">Find a language</string>
     <string name="settings_ocr_no_languages">No matching languages</string>
     <string name="settings_ocr_language_limit">Up to %1$d languages can be selected at once.</string>

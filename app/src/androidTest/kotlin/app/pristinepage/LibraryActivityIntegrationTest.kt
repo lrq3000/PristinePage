@@ -4,6 +4,7 @@ import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.assertIsEnabled
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.compose.ui.test.onNodeWithTag
+import androidx.compose.ui.test.assertTextEquals
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performTextReplacement
 import androidx.lifecycle.ViewModel
@@ -41,9 +42,12 @@ class LibraryActivityIntegrationTest {
         assertEquals(document.document.documentId, session(afterModel).identity().selected)
         compose.onNodeWithTag("document-overview").assertIsDisplayed()
         compose.onNodeWithTag("atelier-rename").performClick()
-        compose.onNodeWithTag("atelier-title-field").performTextReplacement("Atelier integration album")
+        val longTitle = "PristinePage integration album " + "long-title-".repeat(10) + "LAST"
+        compose.onNodeWithTag("atelier-title-field").performTextReplacement(longTitle)
         compose.onNodeWithTag("atelier-save-title").performClick()
-        compose.waitUntil(10_000) { session(afterModel).state.value.document?.document?.title == "Atelier integration album" }
+        compose.waitUntil(10_000) { session(afterModel).state.value.document?.document?.title == longTitle }
+        compose.onNodeWithTag("atelier-album-title", useUnmergedTree = true).assertIsDisplayed().assertTextEquals(longTitle)
+        compose.onNodeWithTag("atelier-rename").assertIsEnabled()
         compose.onNodeWithTag("atelier-home-back").performClick()
         compose.onNodeWithTag("atelier-album-list").assertIsDisplayed()
     }

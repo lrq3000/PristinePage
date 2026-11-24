@@ -35,8 +35,11 @@ import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.heading
 import androidx.compose.ui.semantics.isTraversalGroup
+import androidx.compose.ui.semantics.onClick
 import androidx.compose.ui.semantics.selected
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.graphics.RectangleShape
+import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.unit.dp
@@ -116,13 +119,17 @@ import kotlinx.coroutines.launch
                     Text(stringResource(if (home) R.string.atelier_home else R.string.atelier_album), Modifier.semantics { heading() },
                         style = if (home) MaterialTheme.typography.displaySmall else MaterialTheme.typography.headlineSmall)
                 } else {
+                    val renameLabel = stringResource(R.string.atelier_rename)
+                    val rename = { session.accept(LibraryEvent.ClearRenameResult); sheet = "rename" }
                     TextButton(
-                        modifier = Modifier.heightIn(min = AtelierStyle.touchTarget).testTag("atelier-rename"),
-                        enabled = canAcquire, onClick = { session.accept(LibraryEvent.ClearRenameResult); sheet = "rename" },
+                        onClick = rename, enabled = canAcquire, shape = RectangleShape,
+                        modifier = Modifier.fillMaxWidth().heightIn(min = AtelierStyle.touchTarget).testTag("atelier-rename")
+                            .semantics { onClick(label = renameLabel, action = null) },
                         contentPadding = PaddingValues(0.dp),
                     ) {
-                        Text("${album.title}  ✎", Modifier.semantics { heading() },
-                            style = MaterialTheme.typography.titleLarge, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                        Text(album.title, Modifier.weight(1f).testTag("atelier-album-title").semantics { heading() },
+                            style = MaterialTheme.typography.titleLarge, maxLines = 5, overflow = TextOverflow.Ellipsis)
+                        Text("✎", Modifier.padding(start = 4.dp).clearAndSetSemantics { })
                     }
                     Text(stringResource(R.string.saved_page_count, album.pageCount), style = MaterialTheme.typography.bodySmall)
                 }
@@ -359,7 +366,7 @@ private fun AlbumPageThumbnail(
     }
     val displayed = remember(layout, pages) { layout.pages(pages) }
     Surface(onClick = onOpen, enabled = enabled, modifier = Modifier.fillMaxWidth().heightIn(min = 94.dp)
-        .testTag("atelier-album-${album.documentId.value}"), shape = RoundedCornerShape(AtelierStyle.surfaceRadius),
+        .testTag("atelier-album-${album.documentId.value}"), shape = RectangleShape,
         border = androidx.compose.foundation.BorderStroke(1.dp, MaterialTheme.colorScheme.outline)) {
         if (layout == HomeThumbnailLayout.ROW) {
             Column(Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -429,7 +436,7 @@ private fun AlbumPageThumbnail(
 
 @Composable private fun AlbumCardDetails(album: DocumentSummary, creation: Boolean, modifier: Modifier = Modifier) {
     Column(modifier, verticalArrangement = Arrangement.spacedBy(3.dp)) {
-        Text(album.title, style = MaterialTheme.typography.titleMedium, maxLines = 2, overflow = TextOverflow.Ellipsis)
+        Text(album.title, style = MaterialTheme.typography.titleMedium)
         Text(stringResource(R.string.saved_page_count, album.pageCount), style = MaterialTheme.typography.bodySmall)
         val timestamp = if (creation) album.createdAt else album.updatedAt
         if (timestamp != null) {
