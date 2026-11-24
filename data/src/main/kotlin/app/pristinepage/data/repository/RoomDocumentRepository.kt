@@ -7,31 +7,22 @@ import app.pristinepage.core.recipe.GeometryRecipe
 import app.pristinepage.core.recipe.RecipeCodec
 import app.pristinepage.data.db.*
 import app.pristinepage.data.model.*
+import app.pristinepage.data.repository.LibraryUndoCodec.MembershipPointer
+import app.pristinepage.data.repository.LibraryUndoCodec.MembershipState
+import app.pristinepage.data.repository.LibraryUndoCodec.RecipePointer as UndoPointer
+import app.pristinepage.data.repository.LibraryUndoCodec.RecipeState
 import java.util.UUID
-import java.nio.ByteBuffer
-import java.nio.charset.CodingErrorAction
 import kotlin.coroutines.CoroutineContext
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.ensureActive
-import kotlinx.serialization.Serializable
-import kotlinx.serialization.json.Json
-import kotlinx.serialization.json.JsonArray
-import kotlinx.serialization.json.JsonElement
-import kotlinx.serialization.json.JsonObject
-
-@Serializable private data class UndoPointer(val pageId: String, val sourceId: String, val recipeRevision: Long)
-@Serializable private data class RecipeUndoState(val version: Int = 1, val pages: List<UndoPointer>)
-@Serializable private data class MembershipPointer(val pageId: String, val sourceId: String, val state: String, val ordinal: Int?, val removedAt: Long?)
-@Serializable private data class MembershipUndoState(val documentId: String, val pages: List<MembershipPointer>, val version: Int = 1)
 
 /** File/decode/render work is deliberately absent. Canonical/capability preflight finishes before a short metadata transaction, which rechecks every mutable pointer and publishes all revisions together. RoomMetadataAccess supplies actual Android rollback; host tests exercise this same business code through its database port. */
 class RoomDocumentRepository @JvmOverloads constructor(private val metadata: MetadataAccess, private val admission: RecipeAdmission, private val clock: () -> Long = System::currentTimeMillis, private val dispatcher: CoroutineDispatcher = Dispatchers.IO, private val recovery: RecoveryCoordinator? = null, private val snapshots: ExportSnapshots? = null) : DocumentRepository {
     private val q: CatalogQueries get() = metadata.queries
     private val scanNames get() = (metadata as? RoomMetadataAccess)?.libraryScanNames
-    private val json = Json { encodeDefaults = true; ignoreUnknownKeys = false }
     private class Conflict(val actual: Long) : RuntimeException()
     private data class MaskState(val pageId: String, val revision: Long, val links: List<RecipeMaskRow>, val identities: List<MaskRow>)
     private data class Prepared(val page: PageRow, val current: RecipeRevisionRow, val recipe: Recipe, val bytes: ByteArray, val hash: String, val masks: MaskState, val restored: RecipeRevisionRow?, val sourceBlob: String)
@@ -592,34 +583,10 @@ class RoomDocumentRepository @JvmOverloads constructor(private val metadata: Met
     }
 
     private fun membershipPointer(page: PageRow) = MembershipPointer(page.pageId, page.sourceId, page.state, page.ordinal, page.removedAt)
-    private fun encodeMembership(document: String, pages: List<MembershipPointer>): ByteArray {
-        fun canonical(value: JsonElement): JsonElement = when (value) {
-            is JsonObject -> JsonObject(value.entries.sortedBy { it.key }.associate { it.key to canonical(it.value) })
-            is JsonArray -> JsonArray(value.map(::canonical))
-            else -> value
-        }
-        return canonical(json.encodeToJsonElement(MembershipUndoState.serializer(), MembershipUndoState(document, pages.sortedBy { it.pageId }))).toString().toByteArray(Charsets.UTF_8)
-    }
+    private fun encodeMembership(document: String, pages: List<MembershipPointer>): ByteArray = LibraryUndoCodec.encodeMembership(document, pages)
 
-    private fun decodeMembership(bytes: ByteArray): MembershipUndoState {
-        try {
-            require(bytes.size in 1..524288)
-            val text = Charsets.UTF_8.newDecoder().onMalformedInput(CodingErrorAction.REPORT).onUnmappableCharacter(CodingErrorAction.REPORT).decode(ByteBuffer.wrap(bytes)).toString()
-            // Every string in this format is an opaque UUID or fixed state, so brackets inside quotes are forbidden by typed validation anyway. Bound nesting before asking the serializer to recurse on corrupted metadata.
-            var depth = 0
-            for (character in text) when (character) { '{', '[' -> { depth++; require(depth <= 8) }; '}', ']' -> { depth--; require(depth >= 0) } }
-            require(depth == 0)
-            val state = json.decodeFromString(MembershipUndoState.serializer(), text)
-            DocumentId(state.documentId); require(state.version == 1 && state.pages.size in 1..100 && state.pages.map { it.pageId }.toSet().size == state.pages.size)
-            for (page in state.pages) {
-                PageId(page.pageId); SourceId(page.sourceId)
-                require((page.state == "ACTIVE" && page.ordinal in 0..99 && page.removedAt == null) || (page.state == "REMOVED" && page.ordinal == null && page.removedAt != null))
-            }
-            val ordinals = state.pages.filter { it.state == "ACTIVE" }.map { checkNotNull(it.ordinal) }.sorted()
-            require(ordinals == ordinals.indices.toList() && bytes.contentEquals(encodeMembership(state.documentId, state.pages)))
-            return state
-        } catch (_: Exception) { reject(OperationErrorCode.INTEGRITY_FAILED, "invalid_undo_metadata") }
-    }
+    private fun decodeMembership(bytes: ByteArray): MembershipState = try { LibraryUndoCodec.decodeMembership(bytes) }
+    catch (_: IllegalArgumentException) { reject(OperationErrorCode.INTEGRITY_FAILED, "invalid_undo_metadata") }
 
     private fun prepare(pageId: String, recipe: Recipe, restoreRevision: Long? = null, draft: DraftEdit? = null): Prepared {
         // Raw scalar checks and their typed reads share a short snapshot. The recipe BLOB is bounded BEFORE Room's getBlob/getLong.toInt and detached before codec/capability work outside the lock.
@@ -795,15 +762,9 @@ class RoomDocumentRepository @JvmOverloads constructor(private val metadata: Met
     private fun updateDocument(row: DocumentRow) { if (q.updateDocument(row) != 1) reject(OperationErrorCode.INTEGRITY_FAILED, "document_unavailable", row.documentId) }
     private fun pointer(page: PageRow) = UndoPointer(page.pageId, page.sourceId, page.currentRecipeRevision)
     private fun recipeOwner(page: String, revision: Long): String = "recipe-v1/$page/$revision"
-    private fun encodeUndo(pages: List<UndoPointer>): ByteArray = json.encodeToString(RecipeUndoState.serializer(), RecipeUndoState(pages = pages)).toByteArray(Charsets.UTF_8)
-    private fun decodeUndo(bytes: ByteArray): RecipeUndoState {
-        if (bytes.size !in 1..524288) reject(OperationErrorCode.INTEGRITY_FAILED, "invalid_undo_metadata")
-        val state = try { json.decodeFromString(RecipeUndoState.serializer(), bytes.toString(Charsets.UTF_8)) } catch (_: Exception) { reject(OperationErrorCode.INTEGRITY_FAILED, "invalid_undo_metadata") }
-        if (state.version != 1 || state.pages.isEmpty() || state.pages.size > 100 || state.pages.map { it.pageId }.toSet().size != state.pages.size) reject(OperationErrorCode.INTEGRITY_FAILED, "invalid_undo_metadata")
-        try { for (page in state.pages) { PageId(page.pageId); SourceId(page.sourceId); require(page.recipeRevision >= 1) } }
-        catch (_: IllegalArgumentException) { reject(OperationErrorCode.INTEGRITY_FAILED, "invalid_undo_metadata") }
-        return state
-    }
+    private fun encodeUndo(pages: List<UndoPointer>): ByteArray = LibraryUndoCodec.encodeRecipe(pages)
+    private fun decodeUndo(bytes: ByteArray): RecipeState = try { LibraryUndoCodec.decodeRecipe(bytes) }
+    catch (_: IllegalArgumentException) { reject(OperationErrorCode.INTEGRITY_FAILED, "invalid_undo_metadata") }
     private fun next(value: Long): Long {
         if (value < 1) reject(OperationErrorCode.INTEGRITY_FAILED, "invalid_stored_revision")
         return try { Math.addExact(value, 1L) } catch (_: ArithmeticException) { reject(OperationErrorCode.RESOURCE_LIMIT, "revision_limit") }
