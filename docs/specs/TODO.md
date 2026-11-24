@@ -60,6 +60,8 @@ The first merge-preflight Android candidate passed 19/20 named tests: all 18 pre
 
 The rollback-journal fixture passed that boundary but surfaced a second test-only assumption: precomposed Latin text was already canonical, so the real writer stored it solely in `indexedText`. The subsequent corruption replaced the only stored copy by design. Keep that 19/20 transcript as well. Use decomposed `cafe\u0301` to force the real writer to store both exact verbatim text and the distinct NFC search projection. Assert both actual columns before mutation and require the precise staged-row refusal after changing only the indexed copy. No production code or guard changes in this fixture correction.
 
+The [corrected merge dry-run Android follow-up](../../validation/storage/library-restore-runtime.md#merge-dry-run-follow-up) passed 20/20 actual API 28 cases, including both merged-catalog cases and the exact closed-stage OCR refusal. The one dedicated guest is stopped and released. With the read-only path witnessed, the next core step is the verified write and its exact durable intent/replay; do not treat a preview, staged file or visible marker as success authority.
+
 ### Current coordination: transition to `main`
 
 - [x] Operator approved the local fast-forward and `main`-based PR/handoff cadence; see [operational authority](OPERATIONAL_PLAN.md) and [queue rules](PARALLEL_EXECUTION_PLAN.md#coordination). Earlier branch/base references below describe their historical claims.

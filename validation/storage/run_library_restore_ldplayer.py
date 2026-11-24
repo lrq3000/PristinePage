@@ -52,7 +52,7 @@ OWN_GUEST = "agent-pristinepage-library-" + sha256(str(ROOT).encode()).hexdigest
 APPROVED = ("304f257cd9ba689efd6392f1145191a42da97ae9", "dd89fca5caf988c7d8c6cb92fd0689f4cebf365bfc7fd75e1f3db5cb6e436e9a")
 SUCCESSOR = ("a1fe0d136644edf29fd737a360a07ab42d4b79c1", "8d1d40d673d2bb19ca6ec3a96d01e4e7b85a5498be09d8add754ce39de8a6dd6")
 FIXTURE_CORRECTION = ("93fb1e0f546e02680ac549767b0a0b3f7097ea07", "06bee1ed0ffb2b3d0f18187f36d4aaeff232f298deb6eed620500682ff06b841")
-VERBATIM_FIXTURE = None
+VERBATIM_FIXTURE = ("43f6ebb38c17114ec13aee997f557ea44db9c57b", "6db70aa8a51c7986b063252d21442a58c35193c4a442693f2e88a0ef3ccdd82f")
 MERGE_CASES = (
     "preflightStagesBothPortableCatalogsWithoutWritingEitherLibrary",
     "temporaryMergedCatalogReopensWithBothHistoriesAndTheIncomingSavedOcr",
