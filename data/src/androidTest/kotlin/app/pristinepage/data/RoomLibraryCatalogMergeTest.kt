@@ -1,5 +1,6 @@
 package app.pristinepage.data
 
+import android.database.sqlite.SQLiteDatabase
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import app.pristinepage.core.ocr.OcrConfiguration
@@ -14,8 +15,11 @@ import app.pristinepage.data.library.LibraryPortableCatalogProjection
 import app.pristinepage.data.library.LibrarySavedOcr
 import app.pristinepage.data.library.RoomLibraryCatalogReader
 import app.pristinepage.data.library.RoomLibraryCatalogStage
+import app.pristinepage.data.library.RoomLibraryLocalExport
+import app.pristinepage.data.library.RoomLibraryLocalMergePreflight
 import app.pristinepage.data.library.RoomLibrarySavedCatalog
 import app.pristinepage.data.library.RoomLibrarySavedOcr
+import app.pristinepage.data.library.verifyStagedProjection
 import app.pristinepage.data.model.DocumentMutationResult
 import app.pristinepage.data.model.IngestResult
 import app.pristinepage.data.model.JobId
@@ -25,6 +29,7 @@ import app.pristinepage.data.repository.RoomDocumentRepository
 import app.pristinepage.data.repository.RoomEditablePages
 import app.pristinepage.data.repository.RoomMetadataAccess
 import java.io.File
+import java.io.IOException
 import java.util.UUID
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.*
@@ -33,6 +38,39 @@ import org.junit.runner.RunWith
 
 @RunWith(AndroidJUnit4::class)
 class RoomLibraryCatalogMergeTest {
+    @Test fun preflightStagesBothPortableCatalogsWithoutWritingEitherLibrary() = runBlocking<Unit> {
+        RoomSourceIngestIntegrationTest.Fixture().use { local ->
+            RoomSourceIngestIntegrationTest.Fixture().use { incoming ->
+                local.sourceDisplayName = "Cover.png"
+                local.store.ingest(local.reference, local.reserve().single()) as IngestResult.Committed
+                val (first, second) = incoming.reserve(2)
+                incoming.sourceDisplayName = "cover.png"
+                incoming.store.ingest(incoming.reference, first) as IngestResult.Committed
+                incoming.sourceDisplayName = "Second.png"
+                incoming.store.ingest(incoming.reference, second) as IngestResult.Committed
+                val context = InstrumentationRegistry.getInstrumentation().context
+                val root = File(context.filesDir.canonicalFile, "library-preflight-${UUID.randomUUID()}").apply { check(mkdir()) }
+                val scratch = File(root, "scratch").apply { check(mkdir()) }
+                val destination = File(root, "destination")
+                val backup = File(root, "backup")
+                val destinationGeneration = RoomLibraryLocalExport(context, local.database, local.root.canonicalFile, scratch).writeNewFolder(destination)
+                val incomingGeneration = RoomLibraryLocalExport(context, incoming.database, incoming.root.canonicalFile, scratch).writeNewFolder(backup)
+                val before = listOf(destination, backup).map { library ->
+                    library.walkTopDown().filter(File::isFile).associate { it.relativeTo(library).path to it.readBytes().toList() }
+                }
+                val preflight = RoomLibraryLocalMergePreflight(context, scratch).verify(UUID.randomUUID().toString(), destination, backup)
+                assertEquals(destinationGeneration, preflight.destination)
+                assertEquals(incomingGeneration, preflight.incoming)
+                assertEquals(0L, preflight.payloads.missingBytes) // Both logical slots use the one existing byte object.
+                assertTrue(preflight.catalog.byteCount > 0)
+                assertEquals(before, listOf(destination, backup).map { library ->
+                    library.walkTopDown().filter(File::isFile).associate { it.relativeTo(library).path to it.readBytes().toList() }
+                })
+                assertEquals(emptyList<String>(), scratch.list()?.toList())
+            }
+        }
+    }
+
     @Test fun temporaryMergedCatalogReopensWithBothHistoriesAndTheIncomingSavedOcr() = runBlocking<Unit> {
         RoomSourceIngestIntegrationTest.Fixture().use { local ->
             RoomSourceIngestIntegrationTest.Fixture().use { incoming ->
@@ -80,6 +118,15 @@ class RoomLibraryCatalogMergeTest {
                 assertEquals(listOf("catalog.pending.sqlite"), root.list()?.toList())
                 assertEquals(1L, targetCatalog.capture().albums.single().pages.single().row.currentRecipeRevision)
                 assertEquals(2L, sourceCatalog.capture().albums.single().pages.first().row.currentRecipeRevision)
+
+                // Keep exact recognized text and its job but make the physical FTS index agree with deliberately wrong indexed text.
+                SQLiteDatabase.openDatabase(stage.path, null, SQLiteDatabase.OPEN_READWRITE or SQLiteDatabase.NO_LOCALIZED_COLLATORS).use { sql ->
+                    sql.execSQL("UPDATE OcrResult SET indexedText='decoy searchable token'")
+                    sql.rawQuery("SELECT rowid FROM OcrResultFts WHERE OcrResultFts MATCH 'decoy'", null).use { assertTrue(it.moveToFirst()) }
+                }
+                assertEquals(text, reader.read(stage) { LibraryPortableCatalogProjection(it) {}.snapshot() }
+                    .albums.single().pages.first().savedOcr?.text?.value)
+                assertTrue(runCatching { reader.verifyStagedProjection(stage, candidate.catalog) {} }.exceptionOrNull() is IOException)
             }
         }
     }

@@ -39,7 +39,7 @@ internal class RoomLibraryLocalRestore(context: Context, private val scratchDire
         ) throw IOException("Restore requires a previously absent independent private location")
         val source = LocalLibraryDirectory(backupRoot.toFile())
         val selected = RoomLibraryLocalBackup(application, scratchDirectory).project(source, scratch, checkpoint) { catalog ->
-            val snapshot = LibraryPortableCatalogProjection(catalog, checkpoint).snapshot()
+            val snapshot = LibraryPortableCatalogProjection(catalog, checkpoint = checkpoint).snapshot()
             LibraryBackupRead.Projection(snapshot, identities(snapshot).values)
         }
         val byBlob = identities(selected.value)
@@ -54,7 +54,8 @@ internal class RoomLibraryLocalRestore(context: Context, private val scratchDire
         force(parent)
         val stage = target.resolve("catalog.pending.sqlite")
         RoomLibraryCatalogStage(application).write(selected.value, stage.toFile())
-        verifyCatalog(stage, selected.value, checkpoint)
+        reader.verifyStagedProjection(stage.toFile(), selected.value, checkpoint)
+        val verifiedCatalog = fingerprintClosedLibraryCatalog(stage.toFile(), checkpoint)
 
         val restored = LocalLibraryDirectory(target.toFile())
         val store = object : LibraryObjectTransfer.Store {
@@ -83,8 +84,9 @@ internal class RoomLibraryLocalRestore(context: Context, private val scratchDire
         val catalog = target.resolve("catalog.sqlite")
         Files.createLink(catalog, stage)
         force(target)
-        verifyCatalog(catalog, selected.value, checkpoint)
-        val completed = Completed(selected.generation, fingerprintClosedLibraryCatalog(catalog.toFile(), checkpoint))
+        reader.verifyStagedProjection(catalog.toFile(), selected.value, checkpoint)
+        if (fingerprintClosedLibraryCatalog(catalog.toFile(), checkpoint) != verifiedCatalog) throw IOException("Restored catalog bytes changed")
+        val completed = Completed(selected.generation, verifiedCatalog)
         checkpoint()
         restored.publishRestoreReceipt(completed.encodeReceipt())
         try { Files.deleteIfExists(stage) } catch (_: IOException) { /* Retain only the attempt-owned duplicate on cleanup refusal. */ }
@@ -93,30 +95,6 @@ internal class RoomLibraryLocalRestore(context: Context, private val scratchDire
 
     private fun identities(snapshot: RoomLibrarySavedCatalog.Snapshot) =
         snapshot.originals.associate { it.sourceBlobId to LibraryObjectTransfer.ObjectId(it.byteSha256, it.byteCount) }
-
-    private fun verifyCatalog(file: Path, expected: RoomLibrarySavedCatalog.Snapshot, checkpoint: () -> Unit) {
-        reader.read(file.toFile()) { catalog ->
-            val actual = LibraryPortableCatalogProjection(catalog, checkpoint).snapshot()
-            if (actual.originals.toSet() != expected.originals.toSet() || actual.sources.toSet() != expected.sources.toSet() ||
-                actual.days.toSet() != expected.days.toSet() || actual.albums.map { it.row } != expected.albums.map { it.row }
-            ) throw IOException("Restored library metadata changed")
-            for ((album, other) in actual.albums.zip(expected.albums)) {
-                if (album.pages.size != other.pages.size) throw IOException("Restored library page count changed")
-                for ((page, prior) in album.pages.zip(other.pages)) {
-                    checkpoint()
-                    if (page.row != prior.row || page.filename != prior.filename || page.revisionCount != prior.revisionCount ||
-                        page.revisions.zip(prior.revisions).any { (a, b) ->
-                            a.copy(canonicalRecipe = b.canonicalRecipe) != b || !a.canonicalRecipe.contentEquals(b.canonicalRecipe)
-                        } || !sameOcr(page.savedOcr, prior.savedOcr)
-                    ) throw IOException("Restored library page history changed")
-                }
-            }
-        }
-    }
-
-    private fun sameOcr(a: LibrarySavedOcr?, b: LibrarySavedOcr?) = if (a == null || b == null) a === b else
-        a.producerId == b.producerId && a.intent == b.intent && a.text.value == b.text.value &&
-            a.attempt == b.attempt && a.createdAt == b.createdAt && a.updatedAt == b.updatedAt
 
     private fun forceAncestry(parent: Path, privateFiles: Path) {
         var path = parent

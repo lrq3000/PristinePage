@@ -8,6 +8,7 @@ import app.pristinepage.core.pipeline.PixelSize
 import app.pristinepage.core.recipe.RecipeCodec
 import app.pristinepage.core.recipe.SourceBinding
 import app.pristinepage.data.db.DocumentRow
+import app.pristinepage.data.db.OcrResultRow
 import app.pristinepage.data.db.PageRow
 import app.pristinepage.data.db.RecipeRevisionRow
 import app.pristinepage.data.db.SourceBlobRow
@@ -24,7 +25,9 @@ import java.nio.charset.CharacterCodingException
 import java.nio.charset.CodingErrorAction
 
 /** Projects a closed and independently schema-checked catalog; its raw rows never become writable Room pages. */
-internal class LibraryPortableCatalogProjection(private val sql: SQLiteDatabase, private val checkpoint: () -> Unit) {
+internal class LibraryPortableCatalogProjection(
+    private val sql: SQLiteDatabase, private val verifyDerivedOcr: Boolean = false, private val checkpoint: () -> Unit,
+) {
     private var retainedBytes = 0L
     private data class NamedPage(val row: PageRow, val filename: String)
 
@@ -138,7 +141,8 @@ internal class LibraryPortableCatalogProjection(private val sql: SQLiteDatabase,
         "OcrPageWork w JOIN Job j ON j.jobId=w.jobId JOIN OcrResult r ON r.pageId=w.pageId",
         """w.pageId,w.generation,w.inputSha256,j.jobId,j.idempotenceKey,j.canonicalInputSha256,j.input,
             j.attempt,j.createdAt,j.updatedAt,r.recipeRevision,r.sourcePixelSha256,r.engineId,r.engineVersion,r.layout,
-            CAST(coalesce(r.verbatimText,r.indexedText) AS BLOB)""",
+             CAST(coalesce(r.verbatimText,r.indexedText) AS BLOB),
+             ${if (verifyDerivedOcr) "CAST(r.indexedText AS BLOB),r.verbatimText IS NOT NULL" else "NULL,NULL"}""",
         "${text("w.pageId", 36)} AND ${positive("w.generation")} AND ${text("w.inputSha256", 64)} AND " +
             "w.projectionVersion IS ${RoomOcrResults.PROJECTION_VERSION} AND ${text("j.jobId", 36)} AND ${text("j.idempotenceKey", 128)} AND " +
             "${text("j.canonicalInputSha256", 64)} AND typeof(j.input)='blob' AND length(j.input) BETWEEN 1 AND 3532 AND " +
@@ -147,21 +151,26 @@ internal class LibraryPortableCatalogProjection(private val sql: SQLiteDatabase,
             "j.checkpoint IS NULL AND typeof(j.createdAt)='integer' AND typeof(j.updatedAt)='integer' AND " +
             "${positive("r.recipeRevision")} AND ${text("r.sourcePixelSha256", 64)} AND ${text("r.engineId", 128)} AND " +
             "${integer("r.engineVersion", 1, Int.MAX_VALUE)} AND ${text("r.layout", 32)} AND " +
-            "typeof(r.indexedText)='text' AND (r.verbatimText IS NULL OR typeof(r.verbatimText)='text') AND " +
+            "typeof(r.indexedText)='text' AND length(CAST(r.indexedText AS BLOB))<=786432 AND " +
+            "(r.verbatimText IS NULL OR typeof(r.verbatimText)='text') AND " +
             "length(CAST(coalesce(r.verbatimText,r.indexedText) AS BLOB))<=393216",
         MAX_PAGES,
     ) {
         val page = id(0)
         val input = getBlob(6)
         val intent = OcrJobInput.decodeV2(input)
-        val exact = utf8(15)
-        charge(4L * exact.length + input.size + 256)
+        val exact = OcrText(utf8(15))
+        charge(4L * exact.value.length + input.size + 256)
+        if (verifyDerivedOcr) {
+            val canonical = OcrResultRow.fromRecognition(intent.input, intent.configuration, exact)
+            if (canonical.indexedText != utf8(16) || (canonical.verbatimText != null) != (getInt(17) == 1)) invalid()
+        }
         if (intent.input.pageId != page || intent.generation != getLong(1) || intent.digest != getString(2) ||
             intent.key != getString(4) || intent.digest != getString(5) || intent.input.recipeRevision != getLong(10) ||
             intent.input.sourcePixelSha256 != getString(11) || intent.configuration.engineId != getString(12) ||
             intent.configuration.engineVersion != getInt(13) || intent.configuration.layout.name != getString(14)
         ) invalid()
-        page to LibrarySavedOcr(JobId(id(3)), intent, OcrText(exact), getLong(7), getLong(8), getLong(9))
+        page to LibrarySavedOcr(JobId(id(3)), intent, exact, getLong(7), getLong(8), getLong(9))
     }.toMap()
 
     private fun <T> rows(from: String, select: String, valid: String, maximum: Int, order: String = "", read: Cursor.() -> T): List<T> {

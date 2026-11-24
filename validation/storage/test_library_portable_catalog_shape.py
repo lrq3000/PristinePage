@@ -1,6 +1,8 @@
 """Check portable-table ownership and retention policy against the exported Room schema."""
 
 import re
+import shutil
+import subprocess
 import unittest
 
 import test_library_catalog_reader as catalog
@@ -63,3 +65,26 @@ class LibraryPortableCatalogShapeTest(unittest.TestCase):
     def test_nonempty_utf8_fingerprint_still_has_to_pass_the_live_source_guard(self):
         self.assertFalse(self.refused("UPDATE Source SET conversionFingerprint='sRGB-É'"))
         self.assertTrue(self.refused("UPDATE Source SET conversionFingerprint=char(0)||'unreadable-in-editor'"))
+
+    def test_stage_fts_command_detects_postings_mismatch_and_requires_write_access(self):
+        writer = catalog.ROOT / "data/src/main/kotlin/app/pristinepage/data/library/RoomLibrarySavedCatalog.kt"
+        action, = re.findall(r'sql\.execSQL\("(INSERT INTO OcrResultFts.*integrity-check.*)"\)', writer.read_text(encoding="utf-8"))
+        cli = shutil.which("sqlite3")
+        self.assertIsNotNone(cli)
+        healthy = (
+            "CREATE TABLE OcrResult(indexedText TEXT NOT NULL);"
+            "CREATE VIRTUAL TABLE OcrResultFts USING FTS4(indexedText,content=OcrResult,tokenize=unicode61);"
+            "INSERT INTO OcrResult VALUES('correct index terms');"
+            "INSERT INTO OcrResultFts(rowid,indexedText) VALUES(1,'correct index terms');"
+        )
+
+        def verify(extra):
+            return subprocess.run([cli, "-batch", "-bail", ":memory:"], input=healthy + extra + action + ";",
+                                  text=True, capture_output=True, timeout=10)
+
+        good = verify("")
+        self.assertEqual(0, good.returncode, good.stderr)
+        bad = verify("UPDATE OcrResult SET indexedText='different search terms';")
+        self.assertNotEqual(0, bad.returncode)
+        self.assertIn("malformed", bad.stderr)
+        self.assertIn("readonly", verify("PRAGMA query_only=ON;").stderr)

@@ -31,8 +31,11 @@ internal class LibraryObjectTransfer(private val destination: Store, private val
     }
 
     /** Catalog and journal space is budgeted separately. A caller must provide known capacity and retain exclusive destination ownership through publication. */
-    fun prepare(requirements: List<Requirement>, catalogAndJournalBytes: Long, availableBytes: Long): Prepared {
+    fun prepare(requirements: List<Requirement>, catalogAndJournalBytes: Long, availableBytes: Long,
+        requiredExisting: Set<ObjectId> = emptySet(),
+    ): Prepared {
         require(catalogAndJournalBytes >= 0 && availableBytes >= 0)
+        if (catalogAndJournalBytes > availableBytes) throw IOException("Not enough space for library catalog")
         val objects = LinkedHashMap<String, Candidate>()
         for ((id, openIncoming) in requirements) {
             checkpoint()
@@ -40,10 +43,12 @@ internal class LibraryObjectTransfer(private val destination: Store, private val
             if (candidate.id != id) throw IOException("Conflicting library object lengths")
             if (openIncoming != null) candidate.incoming += openIncoming
         }
+        if (requiredExisting.any { objects[it.sha256]?.id != it }) throw IOException("Missing destination original requirement")
         var missingBytes = 0L
         for (candidate in objects.values) {
             candidate.needsCopy = !verifyExisting(candidate)
             if (candidate.needsCopy) {
+                if (candidate.id in requiredExisting) throw IOException("The destination's existing library original is missing")
                 val incoming = candidate.incoming.firstOrNull() ?: throw IOException("Missing required library object")
                 val id = candidate.id
                 require(id.byteCount <= Long.MAX_VALUE - catalogAndJournalBytes - missingBytes)
@@ -57,7 +62,6 @@ internal class LibraryObjectTransfer(private val destination: Store, private val
             }
         }
         val requiredBytes = catalogAndJournalBytes + missingBytes
-        if (requiredBytes > availableBytes) throw IOException("Not enough space for library catalog")
         checkpoint()
         return Prepared(missingBytes, requiredBytes) {
             for (candidate in objects.values) copyAndVerify(candidate)

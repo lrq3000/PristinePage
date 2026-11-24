@@ -161,6 +161,8 @@ internal class RoomLibrarySavedCatalog(private val database: PristineDatabase) {
                 }
             }
             for ((source, count) in refCounts) if (catalog.countSourceReferences(source) != count) invalid()
+            // FTS4 requires a write connection for this integrity command. Run it only on the app-built stage, never on incoming SQLite pages.
+            sql.execSQL("INSERT INTO OcrResultFts(OcrResultFts) VALUES('integrity-check')")
             sql.query("PRAGMA foreign_key_check").use { if (it.moveToFirst()) invalid() }
             checkpoint()
         }
