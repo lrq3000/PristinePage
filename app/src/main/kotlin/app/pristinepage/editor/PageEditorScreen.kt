@@ -127,7 +127,9 @@ class PageEditorScreen(
                 .clip(RoundedCornerShape(AtelierStyle.surfaceRadius)).background(AtelierStyle.canvas)
                 .then(galleryGesture).testTag("editor-viewport"),
                 contentAlignment = Alignment.Center) {
-                preview.display?.let { display ->
+                // A BoxWithConstraints subcomposition can run with its previous collected snapshot after the owning
+                // lifecycle has retired it. Do not dereference a retired bitmap lease; the next emission redraws it.
+                preview.display?.takeIf { session.preview.value.display === it }?.let { display ->
                     val description = if (!showingCurrent) R.string.editor_previous_description else when (state.view) {
                         EditorView.RESULT -> R.string.editor_preview_description
                         EditorView.GEOMETRY_INPUT -> R.string.editor_input_description

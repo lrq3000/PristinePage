@@ -66,6 +66,16 @@ class EditorComparisonScreenTest {
                 compose.onNodeWithTag("editor-preview").performScrollTo().assertContentDescriptionEquals("Rendered page preview, resized for display")
                 assertEquals(draft,graph.store.editablePages.load(doc,imported.pageId).recipe)
                 assertEquals(1,f.providerOpens); assertArrayEquals(png,graph.store.committedSources.load(imported.sourceId).file.readBytes())
+
+                // The import wizard pins the same preview to Correction without the saved editor's ribbon.
+                compose.runOnUiThread { compose.activity.setContent { MaterialTheme { PageEditorScreen(guidedStep = 2).Content(session) {} } } }
+                waitFor(session, draft, EditorView.RESULT)
+                compose.onNodeWithTag("editor-preview-zoom-fit").assertDoesNotExist()
+                pinchPreview(.12f, .38f)
+                compose.onNodeWithTag("editor-preview-zoom-fit").assertIsDisplayed()
+                pinchPreview(.38f, .06f)
+                compose.onNodeWithTag("editor-preview-zoom-fit").assertDoesNotExist()
+                assertEquals(2L, graph.store.editablePages.load(doc, imported.pageId).recipeRevision)
             } finally {
                 compose.runOnUiThread { compose.activity.setContent {}; session.close() }
                 job.cancelAndJoin(); compose.waitUntil(10_000) { graph.budget.usedBytes == 0L }
