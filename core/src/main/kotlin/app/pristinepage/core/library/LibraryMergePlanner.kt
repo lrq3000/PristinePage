@@ -15,7 +15,7 @@ object LibraryMergePlanner {
     /** The destination slot and original are retained; its next accepted edit and revision-bound OCR come from the incoming slot. */
     data class IncomingState(val destinationPageKey: String, val incomingPageKey: String)
 
-    enum class Reason { NEW_TITLE, AMBIGUOUS_ALBUM, AMBIGUOUS_PAGES, ORIGINAL_CONFLICT, INCOMPATIBLE_SOURCE_BINDING }
+    enum class Reason { NEW_TITLE, AMBIGUOUS_ALBUM, AMBIGUOUS_PAGES, ORIGINAL_CONFLICT, INCOMPATIBLE_SOURCE_BINDING, INCOMPATIBLE_SAVED_STATE }
 
     sealed interface Decision {
         /** Incoming locators are not destination insert IDs. The catalog writer resolves/remaps all colliding IDs and references. */
@@ -26,7 +26,9 @@ object LibraryMergePlanner {
     }
 
     /** Inputs are bounded, stable catalog snapshots for this call; storage admits actual IDs and source bindings before invoking the planner. */
-    fun plan(destination: List<Album>, incoming: List<Album>): List<Decision> {
+    fun plan(destination: List<Album>, incoming: List<Album>,
+        additionalConflict: (destination: Page, incoming: Page) -> Reason? = { _, _ -> null },
+    ): List<Decision> {
         validate(destination)
         validate(incoming)
         val targetTitles = destination.groupBy { canonical(it.title) }
@@ -47,14 +49,16 @@ object LibraryMergePlanner {
                 matches.size != 1 || incomingTitleCounts.getValue(key) != 1 ||
                     targetAlbumTitles[album.key]?.let { it != key } == true ->
                     Decision.Add(album.key, alternateTitle(album.title, reserved, nextSuffix), Reason.AMBIGUOUS_ALBUM)
-                else -> match(matches.single(), album, targetPageOwners) { reason ->
+                else -> match(matches.single(), album, targetPageOwners, additionalConflict) { reason ->
                     Decision.Add(album.key, alternateTitle(album.title, reserved, nextSuffix), reason)
                 }
             }
         })
     }
 
-    private inline fun match(destination: Album, incoming: Album, targetPageOwners: Map<String, String>, conflict: (Reason) -> Decision.Add): Decision {
+    private inline fun match(destination: Album, incoming: Album, targetPageOwners: Map<String, String>,
+        additionalConflict: (Page, Page) -> Reason?, conflict: (Reason) -> Decision.Add,
+    ): Decision {
         val keys = destination.pages.associateBy { it.key }
         val names = destination.pages.associateBy { canonical(it.filename) }
         val matched = mutableSetOf<String>()
@@ -78,6 +82,7 @@ object LibraryMergePlanner {
             if (byName.sourcePixelSha256 != page.sourcePixelSha256 || byName.conversionFingerprint != page.conversionFingerprint) {
                 return conflict(Reason.INCOMPATIBLE_SOURCE_BINDING)
             }
+            additionalConflict(byName, page)?.let { return conflict(it) }
             updates += IncomingState(byName.key, page.key)
         }
         return Decision.Merge(incoming.key, destination.key, immutable(updates), immutable(additions))
