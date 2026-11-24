@@ -71,7 +71,7 @@ import kotlinx.coroutines.withTimeoutOrNull
     val preview = editor?.preview?.collectAsStateWithLifecycle()?.value
     val canLeave = !state.busy && state.request == null && edit?.saving != true
     fun askBeforeLeaving() {
-        editor?.cancelCurveAnalysis()
+        editor?.cancelGeometryAnalysis()
         confirmExit = true
     }
     fun back() {
@@ -115,7 +115,7 @@ import kotlinx.coroutines.withTimeoutOrNull
                 TextButton(onClick = {
                     if (draft.step == 0) owner.addMore() else selected?.let { owner.navigate(it, draft.step - 1) }
                 }, enabled = move) { Text(stringResource(if (draft.step == 0) R.string.atelier_add_pages else R.string.atelier_back)) }
-                if (draft.step == 0) TextButton({ editor.cancelCurveAnalysis(); confirmSkip = true }, enabled = canLeave,
+                if (draft.step == 0) TextButton({ editor.cancelGeometryAnalysis(); confirmSkip = true }, enabled = canLeave,
                     modifier = Modifier.testTag("atelier-wizard-skip-frame")) { Text(stringResource(R.string.atelier_wizard_skip_frame)) }
                 Button(onClick = {
                     if (draft.step == 2) owner.save() else selected?.let { owner.navigate(it, draft.step + 1) }

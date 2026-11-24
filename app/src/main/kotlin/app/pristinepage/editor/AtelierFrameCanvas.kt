@@ -103,7 +103,7 @@ import kotlin.math.roundToInt
     }
     val image = original
     val sourceReady by rememberUpdatedState(onSourceReady)
-    LaunchedEffect(session, image) { image?.let { sourceReady?.invoke(it.bitmap) } }
+    LaunchedEffect(session, image, onSourceReady != null) { image?.let { sourceReady?.invoke(it.bitmap) } }
     if (image == null) {
         Box(Modifier.fillMaxWidth().height(260.dp).background(AtelierStyle.canvas).testTag("atelier-frame-canvas"),
             contentAlignment = Alignment.Center) {
@@ -283,17 +283,22 @@ import kotlin.math.roundToInt
         val expected = geometry
         finding = true
         feedback = null
-        scope.launch {
+        scope.launch(start = CoroutineStart.UNDISPATCHED) {
+            val analysis = session.beginFrameAnalysis(expected, coroutineContext[Job])
             try {
-                val result = detectAtelierFrame(bitmap)
+                val result = analysis?.let { session.reserveFrameAnalysis(bitmap.allocationByteCount).use { detectAtelierFrame(bitmap) } }
                 feedback = when {
+                    analysis == null -> R.string.atelier_frame_not_replaced
                     result == null -> R.string.atelier_frame_no_edges
-                    original === image && session.useDetectedFrame(expected, result) -> null
+                    original === image && session.useDetectedFrame(analysis, result) -> null
                     else -> R.string.atelier_frame_not_replaced
                 }
             } catch (canceled: CancellationException) { throw canceled }
+            catch (failure: RepositoryFailure) {
+                feedback = if (failure.error.code == OperationErrorCode.RESOURCE_LIMIT) R.string.atelier_frame_resources else R.string.atelier_frame_no_edges
+            }
             catch (_: Exception) { feedback = R.string.atelier_frame_no_edges }
-            finally { finding = false }
+            finally { analysis?.let(session::endFrameAnalysis); finding = false }
         }
     }, modifier = Modifier.heightIn(min = 48.dp).testTag("atelier-detect-frame")) {
         Text(stringResource(if (finding) R.string.atelier_finding_edges else R.string.atelier_find_edges))
@@ -376,19 +381,55 @@ internal fun nearestInsertion(contour: BezierContour, touch: Offset, rect: Rect,
     return hit
 }
 
-internal suspend fun detectAtelierFrame(bitmap: android.graphics.Bitmap): QuadPx? =
-    withAtelierLuma(bitmap) { w, h, checkpoint, luma -> AtelierEdgeDetector.detect(w, h, checkpoint, luma) }
+internal suspend fun detectAtelierFrame(bitmap: android.graphics.Bitmap): QuadPx? = withContext(Dispatchers.Default) {
+    val width = bitmap.width
+    val height = bitmap.height
+    if (width > 1024 || height > 1024) return@withContext null
+    val size = analysisSize(bitmap) ?: return@withContext null
+    val jobContext = coroutineContext
+    // Average disjoint preview cells before taking color differences. Sampling just one Bayer-like pattern phase
+    // can turn identical average colors into a spurious boundary. Read one short stripe, never a new display raster.
+    val stripe = IntArray(width * ((height + size.height - 1) / size.height))
+    var rows = 0
+    AtelierEdgeDetector.detectRgb(size.width, size.height, { jobContext.ensureActive() }) { x, y ->
+        if (x == 0) {
+            val start = y * height / size.height
+            rows = (y + 1) * height / size.height - start
+            bitmap.getPixels(stripe, 0, width, 0, start, width, rows)
+        }
+        val first = x * width / size.width
+        val last = (x + 1) * width / size.width
+        var r = 0
+        var g = 0
+        var b = 0
+        for (row in 0 until rows) for (column in first until last) {
+            val rgb = stripe[row * width + column]
+            r += (rgb ushr 16) and 255
+            g += (rgb ushr 8) and 255
+            b += rgb and 255
+        }
+        val n = rows * (last - first)
+        (((r + n / 2) / n) shl 16) or (((g + n / 2) / n) shl 8) or ((b + n / 2) / n)
+    }
+}
 
-private suspend fun <R> withAtelierLuma(
-    bitmap: android.graphics.Bitmap,
-    orientedSource: PixelSize? = null,
-    analyze: (Int, Int, () -> Unit, (Int, Int) -> Int) -> R?,
-): R? = withContext(Dispatchers.Default) {
+private fun analysisSize(bitmap: android.graphics.Bitmap): PixelSize? {
     val w = bitmap.width; val h = bitmap.height
     val scale = 384.0 / maxOf(w, h)
     val dw = minOf(w, (w * scale).roundToInt())
     val dh = minOf(h, (h * scale).roundToInt())
-    if (dw < 2 || dh < 2) return@withContext null
+    return if (dw >= 2 && dh >= 2) PixelSize(dw, dh) else null
+}
+
+private suspend fun <R> withAtelierLuma(
+    bitmap: android.graphics.Bitmap,
+    orientedSource: PixelSize,
+    analyze: (Int, Int, () -> Unit, (Int, Int) -> Int) -> R?,
+): R? = withContext(Dispatchers.Default) {
+    val w = bitmap.width; val h = bitmap.height
+    val size = analysisSize(bitmap) ?: return@withContext null
+    val dw = size.width
+    val dh = size.height
     val jobContext = coroutineContext
     fun luma(x: Int, y: Int): Int {
         val rgb = bitmap.getPixel(x, y)
@@ -399,17 +440,14 @@ private suspend fun <R> withAtelierLuma(
         return ((original + .5) * display / source - .5).coerceIn(0.0, (display - 1).toDouble())
     }
     analyze(dw, dh, { jobContext.ensureActive() }) { x, y ->
-        if (orientedSource == null) luma((x.toDouble() * (w - 1) / (dw - 1)).roundToInt(), (y.toDouble() * (h - 1) / (dh - 1)).roundToInt())
-        else {
-            // Sample the already half-pixel-resized preview at the detector's original-source-aligned sites.
-            val bx = inBitmap(x, dw, orientedSource.width, w)
-            val by = inBitmap(y, dh, orientedSource.height, h)
-            val i = bx.toInt(); val j = by.toInt()
-            val nx = minOf(w - 1, i + 1); val ny = minOf(h - 1, j + 1)
-            val fx = bx - i; val fy = by - j
-            ((1 - fy) * ((1 - fx) * luma(i, j) + fx * luma(nx, j)) +
-                fy * ((1 - fx) * luma(i, ny) + fx * luma(nx, ny))).roundToInt()
-        }
+        // Sample the already half-pixel-resized preview at the detector's original-source-aligned sites.
+        val bx = inBitmap(x, dw, orientedSource.width, w)
+        val by = inBitmap(y, dh, orientedSource.height, h)
+        val i = bx.toInt(); val j = by.toInt()
+        val nx = minOf(w - 1, i + 1); val ny = minOf(h - 1, j + 1)
+        val fx = bx - i; val fy = by - j
+        ((1 - fy) * ((1 - fx) * luma(i, j) + fx * luma(nx, j)) +
+            fy * ((1 - fx) * luma(i, ny) + fx * luma(nx, ny))).roundToInt()
     }
 }
 

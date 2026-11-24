@@ -81,6 +81,39 @@ class EditorShapeTest {
         assertTrue(saves.isEmpty())
     }
 
+    @Test fun automaticFrameCannotReplaceABaselineRestoredByANewerEdit() = checkShape {
+        editor.edit(base.copy(geometry = perspective))
+        advanceUntilIdle()
+        val job = Job()
+        val stale = checkNotNull(editor.beginFrameAnalysis(perspective, job))
+        editor.rotateClockwise()
+        editor.undo()
+        assertEquals(perspective, editor.state.value.draft?.geometry)
+        val replacement = QuadPx(PointPx(.1, .1), PointPx(.9, .1), PointPx(.9, .9), PointPx(.1, .9))
+        assertTrue(job.isCancelled)
+        assertFalse(editor.useDetectedFrame(stale, replacement))
+        val current = checkNotNull(editor.beginFrameAnalysis(perspective))
+        assertTrue(editor.useDetectedFrame(current, replacement))
+        assertEquals(replacement, (editor.state.value.draft!!.geometry as GeometryRecipe.Perspective).quad)
+        assertTrue(saves.isEmpty())
+    }
+
+    @Test fun emptyNavigationFencesFrameAndDetectorBorrowRefusesWhenBudgetIsFull() = checkShape {
+        val original = checkNotNull(editor.state.value.draft).geometry
+        val job = Job()
+        val stale = checkNotNull(editor.beginFrameAnalysis(original, job))
+        assertTrue(editor.checkpointForNavigation())
+        assertTrue(job.isCancelled)
+        assertFalse(editor.useDetectedFrame(stale, perspective.quad))
+        val previewBytes = budget.usedBytes
+        budget.reserve(budget.capacityBytes - previewBytes).use {
+            val refused = assertThrows(RepositoryFailure::class.java) { editor.reserveFrameAnalysis(4096) }
+            assertEquals(OperationErrorCode.RESOURCE_LIMIT, refused.error.code)
+        }
+        editor.reserveFrameAnalysis(4096).use { assertTrue(budget.usedBytes > previewBytes + 4096L) }
+        assertEquals(previewBytes, budget.usedBytes)
+    }
+
     @Test fun navigationOrAnUnmovedGestureSupersedesAProposalEvenWithTheSamePreview() = checkShape {
         editor.edit(base.copy(geometry = perspective))
         advanceUntilIdle()
@@ -130,11 +163,11 @@ class EditorShapeTest {
         assertTrue(editor.checkpointForNavigation())
         advanceUntilIdle()
         val expected = checkNotNull(editor.preview.value.request)
-        editor.setCurveTransition(true)
+        editor.setAnalysisTransition(true)
         assertTrue(editor.checkpointForNavigation())
         assertEquals(expected, editor.preview.value.request)
         assertNull(editor.beginCurveAnalysis(expected))
-        editor.setCurveTransition(false)
+        editor.setAnalysisTransition(false)
         assertNotNull(editor.beginCurveAnalysis(expected))
     }
 

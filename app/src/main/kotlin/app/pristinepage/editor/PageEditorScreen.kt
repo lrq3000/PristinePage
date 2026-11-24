@@ -41,12 +41,17 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import app.pristinepage.R
 import app.pristinepage.core.pipeline.RenderStatus
 import app.pristinepage.core.recipe.GeometryRecipe
+import app.pristinepage.data.model.OperationErrorCode
+import app.pristinepage.data.model.RepositoryFailure
 import app.pristinepage.image.preview.OriginalPreviewBitmap
 import app.pristinepage.design.AtelierStyle
 import app.pristinepage.library.errorText
 import app.pristinepage.ocr.SavedPageOcrDetails
 import app.pristinepage.ocr.SavedPageOcrPanel
 import app.pristinepage.ocr.SavedPageOcrReader
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.currentCoroutineContext
 
 /** A view of one retained session, not a second processing/store owner. The viewport is finite even inside a scroll container and never derives an unbounded height from a narrow source aspect. */
 class PageEditorScreen(
@@ -91,7 +96,7 @@ class PageEditorScreen(
         BackHandler(enabled = guidedStep == null && !state.exitReady) { session.requestBack() }
         val editable = state.page != null && !state.loading && !state.saving && !state.exitReady && !guidedBusy
         var seedAttempted by rememberSaveable(state.page?.pageId?.value) { mutableStateOf(false) }
-        var seedFeedback by rememberSaveable(state.page?.pageId?.value) { mutableStateOf(false) }
+        var seedFeedback by rememberSaveable(state.page?.pageId?.value) { mutableStateOf<Int?>(null) }
         var bezierSelection by remember(session) { mutableStateOf<BezierControl?>(null) }
         var placeBezierPoint by remember(session, panel, state.draft?.geometry is GeometryRecipe.Bezier) { mutableStateOf(false) }
         val mayBrowse = editable && !state.dirty && !state.confirmExit && panel.isEmpty() && !information && ocrPanel == null
@@ -244,7 +249,7 @@ class PageEditorScreen(
                 history()
             }
             if (panel == "shape") state.draft?.let {
-                if (seedFeedback) Text(stringResource(R.string.atelier_frame_no_edges))
+                seedFeedback?.let { label -> Text(stringResource(label)) }
                 val page = state.page
                 val frame = it.geometry
                 val seed = guidedStep == 0 && !seedAttempted && page?.recipeRevision == 1L && frame is GeometryRecipe.None
@@ -259,13 +264,25 @@ class PageEditorScreen(
                             preview.view == EditorView.RESULT && !preview.processing && !preview.previous &&
                                 preview.failure == null && preview.preview?.request == it && it.recipe == state.draft
                         },
-                        onSourceReady = if (!seed) null else { bitmap ->
-                            try {
-                                val quad = detectAtelierFrame(bitmap)
-                                if (session.state.value.draft?.geometry == frame) seedFeedback = quad == null || !session.useDetectedFrame(frame, quad)
-                                seedAttempted = true
-                            } catch (canceled: kotlinx.coroutines.CancellationException) { throw canceled }
-                            catch (_: Exception) { seedAttempted = true; seedFeedback = true }
+                        onSourceReady = if (!seed || !editable) null else { bitmap ->
+                            val analysis = session.beginFrameAnalysis(frame, currentCoroutineContext()[Job])
+                            if (analysis != null) {
+                                try {
+                                    val quad = session.reserveFrameAnalysis(bitmap.allocationByteCount).use { detectAtelierFrame(bitmap) }
+                                    if (session.state.value.draft?.geometry == frame) {
+                                        seedFeedback = if (quad != null && session.useDetectedFrame(analysis, quad)) null else R.string.atelier_frame_no_edges
+                                        // Switching the seed branch off before suspension completes would dispose its own canvas.
+                                        seedAttempted = true
+                                    }
+                                } catch (canceled: CancellationException) { throw canceled }
+                                catch (failure: RepositoryFailure) {
+                                    seedFeedback = if (failure.error.code == OperationErrorCode.RESOURCE_LIMIT)
+                                        R.string.atelier_frame_resources else R.string.atelier_frame_no_edges
+                                    seedAttempted = true
+                                }
+                                catch (_: Exception) { seedFeedback = R.string.atelier_frame_no_edges; seedAttempted = true }
+                                finally { session.endFrameAnalysis(analysis) }
+                            }
                         })
                     if (frame is GeometryRecipe.Bezier) {
                         Text(stringResource(R.string.carnet_bezier_touch_help))
