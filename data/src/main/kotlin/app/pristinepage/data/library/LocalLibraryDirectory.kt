@@ -37,6 +37,30 @@ internal class LocalLibraryDirectory(root: File, private val directorySync: Dire
     override fun createCatalog(generation: LibraryGeneration, write: (OutputStream) -> Unit) = create(generation.catalogPath, write)
     override fun openMarker(generation: LibraryGeneration) = open(markerPath(generation))
 
+    /** Private merge-journal use only. An operation ID is never supplied by SQLite rows or a display label. */
+    fun openMergeIntent(generation: String) = open(mergeStagePath(generation) + "/merge.intent")
+
+    fun createMergeIntent(generation: String, bytes: ByteArray) =
+        create(mergeStagePath(generation) + "/merge.intent") { it.write(bytes) }
+
+    fun openMergeStage(generation: String) = open(mergeStagePath(generation) + "/catalog.sqlite")
+
+    fun forceMergeStage(generation: String, durableAncestor: Path) {
+        val directory = mergeStagePath(generation)
+        val stage = readPath("$directory/catalog.sqlite")
+        if (!rootPath.startsWith(durableAncestor) || !Files.isDirectory(durableAncestor, NOFOLLOW_LINKS) ||
+            durableAncestor.toRealPath() != durableAncestor
+        ) throw IOException("Private merge stage has no admitted durable ancestor")
+        if (!presentRegularFile(stage)) throw IOException("Private merge stage is missing")
+        FileChannel.open(stage, WRITE, NOFOLLOW_LINKS).use { it.force(true) }
+        var containing = checkNotNull(stage.parent)
+        while (true) {
+            forceDirectory(containing.toFile())
+            if (containing == durableAncestor) break
+            containing = checkNotNull(containing.parent)
+        }
+    }
+
     /** Only for a fresh private restore: opaque blob IDs, never source-row paths or logical filenames. */
     fun openPrivateOriginal(blob: String): InputStream? = open(privateOriginalPath(blob))
 
@@ -158,6 +182,11 @@ internal class LocalLibraryDirectory(root: File, private val directorySync: Dire
 
     private fun objectPath(id: LibraryObjectTransfer.ObjectId) = "objects/${id.sha256}"
     private fun markerPath(generation: LibraryGeneration) = "generations/${generation.id}.complete"
+    private fun mergeStagePath(generation: String): String {
+        requireOpaqueId(generation)
+        return "merge-stages/$generation"
+    }
+
     private fun privateOriginalPath(blob: String): String {
         requireOpaqueId(blob)
         return "sources/$blob/original.bin"
