@@ -260,12 +260,14 @@ class RoomSourceIngestIntegrationTest {
 
     internal class Fixture(private val enableRetry: Boolean = false, directorySync: DirectorySync? = null,
         private val captureDate: SourceCaptureDate? = null,
+        val bytes: ByteArray = byteArrayOf(1, 2, 3, 4),
     ) : AutoCloseable {
         private val context: Context = InstrumentationRegistry.getInstrumentation().context
         private val name = "t03-ingest-${UUID.randomUUID()}.db"
         val root = File(context.filesDir, "t03-ingest-${UUID.randomUUID()}")
         val files = if (directorySync == null) SourceFiles(root) else SourceFiles(root, directorySync)
-        val bytes = byteArrayOf(1, 2, 3, 4)
+        private val fixtureSha = java.security.MessageDigest.getInstance("SHA-256").digest(bytes)
+            .joinToString("") { "%02x".format(it.toInt() and 255) }
         val reference = Uri.parse("content://fixture.documents/synthetic-source")
         val owners = LocalOperationOwners()
         var opened = 0; var closed = 0
@@ -303,7 +305,7 @@ class RoomSourceIngestIntegrationTest {
             }
             val normalizedInspector = SourceInspector { file, hash ->
                 assertFalse(database.inTransaction()); assertEquals(opened, closed)
-                assertArrayEquals(bytes, file.readBytes()); assertEquals("9f64a747e1b97f131fabb6b447296c9b6f0201e79fb3c5356e6c77e89b6a806a", hash)
+                assertArrayEquals(bytes, file.readBytes()); assertEquals(fixtureSha, hash)
                 inspectionFailure?.let { throw it }
                 SourceInspection("image/png", PixelSize(3, 2), PixelSize(3, 2), 1, null, "synthetic-v1", "a".repeat(64))
             }

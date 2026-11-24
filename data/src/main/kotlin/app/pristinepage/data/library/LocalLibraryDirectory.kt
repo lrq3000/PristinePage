@@ -103,8 +103,17 @@ internal class LocalLibraryDirectory(root: File, private val directorySync: Dire
         }
 
         fun requireAppendable(candidate: LibraryGeneration) {
+            requireVacantChildId(candidate.id)
+            if (candidate.libraryId != tip.libraryId || candidate.predecessorId != tip.id) {
+                throw IOException("The destination cannot admit the new library generation")
+            }
+        }
+
+        fun requireVacantChildId(id: String) {
             // Budget both the marker and its staging leaf, even if cleanup of the latter is refused.
-            if (entryCount > 2 * LibraryGenerationChain.MAX_MARKERS - 2 || LibraryGenerationChain.tip(markers + candidate) != candidate) {
+            if (entryCount > 2 * LibraryGenerationChain.MAX_MARKERS - 2 || markers.size == LibraryGenerationChain.MAX_MARKERS ||
+                markers.any { it.id == id }
+            ) {
                 throw IOException("The destination cannot admit the new library generation")
             }
         }

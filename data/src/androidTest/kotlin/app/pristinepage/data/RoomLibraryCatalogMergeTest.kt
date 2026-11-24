@@ -10,12 +10,16 @@ import app.pristinepage.core.ocr.OcrLanguagePacks
 import app.pristinepage.core.ocr.OcrLayout
 import app.pristinepage.core.ocr.OcrText
 import app.pristinepage.core.recipe.RecipeCodec
+import app.pristinepage.data.files.DirectorySync
+import app.pristinepage.data.files.PlatformDirectorySync
 import app.pristinepage.data.library.LibraryCatalogMerge
 import app.pristinepage.data.library.LibraryPortableCatalogProjection
 import app.pristinepage.data.library.LibrarySavedOcr
+import app.pristinepage.data.library.LocalLibraryDirectory
 import app.pristinepage.data.library.RoomLibraryCatalogReader
 import app.pristinepage.data.library.RoomLibraryCatalogStage
 import app.pristinepage.data.library.RoomLibraryLocalExport
+import app.pristinepage.data.library.RoomLibraryLocalMerge
 import app.pristinepage.data.library.RoomLibraryLocalMergePreflight
 import app.pristinepage.data.library.RoomLibrarySavedCatalog
 import app.pristinepage.data.library.RoomLibrarySavedOcr
@@ -138,4 +142,96 @@ class RoomLibraryCatalogMergeTest {
             }
         }
     }
+
+    @Test fun exactRoomCopyAddsOnlyTheMissingOriginalAndReplaysWithoutWritingEitherLibrary() = runBlocking<Unit> {
+        RoomSourceIngestIntegrationTest.Fixture().use { local ->
+            RoomSourceIngestIntegrationTest.Fixture(bytes = byteArrayOf(5, 6, 7, 8, 9)).use { incoming ->
+                local.sourceDisplayName = "Cover.png"
+                val cover = local.store.ingest(local.reference, local.reserve().single()) as IngestResult.Committed
+                incoming.sourceDisplayName = "Appendix.png"
+                val appendix = incoming.store.ingest(incoming.reference, incoming.reserve().single()) as IngestResult.Committed
+                val io = RoomMetadataAccess(incoming.database)
+                val commands = RoomDocumentRepository(io, RecipeAdmission { _, _ -> null })
+                assertTrue(commands.rotatePage(appendix.pageId, 1, 1) is DocumentMutationResult.Applied)
+                val edit = RoomEditablePages(io, incoming.database.catalog()).load(incoming.document, appendix.pageId)
+                val text = "  Saved cafe\u0301\r\n"
+                val config = OcrConfiguration("fixture-ocr", 1, OcrLayout.SPARSE_TEXT,
+                    OcrLanguagePacks(listOf(OcrLanguagePack("eng", "e".repeat(64)))))
+                val producer = JobId(UUID.randomUUID().toString())
+                val intent = OcrJobInput(incoming.document, OcrInput(appendix.pageId.value, 2, appendix.sourcePixelHash),
+                    appendix.sourceId, edit.recipeHash, 1, config)
+                io.transaction { RoomLibrarySavedOcr(incoming.database).restoreInTransaction(LibrarySavedOcr(producer, intent, OcrText(text), 1, 11, 12)) }
+
+                val context = InstrumentationRegistry.getInstrumentation().context
+                val root = File(context.filesDir.canonicalFile, "library-copy-fixture-${UUID.randomUUID()}").apply { check(mkdir()) }
+                val scratch = File(root, "scratch").apply { check(mkdir()) }
+                val destination = File(root, "destination")
+                val backup = File(root, "backup")
+                val baseline = RoomLibraryLocalExport(context, local.database, local.root.canonicalFile, scratch).writeNewFolder(destination)
+                val source = RoomLibraryLocalExport(context, incoming.database, incoming.root.canonicalFile, scratch).writeNewFolder(backup)
+                val sourceBefore = fileTree(backup)
+                val destinationBefore = fileTree(destination)
+                val operation = UUID.randomUUID().toString()
+                val copier = RoomLibraryLocalMerge(context)
+                val confirmed = copier.prepare(operation, destination, backup)
+                assertEquals(baseline, confirmed.preview.destination)
+                assertEquals(source, confirmed.preview.incoming)
+                assertEquals(5L, confirmed.preview.payloads.missingBytes)
+                val moved = File(root, "original-backup")
+                check(backup.renameTo(moved))
+                check(moved.copyRecursively(backup))
+                assertEquals(sourceBefore, fileTree(backup))
+                assertTrue(runCatching { copier.copy(confirmed) }.exceptionOrNull() is IOException)
+                assertEquals(destinationBefore, fileTree(destination))
+                val duplicate = File(root, "byte-identical-replacement")
+                check(backup.renameTo(duplicate))
+                check(moved.renameTo(backup))
+
+                val interrupt = RoomLibraryLocalMerge(context, DirectorySync { folder ->
+                    !(folder.name == "objects" && folder.listFiles().orEmpty().count { !it.name.startsWith(".") } == 2) &&
+                        PlatformDirectorySync.sync(folder)
+                })
+                assertTrue(runCatching { interrupt.copy(confirmed) }.exceptionOrNull() is IOException)
+                assertEquals(baseline, LocalLibraryDirectory(destination).readTip())
+                assertEquals(2, fileTree(destination).keys.count { it.startsWith("objects/") && !it.substringAfterLast('/').startsWith(".") })
+                val unchangedAfterInterruption = fileTree(destination)
+                val differentSource = copier.prepare(operation, destination, duplicate)
+                assertTrue(runCatching { copier.copy(differentSource) }.exceptionOrNull() is IOException)
+                assertTrue(runCatching { copier.resume(operation, destination, duplicate) }.exceptionOrNull() is IOException)
+                assertEquals(unchangedAfterInterruption, fileTree(destination))
+                val child = RoomLibraryLocalMerge(context).resume(operation, destination, backup)
+                assertEquals(operation, child.id)
+                assertEquals(baseline.id, child.predecessorId)
+                assertEquals(child, LocalLibraryDirectory(destination).readTip())
+                val destinationAfter = fileTree(destination)
+                assertTrue(destinationAfter.entries.containsAll(destinationBefore.entries))
+                val originalKeys = destinationAfter.keys.filter { it.startsWith("objects/") && !it.substringAfterLast('/').startsWith(".") }
+                assertEquals(1, (originalKeys.toSet() - destinationBefore.keys).size)
+                val reader = RoomLibraryCatalogReader(context, RoomLibraryCatalogReader.MAX_PORTABLE_BYTES)
+                val closed = reader.read(File(destination, child.catalogPath)) { sql ->
+                    sql.rawQuery("SELECT rowid FROM OcrResultFts WHERE OcrResultFts MATCH 'café'", null).use {
+                        assertTrue(it.moveToFirst()); assertFalse(it.moveToNext())
+                    }
+                    LibraryPortableCatalogProjection(sql, verifyDerivedOcr = true) {}.snapshot()
+                }
+                val album = closed.albums.single()
+                assertEquals(listOf("Cover.png", "Appendix.png"), album.pages.map { it.filename })
+                assertEquals(listOf(cover.pageId.value, appendix.pageId.value), album.pages.map { it.row.pageId })
+                val edited = album.pages.last()
+                assertEquals(listOf(0, 1), edited.revisions.map { RecipeCodec.decode(it.canonicalRecipe).geometry.outputQuarterTurns })
+                val saved = checkNotNull(edited.savedOcr)
+                assertEquals(text, saved.text.value)
+                assertEquals(producer, saved.producerId)
+                assertEquals(2L, saved.intent.input.recipeRevision)
+                assertEquals(setOf(local.bytes.toList(), incoming.bytes.toList()),
+                    originalKeys.map { destinationAfter.getValue(it) }.toSet())
+                assertEquals(child, RoomLibraryLocalMerge(context).resume(operation, destination, backup))
+                assertEquals(destinationAfter, fileTree(destination))
+                assertEquals(sourceBefore, fileTree(backup))
+            }
+        }
+    }
+
+    private fun fileTree(root: File) = root.walkTopDown().filter(File::isFile)
+        .associate { it.relativeTo(root).invariantSeparatorsPath to it.readBytes().toList() }
 }

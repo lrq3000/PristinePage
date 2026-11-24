@@ -112,6 +112,37 @@ class LibraryBackupReadTest {
         assertEquals(successor, fixture.store.readTip())
     }
 
+    @Test fun aRetainedGenerationCanBeVerifiedAgainstTheExactExpectedPublishedTip() {
+        val fixture = fixture()
+        val successor = fixture.generation.copy(id = "1bbb6a89-836f-4858-811d-e73237b95422", predecessorId = fixture.generation.id)
+        fixture.store.createMarker(successor, successor.encode())
+        val verified = fixture.reader.read(8, fixture.generation, successor) { marker, file ->
+            assertEquals(fixture.generation, marker)
+            assertArrayEquals(fixture.catalog, file.readBytes())
+            LibraryBackupRead.Projection(Unit, listOf(fixture.original))
+        }
+        assertEquals(fixture.generation, verified.generation)
+        assertThrows(IOException::class.java) {
+            fixture.reader.read<Unit>(8, fixture.generation, fixture.generation) { _, _ -> error("Unexpected tip reached projection") }
+        }
+        assertEquals(successor, fixture.store.readTip())
+    }
+
+    @Test fun changingTheRetainedMarkerDuringProjectionCannotBeAcknowledgedEvenWhenTheTipStaysExact() {
+        val fixture = fixture()
+        val original = fixture.generation
+        val child = original.copy(id = "1bbb6a89-836f-4858-811d-e73237b95422", predecessorId = original.id)
+        fixture.store.createMarker(child, child.encode())
+        assertThrows(IOException::class.java) {
+            fixture.reader.read(8, original, child) { _, _ ->
+                val changed = original.copy(catalog = original.catalog.copy(sha256 = "b".repeat(64)))
+                File(fixture.backup, "generations/${original.id}.complete").writeBytes(changed.encode())
+                LibraryBackupRead.Projection(Unit, listOf(fixture.original))
+            }
+        }
+        assertEquals(child, fixture.store.readTip())
+    }
+
     private class Fixture(
         val backup: File, val scratch: File, val store: LocalLibraryDirectory, val reader: LibraryBackupRead,
         val generation: LibraryGeneration, val catalog: ByteArray, val original: ObjectId,
