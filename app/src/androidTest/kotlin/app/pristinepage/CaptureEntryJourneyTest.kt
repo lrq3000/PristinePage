@@ -5,6 +5,7 @@ import android.accessibilityservice.AccessibilityService
 import android.content.pm.PackageManager
 import android.graphics.Rect
 import android.os.ParcelFileDescriptor
+import android.os.Bundle
 import android.view.accessibility.AccessibilityNodeInfo
 import androidx.activity.compose.setContent
 import androidx.compose.material3.MaterialTheme
@@ -73,7 +74,16 @@ class CaptureEntryJourneyTest {
     @Test fun cameraFreeGalleryAndFilesShowTheDisclosureAndReturnToTheOwnedDraft() = runBlocking<Unit> {
         withCameraFreeDraft(realProvider = false) { _, fixture, owner ->
             for ((kind, tag) in listOf(PhotoImportKind.GALLERY to "atelier-import-gallery", PhotoImportKind.FILES to "atelier-import-files")) {
-                openPicker(kind, tag, owner)
+                val picker = openPicker(kind, tag, owner)
+                if (kind == PhotoImportKind.GALLERY) {
+                    val navigation = setOf("Photos", "Albums", "Browse", "On this device", "Collections")
+                    instrumentation.addResults(Bundle().apply {
+                        putString("galleryHandler", picker)
+                        putString("galleryNavigation", pickerNodes(picker).mapNotNull { node ->
+                            node.text?.toString()?.takeIf { node.isVisibleToUser && it in navigation }
+                        }.distinct().joinToString(","))
+                    })
+                }
                 assertTrue(instrumentation.uiAutomation.performGlobalAction(AccessibilityService.GLOBAL_ACTION_BACK))
                 compose.waitUntil(15_000) { owner.state.value.let { !it.busy && it.request == null && it.draft?.pending == null } }
                 assertEquals(0, checkNotNull(owner.state.value.draft).pages.size)
