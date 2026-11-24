@@ -19,6 +19,8 @@ CASES = {
     "copy": ("app.pristinepage.ocr.OcrSelectionClipboardTest", "onlyExplicitCopyTransfersTheSelectedRangeAndClassificationIsOff"),
     "long-copy": ("app.pristinepage.ocr.OcrSelectionClipboardTest", "longPressInSavedOcrDialogCopiesOnlyTheSelectedWord"),
     "picker": ("app.pristinepage.CaptureEntryJourneyTest", "cameraFreeGalleryAndFilesShowTheDisclosureAndReturnToTheOwnedDraft"),
+    "picker-hdr": ("app.pristinepage.CaptureEntryJourneyTest", "actualFilesSelectionCommitsAndReopensTheCompleteSyntheticHdrSource"),
+    "picker-provider": ("app.pristinepage.SystemPickerJourneyTest", "fixtureProviderLoadsInItsOwnPackageWithoutTargetApplicationDependencies"),
     "zoom": ("app.pristinepage.EditorComparisonScreenTest", "referenceViewsShowDifferentLiteralGeometryAndApplyOnlyTheCompleteDraft"),
     "title": ("app.pristinepage.LibraryActivityIntegrationTest", "realLibraryActivityCreatesAnEmptyDocumentAndRetainsItsSessionAcrossRecreation"),
     "ocr": ("app.pristinepage.ocr.ExpandedOcrLanguagesTest", "selectsARecentlyBundledLanguageAndRecognizesWithItsActualPack"),

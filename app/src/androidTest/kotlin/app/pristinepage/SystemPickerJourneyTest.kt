@@ -59,7 +59,7 @@ class SystemPickerJourneyTest {
                 ids += documents.getString(documents.getColumnIndexOrThrow(DocumentsContract.Document.COLUMN_DOCUMENT_ID))
                 assertTrue(documents.getLong(documents.getColumnIndexOrThrow(DocumentsContract.Document.COLUMN_SIZE)) in 1..4096)
             }
-            assertEquals(listOf("original-a", "original-b", "corrupt"), ids)
+            assertEquals(listOf("original-a", "original-b", "corrupt", "sdr-primary"), ids)
         }
         assertThrows(FileNotFoundException::class.java) { provider.openDocument("original-a", "w", null) }
         assertThrows(FileNotFoundException::class.java) { provider.queryDocument("unrelated", null) }
