@@ -4,6 +4,8 @@ import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.gestures.detectHorizontalDragGestures
+import androidx.compose.foundation.gestures.rememberTransformableState
+import androidx.compose.foundation.gestures.transformable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
@@ -15,9 +17,12 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.res.stringResource
@@ -28,6 +33,7 @@ import androidx.compose.ui.semantics.liveRegion
 import androidx.compose.ui.semantics.selected
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.IntSize
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
@@ -100,6 +106,7 @@ class PageEditorScreen(
             EditorView.ORIGINAL -> R.string.editor_view_original
         }
         val selectedLook = state.draft?.matchingLook()
+        var correctionZoom by remember(session, state.page?.pageId, panel) { mutableStateOf(CorrectionPreviewZoom()) }
         val displayPreview: @Composable (Modifier) -> Unit = { height ->
             val requestedLabel = if (state.view == EditorView.RESULT && selectedLook != null) {
                 stringResource(R.string.editor_requested_look, stringResource(selectedLook.label))
@@ -120,13 +127,42 @@ class PageEditorScreen(
                 .clip(RoundedCornerShape(AtelierStyle.surfaceRadius)).background(AtelierStyle.canvas)
                 .then(galleryGesture).testTag("editor-viewport"),
                 contentAlignment = Alignment.Center) {
-                preview.display?.let { display ->
+                // A BoxWithConstraints subcomposition can run with its previous collected snapshot after the owning
+                // lifecycle has retired it. Do not dereference a retired bitmap lease; the next emission redraws it.
+                preview.display?.takeIf { session.preview.value.display === it }?.let { display ->
                     val description = if (!showingCurrent) R.string.editor_previous_description else when (state.view) {
                         EditorView.RESULT -> R.string.editor_preview_description
                         EditorView.GEOMETRY_INPUT -> R.string.editor_input_description
                         EditorView.ORIGINAL -> R.string.editor_original_description
                     }
-                    Image(display.bitmap.asImageBitmap(), stringResource(description), modifier = Modifier.fillMaxSize().padding(6.dp).testTag("editor-preview"), contentScale = ContentScale.Fit)
+                    val bitmap = display.bitmap.asImageBitmap()
+                    val zooming = panel == "looks" && editable
+                    Box(Modifier.fillMaxSize().padding(6.dp).clipToBounds()) {
+                        var viewport by remember { mutableStateOf(IntSize.Zero) }
+                        fun updateZoom(factor: Float, dx: Float, dy: Float) {
+                            correctionZoom = correctionZoom.transform(factor, dx, dy, viewport.width, viewport.height, bitmap.width, bitmap.height)
+                        }
+                        val gestures = if (zooming) {
+                            val transform = rememberTransformableState { zoom, pan, _ -> updateZoom(zoom, pan.x, pan.y) }
+                            Modifier.transformable(transform, canPan = { correctionZoom.scale > 1f })
+                        } else Modifier
+                        val shown = if (zooming) correctionZoom.transform(1f, 0f, 0f, viewport.width, viewport.height, bitmap.width, bitmap.height)
+                        else CorrectionPreviewZoom()
+                        Box(Modifier.fillMaxSize().onSizeChanged { viewport = it }.then(gestures)) {
+                            Image(bitmap, stringResource(description), modifier = Modifier.fillMaxSize().graphicsLayer {
+                                scaleX = shown.scale
+                                scaleY = shown.scale
+                                translationX = shown.x
+                                translationY = shown.y
+                            }.testTag("editor-preview"), contentScale = ContentScale.Fit)
+                        }
+                        if (zooming) Row(Modifier.align(Alignment.TopEnd)) {
+                            TextButton(onClick = { updateZoom(1.5f, 0f, 0f) }, enabled = shown.scale < CorrectionPreviewZoom.MAX_SCALE,
+                                modifier = Modifier.heightIn(min = 48.dp).testTag("editor-preview-zoom-in")) { Text(stringResource(R.string.editor_zoom_in)) }
+                            if (shown.scale > 1f) TextButton(onClick = { correctionZoom = CorrectionPreviewZoom() },
+                                modifier = Modifier.heightIn(min = 48.dp).testTag("editor-preview-zoom-fit")) { Text(stringResource(R.string.editor_zoom_fit)) }
+                        }
+                    }
                 }
                 if (preview.processing) {
                     Box(Modifier.matchParentSize().background(androidx.compose.ui.graphics.Color.Black.copy(alpha = .34f)))

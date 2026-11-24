@@ -10,6 +10,7 @@
     <string name="atelier_import_count">Imported: %1$d</string>
     <string name="atelier_import_abandon">Abandon draft</string>
     <string name="atelier_import_sources">Import photos</string>
+    <string name="atelier_import_sdr_note">Supported HDR photos are edited and exported in standard dynamic range (SDR). Your original is kept.</string>
     <string name="atelier_import_gallery">From gallery</string>
     <string name="atelier_import_files">From files</string>
     <string name="atelier_finish_import">Finish importing</string>

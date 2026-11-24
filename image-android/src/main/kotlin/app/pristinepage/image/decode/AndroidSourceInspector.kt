@@ -38,7 +38,7 @@ class DecodedSource internal constructor(
     override fun close() { if (closed.compareAndSet(false, true)) { try { image.close() } finally { permit.close() } } }
 }
 
-/** Closed private bytes only; no URI/provider/database access, original mutation or source downsampling. API28+'s strict partial-image policy is used first. API26/27 and embedded ICC support remain unavailable until separately validated, not silently emulated through a permissive partial decoder. */
+/** Closed private bytes only; no URI/provider/database access, original mutation or source downsampling. Use API28+'s strict partial-image policy. Only the explicitly admitted sRGB profiles and SDR projections are supported. */
 class AndroidSourceInspector @JvmOverloads constructor(private val budget: ImageAllocationBudget, private val dispatcher: CoroutineDispatcher = Dispatchers.IO) : SourceInspector, SourceFileDecoder {
     override suspend fun inspect(file: File, expectedByteSha256: String): SourceInspection = decodeFile(file, expectedByteSha256).use { it.inspection }
 
@@ -61,7 +61,9 @@ class AndroidSourceInspector @JvmOverloads constructor(private val budget: Image
                 val header = budget.reserve(parserBytes).use {
                     val checkpoint = { context.ensureActive() }
                     val parsed = if (captureDate) SourceContainer.readWithCaptureDate(file, checkpoint) else SourceContainer.read(file, checkpoint)
-                    if (parsed.jpegProjection == null) verifyBytes(file, expectedByteSha256) { context.ensureActive() }
+                    if (parsed.jpegProjection == null && parsed.projectedBytes == null && parsed.sdrPrimary == null) {
+                        verifyBytes(file, expectedByteSha256) { context.ensureActive() }
+                    }
                     parsed
                 }
                 val orientation = header.exifOrientation
@@ -69,18 +71,25 @@ class AndroidSourceInspector @JvmOverloads constructor(private val budget: Image
                 val permit = DecodeAdmission(budget).admit(file.length(), header.size.width.toLong(), header.size.height.toLong(), orientation)
                 var transferred = false
                 try {
-                    val codecSource = header.jpegProjection?.let { view ->
-                        ImageDecoder.createSource(ByteBuffer.wrap(view.read(file, expectedByteSha256) { context.ensureActive() }))
-                    } ?: ImageDecoder.createSource(file)
+                    val checkpoint = { context.ensureActive() }
+                    val projected = (header.sdrPrimary ?: header.projectedBytes)?.read(file, expectedByteSha256, checkpoint)
+                        ?: header.jpegProjection?.read(file, expectedByteSha256, checkpoint)
+                    val codecSource = if (projected != null) ImageDecoder.createSource(ByteBuffer.wrap(projected))
+                        else ImageDecoder.createSource(file)
                     val bitmap = decodeStrict(codecSource, header, permit) { context.ensureActive() }
                     try {
                         context.ensureActive()
                         // ImageDecoder applies EXIF itself; native asymmetric1..8 fixtures must verify this. Do NOT pass the stored EXIF to CanonicalSourcePixels a second time.
                         val image = CanonicalSourcePixels.normalize(bitmap.width, bitmap.height, 1, { y, row -> bitmap.getPixels(row, 0, bitmap.width, 0, y, bitmap.width, 1) }) { context.ensureActive() }
                         try {
-                            val fingerprint = SourceDecodePolicy.fingerprint(Build.VERSION.SDK_INT, Build.FINGERPRINT, header.jpegProjection != null)
+                            val fingerprint = SourceDecodePolicy.fingerprint(Build.VERSION.SDK_INT, Build.FINGERPRINT) + when {
+                                header.sdrPrimary != null -> SourceDecodePolicy.HDR_SDR_PRIMARY
+                                header.projectedBytes != null -> SourceDecodePolicy.PROFILED_SRGB
+                                header.jpegProjection != null -> SourceDecodePolicy.CAMERA_JPEG
+                                else -> ""
+                            }
                             val hash = CanonicalSourcePixels.hash(image, fingerprint) { context.ensureActive() }
-                            val inspection = SourceInspection(header.mime, header.size, permit.size, orientation, null, fingerprint, hash)
+                            val inspection = SourceInspection(header.mime, header.size, permit.size, orientation, header.profileSha256, fingerprint, hash)
                             context.ensureActive()
                             val projectedDate = if (captureDate) SourceCaptureDate(header.capturedOn?.toEpochDay()) else null
                             DecodedSource(inspection, image, permit, expectedByteSha256, projectedDate).also { completed = it; transferred = true }
@@ -140,23 +149,36 @@ class AndroidSourceInspector @JvmOverloads constructor(private val budget: Image
     private fun refuse(code: OperationErrorCode, key: String, retryable: Boolean = false): Nothing = throw RepositoryFailure(OperationError(code, retryable, key, null))
 }
 
-/** The strict normalizer issues only this conversion version and currently records no embedded profile. */
+/** Different byte-view policies remain distinct from the old unprofiled and camera JPEG fingerprints. */
 internal object SourceDecodePolicy {
+    const val HDR_SDR_PRIMARY = "/jpeg-ultrahdr-sdr-v1"
+    const val PROFILED_SRGB = "/matrix-srgb-profile-v1"
+    const val CAMERA_JPEG = "/jpeg-camera-view-v1"
+
     fun fingerprint(sdk: Int, build: String, projectedJpeg: Boolean = false): String {
         val digest = MessageDigest.getInstance("SHA-256").digest(build.toByteArray(Charsets.UTF_8))
         val prefix = digest.take(8).joinToString("") { "%02x".format(it.toInt() and 255) }
         val base = "android-imagedecoder-v2/api$sdk/$prefix/srgb-straight-white-exif-v1"
-        return if (projectedJpeg) "$base/jpeg-camera-view-v1" else base
+        return if (projectedJpeg) "$base$CAMERA_JPEG" else base
     }
 
     fun requireReproducible(inspection: SourceInspection, sdk: Int, build: String) {
-        if (inspection.conversionFingerprint != fingerprint(sdk, build) &&
-            (inspection.mime != "image/jpeg" || inspection.conversionFingerprint != fingerprint(sdk, build, projectedJpeg = true))
-        ) {
-            throw RepositoryFailure(OperationError(OperationErrorCode.UNSUPPORTED_VERSION, false, "source_conversion_unavailable", null))
-        }
-        if (inspection.profileSha256 != null) {
+        val base = fingerprint(sdk, build)
+        val jpeg = inspection.mime == "image/jpeg"
+        val profiled = inspection.profileSha256 != null
+        if (profiled && (inspection.conversionFingerprint == base ||
+                (jpeg && inspection.conversionFingerprint == "$base$CAMERA_JPEG"))) {
             throw RepositoryFailure(OperationError(OperationErrorCode.UNSUPPORTED_FORMAT, false, "source_profile_unsupported", null))
+        }
+        val supported = when (inspection.conversionFingerprint) {
+            base -> !profiled
+            "$base$CAMERA_JPEG" -> jpeg && !profiled
+            "$base$HDR_SDR_PRIMARY" -> jpeg
+            "$base$PROFILED_SRGB" -> profiled && (jpeg || inspection.mime == "image/png")
+            else -> false
+        }
+        if (!supported) {
+            throw RepositoryFailure(OperationError(OperationErrorCode.UNSUPPORTED_VERSION, false, "source_conversion_unavailable", null))
         }
     }
 }

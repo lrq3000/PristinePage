@@ -4,12 +4,32 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
 from unittest.mock import patch
+import re
 from zipfile import ZipFile
 
-from prepare_ocr_local_app import prepare_from_publisher, require_exact_tree, verify_ocr_members, verify_standard_manifest
+from prepare_ocr_local_app import MAXIMUM_APK_GROWTH, prepare_from_publisher, require_exact_tree, verify_expansion_size, verify_ocr_members, verify_standard_manifest
 
 
 class OcrLocalAppIsolationTest(unittest.TestCase):
+    def test_settings_language_codes_match_the_authenticated_publisher_catalog(self):
+        source = Path(__file__).resolve().parents[2] / "app/src/main/kotlin/app/pristinepage/design/AtelierPreferences.kt"
+        entries = re.findall(r'(?m)^    [A-Z][A-Z_]+\("([a-z_]+)", ', source.read_text(encoding="utf-8"))
+        self.assertEqual(124, len(entries))
+        self.assertEqual("f24f038021ba6658e3f9a794f1770f70ff1912b785cf3b32385fd2d7ae48e2db",
+                         sha256("\n".join(sorted(entries)).encode()).hexdigest())
+
+    def test_apk_growth_must_be_strictly_below_the_operator_limit(self):
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            baseline, expanded = root / "base.apk", root / "new.apk"
+            baseline.touch()
+            with expanded.open("wb") as fake_sparse:
+                fake_sparse.truncate(MAXIMUM_APK_GROWTH - 1)
+                self.assertEqual(MAXIMUM_APK_GROWTH - 1, verify_expansion_size(baseline, expanded))
+                fake_sparse.truncate(MAXIMUM_APK_GROWTH)
+                with self.assertRaises(ValueError):
+                    verify_expansion_size(baseline, expanded)
+
     def test_bootstrap_from_verified_input_files_without_a_probe_receipt(self):
         with TemporaryDirectory() as tmp:
             root = Path(tmp).resolve()

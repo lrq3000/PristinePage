@@ -23,6 +23,7 @@ import app.pristinepage.data.repository.RoomDocumentCatalog
 import app.pristinepage.data.repository.RoomDocumentRepository
 import app.pristinepage.data.repository.RoomEditablePages
 import app.pristinepage.data.repository.RoomImportSessions
+import app.pristinepage.data.repository.RoomIngestPreparation
 import app.pristinepage.data.repository.RoomMetadataAccess
 import app.pristinepage.data.repository.RecipeAdmission
 import app.pristinepage.data.repository.AtelierPageWitness
@@ -132,6 +133,115 @@ class RoomAtelierDraftIntegrationTest {
                 fixture.assertForeignKeys()
             }
         }
+    }
+
+    @Test fun twoRetiredSingleCopyDraftsDoNotPreventStartingAnotherImport() = runBlocking<Unit> {
+        withMemoryDatabase { db ->
+            val metadata = RoomMetadataAccess(db)
+            val sessions = RoomImportSessions(db)
+            val drafts = RoomAtelierDrafts(metadata, db.atelierDrafts(), sessions)
+            val prepare = RoomIngestPreparation(db)
+            val uri = "content://fixture.documents/one"
+            val previous = List(2) {
+                val draft = drafts.create("Canceled scan", null, null)
+                val batch = drafts.reserve(draft.draftId, draft.generation)
+                val child = sessions.prepareSelection(batch, listOf(uri)).childIds.single()
+                val intent = prepare.prepare(child, uri)
+                sessions.cancelBatch(batch)
+                drafts.abandon(draft.draftId, draft.generation)
+                draft to intent
+            }
+
+            val fresh = drafts.create("New scan", null, null)
+            assertTrue(drafts.view(fresh.draftId)!!.pages.isEmpty())
+            val next = drafts.reserve(fresh.draftId, fresh.generation)
+            val newChild = sessions.prepareSelection(next, listOf(uri)).childIds.single()
+            assertEquals(fresh.stagingDocumentId, prepare.prepare(newChild, uri).documentId.value)
+            assertTrue(RoomDocumentCatalog(metadata, db.catalog()).list(null, 10).isEmpty())
+            previous.forEach { (draft, intent) ->
+                assertEquals("ABANDONED", db.atelierDrafts().draft(draft.draftId)!!.state)
+                assertNotNull(db.ingestPreparation().fileTransaction(intent.transactionId.value))
+            }
+        }
+    }
+
+    @Test fun aFullStagingAllowanceDoesNotDisableTheViewfinderDraftOrReserveNewItems() = runBlocking<Unit> {
+        withMemoryDatabase { db ->
+            val metadata = RoomMetadataAccess(db)
+            val sessions = RoomImportSessions(db)
+            val drafts = RoomAtelierDrafts(metadata, db.atelierDrafts(), sessions)
+            val prepare = RoomIngestPreparation(db)
+            val uri = "content://fixture.documents/one"
+            repeat(2) {
+                val old = drafts.create("Retired scan", null, null)
+                val batch = drafts.reserve(old.draftId, old.generation)
+                // Reserve at most eight attempts per draft; nothing in this test opens a URI or allocates a payload.
+                val children = sessions.prepareSelection(batch, List(8) { uri }).childIds
+                children.forEach { prepare.prepare(it, uri) }
+                sessions.cancelBatch(batch)
+                drafts.abandon(old.draftId, old.generation)
+            }
+            val now = drafts.create("New scan", null, null)
+            assertTrue(drafts.view(now.draftId)!!.pages.isEmpty())
+            rejected(OperationErrorCode.RESOURCE_LIMIT) { drafts.reserve(now.draftId, now.generation, camera = true) }
+            assertNull("Refusing the shutter must not reserve a batch", drafts.view(now.draftId)!!.pending)
+            val refused = drafts.reserve(now.draftId, now.generation)
+            try {
+                sessions.prepareSelection(refused, listOf(uri))
+                fail("A seventeenth staging copy was admitted")
+            } catch (failure: RepositoryFailure) {
+                assertEquals(OperationErrorCode.RESOURCE_LIMIT, failure.error.code)
+                assertEquals("draft_staging_full", failure.error.safeMessageKey)
+                db.runInTransaction { assertTrue(db.importSessions().children(refused.value).isEmpty()) }
+            }
+            assertTrue(sessions.cancelUnboundBatch(refused))
+            assertNull(drafts.view(now.draftId)!!.pending)
+            assertNotEquals(refused, drafts.reserve(now.draftId, now.generation))
+        }
+    }
+
+    @Test fun conditionalRefusalCleanupCannotCancelABatchWithABoundSelection() = runBlocking<Unit> {
+        withMemoryDatabase { db ->
+            val sessions = RoomImportSessions(db)
+            val drafts = RoomAtelierDrafts(RoomMetadataAccess(db), db.atelierDrafts(), sessions)
+            val draft = drafts.create("Scan", null, null)
+            val batch = drafts.reserve(draft.draftId, draft.generation)
+            val uri = "content://fixture.documents/one"
+            val accepted = sessions.prepareSelection(batch, listOf(uri))
+            assertFalse(sessions.cancelUnboundBatch(batch))
+            assertEquals(accepted, sessions.prepareSelection(batch, listOf(uri)))
+            assertEquals(batch, drafts.view(draft.draftId)!!.pending)
+        }
+    }
+
+    @Test fun anOversizedSelectionDoesNotSpendTheLastCopySlot() = runBlocking<Unit> {
+        withMemoryDatabase { db ->
+            val metadata = RoomMetadataAccess(db)
+            val sessions = RoomImportSessions(db)
+            val drafts = RoomAtelierDrafts(metadata, db.atelierDrafts(), sessions)
+            val prepare = RoomIngestPreparation(db)
+            val uri = "content://fixture.documents/one"
+            for (count in listOf(8, 7)) {
+                val prior = drafts.create("Retired scan", null, null)
+                val batch = drafts.reserve(prior.draftId, prior.generation)
+                sessions.prepareSelection(batch, List(count) { uri }).childIds.forEach { prepare.prepare(it, uri) }
+                sessions.cancelBatch(batch)
+                drafts.abandon(prior.draftId, prior.generation)
+            }
+            val fresh = drafts.create("Scan", null, null)
+            val first = drafts.reserve(fresh.draftId, fresh.generation)
+            rejected(OperationErrorCode.RESOURCE_LIMIT) { sessions.prepareSelection(first, listOf(uri, uri)) }
+            assertTrue(sessions.cancelUnboundBatch(first))
+            val next = drafts.reserve(fresh.draftId, fresh.generation)
+            val selected = sessions.prepareSelection(next, listOf(uri)).childIds.single()
+            assertEquals(fresh.stagingDocumentId, prepare.prepare(selected, uri).documentId.value)
+        }
+    }
+
+    private suspend fun withMemoryDatabase(test: suspend (PristineDatabase) -> Unit) {
+        val context = InstrumentationRegistry.getInstrumentation().targetContext
+        val db = Room.inMemoryDatabaseBuilder(context, PristineDatabase::class.java).build()
+        try { test(db) } finally { db.close() }
     }
 
     private suspend fun rejected(code: OperationErrorCode, action: suspend () -> Any?) {

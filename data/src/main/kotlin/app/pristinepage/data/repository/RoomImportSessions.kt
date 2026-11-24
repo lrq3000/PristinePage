@@ -72,8 +72,12 @@ class RoomImportSessions @JvmOverloads constructor(private val metadata: Metadat
                     return ImportBatch(sessionId, children.map { ImportSessionId(it.sessionId) })
                 }
                 if (count > 100 - pages.size) reject(OperationErrorCode.RESOURCE_LIMIT, "document_page_limit", sessionId.value)
-                if (drafts?.savedDocumentIsHidden(parent.documentId) == true && drafts.attemptedItems(parent.documentId) + count > RoomAtelierDrafts.MAX_ITEMS_PER_DRAFT) {
+                val hidden = drafts?.savedDocumentIsHidden(parent.documentId) == true
+                if (hidden && checkNotNull(drafts).attemptedItems(parent.documentId) + count > RoomAtelierDrafts.MAX_ITEMS_PER_DRAFT) {
                     reject(OperationErrorCode.RESOURCE_LIMIT, "document_page_limit", sessionId.value)
+                }
+                if (metadata.hasAtelierCopyOwner(parent.documentId)) {
+                    requireAtelierCopyAllowance(metadata, parent.documentId, count, sessionId.value, hidden)
                 }
                 val now = clock()
                 val rows = List(count) { ordinal ->
@@ -154,6 +158,21 @@ class RoomImportSessions @JvmOverloads constructor(private val metadata: Metadat
                 if (sessions.updateSession(parent.copy(state = "RESERVED", uriText = identity)) != 1) reject(OperationErrorCode.INTEGRITY_FAILED, "import_session_unavailable", sessionId.value)
                 coroutineContext.ensureActive()
                 reserved
+            }
+        }
+    }
+
+    override suspend fun cancelUnboundBatch(sessionId: ImportSessionId): Boolean = withContext(dispatcher) {
+        guarded {
+            metadata.transaction {
+                val batch = sessions.session(sessionId.value) ?: return@transaction false
+                if (batch.sessionId != sessionId.value || batch.kind != "BATCH" || batch.parentSessionId != null ||
+                    batch.state != "WAITING_SELECTION" || batch.uriText != null || sessions.children(sessionId.value).isNotEmpty()) return@transaction false
+                coroutineContext.ensureActive()
+                if (sessions.updateSession(batch.copy(state = "CANCELED", errorCode = "CANCELED")) != 1)
+                    reject(OperationErrorCode.INTEGRITY_FAILED, "invalid_import_reservation", sessionId.value)
+                coroutineContext.ensureActive()
+                true
             }
         }
     }

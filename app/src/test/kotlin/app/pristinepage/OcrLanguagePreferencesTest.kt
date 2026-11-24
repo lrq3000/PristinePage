@@ -7,9 +7,24 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class OcrLanguagePreferencesTest {
-    @Test fun defaultsIncludeEnglishAndFrenchAndOfferTwentyDistinctChoices() {
+    @Test fun defaultsIncludeEnglishAndFrenchAndOfferTheFullCatalog() {
         assertEquals(listOf(OcrLanguage.ENGLISH, OcrLanguage.FRENCH), AtelierSettings.fromStored(emptyMap<String, String>()).ocrLanguages)
-        assertTrue(OcrLanguage.entries.map { it.packCode }.distinct().size >= 20)
+        assertEquals(124, OcrLanguage.entries.map { it.packCode }.distinct().size)
+        assertEquals(listOf("chi_tra_vert", "yor"), OcrLanguage.fromStored("chi_tra_vert,yor").map { it.packCode })
+    }
+
+    @Test fun nonLstmEquationPackCannotBeSelectedOrRestoredAsAnActiveLanguage() {
+        val settings = AtelierSettings()
+        assertEquals(settings, settings.withOcrLanguage(OcrLanguage.EQUATIONS, true))
+        assertEquals(listOf(OcrLanguage.ENGLISH), OcrLanguage.fromStored("equ,eng"))
+    }
+
+    @Test fun selectingFromTheFullCatalogCannotExceedTheDurableJobLimit() {
+        val selected = OcrLanguage.entries.take(32)
+        val settings = AtelierSettings(ocrLanguages = selected)
+        assertEquals(settings, settings.withOcrLanguage(OcrLanguage.entries[32], true))
+        val stored = (selected + OcrLanguage.entries[32]).joinToString(",") { it.packCode }
+        assertEquals(selected, OcrLanguage.fromStored(stored))
     }
 
     @Test fun existingPreferencesAndOrderedLanguagesSurviveReadingOldOrMixedValues() {

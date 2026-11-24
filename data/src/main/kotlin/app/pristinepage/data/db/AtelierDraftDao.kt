@@ -80,12 +80,23 @@ abstract class AtelierDraftDao {
     abstract fun retainedCopyAttempts(id: String): Long
     @Query("SELECT * FROM AtelierDraft WHERE state IN ('ACQUIRING','EDITING') ORDER BY createdAt,draftId LIMIT 2")
     abstract fun unfinished(): List<AtelierDraftRow>
-    @Query("""SELECT COUNT(*) FROM AtelierDraft d WHERE d.state NOT IN ('ABANDONED','COMMITTED') OR EXISTS (
-        SELECT 1 FROM ImportSession item JOIN FileTransaction attempt ON attempt.kind='INGEST' AND attempt.ownerId=item.sessionId
-        WHERE item.documentId=d.stagingDocumentId AND item.kind='ITEM'
-          AND (d.state='ABANDONED' OR item.state!='COMMITTED' OR attempt.state!='COMMITTED')
+    @Query("SELECT EXISTS (SELECT 1 FROM AtelierDraft WHERE stagingDocumentId=:id)")
+    abstract fun hasCopyOwner(id: String): Boolean
+    // Lead with Atelier owners so unrelated ordinary import history cannot drive this scan. A promoted row releases only
+    // committed copies with a structurally present receipt; full receipt and source verification remain the read boundary.
+    @Query("""SELECT COUNT(*) FROM (
+        SELECT 1 FROM AtelierDraft d
+        CROSS JOIN ImportSession item ON item.documentId=d.stagingDocumentId AND item.kind='ITEM'
+        CROSS JOIN FileTransaction attempt ON attempt.kind='INGEST' AND attempt.ownerId=item.sessionId
+        WHERE NOT (d.state='COMMITTED' AND item.state='COMMITTED' AND attempt.state='COMMITTED'
+          AND d.committedDocumentId IS coalesce(d.targetDocumentId,d.stagingDocumentId)
+          AND d.activeBatchId IS NULL AND typeof(d.generation)='integer' AND d.generation>1
+          AND typeof(d.step)='integer' AND d.step=2 AND typeof(d.receiptPageIds)='text'
+          AND length(CAST(d.receiptPageIds AS BLOB)) BETWEEN 197 AND 1400
+          AND instr(d.receiptPageIds,'atelier-publish-v1'||char(10)||(d.generation-1)||char(10)||d.committedDocumentId||char(10))=1)
+        LIMIT :limit
     )""")
-    abstract fun hiddenCount(): Int
+    abstract fun retainedStagingCopyAttempts(limit: Int): Int
     @Insert(onConflict = OnConflictStrategy.ABORT) abstract fun insert(row: AtelierDraftRow)
     @Update(onConflict = OnConflictStrategy.ABORT) abstract fun update(row: AtelierDraftRow): Int
 }

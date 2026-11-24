@@ -77,7 +77,13 @@ class ApplicationLibraryActions(
             is LibraryPhotoResult.Rejected -> PhotoSelection.Rejected(selection.error)
         }
         val outcomes = PhotoImportResultRouter(graph.photoImports, graph.store.lifecycle, onPagesSaved).deliver(request, native)
-        if (capture != null && outcomes.none { it is IngestResult.Pending }) withContext(Dispatchers.IO) { capture.discard() }
+        // A late staging refusal can follow a real shutter but precede ingest. Keep the camera handoff
+        // available until the user explicitly clears its pending batch; do not treat it as a completed copy.
+        if (capture != null && outcomes.none { it is IngestResult.Pending || it is IngestResult.Rejected &&
+                it.error.code == OperationErrorCode.RESOURCE_LIMIT &&
+                it.error.safeMessageKey in setOf("draft_staging_full", "draft_staging_selection_limit", "draft_copy_limit") }) {
+            withContext(Dispatchers.IO) { capture.discard() }
+        }
         return outcomes
     }
     override suspend fun cancel(request: PhotoImportRequest) {

@@ -34,7 +34,7 @@ class AtelierAcquisition internal constructor(
         val created = draft.create(title, target, revision)
         return draft.view(created.draftId) ?: missing()
     }
-    suspend fun begin(view: AtelierDraftView): ImportSessionId = draft.reserve(view.id, view.generation)
+    suspend fun begin(view: AtelierDraftView, camera: Boolean = false): ImportSessionId = draft.reserve(view.id, view.generation, camera)
     suspend fun refresh(view: AtelierDraftView): AtelierDraftView = draft.view(view.id) ?: missing()
     suspend fun finish(view: AtelierDraftView): AtelierDraftView {
         draft.finish(view.id, view.generation)

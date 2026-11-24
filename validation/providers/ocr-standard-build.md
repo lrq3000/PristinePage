@@ -1,6 +1,6 @@
 # Standard offline OCR build
 
-Both standard app variants use the same offline Tesseract runtime and 20 pinned recognition files. The app has no OCR-free flavor and does not fetch language packs at runtime. Keep these third-party files out of Git. Assembly is not authorization to distribute the resulting APK.
+Both standard app variants use the same offline Tesseract runtime. The current build requires the expanded 124-pack stage below; historical evidence in this file uses the original 20. The app has no OCR-free flavor and does not fetch language packs at runtime. Keep these third-party files out of Git. Assembly is not authorization to distribute the resulting APK.
 
 ## Stage already approved inputs
 
@@ -20,6 +20,18 @@ python -B validation/providers/prepare_ocr_local_app.py validation/raw/providers
 ```
 
 The preparer verifies each source file before staging, extracts compile classes from the exact AAR, and verifies the resulting exact inventory. The common Gradle pre-build task authenticates it again for both variants. Use the [normal pinned, strict-offline Gradle setup](../../README.md#current-build-baseline). For review, run the preparer with `--apk <path-to-apk>` to authenticate the packaged payload independently of Gradle; also check the manifest, DEX, alignment, signing identity (debug only), and the installed app/test hashes.
+
+### Expanded standard stage
+
+After the operator's acquisition approval, retrieve only the 104 missing recognition blobs by the authenticated publisher tree and preserve the existing approved stage. The preparer checks the full receipt digest before staging and checks every selected input against the resulting known inventory. Neither the 37 script bundles nor `osd` is fetched or packaged.
+
+```text
+python -B validation/providers/fetch_tessdata_fast_languages.py ocr-publisher-languages-410
+python -B validation/providers/prepare_ocr_local_app.py validation/raw/providers/ocr-app-standard-full --expand-from-verified-stage validation/raw/providers/ocr-app-standard --language-inputs validation/raw/providers/ocr-publisher-languages-410
+python -B validation/providers/prepare_ocr_local_app.py validation/raw/providers/ocr-app-standard-full
+```
+
+The trusted expanded receipt is 9,616 bytes (SHA-256 `7174b1547e187af3671e6e22275b1ee5c8ac41aad4b0e7f8e993c40b37807423`), and the private asset inventory totals 344,846,851 uncompressed language bytes. This is not a heap use estimate; the owner streams bounded buffers and checks the complete immutable directory before lending it to native code, which may load model-declared sublanguages. On upgrade, retain the original 20-pack directory rather than deleting known-good prior files. First-use copy, resident filesystem cost and repeated verification require separate latency and resource evidence.
 
 ## Local qualification and release boundary
 

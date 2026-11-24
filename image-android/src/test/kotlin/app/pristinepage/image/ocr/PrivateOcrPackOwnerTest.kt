@@ -109,14 +109,27 @@ class PrivateOcrPackOwnerTest {
         assertTrue(PrivateOcrPackOwner::class.java.declaredConstructors.all { it.isSynthetic || Modifier.isPrivate(it.modifiers) })
     }
 
-    private fun owner(root: Path, owned: (Path) -> Boolean = { true }): PrivateOcrPackOwner {
+    @Test fun catalogCanExceedTheJobLanguageLimitWithoutChangingOrderOrIntegrity() {
+        val root = fixture.newFolder().toPath()
+        val pins = (0 until 124).map { index -> VerifiedOcrPackDirectory.Pin(english.copy(code = "pack$index"), 5) }
+        val catalog = owner(root, pins)
+        assertTrue(catalog.install { ByteArrayInputStream("hello".encodeToByteArray()) })
+        val selected = OcrLanguagePacks(listOf(pins[123].identity, pins[0].identity))
+        assertEquals(selected, catalog.resolveOrdered(listOf("pack123", "pack0")))
+        assertNull(catalog.resolveOrdered(pins.take(33).map { it.identity.code }))
+        val ready = checkNotNull(catalog.acquire(selected))
+        Files.write(ready.resolve("tessdata/pack100.traineddata"), "HELLO".encodeToByteArray())
+        assertNull(catalog.acquire(selected))
+    }
+
+    private fun owner(root: Path, pins: List<VerifiedOcrPackDirectory.Pin> = listOf(
+        VerifiedOcrPackDirectory.Pin(english, 5),
+        VerifiedOcrPackDirectory.Pin(french, 5),
+    ), owned: (Path) -> Boolean = { true }): PrivateOcrPackOwner {
         val constructor = PrivateOcrPackOwner::class.java.declaredConstructors.single { !it.isSynthetic }
         constructor.isAccessible = true
         val directories: (Path) -> Boolean = { it.startsWith(root) }
-        return constructor.newInstance(root, listOf(
-            VerifiedOcrPackDirectory.Pin(english, 5),
-            VerifiedOcrPackDirectory.Pin(french, 5),
-        ), owned, directories) as PrivateOcrPackOwner
+        return constructor.newInstance(root, pins, owned, directories) as PrivateOcrPackOwner
     }
 
     private fun pack(code: String) = ByteArrayInputStream(when (code) {

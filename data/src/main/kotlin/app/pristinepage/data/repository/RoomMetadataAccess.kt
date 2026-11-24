@@ -18,6 +18,8 @@ class RoomMetadataAccess(private val database: PristineDatabase) : MetadataAcces
         } catch (_: IllegalArgumentException) { true }
     }
     override fun retainedAtelierCopyAttempts(documentId: String): Long = database.atelierDrafts().retainedCopyAttempts(documentId)
+    override fun hasAtelierCopyOwner(documentId: String): Boolean = database.atelierDrafts().hasCopyOwner(documentId)
+    override fun retainedStagingCopyAttempts(limit: Int): Int = database.atelierDrafts().retainedStagingCopyAttempts(limit)
     override fun atelierEditingDocument(draftId: String, generation: Long): String? = database.atelierDrafts().editingDocument(draftId, generation)
     override fun ownsAtelierPublication(drafts: AtelierDraftDao): Boolean = database.atelierDrafts() === drafts
 }

@@ -14,17 +14,16 @@ import androidx.activity.result.contract.ActivityResultContract
 import androidx.core.app.ActivityOptionsCompat
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
-import app.pristinepage.capture.PhotoImportController
+import app.pristinepage.capture.PhotoImportRequest
+import app.pristinepage.capture.PhotoImportResultRouter
 import app.pristinepage.capture.PhotoSelection
 import app.pristinepage.data.model.*
-import app.pristinepage.data.repository.ImportSessionLifecycle
 import app.pristinepage.data.repository.SourceInput
 import java.io.ByteArrayInputStream
 import java.io.ByteArrayOutputStream
 import java.io.File
 import java.lang.reflect.InvocationTargetException
 import java.util.UUID
-import kotlin.coroutines.intrinsics.suspendCoroutineUninterceptedOrReturn
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.*
 import org.junit.Test
@@ -227,12 +226,7 @@ class PhotoResultRoutingTest {
         }
         fun launch(registration: AutoCloseable) { registration.javaClass.getMethod("launch").invoke(registration) }
         fun main(block: () -> Unit) = InstrumentationRegistry.getInstrumentation().runOnMainSync(block)
-        suspend fun deliver(graph: ApplicationImports, result: Pair<Any, PhotoSelection>): List<IngestResult> {
-            val router = type("PhotoImportResultRouter").getConstructor(PhotoImportController::class.java, ImportSessionLifecycle::class.java).newInstance(graph.photoImports, graph.store.lifecycle)
-            return suspendCoroutineUninterceptedOrReturn { continuation ->
-                try { router.javaClass.getMethod("deliver", type("PhotoImportRequest"), PhotoSelection::class.java, kotlin.coroutines.Continuation::class.java).invoke(router, result.first, result.second, continuation) }
-                catch (failure: InvocationTargetException) { throw failure.targetException }
-            }
-        }
+        suspend fun deliver(graph: ApplicationImports, result: Pair<Any, PhotoSelection>): List<IngestResult> =
+            PhotoImportResultRouter(graph.photoImports, graph.store.lifecycle).deliver(result.first as PhotoImportRequest, result.second)
     }
 }
