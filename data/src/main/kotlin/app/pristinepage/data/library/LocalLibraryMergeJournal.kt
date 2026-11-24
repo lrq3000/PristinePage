@@ -10,6 +10,10 @@ import java.nio.file.Path
 /** Binds an app-owned closed stage under private scratch. Callers must retain exclusive ownership and know the ancestor's own directory entry is durable. */
 internal class LocalLibraryMergeJournal(root: File, private val durableAncestor: Path, directorySync: DirectorySync = PlatformDirectorySync) {
     private val scratch = LocalLibraryDirectory(root, directorySync)
+    val rootPath: Path get() = scratch.rootPath
+
+    /** Only for the admitted journal consumer: verify the returned stream against the persisted exact candidate on each use. */
+    fun openStage(generation: String) = scratch.openMergeStage(generation) ?: throw IOException("Private merge stage disappeared")
 
     fun publish(intent: LibraryMergeIntent, checkpoint: () -> Unit = {}): LibraryMergeIntent {
         val generation = intent.candidate.id
@@ -42,8 +46,7 @@ internal class LocalLibraryMergeJournal(root: File, private val durableAncestor:
     }
 
     private fun verifyStage(intent: LibraryMergeIntent, checkpoint: () -> Unit) =
-        scratch.openMergeStage(intent.candidate.id)?.use { intent.candidate.verifyCatalog(it, checkpoint) }
-            ?: throw IOException("Private merge stage disappeared")
+        openStage(intent.candidate.id).use { intent.candidate.verifyCatalog(it, checkpoint) }
 
     private fun conflict(): Nothing = throw IOException("Private merge intent conflicts with its stage")
 }

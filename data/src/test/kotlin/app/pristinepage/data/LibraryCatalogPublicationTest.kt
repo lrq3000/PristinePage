@@ -123,7 +123,7 @@ class LibraryCatalogPublicationTest {
     private fun publisher(store: LibraryCatalogPublication.Store) =
         LibraryCatalogPublication(store, temporary.newFolder().toPath())
     private fun publish(directory: Folder, verify: (File) -> Unit) =
-        publisher(directory).publish(generation, 100, { "abc".byteInputStream() }, verify)
+        publisher(directory).publish(generation, 100, { "abc".byteInputStream() }, verifyReopen = verify)
 
     private class Folder(root: File, generation: LibraryGeneration, predecessor: String) : LibraryCatalogPublication.Store {
         val catalog = File(root, generation.catalogPath).apply { checkNotNull(parentFile).mkdirs() }
@@ -137,7 +137,7 @@ class LibraryCatalogPublicationTest {
         override fun createMarker(generation: LibraryGeneration, bytes: ByteArray) {
             Files.newOutputStream(marker.toPath(), CREATE_NEW, WRITE).use { it.write(bytes) }
         }
-        override fun confirmPayloadDurability(generation: LibraryGeneration) = Unit
+        override fun confirmPayloadDurability(generation: LibraryGeneration, requiresObjects: Boolean) = Unit
         override fun confirmMarkerDurability(generation: LibraryGeneration) = Unit
     }
 }

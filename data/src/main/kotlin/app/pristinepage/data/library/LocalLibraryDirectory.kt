@@ -93,13 +93,30 @@ internal class LocalLibraryDirectory(root: File, private val directorySync: Dire
     }
 
     /** Iterates a bounded inventory and refuses uncertainty rather than silently opening an older generation. Does not publish, remove or repair anything. */
-    fun readTip(checkpoint: () -> Unit = {}): LibraryGeneration {
+    fun readTip(checkpoint: () -> Unit = {}): LibraryGeneration = generationInventory(checkpoint).tip
+
+    class GenerationInventory(private val markers: List<LibraryGeneration>, private val entryCount: Int) {
+        val tip = LibraryGenerationChain.tip(markers)
+
+        fun requireExact(generation: LibraryGeneration) {
+            if (generation !in markers) throw IOException("The exact retained library generation is missing or changed")
+        }
+
+        fun requireAppendable(candidate: LibraryGeneration) {
+            // Budget both the marker and its staging leaf, even if cleanup of the latter is refused.
+            if (entryCount > 2 * LibraryGenerationChain.MAX_MARKERS - 2 || LibraryGenerationChain.tip(markers + candidate) != candidate) {
+                throw IOException("The destination cannot admit the new library generation")
+            }
+        }
+    }
+
+    fun generationInventory(checkpoint: () -> Unit = {}): GenerationInventory {
         val root = readPath("generations")
         if (!Files.isDirectory(root, NOFOLLOW_LINKS)) throw IOException("Library generation folder is unavailable")
         val markers = ArrayList<LibraryGeneration>()
+        var entries = 0
         try {
             Files.newDirectoryStream(root).use {
-                var entries = 0
                 for (entry in it) {
                     checkpoint()
                     if (++entries > 2 * LibraryGenerationChain.MAX_MARKERS) throw IOException("Library generation inventory exceeds the limit")
@@ -116,13 +133,21 @@ internal class LocalLibraryDirectory(root: File, private val directorySync: Dire
             throw IOException("Library generation inventory could not be read")
         }
         checkpoint()
-        return LibraryGenerationChain.tip(markers)
+        return GenerationInventory(markers, entries)
     }
 
-    override fun confirmPayloadDurability(generation: LibraryGeneration) {
+    override fun confirmPayloadDurability(generation: LibraryGeneration, requiresObjects: Boolean) {
         forceParentOf(generation.catalogPath)
-        val objects = paths.beneath("objects")
-        if (Files.isDirectory(objects.toPath(), NOFOLLOW_LINKS)) forceDirectory(objects)
+        val objects = readPath("objects")
+        val attributes = try { Files.readAttributes(objects, BasicFileAttributes::class.java, NOFOLLOW_LINKS) }
+        catch (missing: NoSuchFileException) {
+            if (requiresObjects) throw missing
+            null
+        }
+        if (attributes != null) {
+            if (!attributes.isDirectory) throw IOException("Library objects namespace is not a directory")
+            forceDirectory(objects.toFile())
+        }
         // The root may have acquired the catalogs/objects directory links since the last acknowledged generation.
         forceDirectory(paths.root)
         forceDirectory(checkNotNull(paths.root.parentFile))

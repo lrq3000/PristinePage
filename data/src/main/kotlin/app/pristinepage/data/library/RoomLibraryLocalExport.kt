@@ -73,7 +73,9 @@ internal class RoomLibraryLocalExport(
         val transfer = LibraryObjectTransfer(adapter, checkpoint).prepare(requirements, metadataReservation, capacity)
         checkpoint()
         transfer.copyAndVerify()
-        val published = LibraryCatalogPublication(adapter, scratch, checkpoint).publish(generation, MAX_PORTABLE_BYTES, { readRegular(closed) }) { verification ->
+        val published = LibraryCatalogPublication(adapter, scratch, checkpoint).publish(
+            generation, MAX_PORTABLE_BYTES, { readRegular(closed) }, requiresObjects = requirements.isNotEmpty(),
+        ) { verification ->
             reader.read(verification) { catalog ->
                 verifyOriginalReferences(catalog, snapshot.originals, checkpoint)
                 LibraryObjectTransfer(adapter, checkpoint).prepare(

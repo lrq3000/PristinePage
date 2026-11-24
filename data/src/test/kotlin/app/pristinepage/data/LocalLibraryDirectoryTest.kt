@@ -101,4 +101,20 @@ class LocalLibraryDirectoryTest {
         assertThrows(IOException::class.java) { directory.readTip() }
         assertArrayEquals(later.encode(), wrongName.readBytes())
     }
+
+    @Test fun aNonDirectoryObjectNamespaceCannotBeSkippedAsThoughKnownAbsent() {
+        val root = temporary.newFolder()
+        val directory = LocalLibraryDirectory(root, DirectorySync { true })
+        directory.createCatalog(generation) { it.write("abc".toByteArray()) }
+        File(root, "objects").writeText("unrelated")
+        assertThrows(IOException::class.java) { directory.confirmPayloadDurability(generation) }
+        assertEquals("unrelated", File(root, "objects").readText())
+    }
+
+    @Test fun knownMissingObjectNamespaceIsAllowedOnlyForAnEmptyGeneration() {
+        val directory = LocalLibraryDirectory(temporary.newFolder(), DirectorySync { true })
+        directory.createCatalog(generation) { it.write("abc".toByteArray()) }
+        directory.confirmPayloadDurability(generation, requiresObjects = false)
+        assertThrows(IOException::class.java) { directory.confirmPayloadDurability(generation, requiresObjects = true) }
+    }
 }

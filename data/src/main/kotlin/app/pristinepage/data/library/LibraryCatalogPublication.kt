@@ -21,7 +21,7 @@ internal class LibraryCatalogPublication(private val store: Store, private val p
         fun createMarker(generation: LibraryGeneration, bytes: ByteArray)
 
         /** Confirm durability of the catalog and already transferred objects before publishing or accepting a marker, including on retry. */
-        fun confirmPayloadDurability(generation: LibraryGeneration)
+        fun confirmPayloadDurability(generation: LibraryGeneration, requiresObjects: Boolean = false)
 
         /** Confirm the durable visibility of the exact marker. Simply reading an unacknowledged write is not sufficient. */
         fun confirmMarkerDurability(generation: LibraryGeneration)
@@ -34,11 +34,14 @@ internal class LibraryCatalogPublication(private val store: Store, private val p
         generation: LibraryGeneration,
         maximumCatalogBytes: Long,
         openIncoming: () -> InputStream,
+        verifyExistingOnly: Boolean = false,
+        requiresObjects: Boolean = false,
         verifyReopen: (File) -> Unit,
     ): LibraryGeneration {
         require(maximumCatalogBytes > 0)
         if (generation.catalog.byteCount > maximumCatalogBytes) throw IOException("Library catalog exceeds admission limit")
         val alreadyMarked = markerExists(generation)
+        if (verifyExistingOnly && !alreadyMarked) throw IOException("The expected published library marker is missing")
         checkpoint()
         val catalog = store.openCatalog(generation)
         if (catalog == null) {
@@ -51,7 +54,7 @@ internal class LibraryCatalogPublication(private val store: Store, private val p
         (catalog ?: openCatalog(generation)).use { LibraryCatalogVerification(privateScratch, checkpoint).read(it, generation, verifyReopen) }
         // A second read must still identify the catalog we actually reopened, not a provider's replacement at the same locator.
         openCatalog(generation).use { generation.verifyCatalog(it, checkpoint) }
-        store.confirmPayloadDurability(generation)
+        store.confirmPayloadDurability(generation, requiresObjects)
         checkpoint()
         if (!alreadyMarked) store.createMarker(generation, generation.encode())
         store.confirmMarkerDurability(generation)

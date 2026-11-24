@@ -57,7 +57,7 @@ class LocalLibraryMergeJournalTest {
         assertTrue(File(root, "merge-stages/${child.id}/merge.intent").isFile)
         assertThrows(IOException::class.java) { journal.reopen(child.id) }
         failIntentSync = false
-        assertEquals(intent, LocalLibraryMergeJournal(root, root.parentFile.toPath(), sync).reopen(child.id))
+        assertEquals(intent, LocalLibraryMergeJournal(root, checkNotNull(root.parentFile).toPath(), sync).reopen(child.id))
     }
 
     @Test fun aFailedOwnedAncestorSyncCannotExposeAnIntent() {
@@ -69,7 +69,7 @@ class LocalLibraryMergeJournalTest {
         assertEquals(stageText, stage.readText())
     }
 
-    private fun stage(root: File, sync: DirectorySync = DirectorySync { true }, ancestor: File = root.parentFile): Pair<LocalLibraryMergeJournal, File> {
+    private fun stage(root: File, sync: DirectorySync = DirectorySync { true }, ancestor: File = checkNotNull(root.parentFile)): Pair<LocalLibraryMergeJournal, File> {
         val stageDirectory = File(root, "merge-stages/${child.id}").apply { check(mkdirs()) }
         val stage = File(stageDirectory, "catalog.sqlite").apply { writeText(stageText) }
         return LocalLibraryMergeJournal(root, ancestor.toPath(), sync) to stage

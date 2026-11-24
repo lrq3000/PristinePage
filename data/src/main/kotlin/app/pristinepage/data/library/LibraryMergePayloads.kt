@@ -20,6 +20,21 @@ internal object LibraryMergePayloads {
         availableBytes: Long,
         checkpoint: () -> Unit = {},
     ): Estimate {
+        val prepared = prepare(candidate, destinationRows, incomingRows, destination, source, catalogAndJournalBytes, availableBytes, false, checkpoint)
+        return Estimate(prepared.missingBytes, prepared.requiredBytes)
+    }
+
+    fun prepare(
+        candidate: LibraryCatalogMerge.Candidate,
+        destinationRows: List<SourceBlobRow>,
+        incomingRows: List<SourceBlobRow>,
+        destination: LocalLibraryDirectory,
+        source: LocalLibraryDirectory,
+        catalogAndJournalBytes: Long,
+        availableBytes: Long,
+        published: Boolean,
+        checkpoint: () -> Unit,
+    ): LibraryObjectTransfer.Prepared {
         val targetRoot = destination.rootPath
         val sourceRoot = source.rootPath
         if (targetRoot.startsWith(sourceRoot) || sourceRoot.startsWith(targetRoot) || Files.isSameFile(targetRoot, sourceRoot)) {
@@ -50,9 +65,8 @@ internal object LibraryMergePayloads {
         val requirements = existing.map { Requirement(it, null) } + incomingObjects.map { id ->
             Requirement(id) { source.open(id) ?: throw IOException("Merge source original is missing") }
         }
-        val prepared = LibraryObjectTransfer(destination, checkpoint).prepare(requirements,
-            catalogAndJournalBytes, availableBytes, requiredExisting = existing)
-        return Estimate(prepared.missingBytes, prepared.requiredBytes)
+        return LibraryObjectTransfer(destination, checkpoint).prepare(requirements, catalogAndJournalBytes, availableBytes,
+            requiredExisting = if (published) staged.values.toSet() else existing)
     }
 
     private fun inventory(rows: List<SourceBlobRow>): Map<String, ObjectId> {
