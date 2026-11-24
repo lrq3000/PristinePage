@@ -15,7 +15,7 @@ import org.junit.Test
 
 class ActiveLibraryFenceTest {
     private val default = Selection(Location.Default, Identity(id(1), 1))
-    private val selected = Selection(Location.Folder(id(3)), Identity(id(4), 2))
+    private val selected = Selection(Location.Folder(id(3), id(5)), Identity(id(4), 2))
 
     @Test fun aDelayedJobCannotEnterAfterASelectionChangeEvenWhenItsLibraryWasReselected() = runTest {
         val fence = ActiveLibraryFence(default)
@@ -73,6 +73,51 @@ class ActiveLibraryFenceTest {
         assertFalse(fence.reconcile { default })
         assertTrue(fence.reconcile { selected })
         assertEquals(State.Ready(selected), fence.state())
+    }
+
+    @Test fun revokingTheOldFolderDuringARefusedSwitchKeepsItDisconnected() = runTest {
+        val fence = ActiveLibraryFence(selected)
+        val next = default.copy(identity = default.identity.copy(activation = 3))
+        val publishing = CompletableDeferred<Unit>()
+        val release = CompletableDeferred<Unit>()
+        val changed = async {
+            fence.change(selected.identity, next) { publishing.complete(Unit); release.await(); false }
+        }
+        publishing.await()
+        assertTrue(fence.unavailable(selected.identity))
+        release.complete(Unit)
+        assertFalse(changed.await())
+        assertEquals(State.Reconnect(selected), fence.state())
+        assertNull(fence.use(selected.identity) { it })
+    }
+
+    @Test fun aPublishedButRevokedDestinationCannotAdmitAConsumer() = runTest {
+        val fence = ActiveLibraryFence(default)
+        val publishing = CompletableDeferred<Unit>()
+        val release = CompletableDeferred<Unit>()
+        val changed = async {
+            fence.change(default.identity, selected) { publishing.complete(Unit); release.await(); true }
+        }
+        publishing.await()
+        assertTrue(fence.unavailable(selected.identity))
+        release.complete(Unit)
+        assertTrue(changed.await())
+        assertEquals(State.Reconnect(selected), fence.state())
+        assertNull(fence.use(selected.identity) { it })
+    }
+
+    @Test fun aSecondRevocationInvalidatesAnOutstandingReconnectProof() = runTest {
+        val fence = ActiveLibraryFence(selected)
+        assertTrue(fence.unavailable(selected.identity))
+        val read = CompletableDeferred<Unit>()
+        val release = CompletableDeferred<Unit>()
+        val reconnect = async { fence.reconcile { read.complete(Unit); release.await(); selected } }
+        read.await()
+        assertTrue(fence.unavailable(selected.identity))
+        release.complete(Unit)
+        assertFalse(reconnect.await())
+        assertNull(fence.use(selected.identity) { it })
+        assertTrue(fence.reconcile { selected })
     }
 
     private fun id(value: Int) = UUID(0L, value.toLong()).toString()

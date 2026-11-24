@@ -10,8 +10,11 @@ import kotlinx.coroutines.ensureActive
 internal class ActiveLibraryFence(initial: Selection) {
     sealed interface Location {
         data object Default : Location
-        data class Folder(val grantId: String) : Location {
-            init { requireOpaqueId(grantId) }
+        data class Folder(val grantId: String, val admittedGenerationId: String) : Location {
+            init {
+                requireOpaqueId(grantId)
+                requireOpaqueId(admittedGenerationId)
+            }
         }
     }
 
@@ -35,6 +38,7 @@ internal class ActiveLibraryFence(initial: Selection) {
     private var status: State = State.Ready(initial)
     private var consumers = 0
     private var reconciling = false
+    private val revokedDuringProof = HashSet<Identity>(2)
 
     fun state(): State = synchronized(monitor) { status }
 
@@ -54,30 +58,46 @@ internal class ActiveLibraryFence(initial: Selection) {
         }
     }
 
-    /** A false callback result proves no publication; any exception after exclusive admission requires durable reconciliation. */
+    /** False means the exact old selection remains authoritative. An exception is uncertain and requires durable reconciliation. */
     suspend fun change(expected: Identity, next: Selection, publishVerified: suspend CoroutineScope.() -> Boolean): Boolean {
         currentCoroutineContext().ensureActive()
         val before = synchronized(monitor) {
             val ready = status as? State.Ready ?: return false
             if (consumers != 0 || ready.selection.identity != expected || next.identity.activation != expected.activation + 1) return false
+            revokedDuringProof.clear()
             status = State.Switching(ready.selection, next)
             ready.selection
         }
         try {
             val published = coroutineScope { ensureActive(); publishVerified() }
-            synchronized(monitor) { status = State.Ready(if (published) next else before) }
+            synchronized(monitor) {
+                val authoritative = if (published) next else before
+                status = if (authoritative.identity in revokedDuringProof) State.Reconnect(authoritative) else State.Ready(authoritative)
+                revokedDuringProof.clear()
+            }
             return published
         } catch (failure: Throwable) {
-            synchronized(monitor) { status = State.Uncertain(before, next) }
+            synchronized(monitor) {
+                status = State.Uncertain(before, next)
+                revokedDuringProof.clear()
+            }
             throw failure
         }
     }
 
     /** Revocation closes new admissions immediately. Already running operations must still observe actual provider loss. */
     fun unavailable(expected: Identity): Boolean = synchronized(monitor) {
-        val ready = status as? State.Ready ?: return false
-        if (ready.selection.identity != expected || ready.selection.location !is Location.Folder) return false
-        status = State.Reconnect(ready.selection)
+        fun matches(selection: Selection) = selection.identity == expected && selection.location is Location.Folder
+        when (val current = status) {
+            is State.Ready -> if (matches(current.selection)) status = State.Reconnect(current.selection) else return false
+            is State.Switching -> if (matches(current.before) || matches(current.after)) revokedDuringProof += expected else return false
+            is State.Reconnect -> if (matches(current.selection)) {
+                if (reconciling) revokedDuringProof += expected
+            } else return false
+            is State.Uncertain -> if (matches(current.before) || matches(current.after)) {
+                if (reconciling) revokedDuringProof += expected
+            } else return false
+        }
         true
     }
 
@@ -91,16 +111,21 @@ internal class ActiveLibraryFence(initial: Selection) {
                 is State.Uncertain -> setOf(current.before, current.after)
                 else -> return false
             }
+            revokedDuringProof.clear()
             reconciling = true
             permitted
         }
-        try {
-            val selected = coroutineScope { ensureActive(); readVerified() }
-            if (selected == null || selected !in allowed) return false
-            synchronized(monitor) { status = State.Ready(selected) }
-            return true
-        } finally {
+        val selected = try {
+            coroutineScope { ensureActive(); readVerified() }
+        } catch (failure: Throwable) {
             synchronized(monitor) { reconciling = false }
+            throw failure
+        }
+        return synchronized(monitor) {
+            reconciling = false
+            if (selected == null || selected !in allowed || selected.identity in revokedDuringProof) return@synchronized false
+            status = State.Ready(selected)
+            true
         }
     }
 }
