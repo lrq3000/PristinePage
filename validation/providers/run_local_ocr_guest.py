@@ -187,7 +187,8 @@ def load_allocator(root, guest, raw, owner):
     return ns
 
 
-def run_type(ns):
+def run_type(ns, *, purpose="pristinepage-ocr-qualification", operation="PristinePage local OCR guest",
+             fresh_disk_floor_gib=12, add_statuses=(0, 1, 2)):
     base, console, adb, now = (ns[key] for key in ("PickerAdapterRun", "CONSOLE", "ADB", "now"))
 
     class Run(base):
@@ -222,7 +223,8 @@ def run_type(ns):
                 available = int(self.command(["pwsh", "-NoProfile", "-Command",
                                              "(Get-CimInstance Win32_OperatingSystem).FreePhysicalMemory"]).strip())
                 free = min(shutil.disk_usage(ns["ROOT"]).free, shutil.disk_usage(console.parent / "vms").free)
-                need(available >= RAM_KIB and free >= 12 * 1024**3, "Not enough RAM or disk for safe guest admission")
+                disk_floor = fresh_disk_floor_gib if create else 12
+                need(available >= RAM_KIB and free >= disk_floor * 1024**3, "Not enough RAM or disk for safe guest admission")
                 need("1.0.41" in self.command([adb, "version"]), "Unexpected local ADB protocol")
                 prior_server = self.protocol(True)
                 if prior_server == "absent":
@@ -233,17 +235,17 @@ def run_type(ns):
                 if create:
                     need(not self.record.exists() and all(row[1] != name for row in before), "New guest name already exists")
                     record = {"name": name, "index": None, "installation": str(console.parent), "worktree": str(ns["ROOT"]),
-                              "purpose": "pristinepage-ocr-qualification", "created_by_agent": True, "disposable": False,
+                              "purpose": purpose, "created_by_agent": True, "disposable": False,
                               "created": now(), "keep_running": False, "handoff_to": None, "ownership_history": []}
                 elif recovery:
                     record = self.owned_provision(before, recovery, console)
                 else:
                     record = json.loads(self.record.read_text())
                     need(record["name"] == name and record["installation"] == str(console.parent)
-                         and record.get("purpose") == "pristinepage-ocr-qualification"
+                         and record.get("purpose") == purpose
                          and record["owner"] is None and record["state"] == "stopped-released" and record["shutdown_verified"]
                           and not record["keep_running"] and not record["handoff_to"]
-                          and not record.get("radio_recovery_required"), "Not this released OCR guest, or radio restoration needs reconciliation")
+                         and not record.get("radio_recovery_required"), "Not this released test guest, or radio restoration needs reconciliation")
                     self.index = record["index"]
                     self.require_stopped(self.exact(before))
                     for pid, start in record["shutdown_processes"]:
@@ -258,10 +260,10 @@ def run_type(ns):
                 self.save(self.record, record, durable=True)
                 self.claimed = True
                 self.save(self.slot, {"owner": ns["OWNER"], "generation": self.generation,
-                                      "state": "held", "operation": "PristinePage local OCR guest", "acquired": now()}, durable=True)
+                                      "state": "held", "operation": operation, "acquired": now()}, durable=True)
                 if create:
-                    # Exit 1 or 2 can accompany a complete, stopped registration; only a unique new index and both disks admit it.
-                    self.command([console, "add", "--name", name], timeout=95, allowed=(0, 1, 2))
+                    # An allowed nonzero status is not success; only a unique stopped registration and both disks admit it.
+                    self.command([console, "add", "--name", name], timeout=95, allowed=add_statuses)
                     self.index = inspect_fresh_registration(before, self.inventory(), name, console.parent)
                     record.update(index=self.index, state="launching")
                     self.save(self.record, record, durable=True)
@@ -325,8 +327,8 @@ def run_type(ns):
 
         def configure_local_adb(self, console):
             record = self.owned()
-            need(record["purpose"] == "pristinepage-ocr-qualification" and record["index"] == self.index,
-                 "Local-only ADB applies only to the exact OCR qualification guest")
+            need(record["purpose"] == purpose and record["index"] == self.index,
+                 "Local-only ADB applies only to the exact qualification guest")
             self.require_stopped(self.exact(self.inventory()))
             need(self.command([console, "isrunning", "--index", str(self.index)]).strip() == "stop", "Guest is not stopped")
             config = console.parent / "vms/config" / f"leidian{self.index}.config"
@@ -350,7 +352,7 @@ def run_type(ns):
         def owned_provision(self, rows, generation, console):
             record = json.loads(self.record.read_text())
             need(record["name"] == ns["NAME"] and record["installation"] == str(console.parent)
-                 and record["generation"] == generation and record["purpose"] == "pristinepage-ocr-qualification",
+                 and record["generation"] == generation and record["purpose"] == purpose,
                  "Provisioning recovery has the wrong identity")
             matches = [row for row in rows if row[1] == ns["NAME"]]
             need(len(matches) == 1, "No unique registered guest from the original add")
