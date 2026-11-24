@@ -53,10 +53,12 @@ APPROVED = ("304f257cd9ba689efd6392f1145191a42da97ae9", "dd89fca5caf988c7d8c6cb9
 SUCCESSOR = ("a1fe0d136644edf29fd737a360a07ab42d4b79c1", "8d1d40d673d2bb19ca6ec3a96d01e4e7b85a5498be09d8add754ce39de8a6dd6")
 FIXTURE_CORRECTION = ("93fb1e0f546e02680ac549767b0a0b3f7097ea07", "06bee1ed0ffb2b3d0f18187f36d4aaeff232f298deb6eed620500682ff06b841")
 VERBATIM_FIXTURE = ("43f6ebb38c17114ec13aee997f557ea44db9c57b", "6db70aa8a51c7986b063252d21442a58c35193c4a442693f2e88a0ef3ccdd82f")
+ROOM_COPY = ("53e58d514e688fc460ddf574602eb62373978477", "abd835d2f87dc3f661b7787719b6074ddec23fc89ec4d687501497696a621c34")
 MERGE_CASES = (
     "preflightStagesBothPortableCatalogsWithoutWritingEitherLibrary",
     "temporaryMergedCatalogReopensWithBothHistoriesAndTheIncomingSavedOcr",
 )
+COPY_CASE = "exactRoomCopyAddsOnlyTheMissingOriginalAndReplaysWithoutWritingEitherLibrary"
 BUILD_INPUTS = ("data", "core", "gradle", "settings.gradle.kts", "build.gradle.kts", "gradle.properties", "gradlew", "gradlew.bat", "buildSrc", "build-logic")
 
 
@@ -197,7 +199,8 @@ def main():
     candidate = (commit, digest)
     corrected = candidate == FIXTURE_CORRECTION
     verbatim = candidate == VERBATIM_FIXTURE
-    successor = candidate == SUCCESSOR or corrected or verbatim
+    copy = candidate == ROOM_COPY
+    successor = candidate == SUCCESSOR or corrected or verbatim or copy
     need(candidate == APPROVED or successor, "Unapproved source and test APK pair")
     mode = sys.argv[3] if len(sys.argv) >= 4 else None
     need(mode in (None, "--fresh", OWN_GUEST), "Runtime requires the dedicated library guest")
@@ -213,7 +216,7 @@ def main():
         return 0
     fresh = mode == "--fresh"
     guest = OWN_GUEST
-    predecessor = FIXTURE_CORRECTION[1] if verbatim else SUCCESSOR[1] if corrected else APPROVED[1] if successor else None
+    predecessor = VERBATIM_FIXTURE[1] if copy else FIXTURE_CORRECTION[1] if verbatim else SUCCESSOR[1] if corrected else APPROVED[1] if successor else None
     if predecessor:
         proof["predecessor"] = verify_apk(Path(sys.argv[4]).resolve(), predecessor)
     prefix = "picker-adapter-library-restore-" + uuid.uuid4().hex[:12]
@@ -251,6 +254,8 @@ def main():
         registry = run.command([*adb, "shell", "pm", "list", "instrumentation", TEST]).splitlines()
         need(registry == [f"instrumentation:{RUNNER} (target={TEST})"], "Wrong self-target instrumentation")
         cases = dict(CASES, RoomLibraryCatalogMergeTest=MERGE_CASES) if successor else CASES
+        if copy:
+            cases["RoomLibraryCatalogMergeTest"] += (COPY_CASE,)
         scenarios = [f"app.pristinepage.data.{cls}#{test}" for cls, tests in cases.items() for test in tests]
         verify_target(run, ns)
         output = run.command([*adb, "shell", "am", "instrument", "-w", "-r", "-e", "class", ",".join(scenarios), RUNNER], timeout=150)
