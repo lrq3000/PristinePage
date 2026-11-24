@@ -58,6 +58,8 @@ First copy-writer checkpoint: take a separately verified source and destination 
 
 The first merge-preflight Android candidate passed 19/20 named tests: all 18 previous restore/catalog/OCR checks plus read-only preflight against two exported folders. The negative staged OCR fixture reached a standalone-header refusal after its test-only writable reopen, not the intended OCR guard; the preliminary successful candidate readback ran. Keep the original failed transcript. Explicitly set and check rollback-journal mode on the test-only connection before altering indexed text. No production guard changes. Verify the corrected data fixture against the exact installed predecessor and preserve both artifact receipts.
 
+The rollback-journal fixture passed that boundary but surfaced a second test-only assumption: precomposed Latin text was already canonical, so the real writer stored it solely in `indexedText`. The subsequent corruption replaced the only stored copy by design. Keep that 19/20 transcript as well. Use decomposed `cafe\u0301` to force the real writer to store both exact verbatim text and the distinct NFC search projection. Assert both actual columns before mutation and require the precise staged-row refusal after changing only the indexed copy. No production code or guard changes in this fixture correction.
+
 ### Current coordination: transition to `main`
 
 - [x] Operator approved the local fast-forward and `main`-based PR/handoff cadence; see [operational authority](OPERATIONAL_PLAN.md) and [queue rules](PARALLEL_EXECUTION_PLAN.md#coordination). Earlier branch/base references below describe their historical claims.

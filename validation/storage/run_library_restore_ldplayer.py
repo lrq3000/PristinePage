@@ -51,7 +51,8 @@ CASES = {
 OWN_GUEST = "agent-pristinepage-library-" + sha256(str(ROOT).encode()).hexdigest()[:12]
 APPROVED = ("304f257cd9ba689efd6392f1145191a42da97ae9", "dd89fca5caf988c7d8c6cb92fd0689f4cebf365bfc7fd75e1f3db5cb6e436e9a")
 SUCCESSOR = ("a1fe0d136644edf29fd737a360a07ab42d4b79c1", "8d1d40d673d2bb19ca6ec3a96d01e4e7b85a5498be09d8add754ce39de8a6dd6")
-FIXTURE_CORRECTION = None  # An exact reviewed test-only fixture correction can follow the initial successor, never skip its installed predecessor.
+FIXTURE_CORRECTION = ("93fb1e0f546e02680ac549767b0a0b3f7097ea07", "06bee1ed0ffb2b3d0f18187f36d4aaeff232f298deb6eed620500682ff06b841")
+VERBATIM_FIXTURE = None
 MERGE_CASES = (
     "preflightStagesBothPortableCatalogsWithoutWritingEitherLibrary",
     "temporaryMergedCatalogReopensWithBothHistoriesAndTheIncomingSavedOcr",
@@ -195,7 +196,8 @@ def main():
     commit, digest = sys.argv[1:3]
     candidate = (commit, digest)
     corrected = candidate == FIXTURE_CORRECTION
-    successor = candidate == SUCCESSOR or corrected
+    verbatim = candidate == VERBATIM_FIXTURE
+    successor = candidate == SUCCESSOR or corrected or verbatim
     need(candidate == APPROVED or successor, "Unapproved source and test APK pair")
     mode = sys.argv[3] if len(sys.argv) >= 4 else None
     need(mode in (None, "--fresh", OWN_GUEST), "Runtime requires the dedicated library guest")
@@ -211,7 +213,7 @@ def main():
         return 0
     fresh = mode == "--fresh"
     guest = OWN_GUEST
-    predecessor = SUCCESSOR[1] if corrected else APPROVED[1] if successor else None
+    predecessor = FIXTURE_CORRECTION[1] if verbatim else SUCCESSOR[1] if corrected else APPROVED[1] if successor else None
     if predecessor:
         proof["predecessor"] = verify_apk(Path(sys.argv[4]).resolve(), predecessor)
     prefix = "picker-adapter-library-restore-" + uuid.uuid4().hex[:12]

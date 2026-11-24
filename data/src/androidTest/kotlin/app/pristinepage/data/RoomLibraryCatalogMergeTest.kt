@@ -85,7 +85,7 @@ class RoomLibraryCatalogMergeTest {
                 val commands = RoomDocumentRepository(io, RecipeAdmission { _, _ -> null })
                 assertTrue(commands.rotatePage(matching.pageId, 1, 1) is DocumentMutationResult.Applied)
                 val edit = RoomEditablePages(io, incoming.database.catalog()).load(incoming.document, matching.pageId)
-                val text = "  Exact incoming café\r\n"
+                val text = "  Exact incoming cafe\u0301\r\n"
                 val config = OcrConfiguration("fixture-ocr", 1, OcrLayout.SPARSE_TEXT,
                     OcrLanguagePacks(listOf(OcrLanguagePack("eng", "e".repeat(64)))))
                 val producer = JobId(UUID.randomUUID().toString())
@@ -123,12 +123,18 @@ class RoomLibraryCatalogMergeTest {
                 SQLiteDatabase.openDatabase(stage.path, null, SQLiteDatabase.OPEN_READWRITE or SQLiteDatabase.NO_LOCALIZED_COLLATORS).use { sql ->
                     // API 28 can opt a writable connection into compatibility WAL on open. The test must exercise the OCR guard, not the standalone-file guard.
                     sql.rawQuery("PRAGMA journal_mode=DELETE", null).use { assertTrue(it.moveToFirst()); assertEquals("delete", it.getString(0)) }
+                    sql.rawQuery("SELECT verbatimText,indexedText FROM OcrResult", null).use {
+                        assertTrue(it.moveToFirst())
+                        assertEquals(text, it.getString(0))
+                        assertEquals("  Exact incoming café\r\n", it.getString(1))
+                    }
                     sql.execSQL("UPDATE OcrResult SET indexedText='decoy searchable token'")
                     sql.rawQuery("SELECT rowid FROM OcrResultFts WHERE OcrResultFts MATCH 'decoy'", null).use { assertTrue(it.moveToFirst()) }
                 }
                 assertEquals(text, reader.read(stage) { LibraryPortableCatalogProjection(it) {}.snapshot() }
                     .albums.single().pages.first().savedOcr?.text?.value)
-                assertTrue(runCatching { reader.verifyStagedProjection(stage, candidate.catalog) {} }.exceptionOrNull() is IOException)
+                val error = runCatching { reader.verifyStagedProjection(stage, candidate.catalog) {} }.exceptionOrNull()
+                assertTrue(error is IOException && error.message == "Library catalog rows do not match the portable format")
             }
         }
     }
