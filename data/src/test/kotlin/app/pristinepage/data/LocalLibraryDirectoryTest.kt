@@ -76,4 +76,29 @@ class LocalLibraryDirectoryTest {
         assertThrows(IOException::class.java) { directory.create(abc) { fail("Must refuse before consuming the writer") } }
         assertNull(directory.open(abc))
     }
+
+    @Test fun discoveryObservesTheExactMarkerChainAndLeavesTheFolderUnchanged() {
+        val root = temporary.newFolder()
+        val directory = LocalLibraryDirectory(root, DirectorySync { true })
+        val second = generation.copy(id = "11ec853f-ea18-4cf8-af9e-89a7ccc50c8a", predecessorId = generation.id)
+        directory.createMarker(second, second.encode())
+        directory.createMarker(generation, generation.encode())
+        val markerFolder = File(root, "generations")
+        val unknown = File(root, "unrelated.txt").apply { writeText("keep") }
+        val before = markerFolder.listFiles()!!.associate { it.name to it.readBytes().toList() }
+        assertEquals(second, directory.readTip())
+        assertEquals(before, markerFolder.listFiles()!!.associate { it.name to it.readBytes().toList() })
+        assertEquals("keep", unknown.readText())
+    }
+
+    @Test fun aHigherMarkerWithAWrongFilenameDoesNotFallBackToTheOlderTip() {
+        val root = temporary.newFolder()
+        val directory = LocalLibraryDirectory(root, DirectorySync { true })
+        directory.createMarker(generation, generation.encode())
+        val later = generation.copy(id = "11ec853f-ea18-4cf8-af9e-89a7ccc50c8a", predecessorId = generation.id)
+        val wrongName = File(root, "generations/24ba7913-dfd6-4a7b-8e5e-653206116f31.complete")
+        wrongName.writeBytes(later.encode())
+        assertThrows(IOException::class.java) { directory.readTip() }
+        assertArrayEquals(later.encode(), wrongName.readBytes())
+    }
 }

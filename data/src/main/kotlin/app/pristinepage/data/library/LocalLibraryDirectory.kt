@@ -38,6 +38,29 @@ internal class LocalLibraryDirectory(root: File, private val directorySync: Dire
         create(markerPath(generation)) { it.write(bytes) }
     }
 
+    /** Iterates a bounded inventory and refuses uncertainty rather than silently opening an older generation. Does not publish, remove or repair anything. */
+    fun readTip(checkpoint: () -> Unit = {}): LibraryGeneration {
+        val root = paths.beneath("generations").toPath()
+        if (!Files.isDirectory(root, NOFOLLOW_LINKS)) throw IOException("Library generation folder is unavailable")
+        val markers = ArrayList<LibraryGeneration>()
+        Files.newDirectoryStream(root).use {
+            var entries = 0
+            for (entry in it) {
+                checkpoint()
+                if (++entries > 2 * LibraryGenerationChain.MAX_MARKERS) throw IOException("Library generation inventory exceeds the limit")
+                val leaf = entry.fileName.toString()
+                if (!leaf.endsWith(".complete")) continue
+                if (markers.size == LibraryGenerationChain.MAX_MARKERS) throw IOException("Library generation inventory exceeds the limit")
+                val marker = open("generations/$leaf")?.use(LibraryGeneration::read)
+                    ?: throw IOException("Library marker disappeared")
+                if (leaf != "${marker.id}.complete") throw IOException("Library marker name does not match the generation")
+                markers += marker
+            }
+        }
+        checkpoint()
+        return LibraryGenerationChain.tip(markers)
+    }
+
     override fun confirmPayloadDurability(generation: LibraryGeneration) {
         forceParentOf(generation.catalogPath)
         val objects = paths.beneath("objects")
