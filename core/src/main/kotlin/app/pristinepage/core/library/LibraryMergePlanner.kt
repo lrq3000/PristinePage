@@ -2,7 +2,6 @@ package app.pristinepage.core.library
 
 import app.pristinepage.core.pipeline.requireSha256
 import app.pristinepage.core.pipeline.requireWellFormedUnicode
-import java.text.Normalizer
 import java.util.Collections
 
 /** Plans catalog changes without opening databases or treating any display label as a filesystem path. */
@@ -93,8 +92,7 @@ object LibraryMergePlanner {
             val pageNames = HashSet<String>()
             for (page in album.pages) {
                 require(page.key.isNotBlank() && pageKeys.add(page.key)) { "Missing or duplicate page identity" }
-                validateLabel(page.filename)
-                require(page.filename !in setOf(".", "..") && page.filename.none { it == '/' || it == '\\' || it.isISOControl() })
+                require(LibraryScanName.isValid(page.filename))
                 require(pageNames.add(canonical(page.filename))) { "Duplicate page filename" }
                 require(page.original.byteCount > 0 && page.conversionFingerprint.isNotBlank())
                 requireSha256(page.original.sha256)
@@ -124,21 +122,7 @@ object LibraryMergePlanner {
         }
     }
 
-    // Compare NFC plus locale-independent one-code-point case equivalence (including final sigma). Keep dotted and dotless I distinct in the default comparison and do not expand characters into multiple letters.
-    private fun canonical(label: String): String {
-        val normalized = Normalizer.normalize(label, Normalizer.Form.NFC)
-        val key = StringBuilder(normalized.length)
-        var index = 0
-        while (index < normalized.length) {
-            val codePoint = normalized.codePointAt(index)
-            key.appendCodePoint(when (codePoint) {
-                0x0130, 0x0131 -> codePoint
-                else -> Character.toLowerCase(Character.toUpperCase(codePoint))
-            })
-            index += Character.charCount(codePoint)
-        }
-        return Normalizer.normalize(key, Normalizer.Form.NFC)
-    }
+    private fun canonical(label: String): String = libraryComparisonKey(label)
 
     private fun <T> immutable(items: Collection<T>): List<T> = Collections.unmodifiableList(ArrayList(items))
 }
