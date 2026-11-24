@@ -80,6 +80,17 @@ class OcrIndexSqlTest(unittest.TestCase):
         self.assertRegex(term, r"\A[a-z]+\Z")
         return match().replace(":expression", f"""'"{term}"'""").replace(":afterPageId", "NULL").replace(":limit", str(limit))
 
+    def test_backup_distinguishes_no_ocr_from_a_malformed_or_superseded_result(self):
+        source = DB / "OcrResultDao.kt"
+        clauses = literals(source, r'@Query\("""((?:(?!""").)*)"""\)\s*abstract fun libraryResultRevision\(')
+        self.assertEqual(1, len(clauses), "Missing bounded OCR presence read for a library snapshot")
+        query = "SELECT COALESCE((" + clauses[0].replace(":page", f"'{PAGE}'") + "), 'absent')"
+        self.assertEqual(["absent", "1", "2", "-1"], self.run_sql([
+            *create_tables(8), *sync_triggers(), SEED, query, INSERT_TEXT, query,
+            "UPDATE OcrResult SET recipeRevision=2", query,
+            "UPDATE OcrResult SET recipeRevision=CAST('2' AS BLOB)", query,
+        ]))
+
     def test_status_checks_live_page_membership_without_projecting_ocr_work(self):
         clause, = literals(DB / "OcrPageWorkDao.kt", r'@Query\("""((?:(?!""").)*)"""\)\s*abstract fun visibleStatusPage\(')
         query = clause.replace(":page", f"'{PAGE}'").replace(":document", f"'{DOC}'")

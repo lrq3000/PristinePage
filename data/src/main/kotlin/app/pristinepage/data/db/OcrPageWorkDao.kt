@@ -6,6 +6,7 @@ import androidx.room.OnConflictStrategy
 import androidx.room.Query
 
 internal data class OcrSavedPageLocator(val documentId: String, val pageId: String)
+internal data class LibraryOcrResultPointer(val generation: Long, val jobId: String, val resultJobId: String?, val projectionVersion: Long?)
 
 @Dao
 internal abstract class OcrPageWorkDao {
@@ -42,6 +43,17 @@ internal abstract class OcrPageWorkDao {
     @Query("SELECT * FROM OcrPageWork WHERE pageId=:page")
     abstract fun pointer(page: String): OcrPageWorkRow?
 
+    // Backup needs the producing pointer and generation order, not the candidate rerun's input digest, extent, or job payload.
+    @Query("""SELECT
+        CASE WHEN typeof(generation)='integer' AND generation>0 THEN generation ELSE 0 END AS generation,
+        CASE WHEN typeof(jobId)='text' AND length(CAST(jobId AS BLOB))=36 THEN jobId ELSE '' END AS jobId,
+        CASE WHEN resultJobId IS NULL THEN NULL
+            WHEN typeof(resultJobId)='text' AND length(CAST(resultJobId AS BLOB))=36 THEN resultJobId ELSE '' END AS resultJobId,
+        CASE WHEN projectionVersion IS NULL THEN NULL
+            WHEN typeof(projectionVersion)='integer' AND projectionVersion>0 THEN projectionVersion ELSE 0 END AS projectionVersion
+        FROM OcrPageWork WHERE pageId=:page""")
+    abstract fun libraryResultPointer(page: String): LibraryOcrResultPointer?
+
     /** Authorize the requested visible membership before touching an OCR pointer or job that could fail validation. */
     @Query("""SELECT EXISTS (SELECT 1 FROM Page p JOIN Document d ON d.documentId=p.documentId
         WHERE p.pageId=:page AND p.documentId=:document AND p.state='ACTIVE' AND p.removedAt IS NULL
@@ -61,6 +73,17 @@ internal abstract class OcrPageWorkDao {
           AND typeof(r.recipeSha256)='text' AND r.recipeSha256=:recipeSha
           AND s.state='READY' AND b.state='READY' AND typeof(s.pixelSha256)='text' AND s.pixelSha256=:sourceSha)""")
     abstract fun liveInputMatches(page: String, document: String, source: String, revision: Long, recipeSha: String, sourceSha: String): Boolean
+
+    @Query("""SELECT EXISTS (SELECT 1 FROM Page p JOIN Document d ON d.documentId=p.documentId
+        JOIN RecipeRevision r ON r.pageId=p.pageId AND r.recipeRevision=p.currentRecipeRevision AND r.sourceId=p.sourceId
+        JOIN Source s ON s.sourceId=p.sourceId JOIN SourceBlob b ON b.sourceBlobId=s.sourceBlobId
+        WHERE p.pageId=:page AND p.documentId=:document AND p.sourceId=:source AND p.state='REMOVED'
+        AND p.ordinal IS NULL AND typeof(p.removedAt)='integer'
+        AND typeof(p.currentRecipeRevision)='integer' AND p.currentRecipeRevision=:revision
+        AND d.lifecycle='ACTIVE' AND d.deletedAt IS NULL
+        AND typeof(r.recipeSha256)='text' AND r.recipeSha256=:recipeSha
+        AND s.state='READY' AND b.state='READY' AND typeof(s.pixelSha256)='text' AND s.pixelSha256=:sourceSha)""")
+    abstract fun removedLibraryInputMatches(page: String, document: String, source: String, revision: Long, recipeSha: String, sourceSha: String): Boolean
 
     @Insert(onConflict = OnConflictStrategy.ABORT)
     abstract fun insertJob(row: JobRow)

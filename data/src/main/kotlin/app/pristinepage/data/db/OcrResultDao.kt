@@ -106,6 +106,11 @@ internal abstract class OcrResultDao {
           AND (verbatimText IS NOT NULL OR length(CAST(indexedText AS BLOB))<=393216)""")
     abstract fun selectVerbatim(page: String, revision: Long, sourceSha: String, engine: String, engineVersion: Int, layout: String): OcrVerbatimRow?
 
+    /** A present malformed row is not the same as a page with no saved text. Do not project its text here. */
+    @Query("""SELECT CASE WHEN typeof(recipeRevision)='integer' AND recipeRevision>=1 THEN recipeRevision ELSE -1 END
+        FROM OcrResult WHERE pageId=:page""")
+    abstract fun libraryResultRevision(page: String): Long?
+
     fun matchPages(terms: OcrSearchTerms, afterPageId: PageId?, limit: Int): List<OcrMatchRow> =
         selectMatches(terms.expression, afterPageId?.value, limit)
 
