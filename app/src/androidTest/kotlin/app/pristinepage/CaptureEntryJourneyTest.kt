@@ -3,17 +3,26 @@ package app.pristinepage
 import android.Manifest
 import android.accessibilityservice.AccessibilityService
 import android.content.pm.PackageManager
+import androidx.activity.compose.setContent
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.getValue
 import androidx.compose.ui.test.assertIsEnabled
+import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.hasClickAction
 import androidx.compose.ui.test.isEnabled
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
+import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.hasTestTag
 import androidx.compose.ui.test.performClick
+import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
+import androidx.lifecycle.ViewModelStore
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import app.pristinepage.capture.AtelierCaptureViewModel
+import app.pristinepage.capture.AtelierCaptureScreen
 import app.pristinepage.capture.PhotoImportKind
 import app.pristinepage.capture.PhotoPickerContract
 import app.pristinepage.library.ImportLibraryViewModel
@@ -51,6 +60,55 @@ class CaptureEntryJourneyTest {
         }
         compose.runOnUiThread { acquisition.leave(true) }
         compose.waitUntil(10_000) { !acquisition.state.value.open }
+    }
+
+    @Test fun cameraFreeGalleryAndFilesShowTheDisclosureAndReturnToTheOwnedDraft() = runBlocking<Unit> {
+        assertEquals("Do not activate an unverified camera on the retained guest", PackageManager.PERMISSION_DENIED,
+            context.checkSelfPermission(Manifest.permission.CAMERA))
+        DocumentCatalogIntegrationTest.Fixture().use { fixture ->
+            val graph = fixture.open()
+            val models = ViewModelStore()
+            val owner = compose.runOnUiThread {
+                val factory = object : ViewModelProvider.Factory {
+                    @Suppress("UNCHECKED_CAST")
+                    override fun <T : ViewModel> create(modelClass: Class<T>): T =
+                        AtelierCaptureViewModel(context, { graph }) { _, _ -> error("Cancel must not save pages") } as T
+                }
+                ViewModelProvider(models, factory)[AtelierCaptureViewModel::class.java].also { acquisition ->
+                    val activity = compose.activity
+                    activity.setContent {
+                        MaterialTheme {
+                            val state by acquisition.state.collectAsState()
+                            AtelierCaptureScreen(state, acquisition, activity.activityResultRegistry, false, activity.window,
+                                { graph.originalPreview(it) }, { graph.originalPreview(it, 224) })
+                        }
+                    }
+                    acquisition.open("Synthetic picker entry", null)
+                }
+            }
+            try {
+                compose.waitUntil(15_000) { owner.state.value.let { it.open && !it.busy && it.draft != null } }
+                for ((kind, tag) in listOf(PhotoImportKind.GALLERY to "atelier-import-gallery", PhotoImportKind.FILES to "atelier-import-files")) {
+                    val intent = PhotoPickerContract(kind).createIntent(context, Unit)
+                    val handler = intent.resolveActivity(context.packageManager)?.packageName
+                    assertNotNull("No installed picker for $kind", handler)
+                    tap("atelier-camera-import")
+                    compose.onNodeWithText(context.getString(R.string.atelier_import_sdr_note)).assertIsDisplayed()
+                    tap(tag)
+                    val automation = instrumentation.uiAutomation
+                    compose.waitUntil(15_000) { automation.rootInActiveWindow?.packageName?.toString() == handler }
+                    assertEquals(kind, owner.state.value.request?.kind)
+                    assertTrue(automation.performGlobalAction(AccessibilityService.GLOBAL_ACTION_BACK))
+                    compose.waitUntil(15_000) { owner.state.value.let { !it.busy && it.request == null && it.draft?.pending == null } }
+                    assertEquals(0, checkNotNull(owner.state.value.draft).pages.size)
+                    assertEquals(0, fixture.providerOpens)
+                }
+                compose.runOnUiThread { owner.leave(true) } // Only this invocation's isolated empty draft.
+                compose.waitUntil(10_000) { !owner.state.value.open }
+            } finally {
+                compose.runOnUiThread { compose.activity.setContent {}; models.clear() }
+            }
+        }
     }
 
     @Test fun livePreviewCapturesAndSavesOnePage() = runBlocking<Unit> {
