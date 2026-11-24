@@ -121,6 +121,8 @@ class RoomLibraryCatalogMergeTest {
 
                 // Keep exact recognized text and its job but make the physical FTS index agree with deliberately wrong indexed text.
                 SQLiteDatabase.openDatabase(stage.path, null, SQLiteDatabase.OPEN_READWRITE or SQLiteDatabase.NO_LOCALIZED_COLLATORS).use { sql ->
+                    // API 28 can opt a writable connection into compatibility WAL on open. The test must exercise the OCR guard, not the standalone-file guard.
+                    sql.rawQuery("PRAGMA journal_mode=DELETE", null).use { assertTrue(it.moveToFirst()); assertEquals("delete", it.getString(0)) }
                     sql.execSQL("UPDATE OcrResult SET indexedText='decoy searchable token'")
                     sql.rawQuery("SELECT rowid FROM OcrResultFts WHERE OcrResultFts MATCH 'decoy'", null).use { assertTrue(it.moveToFirst()) }
                 }

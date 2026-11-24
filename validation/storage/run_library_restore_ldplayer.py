@@ -50,6 +50,12 @@ CASES = {
 }
 OWN_GUEST = "agent-pristinepage-library-" + sha256(str(ROOT).encode()).hexdigest()[:12]
 APPROVED = ("304f257cd9ba689efd6392f1145191a42da97ae9", "dd89fca5caf988c7d8c6cb92fd0689f4cebf365bfc7fd75e1f3db5cb6e436e9a")
+SUCCESSOR = ("a1fe0d136644edf29fd737a360a07ab42d4b79c1", "8d1d40d673d2bb19ca6ec3a96d01e4e7b85a5498be09d8add754ce39de8a6dd6")
+FIXTURE_CORRECTION = None  # An exact reviewed test-only fixture correction can follow the initial successor, never skip its installed predecessor.
+MERGE_CASES = (
+    "preflightStagesBothPortableCatalogsWithoutWritingEitherLibrary",
+    "temporaryMergedCatalogReopensWithBothHistoriesAndTheIncomingSavedOcr",
+)
 BUILD_INPUTS = ("data", "core", "gradle", "settings.gradle.kts", "build.gradle.kts", "gradle.properties", "gradlew", "gradlew.bat", "buildSrc", "build-logic")
 
 
@@ -171,15 +177,30 @@ def inspect_prior_pid(inspect, pid):
     return state
 
 
+def replacement_flags(fresh, installed, candidate, predecessor):
+    if fresh:
+        need(installed is None and predecessor is None, "First install requires an absent test package and no predecessor")
+        return ["-t"]
+    if installed == candidate:
+        return None
+    need(installed is not None and installed == predecessor, "Refusing to replace an unapproved or absent installed APK")
+    return ["-r", "-t"]
+
+
 def main():
     need(__debug__ and Path.cwd().resolve() == ROOT and not any(os.environ.get(k) for k in LOCAL_ADB_OVERRIDES),
          "Require the exact worktree and default scoped ADB transport")
-    need(len(sys.argv) in (3, 4) and re.fullmatch(r"[a-f0-9]{40}", sys.argv[1]) and
+    need(len(sys.argv) in (3, 4, 5) and re.fullmatch(r"[a-f0-9]{40}", sys.argv[1]) and
          re.fullmatch(r"[a-f0-9]{64}", sys.argv[2]), "Require the exact source and built test APK identities")
     commit, digest = sys.argv[1:3]
-    need((commit, digest) == APPROVED, "Unapproved source and test APK pair")
-    mode = sys.argv[3] if len(sys.argv) == 4 else None
+    candidate = (commit, digest)
+    corrected = candidate == FIXTURE_CORRECTION
+    successor = candidate == SUCCESSOR or corrected
+    need(candidate == APPROVED or successor, "Unapproved source and test APK pair")
+    mode = sys.argv[3] if len(sys.argv) >= 4 else None
     need(mode in (None, "--fresh", OWN_GUEST), "Runtime requires the dedicated library guest")
+    need((not successor and len(sys.argv) <= 4) or (successor and (mode is None or (mode == OWN_GUEST and len(sys.argv) == 5))),
+         "An admitted successor must use the dedicated guest and exact retained predecessor")
     need(not subprocess.check_output(["git", "diff", commit, "--", *BUILD_INPUTS]) and
          not subprocess.check_output(["git", "ls-files", "--others", "--exclude-standard", "--", *BUILD_INPUTS]),
          "Application source or build inputs changed after the exact test build")
@@ -190,6 +211,9 @@ def main():
         return 0
     fresh = mode == "--fresh"
     guest = OWN_GUEST
+    predecessor = SUCCESSOR[1] if corrected else APPROVED[1] if successor else None
+    if predecessor:
+        proof["predecessor"] = verify_apk(Path(sys.argv[4]).resolve(), predecessor)
     prefix = "picker-adapter-library-restore-" + uuid.uuid4().hex[:12]
     raw = ROOT / "validation/raw/storage" / prefix
     raw.mkdir(parents=True)
@@ -214,14 +238,18 @@ def main():
         adb = [ns["ADB"], "-s", run.serial]
         listed = run.command([*adb, "shell", "pm", "list", "packages", TEST]).splitlines()
         need(listed == ([] if fresh else [f"package:{TEST}"]), "Expected an absent package on first install or the verified test package on reuse")
-        if fresh:
+        previous = run.installed_hash(TEST) if listed else None
+        run.save(run.path("package-before.json"), {"sha256": previous}, durable=True)
+        flags = replacement_flags(fresh, previous, digest, predecessor)
+        if flags:
             need(sha(retained) == digest, "Test APK changed before installation")
-            need(run.command([*adb, "install", "-t", "--no-streaming", retained], timeout=90).strip().splitlines()[-1:] == ["Success"],
+            need(run.command([*adb, "install", *flags, "--no-streaming", retained], timeout=90).strip().splitlines()[-1:] == ["Success"],
                  "Test-only installation did not acknowledge success")
         need(run.installed_hash(TEST) == digest, "Installed test APK bytes differ")
         registry = run.command([*adb, "shell", "pm", "list", "instrumentation", TEST]).splitlines()
         need(registry == [f"instrumentation:{RUNNER} (target={TEST})"], "Wrong self-target instrumentation")
-        scenarios = [f"app.pristinepage.data.{cls}#{test}" for cls, tests in CASES.items() for test in tests]
+        cases = dict(CASES, RoomLibraryCatalogMergeTest=MERGE_CASES) if successor else CASES
+        scenarios = [f"app.pristinepage.data.{cls}#{test}" for cls, tests in cases.items() for test in tests]
         verify_target(run, ns)
         output = run.command([*adb, "shell", "am", "instrument", "-w", "-r", "-e", "class", ",".join(scenarios), RUNNER], timeout=150)
         run.path("instrumentation.txt").write_text(output, encoding="utf-8")

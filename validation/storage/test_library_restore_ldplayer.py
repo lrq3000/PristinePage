@@ -6,7 +6,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from run_library_restore_ldplayer import close_owned, inspect_prior_pid, main, read_results, wait_for_allocator
+from run_library_restore_ldplayer import close_owned, inspect_prior_pid, main, read_results, replacement_flags, wait_for_allocator
 
 
 class LibraryRestoreRuntimeEvidenceTest(unittest.TestCase):
@@ -56,6 +56,16 @@ class LibraryRestoreRuntimeEvidenceTest(unittest.TestCase):
                  patch.object(Path, "mkdir", side_effect=AssertionError("Rejected guest attempted to stage runtime evidence")):
             with self.assertRaisesRegex(RuntimeError, "dedicated"):
                 main()
+
+    def test_installation_never_replaces_unrelated_bytes_or_treats_absence_as_reuse_permission(self):
+        candidate, predecessor, unrelated = ("1" * 64, "2" * 64, "3" * 64)
+        self.assertIsNone(replacement_flags(False, candidate, candidate, predecessor))
+        self.assertEqual(["-r", "-t"], replacement_flags(False, predecessor, candidate, predecessor))
+        self.assertEqual(["-t"], replacement_flags(True, None, candidate, None))
+        for fresh, installed, prior in ((False, None, predecessor), (False, unrelated, predecessor),
+                                         (False, predecessor, None), (True, unrelated, None), (True, None, predecessor)):
+            with self.subTest(fresh=fresh, installed=installed, prior=prior), self.assertRaises(RuntimeError):
+                replacement_flags(fresh, installed, candidate, prior)
 
     def test_only_the_lock_collision_can_retry_before_ownership(self):
         run = SimpleNamespace(lock=Path("fixture.lock"), claimed=False)
