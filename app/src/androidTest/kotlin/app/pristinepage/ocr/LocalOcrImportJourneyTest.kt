@@ -11,6 +11,8 @@ import android.os.ParcelFileDescriptor
 import android.os.Process
 import android.os.SystemClock
 import android.util.Log
+import android.view.View
+import android.view.ViewGroup
 import androidx.compose.ui.test.assertIsEnabled
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.hasAnyAncestor
@@ -34,6 +36,7 @@ import androidx.lifecycle.ViewModelProvider
 import androidx.test.core.app.ActivityScenario
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
+import androidx.test.platform.view.inspector.WindowInspectorCompat
 import androidx.work.WorkInfo
 import androidx.work.WorkManager
 import app.pristinepage.MainActivity
@@ -75,6 +78,11 @@ import org.junit.Assume.assumeTrue
 import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
+
+private fun View.ocrTextViews(): Sequence<ReadOnlyOcrTextView> = sequence {
+    if (this@ocrTextViews is ReadOnlyOcrTextView) yield(this@ocrTextViews)
+    if (this@ocrTextViews is ViewGroup) for (i in 0 until childCount) yieldAll(getChildAt(i).ocrTextViews())
+}
 
 /** The debug provider supplies only synthetic images; import acknowledgement, WorkManager, recognition, Room and Home are the running app's own. This does not exercise a system picker. */
 @RunWith(AndroidJUnit4::class)
@@ -256,7 +264,12 @@ class LocalOcrImportJourneyTest {
             ocrTool.performSemanticsAction(SemanticsActions.OnClick) { action -> check(action()) }
             fun observed(label: Int) = compose.onAllNodesWithText(context.getString(label)).fetchSemanticsNodes().size
             try {
-                compose.waitUntil(15_000) { compose.onAllNodesWithText(text.text.value).fetchSemanticsNodes().size == 1 }
+                compose.waitUntil(15_000) {
+                    compose.runOnUiThread {
+                        WindowInspectorCompat.getGlobalWindowViews().flatMap { it.ocrTextViews().toList() }
+                            .count { it.isShown && it.text.toString() == text.text.value } == 1
+                    }
+                }
             } catch (miss: androidx.compose.ui.test.ComposeTimeoutException) {
                 throw AssertionError("Saved OCR panel: close=${observed(R.string.atelier_close)}, loading=${observed(R.string.ocr_details_loading)}, unavailable=${observed(R.string.ocr_details_unavailable)}, noText=${observed(R.string.ocr_text_not_available)}", miss)
             }

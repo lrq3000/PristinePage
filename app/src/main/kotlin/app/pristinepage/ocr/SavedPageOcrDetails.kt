@@ -1,7 +1,10 @@
 package app.pristinepage.ocr
 
+import android.util.TypedValue
+
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.relocation.BringIntoViewRequester
@@ -13,13 +16,14 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.LiveRegionMode
 import androidx.compose.ui.semantics.liveRegion
 import androidx.compose.ui.semantics.semantics
-import androidx.compose.ui.text.style.TextDirection
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.viewinterop.AndroidView
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -162,10 +166,7 @@ internal fun SavedPageOcrDetails(panel: SavedPageOcrPanel, page: EditablePage?, 
                         val text = presentOcrText(item?.text, item?.previousGeneration == true)
                         text.message?.let { Text(stringResource(it)) }
                         item?.configuration?.let { OcrSettingsSummary(it) }
-                        text.verbatim?.let { original ->
-                            // Do not pass private OCR to platform text classification or clipboard via selectable text.
-                            Text(original, style = MaterialTheme.typography.bodyMedium.copy(textDirection = TextDirection.Content))
-                        }
+                        text.verbatim?.let { original -> SelectableOcrText(original) }
                         val save = reader.requestSave
                         if (item != null && save != null) TextButton(
                             onClick = {
@@ -183,6 +184,24 @@ internal fun SavedPageOcrDetails(panel: SavedPageOcrPanel, page: EditablePage?, 
                 modifier = Modifier.heightIn(min = 48.dp)) {
                 Text(stringResource(R.string.ocr_details_refresh))
             }
+        },
+    )
+}
+
+@Composable
+private fun SelectableOcrText(original: String) {
+    val color = MaterialTheme.colorScheme.onSurfaceVariant.toArgb()
+    val size = MaterialTheme.typography.bodyMedium.fontSize.value
+    val highlight = MaterialTheme.colorScheme.primary.copy(alpha = .35f).toArgb()
+    AndroidView(
+        factory = { ReadOnlyOcrTextView(it) },
+        modifier = Modifier.fillMaxWidth(),
+        update = {
+            it.setTextColor(color)
+            it.setTextSize(TypedValue.COMPLEX_UNIT_SP, size)
+            it.highlightColor = highlight
+            // Avoid resetting the native selection during unrelated recompositions.
+            if (it.text.toString() != original) it.text = original
         },
     )
 }
@@ -229,7 +248,7 @@ private fun OcrSettingsSummary(configuration: OcrConfiguration) {
     val ordered = configuration.languagePacks?.ordered.orEmpty()
     if (ordered.isNotEmpty()) {
         val languages = ordered.map { pack ->
-            OcrLanguage.entries.firstOrNull { it.packCode == pack.code }?.let { stringResource(it.label) } ?: pack.code
+            OcrLanguage.entries.firstOrNull { it.packCode == pack.code }?.displayName() ?: pack.code
         }
         Text(stringResource(R.string.ocr_details_languages, languages.joinToString(", ")))
     }
