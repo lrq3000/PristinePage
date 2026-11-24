@@ -46,7 +46,8 @@ internal class RoomLibraryCatalogReader(context: Context, private val maximumByt
                     throw IOException("Library catalog schema differs")
                 }
                 if (candidate.rawQuery(ROOM_IDENTITY, null).use(::readIdentity) != trusted.identity) throw IOException("Library Room identity differs")
-                candidate.rawQuery("PRAGMA quick_check(1)", null).use {
+                // quick_check does not establish that an index includes the table's actual keys. Portable enumeration can use those indexes.
+                candidate.rawQuery("PRAGMA integrity_check(1)", null).use {
                     if (!it.moveToFirst() || it.getString(0) != "ok" || it.moveToNext()) throw IOException("Library catalog integrity check failed")
                 }
                 candidate.rawQuery("PRAGMA foreign_key_check", null).use {

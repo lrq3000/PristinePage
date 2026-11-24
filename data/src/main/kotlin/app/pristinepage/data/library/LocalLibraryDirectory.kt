@@ -3,6 +3,7 @@ package app.pristinepage.data.library
 import app.pristinepage.data.files.DirectorySync
 import app.pristinepage.data.files.PlatformDirectorySync
 import app.pristinepage.data.files.PrivateStorePaths
+import app.pristinepage.data.model.requireOpaqueId
 import java.io.File
 import java.io.IOException
 import java.io.InputStream
@@ -35,6 +36,32 @@ internal class LocalLibraryDirectory(root: File, private val directorySync: Dire
     override fun openCatalog(generation: LibraryGeneration) = open(generation.catalogPath)
     override fun createCatalog(generation: LibraryGeneration, write: (OutputStream) -> Unit) = create(generation.catalogPath, write)
     override fun openMarker(generation: LibraryGeneration) = open(markerPath(generation))
+
+    /** Only for a fresh private restore: opaque blob IDs, never source-row paths or logical filenames. */
+    fun openPrivateOriginal(blob: String): InputStream? = open(privateOriginalPath(blob))
+
+    fun createPrivateOriginal(blob: String, write: (OutputStream) -> Unit) = create(privateOriginalPath(blob), write)
+
+    fun publishRestoreReceipt(expected: ByteArray) {
+        val path = "catalog.ready"
+        create(path) { it.write(expected) }
+        val observed = open(path) ?: throw IOException("Restore completion receipt is missing")
+        observed.use { input ->
+            for (byte in expected) if (input.read() != byte.toInt().and(255)) throw IOException("Restore completion receipt changed")
+            if (input.read() != -1) throw IOException("Restore completion receipt has trailing data")
+        }
+    }
+
+    /** Duplicate destination locators can share their already verified immutable inode; never link back to the backup. */
+    fun linkPrivateOriginal(existing: String, duplicate: String) {
+        val source = readPath(privateOriginalPath(existing))
+        if (!presentRegularFile(source)) throw IOException("Primary restored original is missing")
+        val target = paths.beneath(privateOriginalPath(duplicate))
+        val parent = checkNotNull(target.parentFile)
+        paths.createDirectories(parent, ::forceDirectory)
+        Files.createLink(target.toPath(), source)
+        forceDirectory(parent)
+    }
 
     override fun createMarker(generation: LibraryGeneration, bytes: ByteArray) {
         require(bytes.contentEquals(generation.encode()))
@@ -131,4 +158,8 @@ internal class LocalLibraryDirectory(root: File, private val directorySync: Dire
 
     private fun objectPath(id: LibraryObjectTransfer.ObjectId) = "objects/${id.sha256}"
     private fun markerPath(generation: LibraryGeneration) = "generations/${generation.id}.complete"
+    private fun privateOriginalPath(blob: String): String {
+        requireOpaqueId(blob)
+        return "sources/$blob/original.bin"
+    }
 }

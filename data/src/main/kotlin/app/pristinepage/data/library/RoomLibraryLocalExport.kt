@@ -1,10 +1,7 @@
 package app.pristinepage.data.library
 
 import android.content.Context
-import android.content.ContextWrapper
 import android.database.sqlite.SQLiteDatabase
-import androidx.room.Room
-import androidx.room.RoomDatabase
 import app.pristinepage.data.library.RoomLibraryCatalogReader.Companion.MAX_PORTABLE_BYTES
 import app.pristinepage.data.db.PristineDatabase
 import app.pristinepage.data.db.SourceBlobRow
@@ -17,7 +14,6 @@ import java.nio.file.Files
 import java.nio.file.LinkOption.NOFOLLOW_LINKS
 import java.nio.file.Path
 import java.nio.file.StandardOpenOption.READ
-import java.security.MessageDigest
 import java.util.UUID
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ensureActive
@@ -37,10 +33,10 @@ internal class RoomLibraryLocalExport(
     suspend fun writeNewFolder(destination: File): LibraryGeneration = withContext(Dispatchers.IO) {
         val checkpoint = { coroutineContext.ensureActive() }
         val privateFiles = application.filesDir.toPath().toRealPath()
-        val parent = privateDirectory(checkNotNull(destination.absoluteFile.parentFile), privateFiles)
+        val parent = canonicalLibraryDirectory(checkNotNull(destination.absoluteFile.parentFile), privateFiles)
         val target = parent.resolve(destination.name)
-        val scratch = privateDirectory(scratchDirectory, privateFiles)
-        val originals = privateDirectory(originalRoot, privateFiles)
+        val scratch = canonicalLibraryDirectory(scratchDirectory, privateFiles)
+        val originals = canonicalLibraryDirectory(originalRoot, privateFiles)
         if (target != destination.absoluteFile.toPath() || target.startsWith(scratch) || scratch.startsWith(target) ||
             target.startsWith(originals) || originals.startsWith(target) || overlap(scratch, originals)
         ) {
@@ -53,10 +49,10 @@ internal class RoomLibraryLocalExport(
         checkpoint()
         val stage = newStage(scratch)
         val closed = File(stage, "catalog.sqlite")
-        val version = writeCatalog(snapshot, closed)
+        val version = RoomLibraryCatalogStage(application).write(snapshot, closed)
         reader.read(closed) { catalog -> verifyOriginalReferences(catalog, snapshot.originals, checkpoint) }
         val generation = LibraryGeneration(UUID.randomUUID().toString(), UUID.randomUUID().toString(), null, version,
-            fingerprint(closed, checkpoint))
+            fingerprintClosedLibraryCatalog(closed, checkpoint))
         val requirements = snapshot.originals.map { blob ->
             LibraryObjectTransfer.Requirement(objectId(blob)) { readRegular(source.finalFile(blob.sourceBlobId)) }
         }
@@ -93,68 +89,15 @@ internal class RoomLibraryLocalExport(
         published
     }
 
-    private suspend fun writeCatalog(snapshot: RoomLibrarySavedCatalog.Snapshot, file: File): Int {
-        val stagingContext = object : ContextWrapper(application) {
-            override fun getDatabasePath(name: String): File {
-                check(name == file.name)
-                return file
-            }
-        }
-        val stage = Room.databaseBuilder(stagingContext, PristineDatabase::class.java, file.name)
-            .setJournalMode(RoomDatabase.JournalMode.TRUNCATE).build()
-        try {
-            val sql = stage.openHelper.writableDatabase
-            sql.query("PRAGMA journal_mode=DELETE").use {
-                if (!it.moveToFirst() || it.getString(0) != "delete") throw IOException("Library stage cannot be closed without a journal")
-            }
-            if (sql.path != file.path) throw IOException("Library stage path mismatch")
-            val pageSize = sql.pageSize
-            if (pageSize !in 512..65_536 || java.lang.Long.bitCount(pageSize) != 1) throw IOException("Invalid SQLite page size")
-            val pageCap = MAX_PORTABLE_BYTES / pageSize
-            sql.query("PRAGMA max_page_count=$pageCap").use {
-                if (!it.moveToFirst() || it.getLong(0) !in 1..pageCap) throw IOException("Library stage capacity could not be set")
-            }
-            RoomLibrarySavedCatalog(stage).writeFresh(snapshot)
-            return sql.version
-        } finally { stage.close() }
-    }
-
     private fun verifyOriginalReferences(catalog: SQLiteDatabase, expected: List<SourceBlobRow>, checkpoint: () -> Unit) {
         if (LibraryPortableOriginals.read(catalog, checkpoint) != expected.associate { it.sourceBlobId to objectId(it) }) {
             throw IOException("Original references changed in the staged catalog")
         }
     }
 
-    private fun fingerprint(file: File, checkpoint: () -> Unit): LibraryObjectTransfer.ObjectId {
-        val length = Files.size(file.toPath())
-        if (length !in 1..MAX_PORTABLE_BYTES) throw IOException("Library stage exceeds the catalog limit")
-        val hash = MessageDigest.getInstance("SHA-256")
-        var remaining = length
-        readRegular(file).use { stream ->
-            val buffer = ByteArray(65536)
-            while (remaining > 0) {
-                checkpoint()
-                val count = stream.read(buffer, 0, minOf(buffer.size.toLong(), remaining).toInt())
-                if (count <= 0) throw IOException("Library stage extent changed")
-                hash.update(buffer, 0, count)
-                remaining -= count
-            }
-            if (stream.read() != -1) throw IOException("Library stage extent changed")
-        }
-        return LibraryObjectTransfer.ObjectId(hash.digest().joinToString("") { "%02x".format(it.toInt() and 255) }, length)
-    }
-
     private fun readRegular(file: File): InputStream {
         if (!Files.isRegularFile(file.toPath(), NOFOLLOW_LINKS)) throw IOException("Library input is not a regular file")
         return Files.newInputStream(file.toPath(), READ, NOFOLLOW_LINKS)
-    }
-
-    private fun privateDirectory(file: File, privateFiles: Path): Path {
-        val path = file.absoluteFile.toPath()
-        if (!path.startsWith(privateFiles) || !Files.isDirectory(path, NOFOLLOW_LINKS) || path.toRealPath() != path) {
-            throw IOException("Library location is not a canonical app-private directory")
-        }
-        return path
     }
 
     private fun newStage(scratch: Path): File = synchronized(STAGE_ADMISSION) {

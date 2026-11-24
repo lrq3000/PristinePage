@@ -2,8 +2,10 @@
 
 import json
 from pathlib import Path
+from contextlib import closing
 import re
 import shutil
+import sqlite3
 import subprocess
 import unittest
 
@@ -57,6 +59,24 @@ class LibraryCatalogReaderSqlTest(unittest.TestCase):
         records = self.sqlite(add_trigger, query)
         self.assertTrue(any(list(row.values())[1:4] == ["trigger", "added", "Document"] for row in records))
         self.assertNotEqual(self.sqlite(query), records)
+
+    def test_integrity_guard_detects_missing_index_entries_that_quick_check_misses(self):
+        # Keep the entry count and btree intact, but make its one stored key disagree with the schema's declared expression.
+        fixture = (
+            "CREATE TABLE IntegrityWitness(value TEXT NOT NULL)",
+            "INSERT INTO IntegrityWitness VALUES ('kept')",
+            "CREATE INDEX integrity_witness ON IntegrityWitness(upper(value))",
+            "PRAGMA writable_schema=ON",
+            "UPDATE sqlite_master SET sql='CREATE INDEX integrity_witness ON IntegrityWitness(value)' WHERE name='integrity_witness'",
+            "PRAGMA writable_schema=OFF",
+            "PRAGMA schema_version=99",
+        )
+        source = READER.read_text(encoding="utf-8")
+        check, = re.findall(r'candidate.rawQuery\("(PRAGMA (?:quick_check|integrity_check)\(1\))"', source)
+        with closing(sqlite3.connect(":memory:")) as db:
+            db.executescript(";\n".join(fixture) + ";")
+            self.assertEqual([("ok",)], db.execute("PRAGMA quick_check(1)").fetchall())
+            self.assertIn("missing from index integrity_witness", db.execute(check).fetchone()[0])
 
 
 if __name__ == "__main__":
