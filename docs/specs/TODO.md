@@ -84,6 +84,8 @@ Detached Open checkpoint: bind the app-private folder's physical identity and ma
 
 [Detached Open runtime evidence](../../validation/storage/library-restore-runtime.md#detached-library-open-follow-up) passed 23/23 API 28 cases. Existing originals remained in place; the verified view refused an exact-byte replacement directory and a changed tip. Work proceeds on authenticating newly decoded pixels against the recorded conversion identity; this test did not use a real codec or cross-device transfer. The existing toolchain approval remains pending for the selected-folder picker and grants.
 
+Historical pixel-binding checkpoint: for one admitted source record and stable verified original, the decoder can compare actual normalized RGB under the stored fingerprint while allowing a different current build with the same known conversion policy. Keep byte extent/digest, encoded and normalized shape, EXIF, profile and policy checks independent; this does not rewrite stored provenance or enable ordinary render or export replay. The strict-offline image suite passed 283 JVM cases. The synthetic on-device codec witness compiles, including a same-length alternate PNG with the same normalized pixels that must fail the original's byte binding. Its image-module APK has not been signed or installed: the current portability guest is scoped to data-only successors. A synthesized historical fingerprint does not prove two-build equivalence.
+
 ### Current coordination: transition to `main`
 
 - [x] Operator approved the local fast-forward and `main`-based PR/handoff cadence; see [operational authority](OPERATIONAL_PLAN.md) and [queue rules](PARALLEL_EXECUTION_PLAN.md#coordination). Earlier branch/base references below describe their historical claims.

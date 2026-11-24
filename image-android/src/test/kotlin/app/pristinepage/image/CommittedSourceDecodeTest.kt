@@ -14,6 +14,7 @@ import app.pristinepage.image.decode.DecodedSource
 import app.pristinepage.image.decode.ImageAllocationBudget
 import app.pristinepage.image.decode.SourceDecoder
 import app.pristinepage.image.decode.SourceFileDecoder
+import app.pristinepage.image.decode.PortableSourcePixels
 import java.io.ByteArrayOutputStream
 import java.io.DataOutputStream
 import java.io.File
@@ -143,6 +144,45 @@ class CommittedSourceDecodeTest {
         val f = Fixture(); f.actual = f.info.copy(conversionFingerprint = "new-unaccepted-conversion")
         assertEquals(OperationErrorCode.UNSUPPORTED_VERSION, error(f).code); assertEquals(f.info, f.stored.inspection); assertEquals(0L, f.budget.usedBytes)
         assertThrows(IllegalStateException::class.java) { f.lastImage!!.toPackedByteArray() }
+    }
+
+    @Test fun portableProofAcceptsAnotherBuildOnlyAfterAuthenticatingTheActualRasterWithTheHistoricalBinding() {
+        val f = Fixture()
+        val old = "android-imagedecoder-v2/api28/0123456789abcdef/srgb-straight-white-exif-v1"
+        val current = "android-imagedecoder-v2/api35/fedcba9876543210/srgb-straight-white-exif-v1"
+        val recorded = f.info.copy(conversionFingerprint = old, sourcePixelHash = independentPixels(old, f.pixels))
+        val observed = f.info.copy(conversionFingerprint = current, sourcePixelHash = independentPixels(current, f.pixels))
+        RgbImage(3, 2, 9, f.pixels).use {
+            assertTrue(PortableSourcePixels.proves(recorded, observed, it))
+            assertFalse(PortableSourcePixels.proves(recorded.copy(sourcePixelHash = "e".repeat(64)), observed, it))
+            assertFalse(PortableSourcePixels.proves(recorded.copy(exifOrientation = 2), observed, it))
+            assertFalse(PortableSourcePixels.proves(recorded.copy(conversionFingerprint = "future-policy"), observed, it))
+            assertFalse(PortableSourcePixels.proves(recorded.copy(mime = "image/jpeg"),
+                observed.copy(mime = "image/jpeg", conversionFingerprint = "$current/jpeg-camera-view-v1"), it))
+            val profiled = "$old/matrix-srgb-profile-v1"
+            assertFalse(PortableSourcePixels.proves(recorded.copy(conversionFingerprint = profiled,
+                profileSha256 = "a".repeat(64), sourcePixelHash = independentPixels(profiled, f.pixels)),
+                observed.copy(conversionFingerprint = "$current/matrix-srgb-profile-v1", profileSha256 = "b".repeat(64)), it))
+        }
+        val wrongPixels = f.pixels.copyOf().apply { this[0] = 0 }
+        RgbImage(3, 2, 9, wrongPixels).use {
+            assertFalse(PortableSourcePixels.proves(recorded, observed.copy(sourcePixelHash = independentPixels(current, wrongPixels)), it))
+        }
+    }
+
+    private fun independentPixels(fingerprint: String, pixels: ByteArray): String {
+        val bytes = ByteArrayOutputStream()
+        DataOutputStream(bytes).use { stream ->
+            stream.write("pristinepage-source-pixels-v1\u0000".toByteArray())
+            val policy = fingerprint.toByteArray()
+            stream.writeInt(policy.size)
+            stream.write(policy)
+            stream.writeInt(3)
+            stream.writeInt(2)
+            stream.writeLong(pixels.size.toLong())
+            stream.write(pixels)
+        }
+        return MessageDigest.getInstance("SHA-256").digest(bytes.toByteArray()).joinToString("") { "%02x".format(it.toInt() and 255) }
     }
 
     @Test fun bytePixelSizeExifProfileAndMimeDriftCannotReturnANewSourceIdentity() = runTest {

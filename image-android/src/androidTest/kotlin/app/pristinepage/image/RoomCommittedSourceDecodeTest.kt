@@ -5,12 +5,16 @@ import app.pristinepage.core.pipeline.OutputSpec
 import app.pristinepage.core.pipeline.PixelSize
 import app.pristinepage.core.pipeline.RenderPurpose
 import app.pristinepage.data.model.*
+import app.pristinepage.data.repository.CommittedSource
 import app.pristinepage.data.repository.RoomCommittedSources
 import app.pristinepage.data.repository.RoomMetadataAccess
 import app.pristinepage.image.decode.AndroidSourceInspector
 import app.pristinepage.image.decode.ImageAllocationBudget
 import app.pristinepage.image.decode.SourceDecoder
 import app.pristinepage.image.decode.SourceFileDecoder
+import java.io.ByteArrayOutputStream
+import java.io.DataOutputStream
+import java.security.MessageDigest
 import app.pristinepage.image.EncodedImageFixtures.exif
 import app.pristinepage.image.EncodedImageFixtures.jpeg
 import app.pristinepage.image.EncodedImageFixtures.rgbaPng
@@ -38,6 +42,47 @@ class RoomCommittedSourceDecodeTest {
                 assertTrue(f.budget.usedBytes > 0)
             }
             assertEquals(before, f.inventory()); assertEquals(1, f.opened); assertEquals(1, f.inspected); assertEquals(0L, f.budget.usedBytes); f.assertForeignKeys()
+        }
+    }
+
+    @Test fun portablePixelProofUsesARealDecodedRasterWithAnIndependentlyRecordedBuildIdentity() = runBlocking {
+        fun withNote(note: String) = EncodedImageFixtures.png(4, 1, 8, 6,
+            byteArrayOf(0, -1, 0, 64, 0, 64, 32, 0, -128, -1, 0, 0, -1, -1, -1, -1, 1),
+            EncodedImageFixtures.chunk("tEXt", "Note\u0000$note".toByteArray()))
+        RoomNormalizedIngestTest.Fixture(withNote("abc")).use { f ->
+            val first = ingest(f)
+            val source = checkNotNull(f.database.catalog().source(first.sourceId.value))
+            val admitted = RoomCommittedSources(RoomMetadataAccess(f.database), f.database.catalog(), f.files).load(first.sourceId)
+            val original = admitted.file
+            val originalBytes = original.readBytes()
+            val observed = admitted.inspection
+            val earlierBuild = "android-imagedecoder-v2/api34/0123456789abcdef/srgb-straight-white-exif-v1"
+            val expected = byteArrayOf(255.toByte(), 255.toByte(), 255.toByte(), 159.toByte(), 143.toByte(),
+                127, 255.toByte(), 0, 0, 255.toByte(), 255.toByte(), 255.toByte())
+            val tagged = ByteArrayOutputStream()
+            DataOutputStream(tagged).use {
+                it.write("pristinepage-source-pixels-v1\u0000".toByteArray())
+                it.writeInt(earlierBuild.length); it.write(earlierBuild.toByteArray())
+                it.writeInt(4); it.writeInt(1); it.writeLong(expected.size.toLong()); it.write(expected)
+            }
+            val hash = MessageDigest.getInstance("SHA-256").digest(tagged.toByteArray()).joinToString("") { "%02x".format(it.toInt() and 255) }
+            val recorded = observed.copy(conversionFingerprint = earlierBuild, sourcePixelHash = hash)
+            fun historical(inspection: SourceInspection) = CommittedSource(first.sourceId, SourceBlobId(source.sourceBlobId),
+                admitted.sourceByteHash, admitted.byteCount, inspection, original)
+            val before = f.inventory()
+            assertTrue(f.decoder.provePortableBinding(historical(recorded)))
+            assertFalse(f.decoder.provePortableBinding(historical(recorded.copy(sourcePixelHash = "a".repeat(64)))))
+            assertEquals(before, f.inventory())
+            assertArrayEquals(originalBytes, original.readBytes())
+            val alternative = withNote("def")
+            assertEquals(originalBytes.size, alternative.size)
+            assertFalse(originalBytes.contentEquals(alternative))
+            original.writeBytes(alternative) // Mutable fixture control, never a product operation.
+            assertEquals(observed, f.decoder.inspect(original, EncodedImageFixtures.sha(alternative)))
+            val refusal = runCatching { f.decoder.provePortableBinding(historical(recorded)) }.exceptionOrNull()
+            assertEquals(OperationErrorCode.INTEGRITY_FAILED, (refusal as? RepositoryFailure)?.error?.code)
+            assertArrayEquals(alternative, original.readBytes())
+            assertEquals(0L, f.budget.usedBytes)
         }
     }
 

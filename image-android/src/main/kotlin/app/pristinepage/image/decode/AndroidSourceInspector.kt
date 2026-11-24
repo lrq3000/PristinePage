@@ -14,6 +14,7 @@ import app.pristinepage.data.model.OperationErrorCode
 import app.pristinepage.data.model.RepositoryFailure
 import app.pristinepage.data.model.SourceCaptureDate
 import app.pristinepage.data.model.SourceInspection
+import app.pristinepage.data.repository.CommittedSource
 import java.io.File
 import java.io.FileNotFoundException
 import java.io.IOException
@@ -46,6 +47,25 @@ class AndroidSourceInspector @JvmOverloads constructor(private val budget: Image
         decodeFile(file, expectedByteSha256, captureDate = true).use { InspectedSourceForIngest(it.inspection, checkNotNull(it.captureDate)) }
 
     override suspend fun decodeFile(file: File, expectedByteSha256: String): DecodedSource = decodeFile(file, expectedByteSha256, captureDate = false)
+
+    /** Re-decode one admitted original under its stable source owner. The adapter must obtain this tuple from the same verified catalog admission; the caller cannot supply a separate digest or history. */
+    internal suspend fun provePortableBinding(original: CommittedSource): Boolean =
+        withContext(dispatcher) {
+            val active = currentCoroutineContext()
+            fun verifyExtent() {
+                if (!original.file.isFile) refuse(OperationErrorCode.SOURCE_UNAVAILABLE, "source_file_unavailable")
+                if (original.file.length() != original.byteCount) refuse(OperationErrorCode.INTEGRITY_FAILED, "source_byte_identity_mismatch")
+            }
+            active.ensureActive()
+            verifyExtent()
+            val equal = decodeFile(original.file, original.sourceByteHash).use { current ->
+                current.sourceByteHash == original.sourceByteHash &&
+                    PortableSourcePixels.proves(original.inspection, current.inspection, current.image) { active.ensureActive() }
+            }
+            active.ensureActive()
+            verifyExtent()
+            equal
+        }
 
     private suspend fun decodeFile(file: File, expectedByteSha256: String, captureDate: Boolean): DecodedSource {
         var completed: DecodedSource? = null
