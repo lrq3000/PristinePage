@@ -30,6 +30,7 @@ internal class RoomLibraryCatalogReader(context: Context, private val maximumByt
             reference.close()
         }
     }
+    val schemaVersion: Int get() = expected.version
 
     /** The installed Room schema supplies an independent allowlist. The callback is synchronous, read-only, and must separately validate bounded row semantics and file references. */
     fun <T> read(file: File, load: (SQLiteDatabase) -> T): T {
@@ -88,10 +89,11 @@ internal class RoomLibraryCatalogReader(context: Context, private val maximumByt
         return cursor.getString(0).also { if (cursor.moveToNext()) throw IOException("Library Room identity is ambiguous") }
     }
 
-    private companion object {
+    companion object {
+        const val MAX_PORTABLE_BYTES = 32L * 1024 * 1024
         // Use CASE to admit raw SQL extents before transferring schema text into an Android CursorWindow.
-        const val SCHEMA_BOUNDS = "(typeof(type)='text' AND length(CAST(type AS BLOB))<=16 AND typeof(name)='text' AND length(CAST(name AS BLOB))<=160 AND typeof(tbl_name)='text' AND length(CAST(tbl_name AS BLOB))<=160 AND (sql IS NULL OR (typeof(sql)='text' AND length(CAST(sql AS BLOB))<=16384)))"
-        const val SCHEMA_QUERY = "SELECT $SCHEMA_BOUNDS, CASE WHEN $SCHEMA_BOUNDS THEN type END, CASE WHEN $SCHEMA_BOUNDS THEN name END, CASE WHEN $SCHEMA_BOUNDS THEN tbl_name END, CASE WHEN $SCHEMA_BOUNDS THEN sql END FROM sqlite_master ORDER BY type,name LIMIT 129"
-        const val ROOM_IDENTITY = "SELECT identity_hash FROM room_master_table WHERE id=42 AND typeof(identity_hash)='text' AND length(CAST(identity_hash AS BLOB))=32"
+        private const val SCHEMA_BOUNDS = "(typeof(type)='text' AND length(CAST(type AS BLOB))<=16 AND typeof(name)='text' AND length(CAST(name AS BLOB))<=160 AND typeof(tbl_name)='text' AND length(CAST(tbl_name AS BLOB))<=160 AND (sql IS NULL OR (typeof(sql)='text' AND length(CAST(sql AS BLOB))<=16384)))"
+        private const val SCHEMA_QUERY = "SELECT $SCHEMA_BOUNDS, CASE WHEN $SCHEMA_BOUNDS THEN type END, CASE WHEN $SCHEMA_BOUNDS THEN name END, CASE WHEN $SCHEMA_BOUNDS THEN tbl_name END, CASE WHEN $SCHEMA_BOUNDS THEN sql END FROM sqlite_master ORDER BY type,name LIMIT 129"
+        private const val ROOM_IDENTITY = "SELECT identity_hash FROM room_master_table WHERE id=42 AND typeof(identity_hash)='text' AND length(CAST(identity_hash AS BLOB))=32"
     }
 }

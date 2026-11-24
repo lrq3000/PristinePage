@@ -9,6 +9,7 @@ import java.io.InputStream
 import java.io.OutputStream
 import java.nio.channels.Channels
 import java.nio.channels.FileChannel
+import java.nio.file.DirectoryIteratorException
 import java.nio.file.FileAlreadyExistsException
 import java.nio.file.Files
 import java.nio.file.LinkOption.NOFOLLOW_LINKS
@@ -27,6 +28,8 @@ internal class LocalLibraryDirectory(root: File, private val directorySync: Dire
         require(root.absoluteFile == paths.root && Files.isDirectory(root.toPath(), NOFOLLOW_LINKS))
     }
 
+    val rootPath: Path get() = paths.root.toPath()
+
     override fun open(id: LibraryObjectTransfer.ObjectId) = open(objectPath(id))
     override fun create(id: LibraryObjectTransfer.ObjectId, write: (OutputStream) -> Unit) = create(objectPath(id), write)
     override fun openCatalog(generation: LibraryGeneration) = open(generation.catalogPath)
@@ -40,22 +43,26 @@ internal class LocalLibraryDirectory(root: File, private val directorySync: Dire
 
     /** Iterates a bounded inventory and refuses uncertainty rather than silently opening an older generation. Does not publish, remove or repair anything. */
     fun readTip(checkpoint: () -> Unit = {}): LibraryGeneration {
-        val root = paths.beneath("generations").toPath()
+        val root = readPath("generations")
         if (!Files.isDirectory(root, NOFOLLOW_LINKS)) throw IOException("Library generation folder is unavailable")
         val markers = ArrayList<LibraryGeneration>()
-        Files.newDirectoryStream(root).use {
-            var entries = 0
-            for (entry in it) {
-                checkpoint()
-                if (++entries > 2 * LibraryGenerationChain.MAX_MARKERS) throw IOException("Library generation inventory exceeds the limit")
-                val leaf = entry.fileName.toString()
-                if (!leaf.endsWith(".complete")) continue
-                if (markers.size == LibraryGenerationChain.MAX_MARKERS) throw IOException("Library generation inventory exceeds the limit")
-                val marker = open("generations/$leaf")?.use(LibraryGeneration::read)
-                    ?: throw IOException("Library marker disappeared")
-                if (leaf != "${marker.id}.complete") throw IOException("Library marker name does not match the generation")
-                markers += marker
+        try {
+            Files.newDirectoryStream(root).use {
+                var entries = 0
+                for (entry in it) {
+                    checkpoint()
+                    if (++entries > 2 * LibraryGenerationChain.MAX_MARKERS) throw IOException("Library generation inventory exceeds the limit")
+                    val leaf = entry.fileName.toString()
+                    if (!leaf.endsWith(".complete")) continue
+                    if (markers.size == LibraryGenerationChain.MAX_MARKERS) throw IOException("Library generation inventory exceeds the limit")
+                    val marker = open("generations/$leaf")?.use(LibraryGeneration::read)
+                        ?: throw IOException("Library marker disappeared")
+                    if (leaf != "${marker.id}.complete") throw IOException("Library marker name does not match the generation")
+                    markers += marker
+                }
             }
+        } catch (_: DirectoryIteratorException) {
+            throw IOException("Library generation inventory could not be read")
         }
         checkpoint()
         return LibraryGenerationChain.tip(markers)
@@ -80,10 +87,16 @@ internal class LocalLibraryDirectory(root: File, private val directorySync: Dire
         forceDirectory(checkNotNull(paths.beneath(relativePath).parentFile))
 
     private fun open(relativePath: String): InputStream? {
-        val path = paths.beneath(relativePath).toPath()
+        val path = readPath(relativePath)
         if (!presentRegularFile(path)) return null
         // An open failure after positive observation is uncertain, not evidence that a new object can be created here.
         return Files.newInputStream(path, READ, NOFOLLOW_LINKS)
+    }
+
+    private fun readPath(relativePath: String): Path = try {
+        paths.beneath(relativePath).toPath()
+    } catch (_: IllegalArgumentException) {
+        throw IOException("Library path redirects outside its owned location")
     }
 
     private fun create(relativePath: String, write: (OutputStream) -> Unit) {

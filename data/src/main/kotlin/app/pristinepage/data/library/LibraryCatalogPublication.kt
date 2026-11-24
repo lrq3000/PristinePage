@@ -5,11 +5,7 @@ import java.io.File
 import java.io.IOException
 import java.io.InputStream
 import java.io.OutputStream
-import java.nio.file.Files
-import java.nio.file.LinkOption.NOFOLLOW_LINKS
 import java.nio.file.Path
-import java.nio.file.StandardOpenOption.READ
-import java.nio.file.StandardOpenOption.WRITE
 
 /** Publishes a verified immutable catalog generation, not an active-root switch or authority to retire its predecessor. */
 internal class LibraryCatalogPublication(private val store: Store, private val privateScratch: Path, private val checkpoint: () -> Unit = {}) {
@@ -52,7 +48,7 @@ internal class LibraryCatalogPublication(private val store: Store, private val p
                 openIncoming().use { transferExactBytes(it, sink, generation.catalog.byteCount, generation.catalog.sha256, checkpoint) }
             }
         }
-        (catalog ?: openCatalog(generation)).use { verifyAndReopen(it, generation, verifyReopen) }
+        (catalog ?: openCatalog(generation)).use { LibraryCatalogVerification(privateScratch, checkpoint).read(it, generation, verifyReopen) }
         // A second read must still identify the catalog we actually reopened, not a provider's replacement at the same locator.
         openCatalog(generation).use { generation.verifyCatalog(it, checkpoint) }
         store.confirmPayloadDurability(generation)
@@ -62,22 +58,6 @@ internal class LibraryCatalogPublication(private val store: Store, private val p
         if (!markerExists(generation)) throw IOException("Library completion marker is missing")
         checkpoint()
         return generation
-    }
-
-    private fun verifyAndReopen(input: InputStream, generation: LibraryGeneration, verifyReopen: (File) -> Unit) {
-        val directory = privateScratch.toAbsolutePath()
-        if (directory.toRealPath() != directory || !Files.isDirectory(directory, NOFOLLOW_LINKS)) throw IOException("Invalid private verification directory")
-        val scratch = Files.createTempFile(directory, "library-catalog-", ".sqlite")
-        try {
-            Files.newOutputStream(scratch, WRITE, NOFOLLOW_LINKS).use {
-                transferExactBytes(input, it, generation.catalog.byteCount, generation.catalog.sha256, checkpoint)
-            }
-            Files.newInputStream(scratch, READ, NOFOLLOW_LINKS).use { generation.verifyCatalog(it, checkpoint) }
-            verifyReopen(scratch.toFile())
-        } finally {
-            // This uniquely created verification copy is not the selected folder or a retained user's catalog.
-            try { Files.deleteIfExists(scratch) } catch (_: IOException) { /* Prefer retaining a private copy over obscuring the result. */ }
-        }
     }
 
     private fun openCatalog(generation: LibraryGeneration): InputStream {

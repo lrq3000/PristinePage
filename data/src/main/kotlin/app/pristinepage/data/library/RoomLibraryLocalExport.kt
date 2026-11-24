@@ -5,6 +5,7 @@ import android.content.ContextWrapper
 import android.database.sqlite.SQLiteDatabase
 import androidx.room.Room
 import androidx.room.RoomDatabase
+import app.pristinepage.data.library.RoomLibraryCatalogReader.Companion.MAX_PORTABLE_BYTES
 import app.pristinepage.data.db.PristineDatabase
 import app.pristinepage.data.db.SourceBlobRow
 import app.pristinepage.data.files.PlatformDirectorySync
@@ -31,7 +32,7 @@ internal class RoomLibraryLocalExport(
 ) {
     private val application = context.applicationContext
     private val source = SourceFiles(originalRoot)
-    private val reader = RoomLibraryCatalogReader(application, MAX_CATALOG_BYTES)
+    private val reader = RoomLibraryCatalogReader(application, MAX_PORTABLE_BYTES)
 
     suspend fun writeNewFolder(destination: File): LibraryGeneration = withContext(Dispatchers.IO) {
         val checkpoint = { coroutineContext.ensureActive() }
@@ -48,7 +49,7 @@ internal class RoomLibraryLocalExport(
         if (!Files.notExists(target, NOFOLLOW_LINKS)) throw IOException("Library export requires a new folder")
         val snapshot = RoomLibrarySavedCatalog(sourceDatabase).capture()
         // A scratch database and its rollback journal are separate from the later destination/scratch copy budget.
-        if (scratch.toFile().usableSpace < 3 * MAX_CATALOG_BYTES) throw IOException("Not enough space to stage a library catalog")
+        if (scratch.toFile().usableSpace < 3 * MAX_PORTABLE_BYTES) throw IOException("Not enough space to stage a library catalog")
         checkpoint()
         val stage = newStage(scratch)
         val closed = File(stage, "catalog.sqlite")
@@ -76,7 +77,7 @@ internal class RoomLibraryLocalExport(
         val transfer = LibraryObjectTransfer(adapter, checkpoint).prepare(requirements, metadataReservation, capacity)
         checkpoint()
         transfer.copyAndVerify()
-        val published = LibraryCatalogPublication(adapter, scratch, checkpoint).publish(generation, MAX_CATALOG_BYTES, { readRegular(closed) }) { verification ->
+        val published = LibraryCatalogPublication(adapter, scratch, checkpoint).publish(generation, MAX_PORTABLE_BYTES, { readRegular(closed) }) { verification ->
             reader.read(verification) { catalog ->
                 verifyOriginalReferences(catalog, snapshot.originals, checkpoint)
                 LibraryObjectTransfer(adapter, checkpoint).prepare(
@@ -109,7 +110,7 @@ internal class RoomLibraryLocalExport(
             if (sql.path != file.path) throw IOException("Library stage path mismatch")
             val pageSize = sql.pageSize
             if (pageSize !in 512..65_536 || java.lang.Long.bitCount(pageSize) != 1) throw IOException("Invalid SQLite page size")
-            val pageCap = MAX_CATALOG_BYTES / pageSize
+            val pageCap = MAX_PORTABLE_BYTES / pageSize
             sql.query("PRAGMA max_page_count=$pageCap").use {
                 if (!it.moveToFirst() || it.getLong(0) !in 1..pageCap) throw IOException("Library stage capacity could not be set")
             }
@@ -126,7 +127,7 @@ internal class RoomLibraryLocalExport(
 
     private fun fingerprint(file: File, checkpoint: () -> Unit): LibraryObjectTransfer.ObjectId {
         val length = Files.size(file.toPath())
-        if (length !in 1..MAX_CATALOG_BYTES) throw IOException("Library stage exceeds the catalog limit")
+        if (length !in 1..MAX_PORTABLE_BYTES) throw IOException("Library stage exceeds the catalog limit")
         val hash = MessageDigest.getInstance("SHA-256")
         var remaining = length
         readRegular(file).use { stream ->
@@ -177,7 +178,6 @@ internal class RoomLibraryLocalExport(
     private fun objectId(blob: SourceBlobRow) = LibraryObjectTransfer.ObjectId(blob.byteSha256, blob.byteCount)
 
     private companion object {
-        const val MAX_CATALOG_BYTES = 32L * 1024 * 1024
         val STAGE_ADMISSION = Any()
     }
 }

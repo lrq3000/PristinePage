@@ -4,6 +4,7 @@ import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import app.pristinepage.data.library.LibraryGeneration
 import app.pristinepage.data.library.RoomLibraryCatalogReader
+import app.pristinepage.data.library.RoomLibraryLocalBackup
 import app.pristinepage.data.library.RoomLibraryLocalExport
 import app.pristinepage.data.model.IngestResult
 import java.io.File
@@ -52,6 +53,16 @@ class RoomLibraryLocalExportTest {
                 }
             }
             assertEquals(listOf("Report-1.png", "Report-2.png"), labels)
+            val backupReader = RoomLibraryLocalBackup(context, scratch)
+            val reopened = backupReader.read(backup)
+            assertEquals(exported, reopened.generation)
+            val expectedBlobIds = commits.map { checkNotNull(source.database.catalog().source(it.sourceId.value)).sourceBlobId }.toSet()
+            assertEquals(expectedBlobIds, reopened.originals.keys)
+            assertEquals(1, reopened.originals.values.toSet().size)
+            val damaged = source.bytes.copyOf().also { it[0] = 7 }
+            files.single().writeBytes(damaged)
+            assertTrue(runCatching { backupReader.read(backup) }.exceptionOrNull() is IOException)
+            assertArrayEquals(damaged, files.single().readBytes())
             for (commit in commits) {
                 val row = checkNotNull(source.database.catalog().source(commit.sourceId.value))
                 assertArrayEquals(source.bytes, source.files.finalFile(row.sourceBlobId).readBytes())
