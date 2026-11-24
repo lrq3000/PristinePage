@@ -55,12 +55,14 @@ FIXTURE_CORRECTION = ("93fb1e0f546e02680ac549767b0a0b3f7097ea07", "06bee1ed0ffb2
 VERBATIM_FIXTURE = ("43f6ebb38c17114ec13aee997f557ea44db9c57b", "6db70aa8a51c7986b063252d21442a58c35193c4a442693f2e88a0ef3ccdd82f")
 ROOM_COPY = ("53e58d514e688fc460ddf574602eb62373978477", "abd835d2f87dc3f661b7787719b6074ddec23fc89ec4d687501497696a621c34")
 PRIVATE_SELECTION = ("3b9c77e69f32b49280ee5bab24a7e144d325074f", "60b55bda25e26156970f6fc3f434adbd60da4dcf2816c77a80babfdf724272b3")
+DETACHED_OPEN = ("a70e89da945536297b724b3c48297bcad0f9233f", "5228591179bbaae73c077ba431f30e1eef3cc3bce25fd33d8761bb5e9c4dfb69")
 MERGE_CASES = (
     "preflightStagesBothPortableCatalogsWithoutWritingEitherLibrary",
     "temporaryMergedCatalogReopensWithBothHistoriesAndTheIncomingSavedOcr",
 )
 COPY_CASE = "exactRoomCopyAddsOnlyTheMissingOriginalAndReplaysWithoutWritingEitherLibrary"
 SELECTION_CASE = "aSelectionVisibleAfterFailedAcknowledgmentReopensOnTheActualPrivateFilesystem"
+OPEN_CASE = "openReadsARealCatalogAndOriginalWithoutCopyingScansIntoWorkingStorage"
 BUILD_INPUTS = ("data", "core", "gradle", "settings.gradle.kts", "build.gradle.kts", "gradle.properties", "gradlew", "gradlew.bat", "buildSrc", "build-logic")
 
 
@@ -203,7 +205,8 @@ def main():
     verbatim = candidate == VERBATIM_FIXTURE
     copy = candidate == ROOM_COPY
     selection = candidate == PRIVATE_SELECTION
-    successor = candidate == SUCCESSOR or corrected or verbatim or copy or selection
+    detached = candidate == DETACHED_OPEN
+    successor = candidate == SUCCESSOR or corrected or verbatim or copy or selection or detached
     need(candidate == APPROVED or successor, "Unapproved source and test APK pair")
     mode = sys.argv[3] if len(sys.argv) >= 4 else None
     need(mode in (None, "--fresh", OWN_GUEST), "Runtime requires the dedicated library guest")
@@ -219,7 +222,7 @@ def main():
         return 0
     fresh = mode == "--fresh"
     guest = OWN_GUEST
-    predecessor = (ROOM_COPY[1] if selection else VERBATIM_FIXTURE[1] if copy else FIXTURE_CORRECTION[1] if verbatim
+    predecessor = (PRIVATE_SELECTION[1] if detached else ROOM_COPY[1] if selection else VERBATIM_FIXTURE[1] if copy else FIXTURE_CORRECTION[1] if verbatim
                    else SUCCESSOR[1] if corrected else APPROVED[1] if successor else None)
     if predecessor:
         proof["predecessor"] = verify_apk(Path(sys.argv[4]).resolve(), predecessor)
@@ -258,10 +261,12 @@ def main():
         registry = run.command([*adb, "shell", "pm", "list", "instrumentation", TEST]).splitlines()
         need(registry == [f"instrumentation:{RUNNER} (target={TEST})"], "Wrong self-target instrumentation")
         cases = dict(CASES, RoomLibraryCatalogMergeTest=MERGE_CASES) if successor else CASES
-        if copy or selection:
+        if copy or selection or detached:
             cases["RoomLibraryCatalogMergeTest"] += (COPY_CASE,)
-        if selection:
+        if selection or detached:
             cases["RoomLibraryActiveSelectionTest"] = (SELECTION_CASE,)
+        if detached:
+            cases["RoomLibraryPortableViewTest"] = (OPEN_CASE,)
         scenarios = [f"app.pristinepage.data.{cls}#{test}" for cls, tests in cases.items() for test in tests]
         verify_target(run, ns)
         output = run.command([*adb, "shell", "am", "instrument", "-w", "-r", "-e", "class", ",".join(scenarios), RUNNER], timeout=150)
