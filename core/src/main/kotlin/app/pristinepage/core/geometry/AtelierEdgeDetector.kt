@@ -16,6 +16,9 @@ object AtelierEdgeDetector {
     private const val MIN_CONTRAST = 30
     private const val REGION_CONTRAST = 13
 
+    /** Conservative shared-ledger charge for a bounded preview analysis, not a total process heap estimate. */
+    fun workspaceBytes(): Long = 4L * 1024 * 1024
+
     @JvmStatic @JvmOverloads fun detect(width: Int, height: Int, checkpoint: () -> Unit = {}, luminance: (Int, Int) -> Int): QuadPx? {
         if (width !in MIN_AXIS..MAX_EDGE || height !in MIN_AXIS..MAX_EDGE) return null
         val pixels = IntArray(width * height)
@@ -24,28 +27,85 @@ object AtelierEdgeDetector {
             for (x in 0 until width) pixels[y * width + x] = luminance(x, y)
         }
         require(pixels.all { it in 0..255 })
+        val lines = lineProposals(width, height, pixels, checkpoint)
+        val choices = lines.ifEmpty { regions(AtelierRegionOutline.Workspace(width, height), width, height, pixels, checkpoint) }
+        return choices.singleOrNull()?.let { normalize(it, width, height) }
+    }
+
+    /** Preserve the luminance-first policy. When no luminance contour is supported, compare two color difference planes. */
+    @JvmStatic @JvmOverloads fun detectRgb(width: Int, height: Int, checkpoint: () -> Unit = {}, rgb: (Int, Int) -> Int): QuadPx? {
+        if (width !in MIN_AXIS..MAX_EDGE || height !in MIN_AXIS..MAX_EDGE) return null
+        val packed = IntArray(width * height)
+        val samples = IntArray(packed.size)
+        for (y in 0 until height) {
+            checkpoint()
+            for (x in 0 until width) {
+                val index = y * width + x
+                val v = rgb(x, y)
+                packed[index] = v
+                val r = (v ushr 16) and 255
+                val g = (v ushr 8) and 255
+                val b = v and 255
+                samples[index] = (77 * r + 150 * g + 29 * b + 128) ushr 8
+            }
+        }
+        val lines = lineProposals(width, height, samples, checkpoint)
+        if (lines.isNotEmpty()) return lines.singleOrNull()?.let { normalize(it, width, height) }
+        val workspace = AtelierRegionOutline.Workspace(width, height)
+        val lumaRegions = regions(workspace, width, height, samples, checkpoint)
+        if (lumaRegions.size > 1) return null
+        var predicted = lumaRegions.singleOrNull()
+        for (shift in intArrayOf(16, 0)) {
+            var low = 255
+            var high = 0
+            for (i in packed.indices) {
+                if (i % width == 0) checkpoint()
+                val v = packed[i]
+                // Scaling keeps both differences in the existing 0..255 detector domain without clipping.
+                val value = (((v ushr shift) and 255) - ((v ushr 8) and 255) + 256) ushr 1
+                samples[i] = value
+                low = minOf(low, value)
+                high = maxOf(high, value)
+            }
+            if (high - low < REGION_CONTRAST) continue
+            val choices = regions(workspace, width, height, samples, checkpoint)
+            if (choices.size > 1) return null
+            val next = choices.singleOrNull() ?: continue
+            if (predicted != null && !AtelierRegionOutline.agrees(predicted, next, 4.0)) return null
+            if (predicted == null) predicted = next
+        }
+        return predicted?.let { normalize(it, width, height) }
+    }
+
+    private fun regions(workspace: AtelierRegionOutline.Workspace, width: Int, height: Int, pixels: IntArray,
+        checkpoint: () -> Unit): List<QuadPx> =
+        workspace.proposals(pixels, checkpoint) { quad, sign ->
+            separatesPage(quad, width, height, pixels, sign, allowIsolatedInk = true)
+        }
+
+    private fun lineProposals(width: Int, height: Int, pixels: IntArray, checkpoint: () -> Unit): List<QuadPx> {
         val rows = { u: Int, v: Int -> pixels[u * width + v] }
         val columns = { u: Int, v: Int -> pixels[v * width + u] }
         // Keep the quick high-contrast fit only when all four sides also separate the same inside/outside polarity.
         val quick = quad(oppositeEdges(height, width, rows), oppositeEdges(width, height, columns), width, height)
-        val detected = if (quick != null && separatesPage(quick, width, height, pixels)) quick else {
-            val vertical = regionalEdges(height, width, checkpoint, rows)
-            val horizontal = regionalEdges(width, height, checkpoint, columns)
-            // A bright sheet and a dark sheet are both possible. Do not silently pick a polarity if both fit.
-            val regional = listOf(-1, 1).mapNotNull { sign ->
-                quad(vertical[sign], horizontal[sign], width, height)?.takeIf { separatesPage(it, width, height, pixels, sign) }
-            }
-            if (regional.isNotEmpty()) regional.singleOrNull()
-            else {
-                val upright = narrowReceipt(width, height, rows, columns, checkpoint)
-                val sideways = narrowReceipt(height, width, columns, rows, checkpoint)?.let {
-                    fun transpose(p: PointPx) = PointPx(p.y, p.x)
-                    QuadPx(transpose(it.tl), transpose(it.bl), transpose(it.br), transpose(it.tr))
-                }
-                // An ambiguous result is not a safe default. Never invent end caps or extrapolate them past the preview.
-                listOfNotNull(upright, sideways).filter { separatesPage(it, width, height, pixels) }.singleOrNull()
-            }
-        } ?: return null
+        if (quick != null && separatesPage(quick, width, height, pixels)) return listOf(quick)
+        val vertical = regionalEdges(height, width, checkpoint, rows)
+        val horizontal = regionalEdges(width, height, checkpoint, columns)
+        // A bright sheet and a dark sheet are both possible. Do not silently pick a polarity if both fit.
+        val regional = listOf(-1, 1).mapNotNull { sign ->
+            quad(vertical[sign], horizontal[sign], width, height)?.takeIf { separatesPage(it, width, height, pixels, sign) }
+        }
+        if (regional.isNotEmpty()) return regional
+        val upright = narrowReceipt(width, height, rows, columns, checkpoint)
+        val sideways = narrowReceipt(height, width, columns, rows, checkpoint)?.let {
+            fun transpose(p: PointPx) = PointPx(p.y, p.x)
+            QuadPx(transpose(it.tl), transpose(it.bl), transpose(it.br), transpose(it.tr))
+        }
+        // An ambiguous result is not a safe default. Never invent end caps or extrapolate them past the preview.
+        return listOfNotNull(upright, sideways).filter { separatesPage(it, width, height, pixels) }
+    }
+
+    private fun normalize(detected: QuadPx, width: Int, height: Int): QuadPx {
         fun normalized(point: PointPx) = PointPx(point.x / (width - 1), point.y / (height - 1))
         return QuadPx(normalized(detected.tl), normalized(detected.tr), normalized(detected.br), normalized(detected.bl))
     }
@@ -129,7 +189,8 @@ object AtelierEdgeDetector {
         return candidate
     }
 
-    private fun separatesPage(quad: QuadPx, width: Int, height: Int, pixels: IntArray, requiredSign: Int? = null): Boolean {
+    private fun separatesPage(quad: QuadPx, width: Int, height: Int, pixels: IntArray, requiredSign: Int? = null,
+        allowIsolatedInk: Boolean = false): Boolean {
         val points = quad.points()
         fun sample(x: Double, y: Double): Int? {
             val ix = x.roundToInt()
@@ -161,7 +222,8 @@ object AtelierEdgeDetector {
                         available++
                         if (sign * (inside - outside) >= REGION_CONTRAST) supported++
                     }
-                    return available >= 2 && if (strict) supported == available else supported >= 2
+                    val gaps = if (allowIsolatedInk && available >= 5) 1 else 0
+                    return available >= 2 && if (strict) supported >= available - gaps else supported >= 2
                 }
                 // For tight framing two real outer-band samples suffice; no samples are invented outside the source.
                 if (band(1, 3, 1, false) && band(2, 7, 1, true)) bright++

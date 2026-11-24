@@ -223,7 +223,7 @@ internal class AtelierCaptureViewModel(
     private fun run(action: suspend () -> Unit) {
         if (current.value.busy) return
         val departing = current.value.editor
-        departing?.setCurveTransition(true)
+        departing?.setAnalysisTransition(true)
         current.value = current.value.copy(busy = true, error = null)
         viewModelScope.launch {
             try { action() }
@@ -231,7 +231,7 @@ internal class AtelierCaptureViewModel(
             catch (failure: RepositoryFailure) { current.value = current.value.copy(error = failure.error.copy(affectedId = null)) }
             catch (_: Exception) { current.value = current.value.copy(error = OperationError(OperationErrorCode.STORAGE_FAILED, true, "draft_storage_failed", null)) }
             finally {
-                departing?.setCurveTransition(false)
+                departing?.setAnalysisTransition(false)
                 current.value = current.value.copy(busy = false)
             }
         }

@@ -24,6 +24,55 @@ import org.junit.runner.RunWith
 class EditorComparisonScreenTest {
     @get:Rule val compose = createAndroidComposeRule<MainActivity>()
 
+    @Test fun guidedPerspectiveSeedsAnEditableOutlineAfterTheOriginalIsReady() = runBlocking<Unit> {
+        val bitmap = Bitmap.createBitmap(200, 160, Bitmap.Config.ARGB_8888)
+        val png = try {
+            bitmap.eraseColor(0xff657eac.toInt())
+            for (y in 18..68) for (x in 19..78) bitmap.setPixel(x, y, 0xffc26731.toInt())
+            ByteArrayOutputStream().also { check(bitmap.compress(Bitmap.CompressFormat.PNG, 100, it)) }.toByteArray()
+        } finally { bitmap.recycle() }
+        DocumentCatalogIntegrationTest.Fixture(png).use { f ->
+            val graph = f.open()
+            val doc = graph.store.documents.createDocument("Synthetic guided outline")
+            val batch = graph.store.imports.beginImport(doc, 1, null)
+            val page = graph.photoImports.importProviderReferences(listOf(f.good), batch.parentId).single() as IngestResult.Committed
+            f.forbid = true
+            val job = SupervisorJob()
+            val scope = CoroutineScope(job + Dispatchers.Main.immediate)
+            val session = withContext(Dispatchers.Main) {
+                EditorSession(doc.value, page.pageId.value, ApplicationEditorActions { graph }, graph.renderer, scope,
+                    RenderedPreviewBitmapLoader(graph.budget), graph.budget)
+            }
+            try {
+                val originalRead = CompletableDeferred<Unit>()
+                val hidden = androidx.compose.runtime.mutableStateOf(true)
+                compose.runOnUiThread {
+                    compose.activity.setContent {
+                        MaterialTheme {
+                            PageEditorScreen(loadOriginal = { graph.originalPreview(it).also { originalRead.complete(Unit) } },
+                                guidedStep = 0, guidedBusy = hidden.value).Content(session) {}
+                        }
+                    }
+                }
+                withTimeout(15_000) { originalRead.await() }
+                compose.onNodeWithTag("atelier-frame-canvas").assertExists()
+                assertTrue(session.state.value.draft?.geometry is GeometryRecipe.None)
+                compose.runOnUiThread { hidden.value = false }
+                compose.waitUntil(15_000) { session.preview.value.display?.request?.recipe?.geometry is GeometryRecipe.Perspective }
+                val quad = (checkNotNull(session.state.value.draft).geometry as GeometryRecipe.Perspective).quad
+                assertEquals(19.0, quad.tl.x * 199, 2.0)
+                assertEquals(68.0, quad.br.y * 159, 2.0)
+                assertTrue(session.state.value.dirty)
+                assertEquals(1L, graph.store.editablePages.load(doc, page.pageId).recipeRevision)
+                assertArrayEquals(png, graph.store.committedSources.load(page.sourceId).file.readBytes())
+            } finally {
+                compose.runOnUiThread { compose.activity.setContent {}; session.close() }
+                job.cancelAndJoin()
+                compose.waitUntil(10_000) { graph.budget.usedBytes == 0L }
+            }
+        }
+    }
+
     @Test fun referenceViewsShowDifferentLiteralGeometryAndApplyOnlyTheCompleteDraft() = runBlocking {
         val sourcePixels = intArrayOf(0xffff0000.toInt(),0xff00ff00.toInt(),0xff0000ff.toInt(),0xffffffff.toInt(),0xff000000.toInt(),0xff010203.toInt())
         val image = Bitmap.createBitmap(sourcePixels,3,2,Bitmap.Config.ARGB_8888)

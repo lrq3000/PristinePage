@@ -1,6 +1,7 @@
 package app.pristinepage.editor
 
 import app.pristinepage.core.geometry.AtelierCurveProposal
+import app.pristinepage.core.geometry.AtelierEdgeDetector
 import app.pristinepage.core.geometry.GeometrySizing
 import app.pristinepage.core.geometry.QuadValidation
 import app.pristinepage.core.pipeline.*
@@ -33,7 +34,8 @@ class EditorSession @JvmOverloads constructor(documentId: String, pageId: String
     private var frameDrag: FrameDrag? = null
     private var bezierDrag: BezierDrag? = null
     private var curveAnalysis: CurveAnalysis? = null
-    private var curveTransition = false
+    private var frameAnalysis: FrameAnalysis? = null
+    private var analysisTransition = false
     private var generation = 0L
     private var active = true
     private var closed = false
@@ -72,7 +74,7 @@ class EditorSession @JvmOverloads constructor(documentId: String, pageId: String
     }
 
     private fun replaceDraft(edits: RecipeHistory, recipe: Recipe) {
-        cancelCurveAnalysis()
+        cancelGeometryAnalysis()
         if (!edits.replace(recipe)) {
             // Choosing an already-selected recipe while looking at a reference still returns to its Result, without inventing another history entry or a dirty draft.
             if (current.value.view != EditorView.RESULT) { current.value = current.value.copy(view = EditorView.RESULT); renderDraft() }
@@ -108,7 +110,7 @@ class EditorSession @JvmOverloads constructor(documentId: String, pageId: String
         val edits = editable() ?: return null
         val contour = (edits.current.geometry as? GeometryRecipe.Bezier)?.contour ?: return null
         if (!active || current.value.confirmExit || control.read(contour) == null) return null
-        cancelCurveAnalysis()
+        cancelGeometryAnalysis()
         endShapeDrag()
         endFrameDrag()
         endBezierDrag()
@@ -173,7 +175,7 @@ class EditorSession @JvmOverloads constructor(documentId: String, pageId: String
         endBezierDrag()
         val geometry = edits.current.geometry
         val start = EditorShapes.points(geometry)[point] ?: return null
-        cancelCurveAnalysis()
+        cancelGeometryAnalysis()
         edits.beginGesture()
         return FrameDrag(point, geometry, start).also { frameDrag = it }
     }
@@ -186,22 +188,39 @@ class EditorSession @JvmOverloads constructor(documentId: String, pageId: String
         else if (edits.cancelGesture()) { updateDraft(); renderDraft() }
     }
 
-    internal fun useDetectedFrame(expected: GeometryRecipe, quad: QuadPx): Boolean {
+    internal class FrameAnalysis(val geometry: GeometryRecipe, internal val job: Job?)
+
+    private fun mayUseFrame(expected: GeometryRecipe): Boolean =
+        (expected is GeometryRecipe.None || expected is GeometryRecipe.Perspective) && editable()?.current?.geometry == expected &&
+            active && !analysisTransition && !current.value.confirmExit && frameDrag == null && shapeDrag == null && bezierDrag == null
+
+    internal fun beginFrameAnalysis(expected: GeometryRecipe, job: Job? = null): FrameAnalysis? {
+        if (!mayUseFrame(expected) || frameAnalysis != null || curveAnalysis != null) return null
+        return FrameAnalysis(expected, job).also { frameAnalysis = it }
+    }
+
+    internal fun endFrameAnalysis(analysis: FrameAnalysis) {
+        if (frameAnalysis === analysis) frameAnalysis = null
+    }
+
+    internal fun useDetectedFrame(analysis: FrameAnalysis, quad: QuadPx): Boolean {
+        if (frameAnalysis !== analysis || !mayUseFrame(analysis.geometry)) return false
         val edits = editable() ?: return false
-        val original = edits.current.geometry
-        if (!active || current.value.confirmExit || original != expected || frameDrag != null || shapeDrag != null || bezierDrag != null) return false
-        if (original !is GeometryRecipe.None && original !is GeometryRecipe.Perspective) return false
-        val geometry = EditorShapes.perspective(original) as? GeometryRecipe.Perspective ?: return false
+        val geometry = EditorShapes.perspective(analysis.geometry) as? GeometryRecipe.Perspective ?: return false
         val candidate = geometry.copy(quad = quad)
         if (!validFrame(candidate)) return false
+        endFrameAnalysis(analysis)
         edit(edits.current.copy(geometry = candidate))
         return true
     }
 
+    internal fun reserveFrameAnalysis(bitmapBytes: Int): AutoCloseable =
+        reserveGeometryAnalysis(AtelierEdgeDetector.workspaceBytes(), bitmapBytes)
+
     internal class CurveAnalysis(val request: RenderRequest, internal val job: Job?)
 
     internal fun beginCurveAnalysis(expected: RenderRequest, job: Job? = null): CurveAnalysis? {
-        if (!mayUseCurveRequest(expected) || curveAnalysis != null) return null
+        if (!mayUseCurveRequest(expected) || curveAnalysis != null || frameAnalysis != null) return null
         return CurveAnalysis(expected, job).also { curveAnalysis = it }
     }
 
@@ -209,29 +228,35 @@ class EditorSession @JvmOverloads constructor(documentId: String, pageId: String
         if (curveAnalysis === analysis) curveAnalysis = null
     }
 
-    internal fun cancelCurveAnalysis() {
-        val analysis = curveAnalysis
+    internal fun cancelGeometryAnalysis() {
+        val curve = curveAnalysis
+        val frame = frameAnalysis
         curveAnalysis = null
-        analysis?.job?.cancel()
+        frameAnalysis = null
+        curve?.job?.cancel()
+        frame?.job?.cancel()
     }
 
-    internal fun setCurveTransition(active: Boolean) {
-        curveTransition = active
-        if (active) cancelCurveAnalysis()
+    internal fun setAnalysisTransition(active: Boolean) {
+        analysisTransition = active
+        if (active) cancelGeometryAnalysis()
     }
 
     internal val supportsCurveAnalysis: Boolean get() = imageBudget != null
 
-    internal fun reserveCurveAnalysis(bitmapBytes: Int): AutoCloseable {
+    internal fun reserveCurveAnalysis(bitmapBytes: Int): AutoCloseable =
+        reserveGeometryAnalysis(AtelierCurveProposal.workspaceBytes(), bitmapBytes)
+
+    private fun reserveGeometryAnalysis(scratchBytes: Long, bitmapBytes: Int): AutoCloseable {
         require(bitmapBytes > 0)
         // The borrowing job can briefly outlive disposal of the display owner. Charge its bitmap retain until that job unwinds.
-        return checkNotNull(imageBudget).reserve(AtelierCurveProposal.workspaceBytes() + bitmapBytes.toLong())
+        return checkNotNull(imageBudget).reserve(scratchBytes + bitmapBytes.toLong())
     }
 
     private fun mayUseCurveRequest(expected: RenderRequest): Boolean {
         val draft = editable()?.current ?: return false
         val request = preview.value
-        return active && !curveTransition && !current.value.confirmExit && request.view == EditorView.RESULT && request.request == expected &&
+        return active && !analysisTransition && !current.value.confirmExit && request.view == EditorView.RESULT && request.request == expected &&
             !request.processing && !request.previous && request.failure == null && request.preview?.request == expected &&
             draft.geometry is GeometryRecipe.Perspective && expected.recipe == draft && frameDrag == null && shapeDrag == null && bezierDrag == null
     }
@@ -261,7 +286,7 @@ class EditorSession @JvmOverloads constructor(documentId: String, pageId: String
     internal fun beginShapeDrag(label: ShapePoint, horizontal: Boolean): ShapeDrag? {
         val edits = editable() ?: return null
         if (!active || current.value.confirmExit || label !in EditorShapes.points(edits.current.geometry)) return null
-        cancelCurveAnalysis()
+        cancelGeometryAnalysis()
         endShapeDrag()
         endFrameDrag()
         edits.beginGesture()
@@ -303,7 +328,7 @@ class EditorSession @JvmOverloads constructor(documentId: String, pageId: String
     }
 
     private fun renderDraft() {
-        cancelCurveAnalysis()
+        cancelGeometryAnalysis()
         if (closed || !active) return
         val page = current.value.page ?: return
         val draft = current.value.draft ?: return
@@ -325,7 +350,7 @@ class EditorSession @JvmOverloads constructor(documentId: String, pageId: String
     fun setActive(value: Boolean) {
         if (closed || active == value) return
         active = value
-        if (active) renderDraft() else { cancelCurveAnalysis(); endShapeDrag(); endFrameDrag(cancel = true); endBezierDrag(cancel = true); scheduler.clear() }
+        if (active) renderDraft() else { cancelGeometryAnalysis(); endShapeDrag(); endFrameDrag(cancel = true); endBezierDrag(cancel = true); scheduler.clear() }
     }
 
     fun apply() = save(andBack = false)
@@ -333,7 +358,7 @@ class EditorSession @JvmOverloads constructor(documentId: String, pageId: String
 
     /** A wizard move can consume only the exact draft accepted by the ordinary save path, never a pending or failed write. */
     internal suspend fun checkpointForNavigation(): Boolean {
-        cancelCurveAnalysis()
+        cancelGeometryAnalysis()
         val edits = editable() ?: return false
         if (!edits.dirty) return true
         val expected = edits.current
@@ -345,7 +370,7 @@ class EditorSession @JvmOverloads constructor(documentId: String, pageId: String
     }
 
     private fun save(andBack: Boolean) {
-        cancelCurveAnalysis()
+        cancelGeometryAnalysis()
         val edits = editable() ?: return
         if (!edits.dirty) { if (andBack) exit(); return }
         // Both Apply paths pass this guard before enqueueing the repository CAS, not just when the buttons recompose.
@@ -384,7 +409,7 @@ class EditorSession @JvmOverloads constructor(documentId: String, pageId: String
     private fun saveFailed(error: OperationError) { if (!closed) current.value = current.value.copy(saving = false, error = error) }
     fun requestBack() {
         if (closed || current.value.saving) return
-        cancelCurveAnalysis()
+        cancelGeometryAnalysis()
         endShapeDrag()
         endFrameDrag(cancel = true)
         endBezierDrag(cancel = true)
@@ -397,7 +422,7 @@ class EditorSession @JvmOverloads constructor(documentId: String, pageId: String
     override fun close() {
         if (closed) return
         closed = true
-        cancelCurveAnalysis()
+        cancelGeometryAnalysis()
         endShapeDrag()
         endFrameDrag(cancel = true)
         endBezierDrag(cancel = true)

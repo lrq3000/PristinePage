@@ -1,9 +1,12 @@
 package app.pristinepage.core
 
 import app.pristinepage.core.geometry.AtelierEdgeDetector
+import app.pristinepage.core.geometry.AtelierRegionOutline
+import app.pristinepage.core.pipeline.QuadPx
 import org.junit.Assert.*
 import org.junit.Test
 import kotlin.math.abs
+import kotlin.math.hypot
 
 class AtelierEdgeDetectorTest {
     @Test fun locatesSkewedPaperRatherThanReturningFullFrame() {
@@ -143,6 +146,132 @@ class AtelierEdgeDetectorTest {
         assertNull(AtelierEdgeDetector.detect(160, 120) { x, y ->
             if ((x in 22..32 || x in 36..46) && y in 9..110) 200 else 60
         })
+    }
+
+    @Test fun findsAShortPageEvenWhenItDoesNotCrossEitherImageMidline() {
+        val corners = listOf(18 to 19, 78 to 23, 75 to 68, 19 to 64)
+        val q = AtelierEdgeDetector.detect(200, 160) { x, y ->
+            if (!inside(corners, x, y)) 72 else if (x in 30..58 && y % 9 == 0) 32 else 195
+        }
+        assertCorners(corners, q)
+    }
+
+    @Test fun findsAnObliquePageWithoutMakingTheScanAxesThePageAxes() {
+        val corners = listOf(87 to 9, 168 to 82, 110 to 148, 29 to 75)
+        val q = AtelierEdgeDetector.detect(200, 160) { x, y -> if (inside(corners, x, y)) 195 else 72 }
+        assertCorners(corners, q)
+    }
+
+    @Test fun twoSeparatePlausiblePagesDoNotBecomeAnArbitrarySuggestion() {
+        val q = AtelierEdgeDetector.detect(200, 160) { x, y ->
+            if ((x in 16..74 || x in 128..181) && y in 18..70) 195 else 72
+        }
+        assertNull(q)
+    }
+
+    @Test fun aShortOffCenterPageCutOffByTheSourceIsNotGuessed() {
+        assertNull(AtelierEdgeDetector.detect(200, 160) { x, y -> if (x in 0..75 && y in 19..66) 195 else 72 })
+    }
+
+    @Test fun aRoundObjectIsNotApproximatedAsFourPageSides() {
+        assertNull(AtelierEdgeDetector.detect(200, 160) { x, y ->
+            if ((x - 52) * (x - 52) + (y - 55) * (y - 55) <= 34 * 34) 195 else 72
+        })
+    }
+
+    @Test fun colorBoundaryFindsAPageInvisibleToTheLuminanceDetector() {
+        val corners = listOf(52 to 24, 143 to 27, 140 to 100, 56 to 97)
+        // Independent rounded luma of both RGB triplets is 124 with the established 77/150/29 weights.
+        fun color(x: Int, y: Int) = if (inside(corners, x, y)) 0xc26731 else 0x657eac
+        assertNull(AtelierEdgeDetector.detect(200, 160) { _, _ -> 124 })
+        assertCorners(corners, AtelierEdgeDetector.detectRgb(200, 160) { x, y -> color(x, y) })
+    }
+
+    @Test fun aColoredSingleDividerDoesNotSupplyFourBorders() {
+        assertNull(AtelierEdgeDetector.detectRgb(200, 160) { x, _ -> if (x < 87) 0xc26731 else 0x657eac })
+    }
+
+    @Test fun unrelatedStrongOpponentColorOutlinesAreAmbiguous() {
+        // Each rectangle contrasts against the same backdrop in one opponent channel. All three have luma 124.
+        assertNull(AtelierEdgeDetector.detectRgb(200, 160) { x, y ->
+            when {
+                x in 15..79 && y in 20..75 -> 0xaf627c
+                x in 120..181 && y in 82..137 -> 0x7c8b2e
+                else -> 0x7c7c7c
+            }
+        })
+    }
+
+    @Test fun aShadowAcrossAClippedPageCannotSupplyItsMissingEdgeEvenIfThePolarityReverses() {
+        for (transpose in listOf(false, true)) {
+            assertNull(AtelierEdgeDetector.detect(if (transpose) 160 else 200, if (transpose) 200 else 160) { x, y ->
+                val (across, along) = if (transpose) y to x else x to y
+                when {
+                    across !in 20..76 || along > 72 -> 100
+                    along < 25 -> 60
+                    else -> 210
+                }
+            })
+        }
+    }
+
+    @Test fun aNewLuminanceRegionDoesNotHideASecondColorOnlyPage() {
+        fun scene(gray: Boolean, color: Boolean) = AtelierEdgeDetector.detectRgb(200, 160) { x, y ->
+            when {
+                gray && x in 16..74 && y in 18..70 -> 0xc3c3c3
+                color && x in 128..181 && y in 18..70 -> 0xc26731
+                else -> 0x7c7c7c
+            }
+        }
+        assertCorners(listOf(16 to 18, 74 to 18, 74 to 70, 16 to 70), scene(gray = true, color = false))
+        assertCorners(listOf(128 to 18, 181 to 18, 181 to 70, 128 to 70), scene(gray = false, color = true))
+        assertNull(scene(gray = true, color = true))
+    }
+
+    @Test fun aShadowCannotCutOffAClippedPageOnATwoToneBackground() {
+        for (transposed in listOf(false, true)) {
+            assertNull(AtelierEdgeDetector.detect(if (transposed) 160 else 200, if (transposed) 200 else 160) { x, y ->
+                val across = if (transposed) y else x
+                val along = if (transposed) x else y
+                when {
+                    across in 20..76 && along < 25 -> 60
+                    across in 20..76 && along <= 72 -> 210
+                    across < 79 -> 100
+                    else -> 40
+                }
+            })
+        }
+    }
+
+    @Test fun cancellationInterruptsABoundedRegionTraversalBeforePublishingAnOutline() {
+        val w = 160
+        val h = 120
+        val pixels = IntArray(w * h) { index ->
+            if (index % w in 8..107 && index / w in 4..103) 207 else 52
+        }
+        val cancellation = java.util.concurrent.CancellationException()
+        var checks = 0
+        // This budget covers the histogram's 75 checks and the first four scan rows, then stops inside the filled component.
+        val thrown = assertThrows(java.util.concurrent.CancellationException::class.java) {
+            AtelierRegionOutline.Workspace(w, h).proposals(pixels, {
+                if (++checks == 90) throw cancellation
+            }) { _, _ -> throw AssertionError("Cancelled work cannot reach a valid proposal") }
+        }
+        assertSame(cancellation, thrown)
+    }
+
+    private fun inside(corners: List<Pair<Int, Int>>, x: Int, y: Int): Boolean = corners.indices.all { i ->
+        val (ax, ay) = corners[i]
+        val (bx, by) = corners[(i + 1) % corners.size]
+        (bx - ax) * (y - ay) >= (by - ay) * (x - ax)
+    }
+
+    private fun assertCorners(corners: List<Pair<Int, Int>>, q: QuadPx?) {
+        assertNotNull("No crop suggested for a fully visible page", q)
+        for ((point, expected) in checkNotNull(q).points().zip(corners)) {
+            assertTrue("Expected labeled corner $expected, received ${point.x * 199} × ${point.y * 159}",
+                hypot(point.x * 199 - expected.first, point.y * 159 - expected.second) <= 3.0)
+        }
     }
 
     private fun verifyLowContrast(inverted: Boolean) {

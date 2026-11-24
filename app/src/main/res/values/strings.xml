@@ -309,4 +309,5 @@
     <string name="atelier_curve_not_found">No reliable curve found. You can adjust the page in Manual curve.</string>
     <string name="atelier_curve_not_replaced">The page changed during analysis. Your adjustments were kept.</string>
     <string name="atelier_curve_resources">Not enough memory to check for a curve. Your frame was kept.</string>
+    <string name="atelier_frame_resources">Not enough memory to find the page edges. Your frame was kept.</string>
 </resources>
