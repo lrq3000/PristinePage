@@ -17,6 +17,8 @@ from prepare_ocr_local_app import verify_expansion_size
 CASES = {
     "import": ("app.pristinepage.GallerySdrImportTest", "importsAnUltraHdrJpegAndReopensTheSdrPixelsWithoutRewritingTheOriginal"),
     "copy": ("app.pristinepage.ocr.OcrSelectionClipboardTest", "onlyExplicitCopyTransfersTheSelectedRangeAndClassificationIsOff"),
+    "long-copy": ("app.pristinepage.ocr.OcrSelectionClipboardTest", "longPressInSavedOcrDialogCopiesOnlyTheSelectedWord"),
+    "picker": ("app.pristinepage.CaptureEntryJourneyTest", "cameraFreeGalleryAndFilesShowTheDisclosureAndReturnToTheOwnedDraft"),
     "zoom": ("app.pristinepage.EditorComparisonScreenTest", "referenceViewsShowDifferentLiteralGeometryAndApplyOnlyTheCompleteDraft"),
     "title": ("app.pristinepage.LibraryActivityIntegrationTest", "realLibraryActivityCreatesAnEmptyDocumentAndRetainsItsSessionAcrossRecreation"),
     "ocr": ("app.pristinepage.ocr.ExpandedOcrLanguagesTest", "selectsARecentlyBundledLanguageAndRecognizesWithItsActualPack"),

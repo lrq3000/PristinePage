@@ -1,5 +1,6 @@
 package app.pristinepage.ocr
 
+import android.content.ClipData
 import android.util.TypedValue
 
 import androidx.compose.foundation.ExperimentalFoundationApi
@@ -64,7 +65,14 @@ internal enum class SavedPageOcrPanel(val title: Int) { PROCESSING(R.string.ocr_
 
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
-internal fun SavedPageOcrDetails(panel: SavedPageOcrPanel, page: EditablePage?, reader: SavedPageOcrReader, showDiagnostics: Boolean, dismiss: () -> Unit) {
+internal fun SavedPageOcrDetails(
+    panel: SavedPageOcrPanel,
+    page: EditablePage?,
+    reader: SavedPageOcrReader,
+    showDiagnostics: Boolean,
+    writeClipboard: ((ClipData) -> Unit)? = null,
+    dismiss: () -> Unit,
+) {
     val lifecycle = LocalLifecycleOwner.current.lifecycle
     val ui = rememberCoroutineScope()
     var refresh by remember { mutableIntStateOf(0) }
@@ -166,7 +174,7 @@ internal fun SavedPageOcrDetails(panel: SavedPageOcrPanel, page: EditablePage?, 
                         val text = presentOcrText(item?.text, item?.previousGeneration == true)
                         text.message?.let { Text(stringResource(it)) }
                         item?.configuration?.let { OcrSettingsSummary(it) }
-                        text.verbatim?.let { original -> SelectableOcrText(original) }
+                        text.verbatim?.let { original -> SelectableOcrText(original, writeClipboard) }
                         val save = reader.requestSave
                         if (item != null && save != null) TextButton(
                             onClick = {
@@ -189,12 +197,12 @@ internal fun SavedPageOcrDetails(panel: SavedPageOcrPanel, page: EditablePage?, 
 }
 
 @Composable
-private fun SelectableOcrText(original: String) {
+private fun SelectableOcrText(original: String, writeClipboard: ((ClipData) -> Unit)?) {
     val color = MaterialTheme.colorScheme.onSurfaceVariant.toArgb()
     val size = MaterialTheme.typography.bodyMedium.fontSize.value
     val highlight = MaterialTheme.colorScheme.primary.copy(alpha = .35f).toArgb()
     AndroidView(
-        factory = { ReadOnlyOcrTextView(it) },
+        factory = { if (writeClipboard == null) ReadOnlyOcrTextView(it) else ReadOnlyOcrTextView(it, writeClipboard) },
         modifier = Modifier.fillMaxWidth(),
         update = {
             it.setTextColor(color)
