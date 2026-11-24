@@ -10,6 +10,8 @@ U-06 source-metadata evidence is tracked separately under `OCR-SOURCE-METADATA-5
 
 The isolated `RoomLibraryLocalRestoreTest` and `validation/storage/test_library_portable_catalog_shape.py` cover the fresh private target and ownership expectations, not Settings or arbitrary Android providers. [The active task record](TODO.md#library-storage-and-backup--t-03--library-portability-01) distinguishes host/compiled evidence from actual Android reopen, durable replay, merge and activation.
 
+[Android portability evidence](../../validation/storage/library-restore-runtime.md) covers the exact private export/restore, detached merge after a deliberately interrupted directory sync, idempotent replay, and private selection-record recovery. It does not cover a user-selected folder, an actual active Room graph switch, stale background work crossing that switch, source retirement, or real power-loss survival.
+
 | Requirement | Authoritative specification | Owning tasks | Required acceptance evidence |
 |---|---|---|---|
 | FR-01 | CAPTURE_IMPORT_EXPORT; UX_SPECIFICATION | T-05 | CaptureLifecycleTest, denial/revocation, orientation/mirror, manual shutter without models; V-04,V-06. |

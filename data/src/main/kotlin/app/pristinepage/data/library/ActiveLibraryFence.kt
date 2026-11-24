@@ -59,7 +59,12 @@ internal class ActiveLibraryFence(initial: Selection) {
     }
 
     /** False means the exact old selection remains authoritative. An exception is uncertain and requires durable reconciliation. */
-    suspend fun change(expected: Identity, next: Selection, publishVerified: suspend CoroutineScope.() -> Boolean): Boolean {
+    suspend fun change(
+        expected: Identity,
+        next: Selection,
+        prepare: suspend CoroutineScope.() -> Boolean = { true },
+        publishVerified: suspend CoroutineScope.() -> Boolean,
+    ): Boolean {
         currentCoroutineContext().ensureActive()
         val before = synchronized(monitor) {
             val ready = status as? State.Ready ?: return false
@@ -68,16 +73,24 @@ internal class ActiveLibraryFence(initial: Selection) {
             status = State.Switching(ready.selection, next)
             ready.selection
         }
-        try {
-            val published = coroutineScope { ensureActive(); publishVerified() }
+        var publicationStarted = false
+        fun disarm(selection: Selection) {
             synchronized(monitor) {
-                val authoritative = if (published) next else before
-                status = if (authoritative.identity in revokedDuringProof) State.Reconnect(authoritative) else State.Ready(authoritative)
+                status = if (selection.identity in revokedDuringProof) State.Reconnect(selection) else State.Ready(selection)
                 revokedDuringProof.clear()
             }
+        }
+        try {
+            val prepared = coroutineScope { ensureActive(); prepare() }
+            currentCoroutineContext().ensureActive()
+            // This is the publication boundary: a later revocation is reconciled with the result, not mistaken for a refused write.
+            publicationStarted = synchronized(monitor) { prepared && next.identity !in revokedDuringProof }
+            val published = publicationStarted && coroutineScope { ensureActive(); publishVerified() }
+            disarm(if (published) next else before)
             return published
         } catch (failure: Throwable) {
-            synchronized(monitor) {
+            if (!publicationStarted) disarm(before)
+            else synchronized(monitor) {
                 status = State.Uncertain(before, next)
                 revokedDuringProof.clear()
             }
