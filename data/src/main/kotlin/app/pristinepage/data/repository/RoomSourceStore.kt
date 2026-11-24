@@ -1,6 +1,7 @@
 package app.pristinepage.data.repository
 
 import android.net.Uri
+import app.pristinepage.core.library.LibraryScanName
 import app.pristinepage.data.files.SourceFiles
 import app.pristinepage.data.files.SourceInspector
 import app.pristinepage.data.journal.IngestJournalCodec
@@ -98,9 +99,15 @@ class RoomSourceStore @JvmOverloads constructor(private val files: SourceFiles, 
             catch (failure: RepositoryFailure) { throw failure }
             catch (_: Exception) { throw RepositoryFailure(OperationError(OperationErrorCode.PROCESSING_FAILED, false, "source_inspection_failed", intent.sessionId.value)) }
             context.ensureActive()
+            val hint = try { provider.suggestedDisplayName(boundReference) }
+            catch (canceled: CancellationException) { throw canceled }
+            catch (_: Exception) { null } // Optional metadata must not invalidate an already admitted original.
+            val preferredFilename = hint?.let { LibraryScanName.forIngest(it, intent.pageId.value, inspected.inspection.mime, emptyList()) }
+            context.ensureActive()
             val sealed = files.seal(staged, IngestJournalCodec.encodeSeal(IngestJournalSeal(
                 intent, inspected.inspection, staged.byteSha256, staged.byteCount,
-                schemaVersion = if (inspected.captureDate == null) 1 else 2, captureDate = inspected.captureDate,
+                schemaVersion = 3,
+                captureDate = inspected.captureDate, preferredFilename = preferredFilename,
             )))
             if (!phases.sealed(intent, lease, sealed)) return replay.replay(intent)
             context.ensureActive()

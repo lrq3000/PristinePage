@@ -9,6 +9,9 @@ import java.io.InputStream
 /** Opening is synchronous and called only from SourceStore's IO scope, preventing a suspending adapter from losing an opened descriptor at a canceled dispatch boundary. The returned stream transfers close responsibility to the consumer. */
 fun interface SourceInput {
     fun open(boundReference: String): InputStream
+
+    /** An optional bounded display-name hint from the same granted item. It is not an I/O path or evidence of the input MIME type. */
+    suspend fun suggestedDisplayName(boundReference: String): String? = null
 }
 
 interface SourceStore {

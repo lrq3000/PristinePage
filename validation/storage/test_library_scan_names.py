@@ -95,3 +95,20 @@ class LibraryScanNameMigrationSqlTest(unittest.TestCase):
             "PRAGMA foreign_key_check",
         )
         self.assertEqual(["page|One.png", "page2|Two.png", "page2|Two.png"], result.stdout.splitlines())
+
+    def test_name_collision_uses_an_exact_index_seek_in_the_owning_album(self):
+        sql = (DB / "LibraryScanNameDao.kt").read_text(encoding="utf-8")
+        queries = re.findall(r'@Query\("""(.*?)"""\)\s+abstract fun (\w+)\(', sql, re.S)
+        lookup = next((statement for statement, name in queries if name == "containsKey"), None)
+        self.assertIsNotNone(lookup, "New ingest must not enumerate retained album names")
+        statement = lookup.replace(":document", "'doc'").replace(":key", "'two.png'")
+        result = self.sqlite(
+            self.ALBUMS,
+            "INSERT INTO LibraryScanName VALUES ('page2','doc','Two.png','two.png'),('page3','other','Else.png','else.png')",
+            "UPDATE Page SET ordinal=NULL,removedAt=3,state='REMOVED' WHERE pageId='page2'",
+            statement,
+            lookup.replace(":document", "'other'").replace(":key", "'two.png'"),
+            "EXPLAIN QUERY PLAN " + statement,
+        )
+        self.assertEqual(["1", "0"], result.stdout.splitlines()[:2])
+        self.assertIn("index_LibraryScanName_documentId_comparisonKey", result.stdout)

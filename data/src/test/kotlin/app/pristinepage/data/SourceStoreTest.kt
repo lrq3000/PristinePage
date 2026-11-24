@@ -67,7 +67,7 @@ class SourceStoreTest {
                 override suspend fun inspectForIngest(file: File, expectedByteSha256: String): InspectedSourceForIngest =
                     InspectedSourceForIngest(normalizedInspector.inspect(file, expectedByteSha256), captureDate)
             }
-            val completion = RoomIngestCompletion(db.metadata, db, db, db, db, files, { db.now }, { db.now }, Dispatchers.Unconfined)
+            val completion = RoomIngestCompletion(db.metadata, db, db, db, db, files, { db.now }, { db.now }, Dispatchers.Unconfined, scanNames = db.scanNames)
             val replay = object : IngestReplay { override suspend fun replay(intent: IngestJournalIntent): IngestResult { beforeReplay(intent); return completion.replay(intent) } }
             val preparation = object : IngestPreparation { override fun prepare(sessionId: ImportSessionId, boundUriText: String): IngestJournalIntent { beforePreparation(); return db.commands.prepare(sessionId, boundUriText) } }
             val lookup = RoomIngestLookup(db.metadata, db, db, db)
@@ -155,6 +155,22 @@ class SourceStoreTest {
         assertTrue(f.db.catalog.pages.isEmpty())
         assertTrue(f.db.blobs.isEmpty())
         assertFalse(f.db.jobs.values.any { it.state == "SUCCEEDED" })
+    }
+
+    @Test fun finalSuccessCannotAcknowledgeAChangedReceipt() = runTest {
+        val f = Fixture()
+        f.db.afterJobUpdate = { job ->
+            if (job.state == "SUCCEEDED") {
+                val (id, row) = f.db.files.entries.single()
+                f.db.files[id] = row.copy(payload = byteArrayOf(0))
+            }
+        }
+        val result = f.store.ingestBoundProvider(f.db.uri, f.db.child) as IngestResult.Rejected
+        assertEquals("ingest_journal_changed", result.error.safeMessageKey)
+        assertTrue(f.db.catalog.pages.isEmpty())
+        val intent = checkNotNull(RoomIngestLookup(f.db.metadata, f.db, f.db, f.db).find(f.db.child))
+        assertEquals("MOVED", f.db.files.getValue(intent.transactionId.value).state)
+        assertArrayEquals(f.bytes, f.files.finalFile(intent.sourceBlobId.value).readBytes())
     }
 
     @Test fun revokedMidCopyClosesTheDescriptorAndCannotCommitAPage() = runTest {

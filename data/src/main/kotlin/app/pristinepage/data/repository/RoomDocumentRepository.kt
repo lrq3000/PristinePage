@@ -30,6 +30,7 @@ import kotlinx.serialization.json.JsonObject
 /** File/decode/render work is deliberately absent. Canonical/capability preflight finishes before a short metadata transaction, which rechecks every mutable pointer and publishes all revisions together. RoomMetadataAccess supplies actual Android rollback; host tests exercise this same business code through its database port. */
 class RoomDocumentRepository @JvmOverloads constructor(private val metadata: MetadataAccess, private val admission: RecipeAdmission, private val clock: () -> Long = System::currentTimeMillis, private val dispatcher: CoroutineDispatcher = Dispatchers.IO, private val recovery: RecoveryCoordinator? = null, private val snapshots: ExportSnapshots? = null) : DocumentRepository {
     private val q: CatalogQueries get() = metadata.queries
+    private val scanNames get() = (metadata as? RoomMetadataAccess)?.libraryScanNames
     private val json = Json { encodeDefaults = true; ignoreUnknownKeys = false }
     private class Conflict(val actual: Long) : RuntimeException()
     private data class MaskState(val pageId: String, val revision: Long, val links: List<RecipeMaskRow>, val identities: List<MaskRow>)
@@ -210,6 +211,7 @@ class RoomDocumentRepository @JvmOverloads constructor(private val metadata: Met
                 }
                 val now = clock()
                 val document = DocumentId(live.target?.documentId ?: live.staged.documentId)
+                val copiedNames = mutableListOf<Pair<PageId, String>>()
                 val saved = if (live.target == null) {
                     updateDocument(live.staged.copy(createdAt = now, updatedAt = now))
                     pages.map { PageId(it.pageId) }
@@ -220,6 +222,8 @@ class RoomDocumentRepository @JvmOverloads constructor(private val metadata: Met
                         val id = PageId(uuid())
                         val source = pages[index].sourceId
                         q.insertPage(PageRow(id.value, document.value, source, 1, "ACTIVE", live.targetPageCount + index, null, now))
+                        scanNames?.copyName(pages[index].pageId, live.staged.documentId, id.value, document.value, proof.original.mime)
+                            ?.let { copiedNames += id to it }
                         q.insertRecipe(RecipeRevisionRow(id.value, 1, source, 1, proof.prepared.bytes.copyOf(), proof.prepared.hash, null, now))
                         pinSource("PAGE", id.value, source, now)
                         pinSource("RECIPE_HISTORY", recipeOwner(id.value, 1), source, now)
@@ -233,6 +237,7 @@ class RoomDocumentRepository @JvmOverloads constructor(private val metadata: Met
                         committedDocumentId = document.value, receiptPageIds = receipt.encode())) != 1) {
                     reject(OperationErrorCode.STORAGE_FAILED, "draft_receipt_write_failed", draftId)
                 }
+                for ((pageId, filename) in copiedNames) verifyCopiedScanName(pageId, document.value, filename)
                 coroutineContext.ensureActive()
                 receipt
             }
@@ -438,6 +443,11 @@ class RoomDocumentRepository @JvmOverloads constructor(private val metadata: Met
                 for (page in pages) updatePage(page.copy(ordinal = checkNotNull(page.ordinal) + pages.size + 1))
                 val added = PageRow(id.value, doc.documentId, source.sourceId, 1, "ACTIVE", index + 1, null, now)
                 q.insertPage(added)
+                val filename = scanNames?.let {
+                    val binding = boundedSource(added.sourceId)
+                    val blob = q.sourceBlob(binding.sourceBlobId) ?: reject(OperationErrorCode.INTEGRITY_FAILED, "source_unavailable", added.pageId)
+                    it.copyName(original.pageId, doc.documentId, added.pageId, doc.documentId, blob.mime)
+                }
                 q.insertRecipe(RecipeRevisionRow(id.value, 1, source.sourceId, 1, prepared.bytes.copyOf(), prepared.hash, null, now))
                 for ((position, page) in pages.withIndex()) updatePage(page.copy(ordinal = if (position <= index) position else position + 1))
                 pinSource("PAGE", id.value, source.sourceId, now)
@@ -446,6 +456,8 @@ class RoomDocumentRepository @JvmOverloads constructor(private val metadata: Met
                 val finalOrder = (pages.take(index + 1) + added + pages.drop(index + 1)).mapIndexed { ordinal, page -> page.copy(ordinal = ordinal) }
                 val undo = addMembershipUndo(doc.documentId, "PAGE_DUPLICATE", pages, finalOrder, nextDoc, now)
                 updateDocument(doc.copy(documentRevision = nextDoc, updatedAt = now))
+                if (filename != null) verifyCopiedScanName(id, doc.documentId, filename)
+                coroutineContext.ensureActive()
                 DocumentMutationResult.Applied(nextDoc, listOf(id), undo)
             }
         }
@@ -487,6 +499,12 @@ class RoomDocumentRepository @JvmOverloads constructor(private val metadata: Met
                 updateDocument(doc.copy(documentRevision = nextDoc, updatedAt = now))
                 DocumentMutationResult.Applied(nextDoc, live.map { PageId(it.pageId) }, null)
             }
+        }
+    }
+
+    private fun verifyCopiedScanName(id: PageId, document: String, filename: String) {
+        if (scanNames?.matches(id.value, document, filename) != true) {
+            reject(OperationErrorCode.INTEGRITY_FAILED, "copied_scan_name_mismatch", id.value)
         }
     }
 

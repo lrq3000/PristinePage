@@ -32,4 +32,15 @@ class LibraryScanNameTest {
     @Test fun onlyTheAdmittedEncodedMimeCanChooseAnExtensionForTheFallback() {
         assertThrows(IllegalArgumentException::class.java) { LibraryScanName.forIngest(null, pageId, "application/pdf", emptyList()) }
     }
+
+    @Test fun manyRetiredEquivalentLabelsCannotExhaustAnAlbum() {
+        val retained = List(5000) { if (it == 0) "report.png" else "report (${it + 1}).png" }.toSet()
+        var lookups = 0
+        val name = LibraryScanName.forIngest("Report.png", pageId, "image/png") {
+            lookups++
+            it in retained
+        }
+        assertEquals("Scan 16085bae-ae25-4fa4-8c69-9a8982ef6c13.png", name)
+        assertTrue(lookups in 2..256)
+    }
 }

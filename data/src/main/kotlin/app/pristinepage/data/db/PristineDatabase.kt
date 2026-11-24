@@ -19,4 +19,5 @@ abstract class PristineDatabase : RoomDatabase() {
     internal abstract fun ocrResults(): OcrResultDao
     internal abstract fun ocrPageWork(): OcrPageWorkDao
     internal abstract fun ocrTextPublication(): OcrTextPublicationDao
+    internal abstract fun libraryScanNames(): LibraryScanNameDao
 }

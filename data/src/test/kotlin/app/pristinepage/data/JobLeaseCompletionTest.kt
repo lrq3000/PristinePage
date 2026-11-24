@@ -22,6 +22,7 @@ class JobLeaseCompletionTest {
         var wallNow: Long? = null
         var failedCas = false
         var storageFault = false
+        var afterUpdate: (JobRow) -> JobRow = { it }
         var transactions = 0
         val metadata = object : MetadataAccess {
             override val queries: CatalogQueries get() = catalog
@@ -45,7 +46,7 @@ class JobLeaseCompletionTest {
             check(catalog.inTransaction)
             if (storageFault) throw IOException("synthetic private storage fault")
             if (failedCas || expectedGeneration != this.row.leaseGeneration) return 0
-            this.row = row; return 1
+            this.row = afterUpdate(row); return 1
         }
         fun writeDomain(): String {
             check(catalog.inTransaction)
@@ -111,6 +112,17 @@ class JobLeaseCompletionTest {
         assertEquals(1L, f.revision())
         assertEquals("RUNNING", f.row.state)
         assertEquals(f.lease.owner, f.row.leaseOwner)
+    }
+
+    @Test fun terminalRowChangedAfterTheSuccessUpdateRollsBackEvenWithValidDomainReadback() {
+        val f = Fixture()
+        f.afterUpdate = { it.copy(state = "FAILED") }
+        val failure = assertThrows(RepositoryFailure::class.java) {
+            (f.completion as JobLeaseTransactions).completeWithReadback(f.lease, f::writeDomain) { assertEquals(2L, f.revision()) }
+        }
+        assertEquals("job_lease_lost", failure.error.safeMessageKey)
+        assertEquals(1L, f.revision())
+        assertEquals("RUNNING", f.row.state)
     }
 
     @Test fun jobStorageFailureIsSafeAndRollsBackTheDomainWriter() {
