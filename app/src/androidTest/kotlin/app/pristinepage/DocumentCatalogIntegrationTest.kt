@@ -119,7 +119,7 @@ class DocumentCatalogIntegrationTest {
         }
     }
 
-    internal class Fixture(encoded: ByteArray? = null, private val realProvider: Boolean = false) : AutoCloseable {
+    internal class Fixture(encoded: ByteArray? = null, private val realProvider: Boolean = false, private val memoryClassMiB: Int = 64) : AutoCloseable {
         private val base = InstrumentationRegistry.getInstrumentation().targetContext
         private val root = File(base.filesDir, "t04-catalog-${UUID.randomUUID()}")
         private val context = object : ContextWrapper(base) {
@@ -134,7 +134,7 @@ class DocumentCatalogIntegrationTest {
         var providerOpens = 0; var forbid = false
         var beforeProvider: (String, Int) -> Unit = { _, _ -> }
         private var graph: ApplicationImports? = null
-        suspend fun open(): ApplicationImports = (if (realProvider) ApplicationServices(context) else ApplicationServices(context, ApplicationImageBudget.create(64), SourceInput { reference ->
+        suspend fun open(): ApplicationImports = (if (realProvider) ApplicationServices(context) else ApplicationServices(context, ApplicationImageBudget.create(memoryClassMiB), SourceInput { reference ->
             check(!forbid); check(reference == good || reference == bad); providerOpens++; beforeProvider(reference, providerOpens)
             ByteArrayInputStream(if (reference == good) png else byteArrayOf(1, 2, 3, 4))
         })).imports().also { graph = it }

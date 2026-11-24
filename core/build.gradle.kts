@@ -26,3 +26,6 @@ tasks.test {
     useJUnit()
     maxParallelForks = 1
 }
+
+// Run the host detector and Android journey against one checked-in test-only image.
+sourceSets.test { resources.srcDir(rootProject.file("app/src/androidTest/assets/geometry")) }
