@@ -1,8 +1,6 @@
 package app.pristinepage.data.library
 
 import android.content.Context
-import android.system.ErrnoException
-import android.system.Os
 import app.pristinepage.data.files.DirectorySync
 import app.pristinepage.data.files.PlatformDirectorySync
 import app.pristinepage.data.library.RoomLibraryCatalogReader.Companion.MAX_PORTABLE_BYTES
@@ -15,7 +13,6 @@ import java.nio.file.LinkOption.NOFOLLOW_LINKS
 import java.nio.file.Path
 import java.nio.file.StandardOpenOption.CREATE
 import java.nio.file.StandardOpenOption.WRITE
-import java.security.MessageDigest
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
@@ -43,13 +40,13 @@ internal class RoomLibraryLocalMerge(context: Context, private val sync: Directo
         val backup = root(incoming, privateFiles)
         if (overlaps(target, backup)) throw IOException("Library merge locations overlap")
         LocalLibraryDirectory(target.toFile()).generationInventory().requireVacantChildId(operationId)
-        val targetKey = key(target)
-        val backupKey = key(backup)
+        val targetKey = localLibraryRootKey(target)
+        val backupKey = localLibraryRootKey(backup)
         val scratch = privateFiles.resolve(PRIVATE_STAGES)
         if (Files.notExists(scratch, NOFOLLOW_LINKS)) Files.createDirectory(scratch)
         val owned = canonicalLibraryDirectory(scratch.toFile(), privateFiles)
         val preview = RoomLibraryLocalMergePreflight(app, owned.toFile()).verify(operationId, target.toFile(), backup.toFile())
-        if (key(target) != targetKey || key(backup) != backupKey) throw IOException("Library merge location changed during preview")
+        if (localLibraryRootKey(target) != targetKey || localLibraryRootKey(backup) != backupKey) throw IOException("Library merge location changed during preview")
         Prepared(operationId, target, backup, targetKey, backupKey, preview)
     }
 
@@ -98,9 +95,9 @@ internal class RoomLibraryLocalMerge(context: Context, private val sync: Directo
         val backupKey = confirmed?.incomingKey ?: checkNotNull(existing).incomingRootKey
         val destination = LocalLibraryDirectory(target.toFile(), sync)
         val source = LocalLibraryDirectory(backup.toFile())
-        val scratchKey = key(scratch)
+        val scratchKey = localLibraryRootKey(scratch)
         fun checkLocations() {
-            if (key(target) != targetKey || key(backup) != backupKey || key(scratch) != scratchKey) {
+            if (localLibraryRootKey(target) != targetKey || localLibraryRootKey(backup) != backupKey || localLibraryRootKey(scratch) != scratchKey) {
                 throw IOException("Library merge location changed")
             }
         }
@@ -168,16 +165,6 @@ internal class RoomLibraryLocalMerge(context: Context, private val sync: Directo
         }
         val attempt = Files.createDirectory(stages.resolve(operationId))
         return attempt.resolve("catalog.sqlite").toFile()
-    }
-
-    private fun key(root: Path): String {
-        if (root.toRealPath() != root || !Files.isDirectory(root, NOFOLLOW_LINKS)) throw IOException("Local library root is unavailable")
-        val stat = try { Os.stat(root.toString()) } catch (failure: ErrnoException) {
-            throw IOException("Local library root identity is unavailable", failure)
-        }
-        // Private journal only: bind a canonical locator and a positive directory identity without recording its name.
-        val identity = "${stat.st_dev}\n${stat.st_ino}\n$root".toByteArray(Charsets.UTF_8)
-        return MessageDigest.getInstance("SHA-256").digest(identity).joinToString("") { "%02x".format(it.toInt() and 255) }
     }
 
     private fun overlaps(a: Path, b: Path) = a.startsWith(b) || b.startsWith(a) || Files.isSameFile(a, b)

@@ -2,11 +2,14 @@ package app.pristinepage.data.library
 
 import android.content.Context
 import android.database.sqlite.SQLiteDatabase
+import android.system.ErrnoException
+import android.system.Os
 import java.io.File
 import java.io.IOException
 import java.nio.file.Files
 import java.nio.file.LinkOption.NOFOLLOW_LINKS
 import java.nio.file.Path
+import java.security.MessageDigest
 import java.util.Collections
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ensureActive
@@ -44,4 +47,14 @@ internal fun canonicalLibraryDirectory(file: File, privateFiles: Path): Path {
         throw IOException("Library location is not a canonical app-private directory")
     }
     return path
+}
+
+/** Private cooperative root identity. Never use it to infer an Android tree grant or to accept a provider path. */
+internal fun localLibraryRootKey(root: Path): String {
+    if (root.toRealPath() != root || !Files.isDirectory(root, NOFOLLOW_LINKS)) throw IOException("Local library root is unavailable")
+    val stat = try { Os.stat(root.toString()) } catch (failure: ErrnoException) {
+        throw IOException("Local library root identity is unavailable", failure)
+    }
+    val identity = "${stat.st_dev}\n${stat.st_ino}\n$root".toByteArray(Charsets.UTF_8)
+    return MessageDigest.getInstance("SHA-256").digest(identity).joinToString("") { "%02x".format(it.toInt() and 255) }
 }
