@@ -305,6 +305,7 @@ import kotlinx.coroutines.withTimeoutOrNull
     if (sources) ModalBottomSheet(onDismissRequest = { sources = false }) {
         Column(Modifier.fillMaxWidth().padding(16.dp)) {
             Text(stringResource(R.string.atelier_import_sources), style = MaterialTheme.typography.titleMedium)
+            Text(stringResource(R.string.atelier_import_sdr_note), style = MaterialTheme.typography.bodySmall)
             TextButton({ sources = false; owner.reserve(PhotoImportKind.GALLERY) }, modifier = Modifier.testTag("atelier-import-gallery")) {
                 Text(stringResource(R.string.atelier_import_gallery))
             }

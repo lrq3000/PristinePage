@@ -124,6 +124,93 @@ class SourceContainerTest {
     private fun iccSegment(data: ByteArray, total: Byte = 1) =
         segment(0xe2, "ICC_PROFILE\u0000".encodeToByteArray() + byteArrayOf(1, total) + data)
 
+    @Test fun boundedSrgbProfilesAreRecognizedInOrdinaryJpegAndPng() {
+        val profile = matrixSrgbProfile()
+        val digest = MessageDigest.getInstance("SHA-256").digest(profile).joinToString("") { "%02x".format(it) }
+        val compressed = ByteArrayOutputStream().also { target ->
+            java.util.zip.DeflaterOutputStream(target).use { it.write(profile) }
+        }.toByteArray()
+        for (bytes in listOf(jpeg(extra = iccSegment(profile)), png(extra = chunk("iCCP",
+            "sRGB\u0000\u0000".encodeToByteArray() + compressed)))) {
+            val parsed = read(bytes) as app.pristinepage.image.decode.EncodedSourceHeader
+            assertEquals(PixelSize(3, 2), parsed.size)
+            assertEquals(digest, parsed.profileSha256)
+        }
+    }
+
+    @Test fun ultraHdrPrimaryProjectionAuthenticatesOriginalButNeverHandsGainMapToCodec() {
+        val (encoded, primary) = hdrJpeg()
+        val root = File("build/test-source-containers").apply { mkdirs() }
+        val file = Files.createTempFile(root.toPath(), "synthetic-hdr-", ".jpg").toFile().apply { writeBytes(encoded) }
+        val parsed = SourceContainer.read(file) {}
+        val view = checkNotNull(parsed.sdrPrimary)
+        val digest = MessageDigest.getInstance("SHA-256").digest(encoded).joinToString("") { "%02x".format(it) }
+        assertEquals(PixelSize(3, 2), parsed.size)
+        assertArrayEquals(primary, view.read(file, digest) {})
+        assertArrayEquals(encoded, file.readBytes())
+        file.writeBytes(encoded.copyOf().also { it[it.lastIndex - 3] = 99 })
+        assertEquals(OperationErrorCode.INTEGRITY_FAILED, assertThrows(RepositoryFailure::class.java) {
+            view.read(file, digest) {}
+        }.error.code)
+    }
+
+    @Test fun genericMpfAndMalformedGainMapOffsetsDoNotBecomeOrdinaryStillImages() {
+        reject(OperationErrorCode.UNSUPPORTED_FORMAT, hdrJpeg(declareHdr = false).first)
+        reject(OperationErrorCode.UNSUPPORTED_FORMAT, hdrJpeg(offsetDelta = 1).first)
+        reject(OperationErrorCode.INVALID_INPUT, hdrJpeg().first.dropLast(2).toByteArray())
+    }
+
+    @Test fun xmpMustDeclareAnSdrBaseAndRgbProfilesCannotDescribeGrayscalePng() {
+        reject(OperationErrorCode.UNSUPPORTED_FORMAT, hdrJpeg(baseElement = "<hdrgm:BaseRenditionIsHDR>True</hdrgm:BaseRenditionIsHDR>").first)
+        reject(OperationErrorCode.UNSUPPORTED_FORMAT, hdrJpeg(commentOnly = true).first)
+        reject(OperationErrorCode.UNSUPPORTED_FORMAT, hdrJpeg(secondaryType = 0x020002).first)
+        reject(OperationErrorCode.UNSUPPORTED_FORMAT, hdrJpeg(nextIfd = Int.MAX_VALUE).first)
+        val compressed = ByteArrayOutputStream().also { target ->
+            java.util.zip.DeflaterOutputStream(target).use { it.write(matrixSrgbProfile()) }
+        }.toByteArray()
+        reject(OperationErrorCode.UNSUPPORTED_FORMAT,
+            png(color = 0, extra = chunk("iCCP", "sRGB\u0000\u0000".encodeToByteArray() + compressed)))
+    }
+
+    @Test fun dualSignaledUltraHdrAcceptsOnlyAnSdrBaseInBothMetadataFormats() {
+        val attributeIfd = ByteBuffer.allocate(26)
+            .putInt(0x4d4d002a).putInt(8).putShort(1)
+            .putShort(0xb000.toShort()).putShort(7).putInt(4).put("0100".encodeToByteArray()).putInt(0).array()
+        val valid = read(hdrJpeg(isoFlags = 0x40, gainMpf = attributeIfd).first) as app.pristinepage.image.decode.EncodedSourceHeader
+        assertNotNull(valid.sdrPrimary)
+        reject(OperationErrorCode.UNSUPPORTED_FORMAT, hdrJpeg(isoFlags = 0x44, gainMpf = attributeIfd).first)
+        reject(OperationErrorCode.UNSUPPORTED_FORMAT, hdrJpeg(isoFlags = 0x40,
+            gainMpf = attributeIfd.copyOf().also { ByteBuffer.wrap(it).putInt(22, 500) }).first)
+    }
+
+    private fun hdrJpeg(declareHdr: Boolean = true, offsetDelta: Int = 0, baseElement: String = "",
+                        commentOnly: Boolean = false, secondaryType: Int = 0, nextIfd: Int = 0,
+                        isoFlags: Int? = null, gainMpf: ByteArray? = null): Pair<ByteArray, ByteArray> {
+        val signature = "http://ns.adobe.com/xap/1.0/\u0000"
+        val description = """<rdf:Description xmlns:hdrgm="http://ns.adobe.com/hdr-gain-map/1.0/" hdrgm:Version="1.0">$baseElement</rdf:Description>"""
+        val hdr = """<rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">${if (commentOnly) "<!--$description-->" else description}</rdf:RDF>"""
+        fun metadata(value: String) = segment(0xe1, (signature + value).encodeToByteArray())
+        val xmp = if (declareHdr) metadata(hdr) else byteArrayOf()
+        val prefix = "urn:iso:std:iso:ts:21496:-1\u0000".encodeToByteArray()
+        val isoHeader = if (isoFlags != null) segment(0xe2, prefix + be(0)) else byteArrayOf()
+        val isoGain = if (isoFlags != null) segment(0xe2, prefix + be(0) + byteArrayOf(isoFlags.toByte()) +
+            be(0, 1, 2, 1, 0, 1, 2, 1, 1, 1, 0, 1, 0, 1)) else byteArrayOf()
+        val gain = jpeg(components = 1, extra = metadata(hdr) + isoGain +
+            (gainMpf?.let { segment(0xe2, "MPF\u0000".encodeToByteArray() + it) } ?: byteArrayOf()))
+        val icc = iccSegment(matrixSrgbProfile())
+        val expected = jpeg()
+        val primaryLength = expected.size + icc.size + xmp.size + isoHeader.size + 90
+        val tiffStart = 2 + xmp.size + icc.size + isoHeader.size + 8
+        val tiff = ByteBuffer.allocate(82)
+        tiff.putInt(0x4d4d002a).putInt(8).putShort(3)
+        tiff.putShort(0xb000.toShort()).putShort(7).putInt(4).put("0100".encodeToByteArray())
+        tiff.putShort(0xb001.toShort()).putShort(4).putInt(1).putInt(2)
+        tiff.putShort(0xb002.toShort()).putShort(7).putInt(32).putInt(50).putInt(nextIfd)
+        tiff.putInt(0x030000).putInt(primaryLength).putInt(0).putInt(0)
+        tiff.putInt(secondaryType).putInt(gain.size).putInt(primaryLength - tiffStart + offsetDelta).putInt(0)
+        return (jpeg(extra = xmp + icc + isoHeader + segment(0xe2, "MPF\u0000".encodeToByteArray() + tiff.array())) + gain) to expected
+    }
+
     /** Independently framed ICC v4 matrix/shaper; no Java/Android profile parser generates the oracle. */
     private fun matrixSrgbProfile(redX: Double = .4360747, gamma: Double = 2.4, lastTag: String = "wtpt"): ByteArray {
         fun fixed(x: Double) = (x * 65_536).roundToInt()

@@ -5,15 +5,22 @@ import app.pristinepage.data.model.OperationError
 import app.pristinepage.data.model.OperationErrorCode
 import app.pristinepage.data.model.RepositoryFailure
 import app.pristinepage.data.model.JpegSampling
+import app.pristinepage.image.export.PlatformSrgbProfile
 import java.io.EOFException
 import java.io.File
 import java.io.IOException
 import java.io.InputStream
+import java.security.MessageDigest
 import java.time.LocalDate
 import java.util.zip.CRC32
+import java.util.zip.DataFormatException
+import java.util.zip.Inflater
 
 data class EncodedSourceHeader(val mime: String, val size: PixelSize, val exifOrientation: Int = 1) {
     internal var jpegProjection: JpegDecodeView? = null
+    internal var projectedBytes: ProjectedSourceBytes? = null
+    internal var sdrPrimary: ProjectedSourceBytes? = null
+    internal var profileSha256: String? = null
     internal var capturedOn: LocalDate? = null
 }
 
@@ -68,9 +75,15 @@ object SourceContainer {
         var metadata = 0L
         var chunks = 0
         val exif = ExifState(captureDate)
+        var profile: String? = null
+        var profileRange: LongRange? = null
+        var palette = false
+        var explicitSrgb = false
+        var colorType = -1
         while (c.remaining > 0) {
             c.checkpoint()
             if (++chunks > 4096) refuse(OperationErrorCode.RESOURCE_LIMIT, "source_metadata_limit")
+            val start = c.position
             val n = c.u32(false)
             val kindBytes = c.bytes(4)
             val kind = kindBytes.toString(Charsets.US_ASCII)
@@ -82,7 +95,7 @@ object SourceContainer {
             }
             val crc = CRC32().apply { update(kindBytes) }
             val fields = when (kind) {
-                "IHDR", "sRGB", "gAMA", "cHRM", "eXIf" -> c.bytes(n.toInt()).also(crc::update)
+                "IHDR", "sRGB", "gAMA", "cHRM", "eXIf", "iCCP" -> c.bytes(n.toInt()).also(crc::update)
                 else -> { c.drain(n, crc); null }
             }
             if (crc.value != c.u32(false)) invalid()
@@ -94,33 +107,59 @@ object SourceContainer {
                     size = dimensions(uint(f, 0), uint(f, 4))
                     val depth = f[8].toInt() and 255
                     val color = f[9].toInt() and 255
+                    colorType = color
                     val legalDepth = if (color in setOf(0, 3)) depth in setOf(1, 2, 4, 8) else color in setOf(2, 4, 6) && depth == 8
                     if (!legalDepth || f[10].toInt() != 0 || f[11].toInt() != 0 || f[12].toInt() !in 0..1) unsupported()
                 }
                 "IDAT" -> { if (dataEnded) invalid(); dataSeen = true }
-                "IEND" -> { if (!dataSeen || n != 0L || c.remaining != 0L) invalid(); return exif.header("image/png", checkNotNull(size)) }
+                "IEND" -> {
+                    if (!dataSeen || n != 0L || c.remaining != 0L) invalid()
+                    return exif.header("image/png", checkNotNull(size)).also {
+                        it.profileSha256 = profile
+                        profileRange?.let { span -> it.projectedBytes = ProjectedSourceBytes(c.position, c.position, listOf(span)) }
+                    }
+                }
                 "eXIf" -> exif.accept(checkNotNull(fields), c.checkpoint)
-                "acTL", "fcTL", "fdAT", "iCCP", "cICP", "mDCv", "cLLi" -> unsupported()
-                "sRGB" -> if (n != 1L || checkNotNull(fields)[0].toInt() !in 0..3) invalid()
+                "acTL", "fcTL", "fdAT", "cICP", "mDCv", "cLLi" -> unsupported()
+                "iCCP" -> {
+                    if (colorType !in setOf(2, 3, 6) || dataSeen || palette || explicitSrgb || profileRange != null) unsupported()
+                    profile = srgbProfileDigest(inflatePngProfile(checkNotNull(fields)))
+                    profileRange = start until c.position
+                }
+                "sRGB" -> {
+                    if (n != 1L || checkNotNull(fields)[0].toInt() !in 0..3) invalid()
+                    if (dataSeen || palette || explicitSrgb || profileRange != null) unsupported()
+                    explicitSrgb = true
+                }
                 "gAMA" -> if (n != 4L || uint(checkNotNull(fields), 0) != 45455L) unsupported()
                 "cHRM" -> {
                     val expected = longArrayOf(31270, 32900, 64000, 33000, 30000, 60000, 15000, 6000)
                     if (n != 32L || expected.indices.any { uint(checkNotNull(fields), it * 4) != expected[it] }) unsupported()
                 }
-                "PLTE" -> if (dataSeen || n !in 3..768 || n % 3 != 0L) invalid()
+                "PLTE" -> {
+                    if (dataSeen || palette || n !in 3..768 || n % 3 != 0L) invalid()
+                    palette = true
+                }
                 else -> if (kindBytes[0].toInt() and 32 == 0) unsupported() // Unknown critical chunks cannot be safely ignored.
             }
         }
         invalid()
     }
 
-    private fun jpeg(c: Cursor, export: JpegSampling? = null, captureDate: Boolean = false): EncodedSourceHeader {
+    private fun jpeg(c: Cursor, export: JpegSampling? = null, captureDate: Boolean = false, gainTail: Boolean = false,
+                     expectIsoGain: Boolean = false): EncodedSourceHeader {
         if (c.byte() != 255 || c.byte() != 216) invalid()
         var size: PixelSize? = null
         var scans = 0
         var markers = 0
         val exif = ExifState(captureDate)
         var exifSegment: LongRange? = null
+        var profile: String? = null
+        var profileRange: LongRange? = null
+        var hdrIndex: UltraHdrJpegIndex? = null
+        var hdrRange: LongRange? = null
+        var hdrSupport: LongRange? = null
+        var isoRange: LongRange? = null
         var exifCompatible = false
         var jfif = false
         var marker = nextMarker(c)
@@ -130,6 +169,23 @@ object SourceContainer {
             if (marker == 0xd9) {
                 if (scans == 0) invalid()
                 val primaryBytes = c.position
+                if (gainTail) {
+                    if (hdrRange == null || c.remaining != 0L) invalid()
+                    if ((isoRange != null) != expectIsoGain) unsupported()
+                    return exif.header("image/jpeg", size ?: invalid())
+                }
+                if (hdrRange != null || hdrIndex != null || isoRange != null) {
+                    val total = primaryBytes + c.remaining
+                    val index = hdrIndex ?: unsupported()
+                    if (hdrRange == null || exifCompatible || !index.startsAtPrimaryEnd(primaryBytes)) unsupported()
+                    if (!index.endsAt(total)) invalid()
+                    // A bounded structural walk proves the indexed suffix is one separate JPEG and checks its SDR-base declaration.
+                    jpeg(c, gainTail = true, expectIsoGain = isoRange != null)
+                    return exif.header("image/jpeg", size ?: invalid()).also {
+                        it.profileSha256 = profile
+                        it.sdrPrimary = ProjectedSourceBytes(total, primaryBytes, listOfNotNull(hdrRange, hdrSupport, isoRange, profileRange).sortedBy { span -> span.first })
+                    }
+                }
                 if (c.remaining != 0L) {
                     if (!exifCompatible) invalid()
                     if (c.remaining > 65536L) refuse(OperationErrorCode.RESOURCE_LIMIT, "source_metadata_limit")
@@ -142,6 +198,11 @@ object SourceContainer {
                 }
                 return exif.header("image/jpeg", size ?: invalid()).also { header ->
                     if (exifCompatible) header.jpegProjection = JpegDecodeView(primaryBytes.toInt(), checkNotNull(exifSegment), exif.orientation)
+                    if (profileRange != null) {
+                        if (exifCompatible) unsupported()
+                        header.profileSha256 = profile
+                        header.projectedBytes = ProjectedSourceBytes(primaryBytes, primaryBytes, listOf(checkNotNull(profileRange)))
+                    }
                 }
             }
             if (marker == 0xd8 || marker in 0xd0..0xd7 || marker == 0x01 || marker == 0x00) invalid()
@@ -186,12 +247,79 @@ object SourceContainer {
                         exifSegment = segmentStart until c.position
                     }
                     val text = f.toString(Charsets.ISO_8859_1)
-                    if (marker == 0xe2 && (text.startsWith("ICC_PROFILE\u0000") || text.startsWith("MPF\u0000"))) unsupported()
-                    if (marker == 0xeb || (marker == 0xe1 && (text.contains("hdrgm:", true) || text.contains("gainmap", true)))) unsupported()
+                    if (marker == 0xe2 && text.startsWith("ICC_PROFILE\u0000")) {
+                        if (gainTail || scans != 0 || profileRange != null || f.size !in 146..(14 + PlatformSrgbProfile.MAX_BYTES) ||
+                            f[12] != 1.toByte() || f[13] != 1.toByte()) unsupported()
+                        profile = srgbProfileDigest(f.copyOfRange(14, f.size))
+                        profileRange = segmentStart until c.position
+                    }
+                    if (marker == 0xe2 && text.startsWith("MPF\u0000")) {
+                        if (scans != 0 || hdrSupport != null) unsupported()
+                        if (gainTail) {
+                            if (!UltraHdrJpegIndex.isVersionOnlyAttribute(f)) unsupported()
+                        } else {
+                            hdrIndex = UltraHdrJpegIndex.parse(f, segmentStart + 8) ?: unsupported()
+                        }
+                        hdrSupport = segmentStart until c.position
+                    }
+                    // Recognize XMP Ultra HDR 1.0 only, not arbitrary multi-image JPEGs or alternative HDR encodings.
+                    if (marker == 0xe1 && (text.contains("hdrgm:", true) || text.contains("gainmap", true) ||
+                            text.contains("http://ns.adobe.com/hdr-gain-map/1.0/"))) {
+                        if (scans != 0 || hdrRange != null || !UltraHdrXmp.declaresSdr(f)) unsupported()
+                        hdrRange = segmentStart until c.position
+                    }
+                    if (marker == 0xeb) unsupported()
+                    if (marker == 0xe2 && text.startsWith("urn:iso:std:iso:ts:21496:-1")) {
+                        if (scans != 0 || isoRange != null || !hasSdrIsoMarker(f, gainTail)) unsupported()
+                        isoRange = segmentStart until c.position
+                    }
                 }
                 else -> c.drain(n.toLong())
             }
             marker = nextMarker(c)
+        }
+    }
+
+    private fun hasSdrIsoMarker(bytes: ByteArray, secondary: Boolean): Boolean {
+        val header = "urn:iso:std:iso:ts:21496:-1\u0000"
+        val versionEnd = header.length + 4
+        if (bytes.size < versionEnd || header.indices.any { bytes[it] != header[it].code.toByte() } ||
+            (header.length until versionEnd).any { bytes[it] != 0.toByte() }) return false
+        if (!secondary) return bytes.size == versionEnd
+        if (bytes.size <= versionEnd) return false
+        val flags = bytes[versionEnd].toInt() and 255
+        // Admit ISO v0 paired with XMP and independent fractions only. Backward/HDR-base and reserved flags are not supported.
+        if (flags and 0x3f != 0) return false
+        val fractions = if (flags and 0x80 == 0) 7 else 17
+        val start = versionEnd + 1
+        if (bytes.size != start + 8 * fractions) return false
+        return (0 until fractions).all { uint(bytes, start + it * 8 + 4) != 0L }
+    }
+
+    private fun srgbProfileDigest(bytes: ByteArray): String {
+        if (!PlatformSrgbProfile.matches(bytes)) unsupported()
+        return MessageDigest.getInstance("SHA-256").digest(bytes).toHexString()
+    }
+
+    private fun inflatePngProfile(fields: ByteArray): ByteArray {
+        val nameEnd = fields.indexOf(0)
+        if (nameEnd !in 1..79 || nameEnd + 2 >= fields.size || fields[nameEnd + 1] != 0.toByte()) unsupported()
+        val output = ByteArray(PlatformSrgbProfile.MAX_BYTES + 1)
+        val inflater = Inflater()
+        try {
+            inflater.setInput(fields, nameEnd + 2, fields.size - nameEnd - 2)
+            var written = 0
+            while (!inflater.finished()) {
+                val read = inflater.inflate(output, written, output.size - written)
+                if (read <= 0 || written + read == output.size) unsupported()
+                written += read
+            }
+            if (inflater.remaining != 0) unsupported()
+            return output.copyOf(written)
+        } catch (_: DataFormatException) {
+            unsupported()
+        } finally {
+            inflater.end()
         }
     }
 
