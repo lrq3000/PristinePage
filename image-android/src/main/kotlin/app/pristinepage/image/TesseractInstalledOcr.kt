@@ -13,6 +13,7 @@ import kotlinx.coroutines.withContext
 /** Read-only binding to a published private catalog of bundled packs. */
 internal class TesseractInstalledOcr(private val packs: PrivateOcrPackOwner, budget: ImageAllocationBudget) {
     suspend fun configurationFor(codes: List<String>, layout: OcrLayout = OcrLayout.AUTOMATIC): OcrConfiguration? = withContext(Dispatchers.IO) {
+        if ("equ" in codes) return@withContext null // This publisher pack contains no LSTM model.
         val ordered = packs.resolveOrdered(codes) { coroutineContext.ensureActive() } ?: return@withContext null
         OcrConfiguration(TesseractSavedOcrSessions.ENGINE_ID, TesseractSavedOcrSessions.CONTRACT_VERSION, layout, ordered)
     }

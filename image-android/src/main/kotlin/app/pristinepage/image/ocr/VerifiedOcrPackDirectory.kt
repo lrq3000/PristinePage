@@ -18,7 +18,7 @@ internal class VerifiedOcrPackDirectory(root: Path, pins: List<Pin>) {
     private val root = root.toAbsolutePath().normalize()
     private val data = this.root.resolve("tessdata")
     private val byCode = pins.associateBy { it.identity.code }.also {
-        require(pins.size in 1..MAX_PACKS && it.size == pins.size)
+        require(pins.size in 1..MAX_CATALOG_PACKS && it.size == pins.size)
     }
 
     fun resolveOrdered(codes: List<String>, checkpoint: () -> Unit = {}): OcrLanguagePacks? {
@@ -31,7 +31,7 @@ internal class VerifiedOcrPackDirectory(root: Path, pins: List<Pin>) {
         val selected = ArrayList<OcrLanguagePack>()
         val seen = HashSet<String>()
         for (code in codes) {
-            if (selected.size == MAX_PACKS || !seen.add(code)) return null
+            if (selected.size == MAX_JOB_PACKS || !seen.add(code)) return null
             selected.add((byCode[code] ?: return null).identity)
         }
         if (selected.isEmpty()) return null
@@ -43,6 +43,12 @@ internal class VerifiedOcrPackDirectory(root: Path, pins: List<Pin>) {
         val selected = packs.ordered.map { requested ->
             (byCode[requested.code] ?: return false).takeIf { it.identity == requested } ?: return false
         }
+        return verifiesPins(selected, checkpoint)
+    }
+
+    fun verifiesCatalog(checkpoint: () -> Unit): Boolean = verifiesPins(byCode.values, checkpoint)
+
+    private fun verifiesPins(selected: Collection<Pin>, checkpoint: () -> Unit): Boolean {
         checkpoint()
         if (!Files.isDirectory(root, NOFOLLOW_LINKS) || !Files.isDirectory(data, NOFOLLOW_LINKS)) return false
         val buffer = ByteArray(64 * 1024)
@@ -74,8 +80,9 @@ internal class VerifiedOcrPackDirectory(root: Path, pins: List<Pin>) {
         }
     }
 
-    private companion object {
-        const val MAX_PACKS = 32
-        const val MAX_PACK_BYTES = 32L * 1024 * 1024
+    companion object {
+        internal const val MAX_CATALOG_PACKS = 128
+        private const val MAX_JOB_PACKS = 32
+        private const val MAX_PACK_BYTES = 32L * 1024 * 1024
     }
 }

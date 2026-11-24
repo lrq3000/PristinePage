@@ -37,10 +37,10 @@ internal class PrivateOcrPackOwner private constructor(
 ) {
     private val parent = parent.toAbsolutePath().normalize()
     private val pins = pins.sortedBy { it.identity.code }.also {
-        require(it.size in 1..32 && it.distinctBy { pin -> pin.identity.code }.size == it.size && it.sumOf { pin -> pin.bytes } <= MAX_SET)
+        require(it.size in 1..VerifiedOcrPackDirectory.MAX_CATALOG_PACKS &&
+            it.distinctBy { pin -> pin.identity.code }.size == it.size && it.sumOf { pin -> pin.bytes } <= MAX_SET)
     }
-    private val all = OcrLanguagePacks(this.pins.map { it.identity })
-    private val identities = all.ordered.toSet()
+    private val identities = this.pins.map { it.identity }.toSet()
     private val names = this.pins.map { "${it.identity.code}.traineddata" }.toSet()
     private val key = MessageDigest.getInstance("SHA-256").digest(this.pins.joinToString("\n", prefix = "pristinepage-ocr-packs-v1\n") {
         "${it.identity.code}\t${it.bytes}\t${it.identity.sha256}"
@@ -52,14 +52,16 @@ internal class PrivateOcrPackOwner private constructor(
     fun resolveOrdered(codes: List<String>, checkpoint: () -> Unit = {}): OcrLanguagePacks? = readInstalled(checkpoint) {
         // Full-catalog authentication already includes every selected pack; do not hash the subset first.
         val ordered = installed.orderedIdentities(codes) ?: return@readInstalled null
-        ordered.takeIf { installed.verifies(all, checkpoint) }
+        ordered.takeIf { installed.verifiesCatalog(checkpoint) }
     }
 
     /** The path is stable because no cooperating writer can touch a published set. The caller borrows it only for the verified engine session. */
-    fun acquire(packs: OcrLanguagePacks, checkpoint: () -> Unit = {}): Path? = readInstalled(checkpoint) {
-        // Native receives the whole directory, not open descriptors for only the selected inputs.
-        destination.takeIf { packs.ordered.all(identities::contains) && installed.verifies(all, checkpoint) }
-    }
+    fun acquire(packs: OcrLanguagePacks, checkpoint: () -> Unit = {}): Path? =
+        if (packs.ordered.all(identities::contains) && verifiesPublished(checkpoint)) destination else null
+
+    // Native may load declared sublanguages, so all contents of this borrowed directory still have to be authenticated.
+    private fun verifiesPublished(checkpoint: () -> Unit): Boolean =
+        readInstalled(checkpoint) { installed.verifiesCatalog(checkpoint) } == true
 
     /** Reuse a verified commit, never replace one. The factory opens only preselected catalog pack codes and may not mutate the private parent. */
     fun install(checkpoint: () -> Unit = {}, open: (String) -> InputStream): Boolean {
@@ -77,7 +79,7 @@ internal class PrivateOcrPackOwner private constructor(
                     ?: return false
                 ownership.use {
                     if (!physicalDirectory(parent)) return false
-                    if (Files.exists(destination, NOFOLLOW_LINKS)) return acquire(all, checkpoint) != null
+                    if (Files.exists(destination, NOFOLLOW_LINKS)) return verifiesPublished(checkpoint)
                     // Android's NIO provider refuses getFileStore even for our own private directory. The path-local space estimate is only an admission hint; writes still handle I/O failure.
                     if (parent.toFile().usableSpace < pins.sumOf { it.bytes }) return false
                     return stageAndPublish(checkpoint, open)
@@ -127,14 +129,14 @@ internal class PrivateOcrPackOwner private constructor(
                 }
             }
             if (!admittedInventory(stage, checkpoint) ||
-                !VerifiedOcrPackDirectory(stage, pins).verifies(all, checkpoint) || Files.exists(destination, NOFOLLOW_LINKS)
+                !VerifiedOcrPackDirectory(stage, pins).verifiesCatalog(checkpoint) || Files.exists(destination, NOFOLLOW_LINKS)
             ) return false
             checkpoint()
             // No copy fallback and no REPLACE_EXISTING. The cooperating writers serialize the absence check above with this move.
             Files.move(stage, destination, ATOMIC_MOVE)
             moved = true
             // Cancellation after the commit does not remove a published set; reopen validates it again.
-            return acquire(all, checkpoint) != null
+            return verifiesPublished(checkpoint)
         } finally {
             if (!moved) {
                 // Only this invocation's known staging entries, never discovered old stages or installed output.
@@ -183,7 +185,7 @@ internal class PrivateOcrPackOwner private constructor(
     }
 
     companion object {
-        private const val MAX_SET = 64L * 1024 * 1024
+        private const val MAX_SET = 384L * 1024 * 1024
         private val installing = AtomicBoolean(false)
         private val privateDirectoryMode = PosixFilePermissions.asFileAttribute(PosixFilePermissions.fromString("rwx------"))
         private val privateFileMode = PosixFilePermissions.asFileAttribute(PosixFilePermissions.fromString("rw-------"))

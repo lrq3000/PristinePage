@@ -32,6 +32,7 @@ internal class TesseractSavedOcrSessions(
         checkpoint()
         if (configuration.engineId != ENGINE_ID || configuration.engineVersion != CONTRACT_VERSION) unavailable()
         val packs = configuration.languagePacks ?: unavailable()
+        if (packs.ordered.any { it.code == "equ" }) unavailable()
         val lease = try {
             acquirePacks(packs, checkpoint) ?: unavailable()
         } catch (_: OutOfMemoryError) {

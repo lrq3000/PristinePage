@@ -9,7 +9,7 @@ plugins {
 }
 
 val minimumApi = libs.versions.minSdk.get().toInt()
-val bundledOcr = rootProject.layout.projectDirectory.dir("validation/raw/providers/ocr-app-standard")
+val bundledOcr = rootProject.layout.projectDirectory.dir("validation/raw/providers/ocr-app-standard-full")
 
 android {
     namespace = "app.pristinepage"

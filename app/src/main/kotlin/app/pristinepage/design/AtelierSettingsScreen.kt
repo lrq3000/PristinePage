@@ -103,17 +103,34 @@ internal fun AtelierSettingsScreen(page: SettingsPage, preferences: AtelierPrefe
                     SettingsPage.OCR_LANGUAGES -> {
                         Text(stringResource(ocrStatus))
                         Text(stringResource(R.string.settings_ocr_languages_help), style = MaterialTheme.typography.bodySmall)
-                        val names = settings.ocrLanguages.map { stringResource(it.label) }
+                        val names = settings.ocrLanguages.map { it.displayName() }
                         Text(stringResource(R.string.settings_ocr_language_order, names.joinToString(", ")), style = MaterialTheme.typography.bodySmall)
-                        OcrLanguage.entries.forEach { language ->
+                        var query by remember { mutableStateOf("") }
+                        OutlinedTextField(query, { query = it.take(64) }, modifier = Modifier.fillMaxWidth().testTag("settings-ocr-language-search"),
+                            label = { Text(stringResource(R.string.settings_ocr_find_language)) }, singleLine = true)
+                        if (settings.ocrLanguages.size >= OcrLanguage.MAX_SELECTED) {
+                            Text(stringResource(R.string.settings_ocr_language_limit, OcrLanguage.MAX_SELECTED), style = MaterialTheme.typography.bodySmall)
+                        }
+                        val options = OcrLanguage.entries.map { it to it.displayName() }.sortedBy { it.second.lowercase(Locale.ROOT) }
+                        val term = query.trim()
+                        val filtered = options.filter { (language, name) ->
+                            name.contains(term, ignoreCase = true) || language.packCode.contains(term, ignoreCase = true)
+                        }
+                        if (filtered.isEmpty()) Text(stringResource(R.string.settings_ocr_no_languages))
+                        filtered.forEach { (language, name) ->
                             val checked = language in settings.ocrLanguages
-                            val enabled = !checked || settings.ocrLanguages.size > 1
+                            val enabled = language.selectable &&
+                                (if (checked) settings.ocrLanguages.size > 1 else settings.ocrLanguages.size < OcrLanguage.MAX_SELECTED)
                             Row(Modifier.fillMaxWidth().heightIn(min = AtelierStyle.touchTarget)
                                 .testTag("settings-ocr-${language.packCode}").toggleable(checked, enabled = enabled, role = Role.Checkbox,
                                     onValueChange = { preferences.setOcrLanguage(language, it) }),
                                 verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                                 Checkbox(checked, onCheckedChange = null, enabled = enabled)
-                                Text(stringResource(language.label))
+                                Column {
+                                    Text(name)
+                                    if (!language.selectable) Text(stringResource(R.string.settings_ocr_legacy_pack),
+                                        style = MaterialTheme.typography.bodySmall)
+                                }
                             }
                         }
                     }

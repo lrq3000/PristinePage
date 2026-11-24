@@ -171,6 +171,10 @@
     <string name="editor_view_result">Result</string>
     <string name="editor_view_input">Input after shape</string>
     <string name="editor_view_original">Original photograph</string>
+    <string name="settings_ocr_find_language">Find a language</string>
+    <string name="settings_ocr_no_languages">No matching languages</string>
+    <string name="settings_ocr_language_limit">Up to %1$d languages can be selected at once.</string>
+    <string name="settings_ocr_legacy_pack">Not supported by the current recognition engine.</string>
     <string name="editor_requested_view">Requested view: %1$s</string>
     <string name="editor_requested_look">Requested page preview: %1$s</string>
     <string name="editor_input_description">Geometry input preview, before all appearance and finishing</string>

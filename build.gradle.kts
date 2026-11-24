@@ -15,7 +15,7 @@ plugins {
 tasks.register<Exec>("verifyBundledOcr") {
     workingDir(rootDir)
     commandLine("python", "-B", "validation/providers/prepare_ocr_local_app.py",
-        layout.projectDirectory.dir("validation/raw/providers/ocr-app-standard").asFile.absolutePath)
+        layout.projectDirectory.dir("validation/raw/providers/ocr-app-standard-full").asFile.absolutePath)
 }
 
 allprojects {
