@@ -88,6 +88,8 @@ Historical pixel-binding checkpoint: for one admitted source record and stable v
 
 Start-empty checkpoint: claim only the same positively empty detached local directory seen at confirmation, stage and reopen a fresh schema with zero originals, and ask for no source root or cleanup capability. The review narrowed implicit durability to the known-durable app files ancestor and put all verification spill files inside one of four admitted attempt directories. A write or cancellation after possible marker visibility requires reconciliation rather than reinitialization; a read-only open is not acknowledgment. Android fixtures cover intervening unrelated content and an injected post-marker directory failure. The next check is the privately scoped runtime witness before considering Settings or activation.
 
+[Start-empty runtime evidence](../../validation/storage/library-restore-runtime.md#start-empty-follow-up) passed 25/25 data-only API 28 cases; the dedicated guest is stopped and released. The next user-value checkpoint is the actual selected-folder grant and durable app cutover. The SimpleStorage toolchain scope is still awaiting approval; do not install a dependency, swap the active app package, or expose Settings as working while that gate is open. Portable Undo and masks, clean acknowledgment of an initially visible marker after process death, active-root worker binding, and move retirement remain open.
+
 ### Current coordination: transition to `main`
 
 - [x] Operator approved the local fast-forward and `main`-based PR/handoff cadence; see [operational authority](OPERATIONAL_PLAN.md) and [queue rules](PARALLEL_EXECUTION_PLAN.md#coordination). Earlier branch/base references below describe their historical claims.
