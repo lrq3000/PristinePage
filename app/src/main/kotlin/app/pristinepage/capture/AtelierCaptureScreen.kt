@@ -77,7 +77,7 @@ import kotlinx.coroutines.withTimeoutOrNull
     fun back() {
         if (!canLeave) return
         if (review && draft?.editing == false) { review = false; return }
-        if (draft?.pages.isNullOrEmpty() && draft?.pending == null) owner.leave(abandon = true)
+        if (draft?.pages.isNullOrEmpty() && draft?.pending == null && !state.photoNeedsRefresh) owner.leave(abandon = true)
         else askBeforeLeaving()
     }
     BackHandler { back() }
@@ -88,12 +88,12 @@ import kotlinx.coroutines.withTimeoutOrNull
             state.error?.let { Text(acquisitionError(it), color = MaterialTheme.colorScheme.error) }
             Button(owner::resumeChoice, enabled = !state.busy) { Text(stringResource(R.string.atelier_import_resume)) }
             TextButton({ owner.leave(false) }, enabled = !state.busy) { Text(stringResource(R.string.atelier_back)) }
-            TextButton({ confirmExit = true }, enabled = !state.busy && draft?.pending == null) { Text(stringResource(R.string.atelier_import_abandon)) }
+            TextButton({ confirmExit = true }, enabled = !state.busy && draft?.pending == null && !state.photoNeedsRefresh) { Text(stringResource(R.string.atelier_import_abandon)) }
         }
     } else
     if (draft?.editing == true && editor != null && edit != null && preview != null) {
         val selected = draft.selected
-        val move = !state.busy && edit.page != null && !edit.saving && !edit.loading && !edit.shapeBlocksApply(preview)
+        val move = !state.busy && !state.saveNeedsCheck && edit.page != null && !edit.saving && !edit.loading && !edit.shapeBlocksApply(preview)
         val step = listOf(R.string.atelier_wizard_frame, R.string.atelier_rotation, R.string.editor_looks)[draft.step]
         Column(Modifier.fillMaxSize().safeDrawingPadding()) {
             Text(stringResource(R.string.atelier_wizard_progress, draft.step + 1, stringResource(step)),
@@ -107,7 +107,7 @@ import kotlinx.coroutines.withTimeoutOrNull
             state.error?.let { Text(acquisitionError(it), color = MaterialTheme.colorScheme.error) }
             Box(Modifier.weight(1f)) {
                 key(editor, draft.step) {
-                    PageEditorScreen(loadOriginal = loadOriginal, guidedStep = draft.step, guidedBusy = state.busy || confirmExit || confirmSkip)
+                    PageEditorScreen(loadOriginal = loadOriginal, guidedStep = draft.step, guidedBusy = state.busy || state.saveNeedsCheck || confirmExit || confirmSkip)
                         .Content(editor, ::askBeforeLeaving)
                 }
             }
@@ -117,10 +117,14 @@ import kotlinx.coroutines.withTimeoutOrNull
                 }, enabled = move) { Text(stringResource(if (draft.step == 0) R.string.atelier_add_pages else R.string.atelier_back)) }
                 if (draft.step == 0) TextButton({ editor.cancelGeometryAnalysis(); confirmSkip = true }, enabled = canLeave,
                     modifier = Modifier.testTag("atelier-wizard-skip-frame")) { Text(stringResource(R.string.atelier_wizard_skip_frame)) }
-                Button(onClick = {
-                    if (draft.step == 2) owner.save() else selected?.let { owner.navigate(it, draft.step + 1) }
-                }, enabled = move, modifier = Modifier.testTag("atelier-wizard-next")) {
-                    Text(stringResource(if (draft.step == 2) R.string.atelier_wizard_save else R.string.atelier_wizard_next))
+                if (state.saveNeedsCheck) {
+                    Button(owner::checkSave, enabled = !state.busy) { Text(stringResource(R.string.atelier_wizard_check_save)) }
+                } else {
+                    Button(onClick = {
+                        if (draft.step == 2) owner.save() else selected?.let { owner.navigate(it, draft.step + 1) }
+                    }, enabled = move, modifier = Modifier.testTag("atelier-wizard-next")) {
+                        Text(stringResource(if (draft.step == 2) R.string.atelier_wizard_save else R.string.atelier_wizard_next))
+                    }
                 }
             }
         }
@@ -170,7 +174,8 @@ import kotlinx.coroutines.withTimeoutOrNull
             Text(stringResource(R.string.atelier_import_keep_draft))
         } },
         dismissButton = {
-            TextButton({ confirmExit = false; owner.leave(true) }, enabled = canLeave && draft?.pending == null) {
+                TextButton({ confirmExit = false; owner.leave(true) },
+                    enabled = canLeave && draft?.pending == null && !state.photoNeedsRefresh && !state.saveNeedsCheck) {
                 Text(stringResource(R.string.atelier_import_abandon))
             }
         })
@@ -235,7 +240,7 @@ import kotlinx.coroutines.withTimeoutOrNull
             }
         }
     }
-    val idle = draft != null && !state.busy && request == null && draft.pending == null
+    val idle = draft != null && !state.busy && !state.photoNeedsRefresh && request == null && draft.pending == null
     Column(Modifier.fillMaxSize().safeDrawingPadding().padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.SpaceBetween) {
             TextButton(back, enabled = !state.busy) { Text(stringResource(R.string.atelier_back)) }
@@ -249,7 +254,9 @@ import kotlinx.coroutines.withTimeoutOrNull
             TextButton({ cameraError = null; cameraEpoch++ }) { Text(stringResource(R.string.atelier_camera_retry)) }
         }
         if (state.busy) LinearProgressIndicator(Modifier.fillMaxWidth())
-        if (draft?.pending != null && request == null && !state.busy) {
+        if (state.photoNeedsRefresh && !state.busy) {
+            TextButton(owner::refreshPhoto) { Text(stringResource(R.string.atelier_import_refresh)) }
+        } else if (draft?.pending != null && request == null && !state.busy) {
             Text(stringResource(R.string.atelier_import_interrupted))
             TextButton(owner::cancelPending) { Text(stringResource(R.string.atelier_import_clear_pending)) }
         }

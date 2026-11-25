@@ -49,6 +49,128 @@ import org.junit.runner.RunWith
 class ApplicationCompositionTest {
     private val output = OutputSpec(PixelSize(2, 2), RenderPurpose.PREVIEW)
 
+    @Test fun anAtelierChooserBelongsToTheDraftAndItsIssuingActivation() = runBlocking {
+        Fixture().use { f ->
+            val services = ApplicationServices(f.context, f.budget, f.provider)
+            val stale = LibraryActivation("aaaaaaaa-aaaa-4aaa-8aaa-000000000011", 1)
+            val refused = runCatching { services.openDefaultAtelier(stale, "Cold draft", null) }.exceptionOrNull() as RepositoryFailure
+            assertEquals("library_activation_changed", refused.error.safeMessageKey)
+            assertFalse(File(f.context.filesDir, "library-settings").exists())
+            assertFalse(f.context.getDatabasePath("pristinepage.db").exists())
+            services.imports().useStore { graph ->
+                val draft = services.openDefaultAtelier(graph.activation, "Exact draft", null).draft
+                val request = services.reserveDefaultAtelier(graph.activation, draft, app.pristinepage.capture.PhotoImportKind.FILES)
+                assertEquals(graph.activation, request.issuedAt)
+                assertEquals(app.pristinepage.capture.PhotoImportKind.FILES, request.kind)
+                assertEquals(request.batchId, graph.store.atelier.refresh(draft).pending?.value)
+                val route = app.pristinepage.library.ApplicationLibraryActions(f.context, null, services)
+                val selection = app.pristinepage.library.LibraryPhotoResult.Selected(listOf(f.good), 0)
+                val staleCancel = runCatching { route.cancelAtelier(graph.activation.copy(number = 2), draft, request) }
+                    .exceptionOrNull() as RepositoryFailure
+                assertEquals("library_activation_changed", staleCancel.error.safeMessageKey)
+                val wrongDraft = draft.copy(id = "aaaaaaaa-aaaa-4aaa-8aaa-000000000013")
+                assertTrue(runCatching { route.deliverAtelier(graph.activation, wrongDraft, request, selection) }.isFailure)
+                assertTrue(f.opened.isEmpty())
+                assertEquals(request.batchId, graph.store.atelier.refresh(draft).pending?.value)
+                val marker = File(f.context.filesDir, "library-settings/active-library")
+                val baseline = marker.readBytes()
+                val body = "pristinepage-active-library-v1\n${graph.activation.libraryId}\n${graph.activation.number + 1}\n-\n-\n"
+                val digest = MessageDigest.getInstance("SHA-256").digest(body.toByteArray(Charsets.US_ASCII))
+                    .joinToString("") { "%02x".format(it.toInt() and 255) }
+                var checks = 0
+                f.afterRoomOpen = { if (++checks == 2) marker.writeText("$body$digest\n", Charsets.US_ASCII) }
+                try {
+                    val late = runCatching { route.deliverAtelier(graph.activation, draft, request, selection) }.exceptionOrNull() as RepositoryFailure
+                    assertEquals("library_activation_changed", late.error.safeMessageKey)
+                } finally {
+                    f.afterRoomOpen = {}
+                    marker.writeBytes(baseline)
+                }
+                assertEquals(listOf(f.good), f.opened)
+                val settled = route.cancelAtelier(graph.activation, draft, request)
+                assertNull(settled.pending)
+                assertEquals(1, settled.pages.size)
+                assertEquals(listOf(f.good), f.opened)
+            }
+        }
+    }
+
+    @Test fun onlyTheIssuedCameraRequestCanDiscardItsHandoff() = runBlocking {
+        Fixture().use { f ->
+            val services = ApplicationServices(f.context, f.budget, f.provider)
+            val route = app.pristinepage.library.ApplicationLibraryActions(f.context, null, services)
+            services.imports().useStore { graph ->
+                val activation = graph.activation
+                val draft = services.openDefaultAtelier(activation, "Capture ownership", null).draft
+                val files = services.reserveDefaultAtelier(activation, draft, app.pristinepage.capture.PhotoImportKind.FILES)
+                val handoff = app.pristinepage.capture.CaptureStage(f.context, files.batchId).create()
+                handoff.writeText("Independent bytes")
+                val forged = files.routedAs(app.pristinepage.capture.PhotoImportKind.CAMERA)
+                assertTrue(runCatching { route.cancelAtelier(activation, draft, forged) }.exceptionOrNull() is RepositoryFailure)
+                assertEquals(files.session, graph.store.atelier.refresh(draft).pending)
+                route.cancelAtelier(activation, draft, files)
+                assertEquals("Independent bytes", handoff.readText())
+                val camera = services.reserveDefaultAtelier(activation, draft, app.pristinepage.capture.PhotoImportKind.CAMERA)
+                val owned = app.pristinepage.capture.CaptureStage(f.context, camera.batchId).create()
+                route.cancelAtelier(activation, draft, camera)
+                assertFalse(owned.exists())
+                val rediscovered = services.reserveDefaultAtelier(activation, draft, app.pristinepage.capture.PhotoImportKind.CAMERA)
+                val unknown = app.pristinepage.capture.CaptureStage(f.context, rediscovered.batchId).create()
+                route.cancelAtelier(activation, draft, app.pristinepage.capture.PhotoImportRequest.abandonmentOnly(rediscovered.session, activation))
+                assertTrue(unknown.isFile)
+                assertNull(graph.store.atelier.refresh(draft).pending)
+                assertTrue(f.opened.isEmpty())
+            }
+        }
+    }
+
+    @Test fun atelierSaveRefusesAReplacementRevisionAndCanReadBackOnlyTheExactReceipt() = runBlocking {
+        Fixture().use { f ->
+            val services = ApplicationServices(f.context, f.budget, f.provider)
+            val route = app.pristinepage.library.ApplicationLibraryActions(f.context, null, services)
+            services.imports().useStore { graph ->
+                val activation = graph.activation
+                val draft = services.openDefaultAtelier(activation, "Reviewed revision", null).draft
+                val files = services.reserveDefaultAtelier(activation, draft, app.pristinepage.capture.PhotoImportKind.FILES)
+                route.deliverAtelier(activation, draft, files, app.pristinepage.library.LibraryPhotoResult.Selected(listOf(f.good), 0))
+                val editing = services.finishDefaultAtelier(activation, draft)
+                val page = checkNotNull(editing.selected)
+                val stepOne = services.navigateDefaultAtelier(activation, editing, page, 1)
+                val reviewed = services.navigateDefaultAtelier(activation, stepOne, page, 2)
+                val original = services.loadDefaultAtelierPage(activation, reviewed, page)
+                val originalInput = services.freezeDefaultAtelierSave(activation, reviewed, original)
+                val rotated = original.recipe.copy(geometry = original.recipe.geometry.withOutputQuarterTurns(1))
+                assertTrue(services.checkpointDefaultAtelier(activation, reviewed, page, original.recipeRevision, rotated) is SaveRecipeResult.Saved)
+                val conflict = runCatching { services.saveDefaultAtelier(originalInput) }.exceptionOrNull() as RepositoryFailure
+                assertEquals(OperationErrorCode.REVISION_CONFLICT, conflict.error.code)
+                assertNull(services.recoverDefaultAtelierSave(originalInput))
+                val edited = services.loadDefaultAtelierPage(activation, reviewed, page)
+                assertEquals(original.recipeRevision + 1, edited.recipeRevision)
+                val exact = services.freezeDefaultAtelierSave(activation, reviewed, edited)
+                val marker = File(f.context.filesDir, "library-settings/active-library")
+                val baseline = marker.readBytes()
+                val body = "pristinepage-active-library-v1\n${activation.libraryId}\n${activation.number + 1}\n-\n-\n"
+                val digest = MessageDigest.getInstance("SHA-256").digest(body.toByteArray(Charsets.US_ASCII))
+                    .joinToString("") { "%02x".format(it.toInt() and 255) }
+                var checks = 0
+                f.afterRoomOpen = { if (++checks == 2) marker.writeText("$body$digest\n", Charsets.US_ASCII) }
+                try {
+                    val failure = runCatching { services.saveDefaultAtelier(exact) }.exceptionOrNull() as RepositoryFailure
+                    assertEquals("atelier_save_delivery_unconfirmed", failure.error.safeMessageKey)
+                } finally {
+                    f.afterRoomOpen = {}
+                    marker.writeBytes(baseline)
+                }
+                val receipt = checkNotNull(services.recoverDefaultAtelierSave(exact))
+                assertEquals(listOf(page), receipt.pageIds)
+                assertEquals(edited.recipeRevision, graph.store.editablePages.load(receipt.document, page).recipeRevision)
+                assertEquals(OperationErrorCode.REVISION_CONFLICT,
+                    (runCatching { services.recoverDefaultAtelierSave(originalInput) }.exceptionOrNull() as RepositoryFailure).error.code)
+                assertEquals(0L, f.budget.usedBytes)
+            }
+        }
+    }
+
     @Test fun anEditorContinuationCannotReadSaveOrRenderUnderAnotherActivation() = runBlocking {
         Fixture().use { f ->
             val services = ApplicationServices(f.context, f.budget, f.provider)
@@ -431,9 +553,11 @@ class ApplicationCompositionTest {
         private val base = InstrumentationRegistry.getInstrumentation().targetContext
         private val root = File(base.filesDir, "t04-composition-${UUID.randomUUID()}")
         private val files = File(root, "files").apply { check(mkdirs()) }
+        private val cache = File(root, "cache").apply { check(mkdirs()) }
         var afterRoomOpen: () -> Unit = {}
         val context = object : ContextWrapper(base) {
             override fun getApplicationContext(): Context = this
+            override fun getCacheDir(): File = cache
             override fun getFilesDir(): File {
                 if (File(root, "databases/pristinepage.db").isFile) afterRoomOpen()
                 return files

@@ -141,7 +141,7 @@ class MainActivity : ComponentActivity() {
         val acquisition = ViewModelProvider(this, object : ViewModelProvider.Factory {
             @Suppress("UNCHECKED_CAST") override fun <T : ViewModel> create(modelClass: Class<T>): T {
                 require(modelClass == AtelierCaptureViewModel::class.java)
-                return AtelierCaptureViewModel(applicationContext, services::imports, app.savedOcrSignals::onPagesSaved) as T
+                return AtelierCaptureViewModel(applicationContext, services, app.savedOcrSignals::onPagesSaved) as T
             }
         })[AtelierCaptureViewModel::class.java]
         editor = editorOwner
@@ -165,9 +165,6 @@ class MainActivity : ComponentActivity() {
                 retained.state.collect { binding.synchronize() }
             }
         }
-        val loadOriginal: suspend (String) -> OriginalPreviewBitmap = { source ->
-            services.imports().originalPreview(source)
-        }
         setContent { AppTheme {
             val libraryState = rememberSaveableStateHolder()
             var settingsPage by rememberSaveable { mutableStateOf<SettingsPage?>(null) }
@@ -185,14 +182,21 @@ class MainActivity : ComponentActivity() {
             LaunchedEffect(batch.savedDocument, batch.savedRevision, batch.undo) {
                 if (batch.savedDocument != null) retained.accept(LibraryEvent.RefreshAlbum)
             }
-            LaunchedEffect(acquiring.saved) {
+            LaunchedEffect(acquiring.saved, acquiring.activation, library.activation) {
                 acquiring.saved?.let { album ->
-                    retained.accept(if (library.selectedId == album) LibraryEvent.RefreshAlbum else LibraryEvent.Open(album))
+                    if (library.activation == acquiring.activation) {
+                        retained.accept(if (library.selectedId == album) LibraryEvent.RefreshAlbum else LibraryEvent.Open(album))
+                    }
                     acquisition.acknowledgeSave()
                 }
             }
-            if (acquiring.open) AtelierCaptureScreen(acquiring, acquisition, activityResultRegistry, settings.showCameraGrid, window, loadOriginal,
-                loadQueueTile = { source -> services.imports().originalPreview(source, longEdge = 224) })
+            if (acquiring.open) {
+                val draft = acquiring.draft
+                val issuing = checkNotNull(acquiring.activation)
+                AtelierCaptureScreen(acquiring, acquisition, activityResultRegistry, settings.showCameraGrid, window,
+                    loadOriginal = { source -> services.originalDefaultAtelier(issuing, checkNotNull(draft), source, 1024) },
+                    loadQueueTile = { source -> services.originalDefaultAtelier(issuing, checkNotNull(draft), source, 224) })
+            }
             else if (batch.album != null) BatchEditScreen(batch, batchOwner, services::imports) { album, pages -> exportOwner.review(album, pages) }
             else if (host.identity == null && camera != null) key(camera.batchId) {
                 CaptureScreen(camera, { retained.accept(LibraryEvent.CancelImport) }, settings.showCameraGrid) { still ->
@@ -226,7 +230,7 @@ class MainActivity : ComponentActivity() {
                      },
                        openAtelier = { title, target ->
                            retained.accept(LibraryEvent.LeaveHomeSearch)
-                           acquisition.open(title, target)
+                            library.activation?.let { acquisition.open(it, title, target) }
                        }, onSettings = {
                            retained.accept(LibraryEvent.LeaveHomeSearch)
                            settingsPage = SettingsPage.ROOT

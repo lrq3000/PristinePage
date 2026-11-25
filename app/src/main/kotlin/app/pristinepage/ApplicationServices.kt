@@ -9,11 +9,15 @@ import app.pristinepage.core.pipeline.Recipe
 import app.pristinepage.core.pipeline.RenderRequest
 import app.pristinepage.core.pipeline.RenderResult
 import app.pristinepage.capture.PhotoImportController
+import app.pristinepage.capture.PhotoImportKind
+import app.pristinepage.capture.PhotoImportRequest
 import app.pristinepage.data.library.AndroidLibraryStartup
 import app.pristinepage.data.library.DefaultLibraryOperations
 import app.pristinepage.data.library.LibraryActivation
 import app.pristinepage.data.model.DocumentId
 import app.pristinepage.data.model.DocumentPage
+import app.pristinepage.data.model.DocumentSummary
+import app.pristinepage.data.model.EditablePage
 import app.pristinepage.data.model.ImportSessionId
 import app.pristinepage.data.model.OperationError
 import app.pristinepage.data.model.OperationErrorCode
@@ -25,6 +29,9 @@ import app.pristinepage.editor.EditorIdentity
 import app.pristinepage.data.files.SourceInspector
 import app.pristinepage.data.repository.PrivateImportStore
 import app.pristinepage.data.repository.ImportSessionLifecycle
+import app.pristinepage.data.repository.AtelierAcquisition
+import app.pristinepage.data.repository.AtelierDraftView
+import app.pristinepage.data.repository.AtelierSavedPages
 import app.pristinepage.data.repository.SourceInput
 import app.pristinepage.data.repository.SavedOcrWork
 import app.pristinepage.data.repository.ImportInitializationCleanup
@@ -58,6 +65,9 @@ class ApplicationServices(context: Context, internal val budget: ImageAllocation
 
     private val context = context.applicationContext
     private val initialization = Mutex()
+    private val atelierPhotoGate = Mutex()
+    private data class AtelierPhoto(val draftId: String, val generation: Long, val request: PhotoImportRequest)
+    private var atelierPhoto: AtelierPhoto? = null // One reservation in the sole unfinished Atelier draft; never restored from picker data.
     private val libraryStartup = AndroidLibraryStartup(this.context)
     private var initialized: ApplicationImports? = null
     private var defaultOperations: DefaultLibraryOperations<ApplicationImports>? = null
@@ -127,6 +137,130 @@ class ApplicationServices(context: Context, internal val budget: ImageAllocation
     internal suspend fun findDefaultPhotoBatch(issuedAt: LibraryActivation, album: DocumentId): ImportSessionId? =
         (withDefaultLibrary(issuedAt) { ActiveImport(it.store.catalog.activeImport(album)) } ?: activationChanged()).batch
 
+    internal data class AtelierOpening(val draft: AtelierDraftView, val needsResume: Boolean)
+
+    internal suspend fun openDefaultAtelier(issuedAt: LibraryActivation, title: String, target: DocumentSummary?): AtelierOpening =
+        useDefaultAtelier(issuedAt) { atelier, _ ->
+            val pending = atelier.pending()
+            if (pending != null) AtelierOpening(pending, true)
+            else AtelierOpening(atelier.create(title, target?.documentId, target?.documentRevision), false)
+        }
+
+    internal suspend fun reserveDefaultAtelier(issuedAt: LibraryActivation, draft: AtelierDraftView, kind: PhotoImportKind) =
+        atelierPhotoGate.withLock {
+            useDefaultAtelier(issuedAt) { atelier, _ ->
+                PhotoImportRequest(atelier.begin(draft, camera = kind == PhotoImportKind.CAMERA).value, kind, issuedAt)
+                    .also { atelierPhoto = AtelierPhoto(draft.id, draft.generation, it) }
+            }
+        }
+
+    internal suspend fun refreshDefaultAtelier(issuedAt: LibraryActivation, draft: AtelierDraftView) =
+        useDefaultAtelier(issuedAt) { atelier, _ -> atelier.refresh(draft) }
+
+    internal suspend fun finishDefaultAtelier(issuedAt: LibraryActivation, draft: AtelierDraftView) =
+        useDefaultAtelier(issuedAt) { atelier, _ -> atelier.finish(draft) }
+
+    internal suspend fun navigateDefaultAtelier(issuedAt: LibraryActivation, draft: AtelierDraftView, page: PageId, step: Int) =
+        useDefaultAtelier(issuedAt) { atelier, _ -> atelier.navigate(draft, page, step) }
+
+    internal suspend fun addToDefaultAtelier(issuedAt: LibraryActivation, draft: AtelierDraftView) =
+        useDefaultAtelier(issuedAt) { atelier, _ -> atelier.addMore(draft) }
+
+    internal suspend fun abandonDefaultAtelier(issuedAt: LibraryActivation, draft: AtelierDraftView) =
+        useDefaultAtelier(issuedAt) { atelier, _ -> atelier.abandon(draft) }
+
+    internal suspend fun loadDefaultAtelierPage(issuedAt: LibraryActivation, draft: AtelierDraftView, page: PageId) =
+        useDefaultAtelier(issuedAt) { atelier, _ -> atelier.load(draft, page) }
+
+    internal suspend fun checkpointDefaultAtelier(issuedAt: LibraryActivation, draft: AtelierDraftView, page: PageId, revision: Long, recipe: Recipe) =
+        useDefaultAtelier(issuedAt) { atelier, renderer -> atelier.checkpoint(draft, page, revision, recipe, renderer) }
+
+    internal class AtelierSave(
+        val issuedAt: LibraryActivation, val draft: AtelierDraftView, reviewed: List<EditablePage>,
+    ) {
+        val reviewed: List<EditablePage> = java.util.Collections.unmodifiableList(reviewed.toList())
+    }
+
+    internal suspend fun freezeDefaultAtelierSave(issuedAt: LibraryActivation, draft: AtelierDraftView, selected: EditablePage): AtelierSave =
+        useDefaultAtelier(issuedAt) { atelier, _ ->
+            if (!draft.editing || draft.step != 2 || draft.selected != selected.pageId) atelierReviewChanged()
+            val ordered = draft.pages.map { item ->
+                val live = atelier.load(draft, item.pageId)
+                val isSelected = item.pageId == selected.pageId
+                val revision = if (isSelected) selected.recipeRevision else item.recipeRevision
+                if (live.sourceId != item.sourceId || live.recipeRevision != revision ||
+                    isSelected && (live.documentId != selected.documentId || live.recipeHash != selected.recipeHash)) atelierReviewChanged()
+                live
+            }
+            if (ordered.none { it.pageId == selected.pageId }) atelierReviewChanged()
+            AtelierSave(issuedAt, draft, ordered)
+        }
+
+    internal suspend fun saveDefaultAtelier(input: AtelierSave): AtelierSavedPages =
+        useDefaultAtelier(input.issuedAt) { atelier, renderer -> atelier.save(input.draft, input.reviewed, renderer) }
+
+    internal suspend fun recoverDefaultAtelierSave(input: AtelierSave): AtelierSavedPages? =
+        useDefaultAtelier(input.issuedAt) { atelier, _ -> EditorValue(atelier.inspectSaved(input.draft, input.reviewed)) }.value
+
+    private fun atelierReviewChanged(): Nothing =
+        throw RepositoryFailure(OperationError(OperationErrorCode.REVISION_CONFLICT, false, "draft_preview_changed", null))
+
+    /** The wizard and its retained editor receive only detached values; raw ports stay within the lease. */
+    private suspend fun <T : Any> useDefaultAtelier(issuedAt: LibraryActivation, operation: suspend (AtelierAcquisition, RenderCoordinator) -> T): T =
+        withDefaultLibrary(issuedAt) { graph ->
+            val value = operation(graph.store.atelier, graph.renderer)
+            try { requireSameDefault(issuedAt) } catch (failure: RepositoryFailure) {
+                if (value !is AtelierSavedPages) throw failure
+                throw RepositoryFailure(OperationError(OperationErrorCode.STORAGE_FAILED, false, "atelier_save_delivery_unconfirmed", null))
+            }
+            value
+        } ?: activationChanged()
+
+    internal suspend fun useDefaultAtelierPhoto(issuedAt: LibraryActivation, draft: AtelierDraftView, request: PhotoImportRequest,
+        allowAlreadySettled: Boolean = false,
+        route: suspend (PhotoImportController, ImportSessionLifecycle) -> Unit,
+    ): AtelierDraftView = atelierPhotoGate.withLock {
+        if (request.issuedAt != issuedAt) activationChanged()
+        withDefaultLibrary(issuedAt) { graph ->
+            val owner = atelierPhoto
+            if (request.canDeliver && (owner == null || owner.request !== request || owner.draftId != draft.id || owner.generation != draft.generation)) {
+                atelierPhotoExpired()
+            }
+            val current = graph.store.atelier.refresh(draft)
+            if (current.generation != draft.generation) atelierPhotoExpired()
+            if (current.pending == null && allowAlreadySettled) {
+                requireSameDefault(issuedAt)
+                return@withDefaultLibrary current // A previous command already settled it; no provider, cancellation or cleanup replay.
+            }
+            if (current.pending != request.session) atelierPhotoExpired()
+            route(graph.photoImports, graph.store.lifecycle)
+            val observed = graph.store.atelier.refresh(draft)
+            if (observed.generation != draft.generation) atelierPhotoExpired()
+            requireSameDefault(issuedAt)
+            observed
+        } ?: activationChanged()
+    }
+
+    private fun atelierPhotoExpired(): Nothing =
+        throw RepositoryFailure(OperationError(OperationErrorCode.SESSION_EXPIRED, false, "photo_request_expired", null))
+
+    internal suspend fun renderDefaultAtelier(issuedAt: LibraryActivation, draft: AtelierDraftView, request: RenderRequest): RenderResult =
+        activationPixels(issuedAt) { graph ->
+            val live = graph.store.atelier.load(draft, PageId(request.pageId))
+            if (request.sourceId != live.sourceId.value) draftSourceUnavailable()
+            graph.renderer.render(request)
+        }
+
+    internal suspend fun originalDefaultAtelier(issuedAt: LibraryActivation, draft: AtelierDraftView, sourceId: String, longEdge: Int): OriginalPreviewBitmap =
+        activationPixels(issuedAt) { graph ->
+            val live = graph.store.atelier.refresh(draft)
+            if (live.generation != draft.generation || live.pages.none { it.sourceId.value == sourceId }) draftSourceUnavailable()
+            graph.originalPreview(sourceId, longEdge)
+        }
+
+    private fun draftSourceUnavailable(): Nothing =
+        throw RepositoryFailure(OperationError(OperationErrorCode.SOURCE_UNAVAILABLE, false, "draft_source_unavailable", null))
+
     internal suspend fun loadDefaultEditorPage(identity: EditorIdentity) =
         defaultEditorOperation(identity) { it.store.editablePages.load(identity.documentId, identity.pageId) }
 
@@ -151,7 +285,7 @@ class ApplicationServices(context: Context, internal val budget: ImageAllocation
             val value = operation(graph)
             // Withhold obsolete reads and receipts. A completed write remains in the issuing library even if the view cannot acknowledge it.
             try {
-                if (libraryStartup.recordedDefaultActivation() != identity.issuedAt) activationChanged()
+                requireSameDefault(identity.issuedAt)
             } catch (failure: RepositoryFailure) {
                 if (value !is SaveRecipeResult.Saved) throw failure
                 throw RepositoryFailure(OperationError(OperationErrorCode.STORAGE_FAILED, false, "editor_save_delivery_unconfirmed", identity.pageId.value))
@@ -179,12 +313,22 @@ class ApplicationServices(context: Context, internal val budget: ImageAllocation
 
     /** Capture the owned, detached pixels before leaving the lease so cancellation/late refusal cannot strand their allocation. */
     private suspend fun <T : AutoCloseable> editorPixels(identity: EditorIdentity, sourceId: String, produce: suspend (ApplicationImports) -> T): T {
+        return activationPixels(identity.issuedAt) { graph ->
+            if (editorPage(graph, identity).sourceId.value != sourceId) editorPageUnavailable(identity)
+            produce(graph)
+        }
+    }
+
+    private suspend fun requireSameDefault(issuedAt: LibraryActivation) {
+        if (libraryStartup.recordedDefaultActivation() != issuedAt) activationChanged()
+    }
+
+    private suspend fun <T : AutoCloseable> activationPixels(issuedAt: LibraryActivation, produce: suspend (ApplicationImports) -> T): T {
         var provisional: T? = null
         try {
-            withDefaultLibrary(identity.issuedAt) { graph ->
-                if (editorPage(graph, identity).sourceId.value != sourceId) editorPageUnavailable(identity)
+            withDefaultLibrary(issuedAt) { graph ->
                 provisional = produce(graph)
-                if (libraryStartup.recordedDefaultActivation() != identity.issuedAt) activationChanged()
+                requireSameDefault(issuedAt)
             } ?: activationChanged()
             currentCoroutineContext().ensureActive()
             return checkNotNull(provisional).also { provisional = null }

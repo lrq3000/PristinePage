@@ -150,9 +150,7 @@ class RoomDocumentRepository @JvmOverloads constructor(private val metadata: Met
     internal suspend fun publishAtelierDraft(drafts: AtelierDraftDao, draftId: String, generation: Long,
         witnessed: List<AtelierPageWitness>, renderer: RenderCoordinator): AtelierPublicationReceipt = withContext(dispatcher) {
         try {
-            requireOpaqueId(draftId)
-            if (!metadata.ownsAtelierPublication(drafts)) reject(OperationErrorCode.INVALID_INPUT, "draft_transaction_owner_mismatch", draftId)
-            if (generation < 1 || witnessed.size !in 1..RoomAtelierDrafts.MAX_ITEMS_PER_DRAFT) reject(OperationErrorCode.REVISION_CONFLICT, "draft_preview_changed", draftId)
+            requireAtelierPublicationRequest(drafts, draftId, generation, witnessed)
             val inputs = witnessed.toList()
             val scope = DraftEdit(draftId, generation)
             val initial = metadata.transaction {
@@ -237,6 +235,28 @@ class RoomDocumentRepository @JvmOverloads constructor(private val metadata: Met
         catch (_: Conflict) { reject(OperationErrorCode.REVISION_CONFLICT, "draft_preview_changed", draftId) }
         catch (_: IllegalArgumentException) { reject(OperationErrorCode.INTEGRITY_FAILED, "draft_publication_invalid", draftId) }
         catch (_: Exception) { reject(OperationErrorCode.STORAGE_FAILED, "draft_publication_failed", draftId) }
+    }
+
+    /** Resolve an uncertain delivery without rendering or attempting another publication. */
+    internal suspend fun inspectAtelierPublication(drafts: AtelierDraftDao, draftId: String, generation: Long,
+        witnessed: List<AtelierPageWitness>): AtelierPublicationReceipt? = withContext(dispatcher) {
+        try {
+            requireAtelierPublicationRequest(drafts, draftId, generation, witnessed)
+            val inputs = witnessed.toList()
+            metadata.transaction {
+                coroutineContext.ensureActive()
+                replayPublication(publicationRow(drafts, draftId), generation, inputs)
+            }
+        } catch (canceled: CancellationException) { throw canceled }
+        catch (failure: RepositoryFailure) { throw failure }
+        catch (_: IllegalArgumentException) { reject(OperationErrorCode.INTEGRITY_FAILED, "draft_publication_invalid", draftId) }
+        catch (_: Exception) { reject(OperationErrorCode.STORAGE_FAILED, "draft_publication_failed", draftId) }
+    }
+
+    private fun requireAtelierPublicationRequest(drafts: AtelierDraftDao, draftId: String, generation: Long, witnessed: List<AtelierPageWitness>) {
+        requireOpaqueId(draftId)
+        if (!metadata.ownsAtelierPublication(drafts)) reject(OperationErrorCode.INVALID_INPUT, "draft_transaction_owner_mismatch", draftId)
+        if (generation < 1 || witnessed.size !in 1..RoomAtelierDrafts.MAX_ITEMS_PER_DRAFT) reject(OperationErrorCode.REVISION_CONFLICT, "draft_preview_changed", draftId)
     }
 
     private fun publicationOriginal(drafts: AtelierDraftDao, prepared: Prepared, scope: DraftEdit, revision: Long): SourceBlobRow {

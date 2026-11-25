@@ -11,6 +11,7 @@ import app.pristinepage.capture.PhotoImportRequest
 import app.pristinepage.capture.PhotoImportResultRouter
 import app.pristinepage.capture.PhotoSelection
 import app.pristinepage.data.library.LibraryActivation
+import app.pristinepage.data.repository.AtelierDraftView
 import app.pristinepage.data.model.*
 import app.pristinepage.data.repository.AlbumSearchQuery
 import app.pristinepage.data.repository.DocumentCatalog
@@ -94,6 +95,17 @@ class ApplicationLibraryActions private constructor(
         return checkNotNull(delivered)
     }
 
+    internal data class AtelierPhotoDelivery(val draft: AtelierDraftView, val results: List<IngestResult>)
+
+    internal suspend fun deliverAtelier(issuedAt: LibraryActivation, draft: AtelierDraftView, request: PhotoImportRequest, selection: LibraryPhotoResult): AtelierPhotoDelivery {
+        if (!request.canDeliver) throw RepositoryFailure(OperationError(OperationErrorCode.SESSION_EXPIRED, false, "photo_result_not_issued", request.batchId))
+        var delivered: List<IngestResult>? = null
+        val observed = checkNotNull(scoped).useDefaultAtelierPhoto(issuedAt, draft, request) { controller, lifecycle ->
+            delivered = deliverIn(request, selection, issuedAt, controller, lifecycle)
+        }
+        return AtelierPhotoDelivery(observed, checkNotNull(delivered))
+    }
+
     private suspend fun deliverIn(request: PhotoImportRequest, selection: LibraryPhotoResult, activation: LibraryActivation,
         controller: PhotoImportController, lifecycle: ImportSessionLifecycle): List<IngestResult> {
         val capture = if (request.kind == PhotoImportKind.CAMERA) CaptureStage(checkNotNull(context), request.batchId) else null
@@ -122,12 +134,22 @@ class ApplicationLibraryActions private constructor(
     }
     override suspend fun cancel(request: PhotoImportRequest) {
         route(request) { _, _, lifecycle ->
-            lifecycle.cancelBatch(request.session)
-            // A durable batch rediscovered without Activity state no longer carries its original UI route.
-            context?.let { app -> withContext(Dispatchers.IO) { CaptureStage(app, request.batchId).discard() } }
+            cancelIn(request, lifecycle)
         }
     }
 
+    internal suspend fun cancelAtelier(issuedAt: LibraryActivation, draft: AtelierDraftView, request: PhotoImportRequest): AtelierDraftView =
+        checkNotNull(scoped).useDefaultAtelierPhoto(issuedAt, draft, request, allowAlreadySettled = true) { _, lifecycle ->
+            cancelIn(request, lifecycle)
+        }
+
+    private suspend fun cancelIn(request: PhotoImportRequest, lifecycle: ImportSessionLifecycle) {
+        lifecycle.cancelBatch(request.session)
+        // A rediscovered, untyped reservation can be settled but does not prove ownership of any camera bytes.
+        if (request.canDeliver && request.kind == PhotoImportKind.CAMERA) {
+            context?.let { app -> withContext(Dispatchers.IO) { CaptureStage(app, request.batchId).discard() } }
+        }
+    }
     private suspend fun route(request: PhotoImportRequest,
         operation: suspend (LibraryActivation, PhotoImportController, ImportSessionLifecycle) -> Unit) {
         val services = scoped

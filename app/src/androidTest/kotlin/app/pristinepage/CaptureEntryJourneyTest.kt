@@ -170,24 +170,26 @@ class CaptureEntryJourneyTest {
         assertEquals("Do not activate an unverified camera on the retained guest", PackageManager.PERMISSION_DENIED,
             context.checkSelfPermission(Manifest.permission.CAMERA))
         DocumentCatalogIntegrationTest.Fixture(realProvider = realProvider).use { fixture ->
-            val graph = fixture.open()
+            val services = fixture.services()
+            val graph = fixture.open(services)
             val models = ViewModelStore()
             val owner = compose.runOnUiThread {
                 val factory = object : ViewModelProvider.Factory {
                     @Suppress("UNCHECKED_CAST")
                     override fun <T : ViewModel> create(modelClass: Class<T>): T =
-                         AtelierCaptureViewModel(context, { graph }) { _, _, _ -> check(realProvider) { "Cancel must not save pages" } } as T
+                          AtelierCaptureViewModel(context, services) { _, _, _ -> check(realProvider) { "Cancel must not save pages" } } as T
                 }
                 ViewModelProvider(models, factory)[AtelierCaptureViewModel::class.java].also { acquisition ->
                     val activity = compose.activity
                     activity.setContent {
                         MaterialTheme {
                             val state by acquisition.state.collectAsState()
-                            AtelierCaptureScreen(state, acquisition, activity.activityResultRegistry, false, activity.window,
-                                { graph.originalPreview(it) }, { graph.originalPreview(it, 224) })
+                             AtelierCaptureScreen(state, acquisition, activity.activityResultRegistry, false, activity.window,
+                                 { services.originalDefaultAtelier(graph.activation, checkNotNull(state.draft), it, 1024) },
+                                 { services.originalDefaultAtelier(graph.activation, checkNotNull(state.draft), it, 224) })
                         }
                     }
-                    acquisition.open("Synthetic picker entry", null)
+                     acquisition.open(graph.activation, "Synthetic picker entry", null)
                 }
             }
             try {
