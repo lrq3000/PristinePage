@@ -14,6 +14,8 @@ The localized run pressed the expected action and received a callback, but the o
 
 That diagnostic exposed a separate timing issue before the callback: Files showed the navigation button before completing the initial-URI transition. Opening its drawer at that point hid the action over the correctly loaded fixture. The witness now waits for the exact folder and both managed namespaces before tapping; it never navigates during initial loading or retries a confirmation.
 
+With that wait, Files returned `RESULT_OK` and flag bits `195` (read, write, persistable and prefix), with no ClipData. The exact encoded tree comparison failed and the adapter correctly returned `UNSUPPORTED_TREE`; no grant was persisted. A follow-up records the URI structure and fixture-identity comparisons only. It does not substitute the fixture's expected URI for the actual capability. The populated fixture adds one PNG and two accepted-history revisions, and compares the streamed original to a digest calculated outside the app. This fixture's synthetic normalization tag is not a runtime decoder or historical-conversion witness.
+
 ## Gates before activating or publishing
 
 - Matched Files folder, real returned modes, exact persisted readback, fresh catalog admission, Activity recreation, and refusal after revocation on the same approved emulator.

@@ -75,7 +75,7 @@ def run(args):
         need(sha(saved) == hashes[package], "Retained candidate APK changed")
         retained[package] = saved
     fixture = raw / "synthetic-library"
-    files = make_fixture(fixture)
+    files = make_fixture(fixture, with_scan=args.with_scan)
     (raw / f"{prefix}-artifacts.json").write_text(
         json.dumps(dict(proof=proof, source=args.commit, fixture=files, previous=previous, guest=args.guest)),
         encoding="utf-8",
@@ -116,14 +116,19 @@ def run(args):
         folder = "PristinePage-tree-" + uuid.uuid4().hex[:12]
         guest_root = f"/sdcard/Documents/{folder}"
         adb("shell", "mkdir", "-p", "/sdcard/Documents")
-        adb("shell", "mkdir", guest_root, f"{guest_root}/catalogs", f"{guest_root}/generations")
+        namespaces = sorted({relative.split("/", 1)[0] for relative in files})
+        adb("shell", "mkdir", guest_root, *(f"{guest_root}/{namespace}" for namespace in namespaces))
         for relative, digest in files.items():
             adb("push", fixture / relative, f"{guest_root}/{relative}")
             need(adb("shell", "sha256sum", f"{guest_root}/{relative}").split()[0] == digest,
                  "The synthetic Files fixture differed after staging")
         recheck_target(run, ns)
+        original_args = []
+        if args.with_scan:
+            original, = (digest for relative, digest in files.items() if relative.startswith("objects/"))
+            original_args = ["-e", "libraryFixtureOriginal", original]
         output = adb("shell", "am", "instrument", "-w", "-r", "-e", "class", ",".join(CASES),
-                     "-e", "libraryFixtureFolder", folder, RUNNER, timeout=150)
+                     "-e", "libraryFixtureFolder", folder, *original_args, RUNNER, timeout=150)
         run.path("instrumentation.txt").write_text(output, encoding="utf-8")
         passed, failed = read_results(output, CASES)
         for relative, digest in files.items():
@@ -142,5 +147,6 @@ if __name__ == "__main__":
     for field in ("commit", "app_sha", "test_sha", "guest"):
         parser.add_argument(field)
     parser.add_argument("--fresh", action="store_true")
+    parser.add_argument("--with-scan", action="store_true")
     parser.add_argument("--previous", nargs=2, metavar=("APP_APK", "TEST_APK"))
     raise SystemExit(run(parser.parse_args()))

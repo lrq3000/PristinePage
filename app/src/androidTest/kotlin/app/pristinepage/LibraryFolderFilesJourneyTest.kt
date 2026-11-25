@@ -16,10 +16,13 @@ import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import app.pristinepage.data.library.AndroidLibraryTreeRead
+import app.pristinepage.data.model.SourceBlobId
 import app.pristinepage.library.LibraryFolderGrantHandoff
 import app.pristinepage.library.LibraryFolderPickerContract
+import java.io.ByteArrayOutputStream
 import java.io.File
 import java.io.IOException
+import java.security.MessageDigest
 import java.util.UUID
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
@@ -43,6 +46,9 @@ class LibraryFolderFilesJourneyTest {
         val app = instrumentation.targetContext.applicationContext
         val folder = InstrumentationRegistry.getArguments().getString("libraryFixtureFolder")
             ?.takeIf { it.matches(Regex("PristinePage-tree-[0-9a-f]{12}")) } ?: error("No exact synthetic folder was staged")
+        val originalDigest = InstrumentationRegistry.getArguments().getString("libraryFixtureOriginal")?.also {
+            check(it.matches(Regex("[0-9a-f]{64}")))
+        }
         val expected = DocumentsContract.buildTreeDocumentUri("com.android.externalstorage.documents", "primary:Documents/$folder")
         val existing = { app.contentResolver.persistedUriPermissions.associate { it.uri.toString() to (it.isReadPermission to it.isWritePermission) } }
         val before = existing()
@@ -81,7 +87,8 @@ class LibraryFolderFilesJourneyTest {
             val picked = selection as? LibraryFolderPickerContract.Picked ?: error(
                 "Files returned $selection; result=${raw.resultCode}; flags=${raw.data?.flags}; " +
                     "exactTree=${raw.data?.data?.toString() == expected.toString()}; clipItems=${raw.data?.clipData?.itemCount}; " +
-                    "clipMatches=${raw.data?.clipData?.takeIf { it.itemCount == 1 }?.getItemAt(0)?.uri?.toString() == expected.toString()}",
+                    "clipMatches=${raw.data?.clipData?.takeIf { it.itemCount == 1 }?.getItemAt(0)?.uri?.toString() == expected.toString()}; " +
+                    resultShape(raw.data?.data, expected, folder),
             )
             assertEquals(expected.toString(), picked.uri.toString())
             val uri = LibraryFolderGrantHandoff(app).persistRead(picked)
@@ -90,7 +97,7 @@ class LibraryFolderFilesJourneyTest {
             assertEquals("9e940d7b-76c7-45ea-b5e4-0ad86f26ea13", first.libraryId)
             assertEquals("25c49d9b-02d8-418f-b982-154980d89cfb", first.generationId)
             assertEquals(1, first.albums)
-            assertEquals(0, first.scans)
+            assertEquals(if (originalDigest == null) 0 else 1, first.scans)
             val different = DocumentsContract.buildTreeDocumentUri(requireNotNull(uri.authority), "primary:Documents/${folder}-different")
             val wrongRoot = assertThrows(IOException::class.java) {
                 runBlocking { AndroidLibraryTreeRead(app, scratch).verify(different, first) }
@@ -100,9 +107,29 @@ class LibraryFolderFilesJourneyTest {
             compose.activityRule.scenario.recreate()
             val again = runBlocking { AndroidLibraryTreeRead(app, scratch).verify(Uri.parse(uri.toString()), first) }
             assertEquals(first.generationId, again.generationId)
+            val fixtureBlob = SourceBlobId("aaaaaaaa-aaaa-4aaa-8aaa-000000000003")
+            if (originalDigest != null) {
+                val bytes = ByteArrayOutputStream()
+                runBlocking { AndroidLibraryTreeRead(app, scratch).copyOriginal(again, fixtureBlob, bytes) }
+                assertTrue(bytes.size() > 32)
+                assertEquals(originalDigest, MessageDigest.getInstance("SHA-256").digest(bytes.toByteArray())
+                    .joinToString("") { "%02x".format(it.toInt() and 255) })
+                val unrelated = ByteArrayOutputStream()
+                assertThrows(IOException::class.java) {
+                    runBlocking { AndroidLibraryTreeRead(app, scratch).copyOriginal(again, SourceBlobId(UUID.randomUUID().toString()), unrelated) }
+                }
+                assertEquals(0, unrelated.size())
+            }
             app.contentResolver.releasePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
             assertEquals(before, existing())
             assertThrows(IOException::class.java) { runBlocking { AndroidLibraryTreeRead(app, scratch).verify(uri, first) } }
+            if (originalDigest != null) {
+                val afterRevocation = ByteArrayOutputStream()
+                assertThrows(IOException::class.java) {
+                    runBlocking { AndroidLibraryTreeRead(app, scratch).copyOriginal(again, fixtureBlob, afterRevocation) }
+                }
+                assertEquals(0, afterRevocation.size())
+            }
         } finally {
             if (existing()[expected.toString()] == (true to false)) {
                 app.contentResolver.releasePersistableUriPermission(expected, Intent.FLAG_GRANT_READ_URI_PERMISSION)
@@ -110,6 +137,23 @@ class LibraryFolderFilesJourneyTest {
             val activePackage = instrumentation.uiAutomation.rootInActiveWindow?.packageName?.toString()
             if (activePackage == registration.first) instrumentalBack(instrumentation)
         }
+    }
+
+    /** Report only structural information about a returned URI; no raw path or non-fixture title. */
+    private fun resultShape(actual: Uri?, expected: Uri, folder: String): String {
+        if (actual == null) return "No data URI"
+        val parts = actual.pathSegments
+        val id = if (DocumentsContract.isTreeUri(actual)) DocumentsContract.getTreeDocumentId(actual) else null
+        val expectedId = DocumentsContract.getTreeDocumentId(expected)
+        val relative = id?.substringAfter(':', missingDelimiterValue = "")
+        val exactAuthority = actual.encodedAuthority == expected.encodedAuthority
+        val canonical = id != null && exactAuthority &&
+            DocumentsContract.buildTreeDocumentUri(requireNotNull(expected.authority), id).toString() == actual.toString()
+        return "content=${actual.scheme == "content"}; authorityMatches=$exactAuthority; tree=${id != null}; " +
+            "segments=${parts.size}; documentSegment=${parts.getOrNull(2) == "document"}; extras=${actual.encodedQuery != null || actual.encodedFragment != null}; " +
+            "canonical=$canonical; primary=${id?.startsWith("primary:")}; exactId=${id == expectedId}; " +
+            "exactRelative=${relative == "Documents/$folder"}; fixtureLeaf=${relative?.trimEnd('/')?.endsWith("/$folder")}; " +
+            "trailingSlash=${id?.endsWith('/')}; slashAfterVolume=${relative?.startsWith('/')}; relativeSegments=${relative?.split('/')?.size}"
     }
 
     private fun await(instrumentation: Instrumentation, picker: String, stage: String, predicate: (AccessibilityNodeInfo) -> Boolean): AccessibilityNodeInfo {

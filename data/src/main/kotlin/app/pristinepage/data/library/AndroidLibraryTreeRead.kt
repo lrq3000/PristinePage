@@ -8,9 +8,11 @@ import android.os.OperationCanceledException
 import android.provider.DocumentsContract
 import app.pristinepage.data.library.LibraryObjectTransfer.ObjectId
 import app.pristinepage.data.library.RoomLibraryCatalogReader.Companion.MAX_PORTABLE_BYTES
+import app.pristinepage.data.model.SourceBlobId
 import java.io.File
 import java.io.IOException
 import java.io.InputStream
+import java.io.OutputStream
 import java.nio.file.Path
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ensureActive
@@ -25,14 +27,39 @@ class AndroidLibraryTreeRead(context: Context, private val scratchDirectory: Fil
 
     class Verified internal constructor(
         internal val tree: String, internal val generation: LibraryGeneration, val albums: Int, val scans: Int,
+        private val originals: Map<String, ObjectId>,
     ) {
         val libraryId: String get() = generation.libraryId
         val generationId: String get() = generation.id
+
+        internal fun original(blob: SourceBlobId): ObjectId =
+            originals[blob.value] ?: throw IOException("Original is not in the verified library view")
     }
 
-    suspend fun verify(tree: Uri, expected: Verified? = null): Verified = withContext(Dispatchers.IO) {
-        val checkpoint = { coroutineContext.ensureActive() }
+    suspend fun verify(tree: Uri, expected: Verified? = null): Verified {
         if (expected != null && expected.tree != tree.toString()) throw IOException("The verified library belongs to a different selected folder")
+        return readTree(tree) { read, checkpoint ->
+            read.read(reader.schemaVersion, expected?.generation, expected?.generation) { generation, file ->
+                reader.read(file) { sql ->
+                    val catalog = LibraryPortableCatalogProjection(sql, checkpoint = checkpoint).snapshot()
+                    val originals = catalog.originals.associate { it.sourceBlobId to ObjectId(it.byteSha256, it.byteCount) }
+                    LibraryBackupRead.Projection(
+                        Verified(tree.toString(), generation, catalog.albums.size, catalog.albums.sumOf { it.pages.size }, originals),
+                        originals.values,
+                    )
+                }
+            }.value
+        }
+    }
+
+    /** Stream one original into caller-owned disposable output. The caller must discard that output on any failure and verify closure before using it. */
+    suspend fun copyOriginal(verified: Verified, blob: SourceBlobId, output: OutputStream) {
+        val id = verified.original(blob)
+        readTree(Uri.parse(verified.tree)) { read, _ -> read.copyExactOriginal(verified.generation, id, output) }
+    }
+
+    private suspend fun <T> readTree(tree: Uri, block: (LibraryBackupRead, () -> Unit) -> T): T = withContext(Dispatchers.IO) {
+        val checkpoint = { coroutineContext.ensureActive() }
         // An uncooperative provider can delay unwinding. Do not let repeated taps accumulate further blocked opens.
         if (!ATTEMPT.tryLock()) throw IOException("A library folder verification is already in progress")
         try {
@@ -42,18 +69,9 @@ class AndroidLibraryTreeRead(context: Context, private val scratchDirectory: Fil
                 val backend = Backend(app, tree, root, scratch, signal, checkpoint)
                 backend.requireRoot()
                 val source = LibraryTreeReadSource(root, backend)
-                val result = LibraryBackupRead(source, scratch, MAX_PORTABLE_BYTES, checkpoint)
-                    .read(reader.schemaVersion, expected?.generation, expected?.generation) { generation, file ->
-                        reader.read(file) { sql ->
-                            val catalog = LibraryPortableCatalogProjection(sql, checkpoint = checkpoint).snapshot()
-                            LibraryBackupRead.Projection(
-                                Verified(tree.toString(), generation, catalog.albums.size, catalog.albums.sumOf { it.pages.size }),
-                                catalog.originals.map { ObjectId(it.byteSha256, it.byteCount) },
-                            )
-                        }
-                    }
+                val result = block(LibraryBackupRead(source, scratch, MAX_PORTABLE_BYTES, checkpoint), checkpoint)
                 backend.requireRoot()
-                result.value
+                result
             }
         } finally {
             ATTEMPT.unlock()
