@@ -10,6 +10,8 @@ The first restart for diagnostics booted and answered targeted ADB and package m
 
 On the next run, the exact synthetic folder and both fixed namespaces were visible; the system action was `SÉLECTIONNER` rather than the test's English label. No selection was acknowledged. The test now accepts the equivalent observed French system action in the same verified folder and does not change the locale. App-owned labels and errors stay English.
 
+The localized run pressed the expected action and received a callback, but the old witness discarded the reason its parser did not return a `Picked` value. The next diagnostic retains the typed result, result code, flag bits and exact-identity comparisons without printing URI strings or changing grant admission.
+
 ## Gates before activating or publishing
 
 - Matched Files folder, real returned modes, exact persisted readback, fresh catalog admission, Activity recreation, and refusal after revocation on the same approved emulator.

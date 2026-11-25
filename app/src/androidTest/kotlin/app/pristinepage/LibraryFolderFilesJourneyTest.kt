@@ -10,6 +10,7 @@ import android.provider.DocumentsContract
 import android.view.InputDevice
 import android.view.MotionEvent
 import android.view.accessibility.AccessibilityNodeInfo
+import androidx.activity.result.ActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.test.ext.junit.runners.AndroidJUnit4
@@ -48,14 +49,14 @@ class LibraryFolderFilesJourneyTest {
         assertFalse(before.containsKey(expected.toString()))
         val scratch = File(app.filesDir, "tree-read-${UUID.randomUUID()}").apply { check(mkdir()) }
         val platform = LibraryFolderPickerContract()
-        val result = AtomicReference<LibraryFolderPickerContract.Picked?>()
+        val result = AtomicReference<ActivityResult>()
         val receipt = CountDownLatch(1)
         val registration = compose.runOnUiThread {
             val activity = compose.activity
             val intent = platform.createIntent(activity, Unit).putExtra(DocumentsContract.EXTRA_INITIAL_URI,
                 DocumentsContract.buildDocumentUri(requireNotNull(expected.authority), DocumentsContract.getTreeDocumentId(expected)))
             val launcher = activity.activityResultRegistry.register("library-files-native-witness", ActivityResultContracts.StartActivityForResult()) {
-                result.set(platform.parseResult(it.resultCode, it.data) as? LibraryFolderPickerContract.Picked)
+                result.set(it)
                 receipt.countDown()
             }
             launcher.launch(intent)
@@ -83,7 +84,13 @@ class LibraryFolderFilesJourneyTest {
                 tap(instrumentation, confirm.allowButton() ?: error("No Files confirmation"))
             }
             assertTrue("Files did not return a selection", receipt.await(10, TimeUnit.SECONDS))
-            val picked = requireNotNull(result.get())
+            val raw = requireNotNull(result.get())
+            val selection = platform.parseResult(raw.resultCode, raw.data)
+            val picked = selection as? LibraryFolderPickerContract.Picked ?: error(
+                "Files returned $selection; result=${raw.resultCode}; flags=${raw.data?.flags}; " +
+                    "exactTree=${raw.data?.data?.toString() == expected.toString()}; clipItems=${raw.data?.clipData?.itemCount}; " +
+                    "clipMatches=${raw.data?.clipData?.takeIf { it.itemCount == 1 }?.getItemAt(0)?.uri?.toString() == expected.toString()}",
+            )
             assertEquals(expected.toString(), picked.uri.toString())
             val uri = LibraryFolderGrantHandoff(app).persistRead(picked)
             assertEquals(before + (expected.toString() to (true to false)), existing())
