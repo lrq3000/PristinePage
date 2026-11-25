@@ -373,13 +373,19 @@ class LibraryFolderFilesJourneyTest {
         val showStorage = setOf("Show internal storage", "Aff. mémoire stockage interne")
         val hideStorage = setOf("Hide internal storage", "Masquer mém. stock. int.")
         val automation = instrumentation.uiAutomation
-        // Inspect the real platform menu once; the primary-storage root is hidden by default on the fresh API 28 guest.
-        select("Files options", options)
-        val menu = await(instrumentation, picker, "internal storage preference") {
-            (unique(it, showStorage) != null) xor (unique(it, hideStorage) != null)
+        fun hasVisibilityChoice(root: AccessibilityNodeInfo) =
+            (unique(root, showStorage) != null) xor (unique(root, hideStorage) != null)
+        fun preferenceMenu(step: String): AccessibilityNodeInfo {
+            val open = automation.rootInActiveWindow
+            if (open?.packageName?.toString() == picker && hasVisibilityChoice(open)) return open
+            select("Files options for $step", options)
+            return await(instrumentation, picker, step, ::hasVisibilityChoice)
         }
+        // Inspect the real platform menu once; the primary-storage root is hidden by default on the fresh API 28 guest.
+        val menu = preferenceMenu("initial internal storage preference")
         val wasHidden = unique(menu, showStorage) != null
         var changed = false
+        var navigationFailure: Throwable? = null
         try {
             if (wasHidden) {
                 select("show internal storage", showStorage)
@@ -390,13 +396,25 @@ class LibraryFolderFilesJourneyTest {
             select("Documents", setOf("Documents"), "dir_list")
             select("synthetic folder", setOf(folder), "dir_list") { containsUnder(it, "Documents", "dropdown_breadcrumb") }
             await(instrumentation, picker, "exact destination before restoring Files preference", ::atTarget)
+        } catch (failure: Throwable) {
+            navigationFailure = failure
+            throw failure
         } finally {
             if (changed) {
-                select("Files options to restore internal storage preference", options)
-                select("restore hidden internal storage", hideStorage)
-                select("verify restored Files options", options)
-                await(instrumentation, picker, "verified hidden internal storage preference") { unique(it, showStorage) != null }
-                check(automation.performGlobalAction(AccessibilityService.GLOBAL_ACTION_BACK))
+                try {
+                    val visible = preferenceMenu("restore internal storage preference")
+                    if (unique(visible, hideStorage) != null) select("restore hidden internal storage", hideStorage)
+                    await(instrumentation, picker, "settled Files restoration menu or toolbar") {
+                        unique(it, showStorage) != null || (!hasVisibilityChoice(it) && unique(it, options) != null)
+                    }
+                    val restored = preferenceMenu("verify restored internal storage preference")
+                    check(unique(restored, showStorage) != null) { "Files did not restore the hidden internal storage preference" }
+                    check(automation.performGlobalAction(AccessibilityService.GLOBAL_ACTION_BACK))
+                } catch (restorationFailure: Throwable) {
+                    val original = navigationFailure
+                    if (original == null) throw restorationFailure
+                    original.addSuppressed(restorationFailure)
+                }
             }
         }
         if (!selectFolder) {
