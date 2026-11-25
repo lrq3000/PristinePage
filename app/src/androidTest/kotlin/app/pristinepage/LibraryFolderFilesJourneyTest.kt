@@ -17,6 +17,7 @@ import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import app.pristinepage.data.library.AndroidLibraryTreeRead
+import app.pristinepage.data.model.DocumentId
 import app.pristinepage.data.model.SourceBlobId
 import app.pristinepage.library.LibraryFolderGrantHandoff
 import app.pristinepage.library.LibraryFolderPickerContract
@@ -37,6 +38,7 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
+import org.junit.Assert.assertNotNull
 import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -48,11 +50,34 @@ class LibraryFolderFilesJourneyTest {
 
     @Test fun actualFilesGrantReopensAfterActivityRecreationAndRevocationFailsClosed() = verifyJourney()
 
-    @Test fun exactFilesTreeExposesSyncableDirectoryDescriptors() = verifyJourney { resolver, tree ->
+    @Test fun exactFilesTreeExposesSyncableDirectoryDescriptors() = verifyJourney { resolver, tree, _, _, _ ->
         LibraryProviderDirectoryProbe.verify(resolver, tree)
     }
 
-    private fun verifyJourney(probe: ((ContentResolver, Uri) -> Unit)? = null) {
+    @Test fun populatingAWorkingRoomCatalogDoesNotMaterializeTheOriginal() = verifyJourney { _, _, reader, selected, scratch ->
+        runBlocking {
+            reader.openWorkingCatalog(selected) { catalog ->
+                val sourceAlbum = DocumentId("aaaaaaaa-aaaa-4aaa-8aaa-000000000001")
+                val album = catalog.load(sourceAlbum)
+                assertEquals("Synthetic folder test", album.document.title)
+                assertEquals(2L, album.document.documentRevision)
+                assertEquals(1, album.pages.size)
+                assertEquals(2L, album.pages.single().recipeRevision)
+                assertNotNull(scratch.walkTopDown().firstOrNull { it.name == "working.sqlite" })
+                assertFalse(scratch.walkTopDown().any { it.name == "original.bin" || it.name == "objects" })
+            }
+            repeat(4) {
+                val canceled = runCatching {
+                    reader.openWorkingCatalog(selected) { throw CancellationException("Canceled after the catalog opened") }
+                }
+                assertTrue(canceled.exceptionOrNull() is CancellationException)
+            }
+            reader.openWorkingCatalog(selected) { catalog -> assertEquals(1, catalog.list(null, 2).size) }
+        }
+        assertTrue("Only this attempt's own working catalog is retired", scratch.list().orEmpty().isEmpty())
+    }
+
+    private fun verifyJourney(probe: ((ContentResolver, Uri, AndroidLibraryTreeRead, AndroidLibraryTreeRead.Verified, File) -> Unit)? = null) {
         val instrumentation = InstrumentationRegistry.getInstrumentation()
         val app = instrumentation.targetContext.applicationContext
         val folder = InstrumentationRegistry.getArguments().getString("libraryFixtureFolder")
@@ -147,7 +172,7 @@ class LibraryFolderFilesJourneyTest {
                 }
             }
             assertEquals("Cancellation must prevent the next chunk from reaching the sink", 1, canceledWrites)
-            val observation = probe?.let { runCatching { it(app.contentResolver, uri) } }
+            val observation = probe?.let { runCatching { it(app.contentResolver, uri, AndroidLibraryTreeRead(app, scratch), again, scratch) } }
             var writes = 0
             val disposable = onWrite { length ->
                 if (++writes == 1) {

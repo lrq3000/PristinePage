@@ -26,6 +26,10 @@ On API 28 in the dedicated LDPlayer app guest, `83370f7` using the verified deve
 
 Independent review found a Kotlin-only construction restriction compiled to a public JVM constructor, the need for a practical deduplicated I/O ceiling before opening payloads, and a witness mode that could skip its original. The successor keeps the concrete capability private, enforces an 8 GiB read-admission budget before opening any original, requires a populated fixture and tests cancellation and grant revocation mid-stream. Files grant confirmation is still distinct from proving write access or safe ownership of an existing destination.
 
+That first successor attempt stopped in the existing exclusive guest's boot serial query, before APK replacement or instrumentation. Shutdown and release were verified. The runner now keeps an absent or individually timed-out serial observation inside the original boot deadline, checking the same owned instance each time; it never retries a launch or adopts a serial from broad discovery.
+
+The detached working-catalog candidate rebuilds and reopens fresh private Room tables from the exact granted catalog, without creating a private original. The reviewed implementation checks the live tip and full catalog before and after each lendable metadata read, revokes the view before draining readers, and retains only unconfirmed working-file cleanup. Verification spill shares the same bounded attempt. Strict-offline verification recorded 971 data JVM cases, 264 app JVM cases, 236 host storage checks, Android test compilation and both package checks. The native combined run remains required. The working path still does not activate a library or allow mutations; padded album titles from a noncanonical external catalog remain a distinct admission gap, and close acknowledgment during interrupted initial stage creation must be validated before a recurring live workflow.
+
 ## Gates before activating or publishing
 
 - Matched Files folder, real returned modes, exact persisted readback, fresh catalog admission, Activity recreation, and refusal after revocation on the same approved emulator.

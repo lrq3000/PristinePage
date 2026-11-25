@@ -9,11 +9,14 @@ import android.provider.DocumentsContract
 import app.pristinepage.data.library.LibraryObjectTransfer.ObjectId
 import app.pristinepage.data.library.RoomLibraryCatalogReader.Companion.MAX_PORTABLE_BYTES
 import app.pristinepage.data.model.SourceBlobId
+import app.pristinepage.data.repository.DocumentCatalog
 import java.io.File
 import java.io.IOException
 import java.io.InputStream
 import java.io.OutputStream
+import java.nio.file.Files
 import java.nio.file.Path
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.suspendCancellableCoroutine
@@ -70,14 +73,68 @@ class AndroidLibraryTreeRead(context: Context, private val scratchDirectory: Fil
     private fun requireVerifiedTree(verified: Verified): VerifiedTree =
         verified as? VerifiedTree ?: throw IOException("The library tree was not verified by this reader")
 
-    private suspend fun <T> readTree(tree: Uri, block: (LibraryBackupRead, () -> Unit) -> T): T = withContext(Dispatchers.IO) {
+    /** Rebuild a private Room catalog without importing original bytes. This detached read cannot activate a library or commit an edit. */
+    suspend fun <T : Any> openWorkingCatalog(
+        verified: Verified, block: suspend CoroutineScope.(DocumentCatalog) -> T,
+    ): T = withContext(Dispatchers.IO) {
+        val selected = requireVerifiedTree(verified)
+        if (!WORKING.tryLock()) throw IOException("A library working catalog is already open")
+        try {
+            val checkpoint = { coroutineContext.ensureActive() }
+            val scratch = canonicalLibraryDirectory(scratchDirectory, app.filesDir.toPath().toRealPath())
+            val tree = Uri.parse(selected.tree)
+            if (scratch.toFile().usableSpace < 3 * MAX_PORTABLE_BYTES) throw IOException("Not enough private space for a library working catalog")
+            Files.newDirectoryStream(scratch, "library-working-*").use {
+                if (it.asSequence().take(4).count() >= 4) throw IOException("Retained working catalogs need attention")
+            }
+            checkpoint()
+            val attempt = Files.createTempDirectory(scratch, "library-working-")
+            val file = attempt.resolve("working.sqlite").toFile()
+            val stage = RoomLibraryCatalogStage(app)
+            var mayRetire = true
+            try {
+                val snapshot = readTree(tree, attempt.toFile()) { read, _ ->
+                    read.read(reader.schemaVersion, selected.generation, selected.generation) { _, catalog ->
+                        reader.read(catalog) { sql ->
+                            // The exact proof already admitted membership. This graph owns no payload; each original read authenticates bytes anew.
+                            LibraryBackupRead.Projection(LibraryPortableCatalogProjection(sql, checkpoint = checkpoint).snapshot(), emptyList())
+                        }
+                    }.value
+                }
+                mayRetire = false
+                stage.write(snapshot, file)
+                mayRetire = true
+                reader.verifyStagedProjection(file, snapshot, checkpoint)
+                suspend fun requireCurrent() = readTree(tree, attempt.toFile()) { read, _ -> read.requireCurrent(selected.generation) }
+                requireCurrent()
+                mayRetire = false
+                val result = stage.useCatalog(file, ::requireCurrent, acknowledgeClose = { mayRetire = true }, block)
+                requireCurrent()
+                result
+            } finally {
+                // Only close-acknowledged, attempt-owned working files are retired; uncertain attempts consume the bounded private budget.
+                if (mayRetire) try {
+                    for (name in listOf("working.sqlite", "working.sqlite-journal", "working.sqlite-wal", "working.sqlite-shm")) {
+                        Files.deleteIfExists(attempt.resolve(name))
+                    }
+                    Files.delete(attempt)
+                } catch (_: IOException) { /* Retain the attempt on uncertain cleanup; no other directory is a target. */ }
+            }
+        } finally {
+            WORKING.unlock()
+        }
+    }
+
+    private suspend fun <T> readTree(
+        tree: Uri, scratchLocation: File = scratchDirectory, block: (LibraryBackupRead, () -> Unit) -> T,
+    ): T = withContext(Dispatchers.IO) {
         val checkpoint = { coroutineContext.ensureActive() }
         // An uncooperative provider can delay unwinding. Do not let repeated taps accumulate further blocked opens.
         if (!ATTEMPT.tryLock()) throw IOException("A library folder verification is already in progress")
         try {
             withLibraryProviderSignal { signal ->
                 val root = localTreeDocumentId(tree) ?: throw IOException("This folder provider is not supported")
-                val scratch = canonicalLibraryDirectory(scratchDirectory, app.filesDir.toPath().toRealPath())
+                val scratch = canonicalLibraryDirectory(scratchLocation, app.filesDir.toPath().toRealPath())
                 val backend = Backend(app, tree, root, scratch, signal, checkpoint)
                 backend.requireRoot()
                 val source = LibraryTreeReadSource(root, backend)
@@ -169,7 +226,7 @@ class AndroidLibraryTreeRead(context: Context, private val scratchDirectory: Fil
 
         private fun checkAccess() {
             checkpoint()
-            if (!hasTrustedLocalProvider(app) || resolver.persistedUriPermissions.none { it.isReadPermission && it.uri.toString() == tree.toString() }) {
+            if (!hasTrustedLocalProvider(app) || !hasExactReadGrant(app, tree)) {
                 throw IOException("Reconnect the selected library folder")
             }
         }
@@ -181,6 +238,10 @@ class AndroidLibraryTreeRead(context: Context, private val scratchDirectory: Fil
         // This caps one detached admission's cumulative provider I/O, not storage capacity or single-scan size.
         private const val MAX_TREE_ORIGINAL_BYTES = 8L * 1024 * 1024 * 1024
         private val ATTEMPT = Mutex()
+        private val WORKING = Mutex()
+
+        private fun hasExactReadGrant(app: Context, tree: Uri): Boolean =
+            app.contentResolver.persistedUriPermissions.any { it.isReadPermission && it.uri.toString() == tree.toString() }
 
         /** Exact primary shared-storage or AOSP Documents-subtree grant. Never a volume root, single document URI, or translated filesystem path. */
         fun localTreeDocumentId(uri: Uri): String? {

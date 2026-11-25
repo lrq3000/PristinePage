@@ -28,29 +28,37 @@ internal class LibraryBackupRead(
     data class Projection<T>(val value: T, val objects: Collection<ObjectId>)
     data class Verified<T>(val generation: LibraryGeneration, val value: T)
 
+    /** Recheck identity of an already admitted tip and catalog without reopening every original. */
+    fun requireCurrent(generation: LibraryGeneration) {
+        verifyScratch()
+        checkTip(generation)
+        openCatalog(generation).use { generation.verifyCatalog(it, checkpoint) }
+        checkTip(generation)
+        checkpoint()
+    }
+
     /** The caller derives [objectId] from an already admitted snapshot and owns disposable output. Failure can leave output bytes but never authorizes their use. */
     fun copyExactOriginal(generation: LibraryGeneration, objectId: ObjectId, output: OutputStream) {
-        val scratch = privateScratch.toRealPath()
-        if (scratch != privateScratch.toAbsolutePath()) throw IOException("Invalid private verification directory")
-        store.requireIndependentScratch(scratch)
-        fun requireTip() {
-            checkpoint()
-            val inventory = store.generationInventory(checkpoint)
-            inventory.requireExact(generation)
-            if (inventory.tip != generation) throw IOException("The verified library generation is no longer current")
-        }
+        verifyScratch()
         fun requireCatalog() {
             checkpoint()
             openCatalog(generation).use { generation.verifyCatalog(it, checkpoint) }
         }
-        requireTip()
+        checkTip(generation)
         requireCatalog()
         checkpoint()
         val input = store.open(objectId) ?: throw IOException("The verified library original is missing")
         input.use { transferExactBytes(it, output, objectId.byteCount, objectId.sha256, checkpoint) }
         requireCatalog()
-        requireTip()
+        checkTip(generation)
         checkpoint()
+    }
+
+    private fun checkTip(generation: LibraryGeneration) {
+        checkpoint()
+        val inventory = store.generationInventory(checkpoint)
+        inventory.requireExact(generation)
+        if (inventory.tip != generation) throw IOException("The verified library generation is no longer current")
     }
 
     fun <T> read(expectedSchema: Int, generation: LibraryGeneration? = null, expectedTip: LibraryGeneration? = null,
@@ -58,9 +66,7 @@ internal class LibraryBackupRead(
         project: (LibraryGeneration, File) -> Projection<T>,
     ): Verified<T> {
         require(maximumOriginalBytes >= 0)
-        val scratch = privateScratch.toRealPath()
-        if (scratch != privateScratch.toAbsolutePath()) throw IOException("Invalid private verification directory")
-        store.requireIndependentScratch(scratch)
+        val scratch = verifyScratch()
         val inventory = store.generationInventory(checkpoint)
         val tip = inventory.tip
         if (expectedTip != null && tip != expectedTip) throw IOException("Unexpected library tip during catalog admission")
@@ -81,6 +87,13 @@ internal class LibraryBackupRead(
         if (reopened.tip != tip) throw IOException("Library generation changed during verification")
         checkpoint()
         return Verified(selected, projection.value)
+    }
+
+    private fun verifyScratch(): Path {
+        val scratch = privateScratch.toRealPath()
+        if (scratch != privateScratch.toAbsolutePath()) throw IOException("Invalid private verification directory")
+        store.requireIndependentScratch(scratch)
+        return scratch
     }
 
     private fun verifyOriginals(objects: Collection<ObjectId>, maximumBytes: Long) {

@@ -5,25 +5,24 @@ import android.content.ContextWrapper
 import androidx.room.Room
 import androidx.room.RoomDatabase
 import app.pristinepage.data.db.PristineDatabase
+import app.pristinepage.data.model.DocumentId
+import app.pristinepage.data.repository.DocumentCatalog
+import app.pristinepage.data.repository.RoomDocumentCatalog
+import app.pristinepage.data.repository.RoomMetadataAccess
 import java.io.File
 import java.io.IOException
 import java.nio.file.Files
 import java.nio.file.LinkOption.NOFOLLOW_LINKS
 import java.nio.file.StandardOpenOption.READ
 import java.security.MessageDigest
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.coroutineScope
 
 /** Fresh, bounded, closed catalog writer for an exclusively owned stage. Never opens the portable input with Room. */
 internal class RoomLibraryCatalogStage(private val application: Context) {
     suspend fun write(snapshot: RoomLibrarySavedCatalog.Snapshot, file: File): Int {
         if (!Files.notExists(file.toPath(), NOFOLLOW_LINKS)) throw IOException("Library staging catalog already exists")
-        val stagingContext = object : ContextWrapper(application) {
-            override fun getDatabasePath(name: String): File {
-                check(name == file.name)
-                return file
-            }
-        }
-        val stage = Room.databaseBuilder(stagingContext, PristineDatabase::class.java, file.name)
-            .setJournalMode(RoomDatabase.JournalMode.TRUNCATE).build()
+        val stage = database(file)
         try {
             val sql = stage.openHelper.writableDatabase
             sql.query("PRAGMA journal_mode=DELETE").use {
@@ -39,6 +38,44 @@ internal class RoomLibraryCatalogStage(private val application: Context) {
             RoomLibrarySavedCatalog(stage).writeFresh(snapshot)
             return sql.version
         } finally { stage.close() }
+    }
+
+    /** The caller verified this closed, app-built stage. Only structured metadata reads are exposed, not Room or local writes. */
+    suspend fun <T : Any> useCatalog(
+        file: File, confirmAccess: suspend () -> Unit, acknowledgeClose: () -> Unit,
+        block: suspend CoroutineScope.(DocumentCatalog) -> T,
+    ): T {
+        val stage = database(file)
+        val access = LibraryWorkingCatalogAccess(confirmAccess)
+        try {
+            if (stage.openHelper.readableDatabase.path != file.path) throw IOException("Working catalog path mismatch")
+            val catalog = RoomDocumentCatalog(RoomMetadataAccess(stage), stage.catalog())
+            val scoped = object : DocumentCatalog {
+                override suspend fun list(after: DocumentId?, limit: Int) =
+                    access.read { catalog.list(after, limit) }
+                override suspend fun load(documentId: DocumentId) =
+                    access.read { catalog.load(documentId) }
+                override suspend fun activeImport(documentId: DocumentId) =
+                    access.read { catalog.activeImport(documentId) }
+            }
+            return coroutineScope { block(scoped) }
+        } finally {
+            access.retire {
+                stage.close()
+                acknowledgeClose()
+            }
+        }
+    }
+
+    private fun database(file: File): PristineDatabase {
+        val stagingContext = object : ContextWrapper(application) {
+            override fun getDatabasePath(name: String): File {
+                check(name == file.name)
+                return file
+            }
+        }
+        return Room.databaseBuilder(stagingContext, PristineDatabase::class.java, file.name)
+            .setJournalMode(RoomDatabase.JournalMode.TRUNCATE).build()
     }
 }
 
