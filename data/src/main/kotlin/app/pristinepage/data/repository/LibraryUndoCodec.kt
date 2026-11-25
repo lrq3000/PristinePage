@@ -61,6 +61,44 @@ internal object LibraryUndoCodec {
         return encodeMembership(to, mapped)
     }
 
+    /** A pair must describe the exact scope of the recorded edit, not just two independently canonical states. */
+    fun validateMembershipEdit(action: String, document: String, before: MembershipState, after: MembershipState): MembershipPointer? {
+        require(before.documentId == document && after.documentId == document && before.pages.all { it.state == "ACTIVE" })
+        return when (action) {
+            "PAGE_DUPLICATE" -> {
+                val beforeIds = before.pages.mapTo(HashSet()) { it.pageId }
+                val added = after.pages.filter { it.pageId !in beforeIds }
+                require(after.pages.size == before.pages.size + 1 && added.size == 1 && after.pages.all { it.state == "ACTIVE" })
+                val copy = added.single()
+                val ordinal = requireNotNull(copy.ordinal)
+                require(ordinal > 0 && before.pages.singleOrNull { it.ordinal == ordinal - 1 }?.sourceId == copy.sourceId)
+                val expected = before.pages.map { page ->
+                    val old = requireNotNull(page.ordinal)
+                    page.copy(ordinal = if (old >= ordinal) old + 1 else old)
+                } + copy
+                require(expected.sortedBy { it.pageId } == after.pages)
+                copy
+            }
+            "PAGE_REMOVE", "PAGE_REORDER" -> {
+                require(before.pages.map { it.pageId to it.sourceId } == after.pages.map { it.pageId to it.sourceId })
+                if (action == "PAGE_REORDER") {
+                    require(after.pages.all { it.state == "ACTIVE" })
+                } else {
+                    val removed = requireNotNull(after.pages.singleOrNull { it.state == "REMOVED" })
+                    val ordinal = requireNotNull(before.pages.single { it.pageId == removed.pageId }.ordinal)
+                    val expected = before.pages.map { page ->
+                        val old = requireNotNull(page.ordinal)
+                        if (page.pageId == removed.pageId) page.copy(state = "REMOVED", ordinal = null, removedAt = removed.removedAt)
+                        else page.copy(ordinal = if (old > ordinal) old - 1 else old)
+                    }
+                    require(expected == after.pages)
+                }
+                null
+            }
+            else -> throw IllegalArgumentException("Unsupported membership action")
+        }
+    }
+
     private fun validateRecipe(pages: List<RecipePointer>) {
         require(pages.size in 1..100 && pages.map { it.pageId }.toSet().size == pages.size)
         for (page in pages) {

@@ -525,34 +525,8 @@ class RoomDocumentRepository @JvmOverloads constructor(private val metadata: Met
     private fun undoMembership(entry: UndoEntryRow, expectedDocumentRevision: Long, ownerContext: CoroutineContext): DocumentMutationResult {
         if (expectedDocumentRevision < 1 || entry.state != "AVAILABLE" || entry.expiresAt <= clock()) reject(OperationErrorCode.INVALID_INPUT, "undo_unavailable", entry.undoId)
         val before = decodeMembership(entry.beforeState); val after = decodeMembership(entry.afterState)
-        if (before.documentId != entry.documentId || after.documentId != entry.documentId) reject(OperationErrorCode.INTEGRITY_FAILED, "invalid_undo_metadata", entry.undoId)
-        // Every supported membership edit starts from an active set. Validate before reading non-null ordinals so corrupted but canonical history never becomes a misleading storage retry.
-        if (before.pages.any { it.state != "ACTIVE" }) reject(OperationErrorCode.INTEGRITY_FAILED, "invalid_undo_metadata", entry.undoId)
-        val duplicate = if (entry.action == "PAGE_DUPLICATE") {
-            val beforeIds = before.pages.map { it.pageId }.toSet()
-            val added = after.pages.filter { it.pageId !in beforeIds }
-            if (after.pages.size != before.pages.size + 1 || added.size != 1 || after.pages.any { it.state != "ACTIVE" }) reject(OperationErrorCode.INTEGRITY_FAILED, "invalid_undo_metadata", entry.undoId)
-            val copy = added.single(); val ordinal = checkNotNull(copy.ordinal)
-            val original = before.pages.singleOrNull { it.ordinal == ordinal - 1 }
-            if (ordinal < 1 || original?.sourceId != copy.sourceId) reject(OperationErrorCode.INTEGRITY_FAILED, "invalid_undo_metadata", entry.undoId)
-            val derived = (before.pages.map { page -> page.copy(ordinal = checkNotNull(page.ordinal).let { if (it >= ordinal) it + 1 else it }) } + copy).sortedBy { it.pageId }
-            if (derived != after.pages) reject(OperationErrorCode.INTEGRITY_FAILED, "invalid_undo_metadata", entry.undoId)
-            copy
-        } else {
-            if (before.pages.map { it.pageId to it.sourceId } != after.pages.map { it.pageId to it.sourceId }) reject(OperationErrorCode.INTEGRITY_FAILED, "invalid_undo_metadata", entry.undoId)
-            null
-        }
-        if ((entry.action == "PAGE_REORDER" && after.pages.any { it.state != "ACTIVE" }) || (entry.action == "PAGE_REMOVE" && after.pages.count { it.state == "REMOVED" } != 1)) reject(OperationErrorCode.INTEGRITY_FAILED, "invalid_undo_metadata", entry.undoId)
-        if (entry.action == "PAGE_REMOVE") {
-            val removed = after.pages.single { it.state == "REMOVED" }
-            val oldOrdinal = checkNotNull(before.pages.single { it.pageId == removed.pageId }.ordinal)
-            val derived = before.pages.map { prior ->
-                if (prior.pageId == removed.pageId) prior.copy(state = "REMOVED", ordinal = null, removedAt = removed.removedAt)
-                else prior.copy(ordinal = checkNotNull(prior.ordinal).let { if (it > oldOrdinal) it - 1 else it })
-            }
-            // Canonical snapshots can still disagree semantically. A removal may restore its one page, not silently reorder untouched survivors through a corrupted before-state.
-            if (derived != after.pages) reject(OperationErrorCode.INTEGRITY_FAILED, "invalid_undo_metadata", entry.undoId)
-        }
+        val duplicate = try { LibraryUndoCodec.validateMembershipEdit(entry.action, entry.documentId, before, after) }
+        catch (_: IllegalArgumentException) { reject(OperationErrorCode.INTEGRITY_FAILED, "invalid_undo_metadata", entry.undoId) }
         return metadata.transaction {
             val doc = activeDocument(entry.documentId)
             if (doc.documentRevision != expectedDocumentRevision) throw Conflict(doc.documentRevision)
