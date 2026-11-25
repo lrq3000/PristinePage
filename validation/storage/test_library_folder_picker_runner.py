@@ -170,6 +170,24 @@ class LibraryFolderPickerRunnerTest(unittest.TestCase):
             with self.subTest(guest=guest, apks=apks, trace=trace), self.assertRaisesRegex(RuntimeError, "grant boundary"):
                 verify_ancestry_grant_refusal((evidence | {"tree-ancestry-instrumentation.txt": trace}).__getitem__, guest, apks)
 
+    def test_ancestry_continuation_can_admit_the_observed_pre_picker_refusal(self):
+        cls, method = "app.pristinepage.LibraryFolderFilesJourneyTest", "persistsExactFilesReadForColdAncestry"
+        case = f"{cls}#{method}"
+        pair = {"app.pristinepage.debug": "a" * 64, "app.pristinepage.debug.test": "b" * 64}
+        fields = f"INSTRUMENTATION_STATUS: class={cls}\nINSTRUMENTATION_STATUS: test={method}\n"
+        text = "The cold ancestry guest must start without retained URI grants"
+        transcript = fields + "INSTRUMENTATION_STATUS_CODE: 1\n" + fields + (
+            f"INSTRUMENTATION_STATUS: stack=java.lang.AssertionError: {text}\n"
+            "INSTRUMENTATION_STATUS_CODE: -2\nINSTRUMENTATION_RESULT: stream=\n"
+            "FAILURES!!!\nTests run: 1,  Failures: 1\nINSTRUMENTATION_CODE: -1\n")
+        evidence = {"artifacts.json": json.dumps({"guest": "assigned"}),
+                    "outcomes.json": json.dumps({"passed": [], "failed": [case], "installedSha256": pair}),
+                    "tree-ancestry-grant-instrumentation.txt": transcript}
+        verify_ancestry_grant_refusal(evidence.__getitem__, "assigned", pair, before_picker=True)
+        with self.assertRaisesRegex(RuntimeError, "grant boundary"):
+            verify_ancestry_grant_refusal((evidence | {"tree-ancestry-grant-instrumentation.txt":
+                transcript.replace(text, "An unexpected URI was returned")}).__getitem__, "assigned", pair, before_picker=True)
+
     def test_death_retry_requires_both_no_write_controls_on_the_same_exact_pair(self):
         def transcript(case):
             cls, method = case.split("#")

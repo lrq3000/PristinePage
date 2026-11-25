@@ -80,6 +80,7 @@ BACKUP_DIRECT_CONTROL_PASS = "b2ac8b7795cb08629b3eb0cf888b1467a464ef8b36810afa76
 BACKUP_DEATH_RECEIPT_ONLY = "b6f9e9329f39c067cecdb1c1130b9f8f28bf65492e17709750c89d38bdfa86cd"
 ANCESTRY_GRANT_REFUSAL = "3271a4ebf9f4e0c55a25202fecfc160fef75626fe07ab027c767b7c2ce0b8fd1"
 ANCESTRY_FINISHED_GRANT_REFUSAL = "0a2fb4828173346ad9d01ff59d00449ce48c48827d38c1c1882e66dcc6f5083e"
+ANCESTRY_EXISTING_GRANT_REFUSAL = "3e3e68c579d04a3dd6c69627b8d30ea0ac151ac9096519c5d0d626b748486076"
 UUID_TEXT = r"[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}"
 BACKUP_ORIGINAL = "ebd602840377a3b3cf763cb6828fee67861ff77c444e8fe5894457ef6d99a24d"
 OCR_ACTIVATION_CASES = tuple(f"app.pristinepage.ocr.OcrWorkManagerIntegrationTest#{method}" for method in (
@@ -233,13 +234,17 @@ def verify_settings_retry_evidence(raw, expected_sha, guest, previous):
          "The exact no-write Settings cancel control did not pass on the predecessor pair")
 
 
-def verify_ancestry_grant_refusal(anchor, guest, pair):
-    transcript = anchor("tree-ancestry-instrumentation.txt")
+def verify_ancestry_grant_refusal(anchor, guest, pair, *, before_picker=False):
+    case, transcript_leaf, error = (
+        (ANCESTRY_GRANT_CASE, "tree-ancestry-grant-instrumentation.txt", "The cold ancestry guest must start without retained URI grants")
+        if before_picker else (ANCESTRY_CASE, "tree-ancestry-instrumentation.txt",
+                               "Files retained effective write access during the read-only probe expected:<-1> but was:<0>")
+    )
+    transcript = anchor(transcript_leaf)
     need(json.loads(anchor("artifacts.json"))["guest"] == guest and
-         json.loads(anchor("outcomes.json")) == {"passed": [], "failed": [ANCESTRY_CASE], "installedSha256": pair} and
-         read_results(transcript, (ANCESTRY_CASE,)) == ([], [ANCESTRY_CASE]) and
-         "INSTRUMENTATION_STATUS: stack=java.lang.AssertionError: Files retained effective write access during the read-only probe expected:<-1> but was:<0>"
-         in transcript.splitlines(),
+         json.loads(anchor("outcomes.json")) == {"passed": [], "failed": [case], "installedSha256": pair} and
+         read_results(transcript, (case,)) == ([], [case]) and
+         f"INSTRUMENTATION_STATUS: stack=java.lang.AssertionError: {error}" in transcript.splitlines(),
          "Require the exact failed read-only grant boundary on the installed predecessor")
 
 
@@ -667,9 +672,11 @@ def run(args):
             parents = {Path(file).resolve().parent for file in args.previous}
             need(len(parents) == 1 and previous[APP] == hashes[APP] and previous[TEST] != hashes[TEST],
                  "Require the exact released app and changed instrumentation for the ancestry continuation")
-            old = settings_run_anchors(parents.pop(), ANCESTRY_FINISHED_GRANT_REFUSAL)
-            verify_ancestry_grant_refusal(old, args.guest, previous)
-            refused_death_destinations.append(backup_death_control_destination(old, ANCESTRY_CASE))
+            old = settings_run_anchors(parents.pop(), ANCESTRY_EXISTING_GRANT_REFUSAL)
+            verify_ancestry_grant_refusal(old, args.guest, previous, before_picker=True)
+            refused_death_destinations.append(backup_death_control_destination(old, ANCESTRY_GRANT_CASE))
+            finished = settings_run_anchors(raw.parent / "picker-adapter-library-tree-d41f13a3e0aa", ANCESTRY_FINISHED_GRANT_REFUSAL)
+            refused_death_destinations.append(backup_death_control_destination(finished, ANCESTRY_CASE))
             first = settings_run_anchors(raw.parent / "picker-adapter-library-tree-62c66f5beb8e", ANCESTRY_GRANT_REFUSAL)
             refused_death_destinations.append(backup_death_control_destination(first, ANCESTRY_CASE))
         if death_operation or death_receipt:

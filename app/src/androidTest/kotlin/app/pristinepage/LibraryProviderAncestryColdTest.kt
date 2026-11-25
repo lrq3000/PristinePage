@@ -1,14 +1,18 @@
 package app.pristinepage
 
 import android.content.Intent
+import android.content.Context
 import android.content.pm.PackageManager
+import android.net.Uri
 import android.os.Process
 import android.provider.DocumentsContract
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import app.pristinepage.data.library.AndroidLibraryTreeRead
 import java.io.File
+import java.io.FileOutputStream
 import java.io.IOException
+import java.security.MessageDigest
 import java.util.UUID
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
@@ -28,14 +32,20 @@ class LibraryProviderAncestryColdTest {
             DocumentsContract.buildTreeDocumentUri(authority, it)
         }
         val resolver = app.contentResolver
-        val grant = resolver.persistedUriPermissions.single().also {
-            check(it.isReadPermission && !it.isWritePermission && it.uri in spellings)
+        val (selected, baseline) = LibraryAncestryGrantWitness.read(app, folder)
+        val uri = spellings.single { DocumentsContract.getTreeDocumentId(it).substringBefore(':') == selected }
+        fun grants() = resolver.persistedUriPermissions.associate { it.uri.toString() to (it.isReadPermission to it.isWritePermission) }
+        fun requireInventory(held: Boolean) {
+            val current = grants()
+            check(current.filterKeys { key -> spellings.any { it.toString() == key } } ==
+                if (held) mapOf(uri.toString() to (true to false)) else emptyMap())
+            assertEquals("Unrelated persisted URI grants changed", baseline,
+                LibraryAncestryGrantWitness.fingerprint(current - uri.toString()))
         }
-        val uri = grant.uri
+        requireInventory(held = true)
         try {
             fun requireReadOnly() {
-                val current = resolver.persistedUriPermissions.single()
-                check(current.uri == uri && current.isReadPermission && !current.isWritePermission)
+                requireInventory(held = true)
                 assertEquals(PackageManager.PERMISSION_GRANTED,
                     app.checkUriPermission(uri, Process.myPid(), Process.myUid(), Intent.FLAG_GRANT_READ_URI_PERMISSION))
                 for (tree in spellings) {
@@ -58,7 +68,42 @@ class LibraryProviderAncestryColdTest {
             requireReadOnly()
         } finally {
             resolver.releasePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
-            check(resolver.persistedUriPermissions.isEmpty())
+            requireInventory(held = false)
         }
+    }
+}
+
+/** Persist only the fixture namespace and a fingerprint of the untouched grants, never their URIs. */
+internal object LibraryAncestryGrantWitness {
+    private fun file(app: Context, folder: String): File {
+        check(folder.matches(Regex("PristinePage-tree-[0-9a-f]{12}")))
+        return File(app.filesDir.canonicalFile, "ancestry-grant-$folder")
+    }
+
+    fun fingerprint(grants: Map<String, Pair<Boolean, Boolean>>): String {
+        val digest = MessageDigest.getInstance("SHA-256")
+        for ((key, modes) in grants.toSortedMap()) {
+            digest.update("${key.length}:$key:${modes.first}:${modes.second}\n".toByteArray(Charsets.UTF_8))
+        }
+        return digest.digest().joinToString("") { "%02x".format(it.toInt() and 255) }
+    }
+
+    fun save(app: Context, folder: String, tree: Uri, before: Map<String, Pair<Boolean, Boolean>>) {
+        val target = file(app, folder)
+        check(target.createNewFile())
+        val namespace = DocumentsContract.getTreeDocumentId(tree).substringBefore(':')
+        check(namespace == "home" || namespace == "primary")
+        FileOutputStream(target).use {
+            it.write("$namespace\n${fingerprint(before)}\n".toByteArray(Charsets.US_ASCII))
+            it.fd.sync()
+        }
+    }
+
+    fun read(app: Context, folder: String): Pair<String, String> {
+        val target = file(app, folder)
+        check(target.length() in 70L..73L)
+        val fields = Regex("(home|primary)\n([a-f0-9]{64})\n").matchEntire(target.readText(Charsets.US_ASCII))
+        checkNotNull(fields)
+        return fields.groupValues[1] to fields.groupValues[2]
     }
 }

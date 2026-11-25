@@ -402,6 +402,8 @@ The [first ancestry run](../../validation/storage/library-folder-android.md#gran
 
 The Activity finish was insufficient on `c458b00`; neither descriptor stage ran. Reuse the already qualified cold-process pattern: acquire exactly one persisted read grant on a fresh fixture, stop only the verified test app, verify process absence, and run both probes headlessly after confirming both URI spellings deny write. Release only the newly retained exact read mode in the cold test. Recheck both refused fixtures and all current fixture bytes; no VM restart between the two instrumentations, no provider writes and no change to application permissions. If a cold process also sees effective write, report that boundary and advance the independent capacity/interruption work rather than repeating the same trial.
 
+`dd764d5` did not reach the cold process: its pre-picker empty-inventory assertion saw an unrelated persisted grant. Preserve that grant; compare the exact fixture read delta and a deterministic digest of all unrelated URI/mode bindings across the handoff and cleanup. Authenticate the pre-picker refusal and retain its fixture alongside the two earlier destinations. Checkpoint at the first actual cold-process permission or ancestry outcome; no unchanged retry, storage reset or release claim.
+
 ### Current coordination: transition to `main`
 
 - [x] Operator approved the local fast-forward and `main`-based PR/handoff cadence; see [operational authority](OPERATIONAL_PLAN.md) and [queue rules](PARALLEL_EXECUTION_PLAN.md#coordination). Earlier branch/base references below describe their historical claims.

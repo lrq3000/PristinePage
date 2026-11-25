@@ -719,7 +719,6 @@ class LibraryFolderFilesJourneyTest {
         val existing = { app.contentResolver.persistedUriPermissions.associate { it.uri.toString() to (it.isReadPermission to it.isWritePermission) } }
         val before = existing()
         assertFalse(before.keys.any { it in exactFixtureTrees })
-        if (holdReadForColdAncestry) assertTrue("The cold ancestry guest must start without retained URI grants", before.isEmpty())
         val isolatedWritableRoute = backupDeath != null || backupDeathPickerOnly
         val platform = LibraryFolderPickerContract(writable = isolatedWritableRoute)
         val result = AtomicReference<ActivityResult>()
@@ -821,6 +820,7 @@ class LibraryFolderFilesJourneyTest {
             assertEquals(before + (uri.toString() to (true to false)), existing())
             if (holdReadForColdAncestry) {
                 compose.runOnUiThread { registration.second.unregister() }
+                LibraryAncestryGrantWitness.save(app, folder, uri, before)
                 readHandedOff = true
                 return
             }
