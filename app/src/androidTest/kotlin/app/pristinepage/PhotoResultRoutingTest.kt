@@ -15,9 +15,11 @@ import androidx.core.app.ActivityOptionsCompat
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import app.pristinepage.capture.PhotoImportRequest
+import app.pristinepage.capture.PhotoImportKind
 import app.pristinepage.capture.PhotoImportResultRouter
 import app.pristinepage.capture.PhotoSelection
 import app.pristinepage.data.model.*
+import app.pristinepage.data.library.LibraryActivation
 import app.pristinepage.data.repository.SourceInput
 import java.io.ByteArrayInputStream
 import java.io.ByteArrayOutputStream
@@ -33,6 +35,20 @@ import org.junit.runner.RunWith
 @RunWith(AndroidJUnit4::class)
 class PhotoResultRoutingTest {
     private val uri = Uri.parse("content://fixture.documents/selected")
+
+    @Test fun scopedPickerStateReopensOnlyItsExactRoutingIdentity() {
+        val activation = LibraryActivation("aaaaaaaa-aaaa-4aaa-8aaa-000000000011", 2)
+        val batch = "aaaaaaaa-aaaa-4aaa-8aaa-000000000012"
+        val issued = PhotoImportRequest(batch, PhotoImportKind.FILES, activation)
+        val old = PhotoImportRequest(batch, PhotoImportKind.FILES, activation.copy(number = 1))
+        assertNotEquals(old.registryKey, issued.registryKey)
+        assertNotEquals(issued.routedAs(PhotoImportKind.GALLERY).registryKey, issued.registryKey)
+        val retained = issued.save()
+        assertTrue(issued.matches(checkNotNull(PhotoImportRequest.restore(retained))))
+        retained.remove("activation")
+        val refused = runCatching { PhotoImportRequest.restore(retained) }.exceptionOrNull() as RepositoryFailure
+        assertEquals(OperationErrorCode.SESSION_EXPIRED, refused.error.code)
+    }
 
     @Test fun earlierCallbackKeepsItsDocumentAfterANewerRequestIsRegistered() = runBlocking {
         Fixture().use { f ->

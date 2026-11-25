@@ -34,6 +34,8 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import app.pristinepage.capture.LibraryPickerBinding
 import app.pristinepage.capture.CaptureScreen
 import app.pristinepage.capture.PhotoImportKind
+import app.pristinepage.capture.PhotoImportRequest.Companion.restoreActivation
+import app.pristinepage.capture.PhotoImportRequest.Companion.saveActivation
 import app.pristinepage.capture.AtelierCaptureViewModel
 import app.pristinepage.capture.AtelierCaptureScreen
 import app.pristinepage.data.model.DocumentId
@@ -90,7 +92,7 @@ class MainActivity : ComponentActivity() {
             isAppearanceLightStatusBars = true
             isAppearanceLightNavigationBars = true
         }
-        val restored = try { restore(savedInstanceState) to restoreEditor(savedInstanceState) } catch (_: RuntimeException) {
+        val restored = try { restoreLibraryIdentity(savedInstanceState) to restoreEditor(savedInstanceState) } catch (_: RuntimeException) {
             // Invalid saved identity cannot invent a replacement request/destination. The explicit library action still discovers durable pending insertions without reopening temporary provider references.
             setContent { AppTheme { Column(Modifier.fillMaxSize().safeDrawingPadding().padding(24.dp)) {
                 Text(stringResource(R.string.error_session_expired))
@@ -107,7 +109,7 @@ class MainActivity : ComponentActivity() {
         val factory = object : ViewModelProvider.Factory {
             @Suppress("UNCHECKED_CAST") override fun <T : ViewModel> create(modelClass: Class<T>): T {
                 require(modelClass == ImportLibraryViewModel::class.java)
-                return ImportLibraryViewModel(ApplicationLibraryActions(applicationContext, app.savedOcrSignals::onPagesSaved, services::imports), restored) as T
+                return ImportLibraryViewModel(ApplicationLibraryActions(applicationContext, app.savedOcrSignals::onPagesSaved, services), restored) as T
             }
         }
         val retained = ViewModelProvider(this, factory)[ImportLibraryViewModel::class.java].session
@@ -296,13 +298,8 @@ class MainActivity : ComponentActivity() {
 
     override fun onSaveInstanceState(outState: Bundle) {
         super.onSaveInstanceState(outState)
-        session?.identity()?.let { identity ->
-            outState.putBundle(SAVED, Bundle().apply {
-                identity.selected?.let { putString(SELECTED, it.value) }
-                identity.pending?.let { putString(PENDING, it.value) }
-                if (identity.pending != null) putString(ACQUISITION, identity.kind.name)
-                identity.selectedPage?.let { putString(PAGE, it.value) }
-            })
+        session?.let { owner ->
+            saveLibraryIdentity(outState, owner.identity(), owner.state.value.request?.canDeliver == true)
         }
         editor?.state?.value?.identity?.let { identity ->
             outState.putBundle(EDITOR, Bundle().apply { putString(SELECTED, identity.documentId.value); putString(PAGE, identity.pageId.value) })
@@ -311,25 +308,45 @@ class MainActivity : ComponentActivity() {
 
     override fun onDestroy() { picker?.close(); picker = null; super.onDestroy() }
 
-    private companion object {
-        const val SAVED = "pristinepage.library.identity.v1"
-        const val SELECTED = "document"
-        const val PENDING = "batch"
-        const val ACQUISITION = "acquisition"
-        const val EDITOR = "pristinepage.editor.identity.v1"
-        const val PAGE = "page"
-        @Suppress("DEPRECATION") fun restoreEditor(saved: Bundle?): EditorIdentity? {
+    internal companion object {
+        private const val SAVED = "pristinepage.library.identity.v1"
+        private const val SELECTED = "document"
+        private const val PENDING = "batch"
+        private const val ACQUISITION = "acquisition"
+        private const val EDITOR = "pristinepage.editor.identity.v1"
+        private const val PAGE = "page"
+        @Suppress("DEPRECATION") private fun restoreEditor(saved: Bundle?): EditorIdentity? {
             val raw = saved?.get(EDITOR) ?: return null
             require(raw is Bundle)
             val document = raw.get(SELECTED) as? String ?: throw IllegalArgumentException("Invalid saved editor identity")
             val page = raw.get(PAGE) as? String ?: throw IllegalArgumentException("Invalid saved editor identity")
             return EditorIdentity(DocumentId(document), PageId(page))
         }
-        @Suppress("DEPRECATION") fun restore(saved: Bundle?): LibraryIdentity {
+        fun saveLibraryIdentity(out: Bundle, identity: LibraryIdentity, allowPendingResult: Boolean) {
+            out.putBundle(SAVED, Bundle().apply {
+                identity.selected?.let { putString(SELECTED, it.value) }
+                identity.selectedPage?.let { putString(PAGE, it.value) }
+                val pending = identity.pending
+                val issuedAt = identity.issuedAt
+                if (allowPendingResult && pending != null && issuedAt != null) {
+                    putString(PENDING, pending.value)
+                    putString(ACQUISITION, identity.kind.name)
+                    saveActivation(issuedAt)
+                }
+            })
+        }
+
+        @Suppress("DEPRECATION") fun restoreLibraryIdentity(saved: Bundle?): LibraryIdentity {
             val raw = saved?.get(SAVED) ?: return LibraryIdentity()
             require(raw is Bundle)
             fun id(key: String): String? = if (raw.containsKey(key)) (raw.get(key) as? String ?: throw IllegalArgumentException("Invalid saved identity")) else null
-            return LibraryIdentity(id(SELECTED)?.let(::DocumentId), id(PENDING)?.let(::ImportSessionId), id(PAGE)?.let(::PageId), id(ACQUISITION)?.let(PhotoImportKind::valueOf) ?: PhotoImportKind.GALLERY)
+            val pending = id(PENDING)?.let(::ImportSessionId)
+            val issuedAt = raw.restoreActivation()
+            val route = id(ACQUISITION)?.let(PhotoImportKind::valueOf)
+            require(issuedAt == null || (pending != null && route != null))
+            // Legacy unscoped result registrations are not restored. Room may still discover the exact pending batch for explicit abandonment.
+            return LibraryIdentity(id(SELECTED)?.let(::DocumentId), pending.takeIf { issuedAt != null }, id(PAGE)?.let(::PageId),
+                route ?: PhotoImportKind.GALLERY, issuedAt)
         }
     }
 }

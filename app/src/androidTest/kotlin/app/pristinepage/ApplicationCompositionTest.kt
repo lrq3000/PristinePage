@@ -49,6 +49,35 @@ import org.junit.runner.RunWith
 class ApplicationCompositionTest {
     private val output = OutputSpec(PixelSize(2, 2), RenderPurpose.PREVIEW)
 
+    @Test fun aStalePhotoResultCannotBootstrapOrAccessTheDefaultGraph() = runBlocking {
+        Fixture().use { f ->
+            val services = ApplicationServices(f.context, f.budget, f.provider)
+            val actions = app.pristinepage.library.ApplicationLibraryActions(f.context, null, services)
+            val stale = LibraryActivation("aaaaaaaa-aaaa-4aaa-8aaa-000000000010", 1)
+            val cold = app.pristinepage.capture.PhotoImportRequest("aaaaaaaa-aaaa-4aaa-8aaa-000000000011",
+                app.pristinepage.capture.PhotoImportKind.FILES, stale)
+            val result = app.pristinepage.library.LibraryPhotoResult.Selected(listOf(f.good), 0)
+            val refused = runCatching { actions.deliver(cold, result) }.exceptionOrNull() as RepositoryFailure
+            assertEquals("library_activation_changed", refused.error.safeMessageKey)
+            assertFalse(File(f.context.filesDir, "library-settings").exists())
+            assertFalse(f.context.getDatabasePath("pristinepage.db").exists())
+            services.imports().useStore { graph ->
+                val id = graph.store.documents.createDocument("Current album")
+                val request = actions.begin(graph.store.catalog.load(id).document)
+                assertEquals(graph.activation, request.issuedAt)
+                val rediscovered = checkNotNull(actions.activeImportRequest(id))
+                val notIssued = runCatching { actions.deliver(rediscovered, result) }.exceptionOrNull() as RepositoryFailure
+                assertEquals("photo_result_not_issued", notIssued.error.safeMessageKey)
+                assertTrue("Room discovery must not open the provider", f.opened.isEmpty())
+                val mismatched = app.pristinepage.capture.PhotoImportRequest(request.batchId, request.kind, graph.activation.copy(number = 2))
+                val declined = runCatching { actions.cancel(mismatched) }.exceptionOrNull() as RepositoryFailure
+                assertEquals("library_activation_changed", declined.error.safeMessageKey)
+                assertNotNull(graph.store.catalog.activeImport(id))
+                assertTrue(actions.deliver(request, result).single() is IngestResult.Committed)
+            }
+        }
+    }
+
     @Test fun aColdWorkerCannotCreateOrBorrowADefaultLibraryUntilTheExactActivationExists() = runBlocking {
         Fixture().use { f ->
             val service = ApplicationServices(f.context, f.budget, f.provider)

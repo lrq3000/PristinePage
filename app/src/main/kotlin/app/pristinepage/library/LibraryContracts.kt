@@ -2,6 +2,7 @@ package app.pristinepage.library
 
 import app.pristinepage.capture.PhotoImportRequest
 import app.pristinepage.capture.PhotoImportKind
+import app.pristinepage.data.library.LibraryActivation
 import app.pristinepage.data.model.*
 import app.pristinepage.data.repository.AlbumSearchQuery
 import kotlinx.coroutines.flow.StateFlow
@@ -16,6 +17,7 @@ interface LibraryActions {
     suspend fun list(after: DocumentId?, limit: Int): List<DocumentSummary>
     suspend fun load(id: DocumentId): DocumentOverview
     suspend fun activeImport(id: DocumentId): ImportSessionId?
+    suspend fun activeImportRequest(id: DocumentId): PhotoImportRequest? = activeImport(id)?.let { PhotoImportRequest.abandonmentOnly(it) }
     suspend fun create(title: String): DocumentId
     suspend fun begin(document: DocumentSummary): PhotoImportRequest
     suspend fun deliver(request: PhotoImportRequest, selection: LibraryPhotoResult): List<IngestResult>
@@ -47,8 +49,14 @@ class HomePageSearchHit internal constructor(
 class HomePageSearchPage internal constructor(val hits: List<HomePageSearchHit>, internal val next: (suspend () -> HomePageSearchPage)?)
 
 /** Only opaque identity may be placed in app saved state. A restored batch is not permission to relaunch a picker, reopen a URI, or infer a successful import. */
-data class LibraryIdentity @JvmOverloads constructor(val selected: DocumentId? = null, val pending: ImportSessionId? = null, val selectedPage: PageId? = null, val kind: PhotoImportKind = PhotoImportKind.GALLERY) {
-    init { require(selected != null || selectedPage == null) { "A selected page needs its document identity" } }
+data class LibraryIdentity @JvmOverloads constructor(
+    val selected: DocumentId? = null, val pending: ImportSessionId? = null, val selectedPage: PageId? = null,
+    val kind: PhotoImportKind = PhotoImportKind.GALLERY, val issuedAt: LibraryActivation? = null,
+) {
+    init {
+        require(selected != null || selectedPage == null) { "A selected page needs its document identity" }
+        require(pending != null || issuedAt == null) { "A batch activation needs its batch identity" }
+    }
 }
 /** Transient process-private handoff, never saved UI state or scheduler data. URI-specific parsing/grants stay at the Activity/Android adapter; the session owns only immediate consumption lifetime. */
 sealed interface LibraryPhotoResult {

@@ -3,8 +3,10 @@ package app.pristinepage.library
 import android.content.Context
 import android.net.Uri
 import app.pristinepage.ApplicationImports
+import app.pristinepage.ApplicationServices
 import app.pristinepage.capture.CaptureStage
 import app.pristinepage.capture.PhotoImportKind
+import app.pristinepage.capture.PhotoImportController
 import app.pristinepage.capture.PhotoImportRequest
 import app.pristinepage.capture.PhotoImportResultRouter
 import app.pristinepage.capture.PhotoSelection
@@ -12,6 +14,7 @@ import app.pristinepage.data.library.LibraryActivation
 import app.pristinepage.data.model.*
 import app.pristinepage.data.repository.AlbumSearchQuery
 import app.pristinepage.data.repository.DocumentCatalog
+import app.pristinepage.data.repository.ImportSessionLifecycle
 import app.pristinepage.data.repository.RoomSourceMetadataSearch
 import app.pristinepage.data.repository.SavedOcrWork
 import app.pristinepage.data.repository.SourceMetadataQuery
@@ -22,12 +25,17 @@ import kotlinx.coroutines.withContext
 import java.util.Locale
 
 /** A cold adapter to the one Application graph, not another store or acquisition path. Temporary references return to the existing router/controller; no grant, new journal, recovery engine or source normalization is duplicated here. */
-class ApplicationLibraryActions(
+class ApplicationLibraryActions private constructor(
     private val context: Context?,
     private val onPagesSaved: ((LibraryActivation, DocumentId, List<PageId>) -> Unit)?,
     private val open: suspend () -> ApplicationImports,
+    private val scoped: ApplicationServices?,
 ) : LibraryActions, OrderedLibraryActions, SearchableLibraryActions, SearchablePageActions {
-    constructor(context: Context? = null, open: suspend () -> ApplicationImports) : this(context, null, open)
+    constructor(context: Context? = null, open: suspend () -> ApplicationImports) : this(context, null, open, null)
+    constructor(context: Context?, onPagesSaved: ((LibraryActivation, DocumentId, List<PageId>) -> Unit)?,
+        open: suspend () -> ApplicationImports) : this(context, onPagesSaved, open, null)
+    internal constructor(context: Context?, onPagesSaved: ((LibraryActivation, DocumentId, List<PageId>) -> Unit)?,
+        services: ApplicationServices) : this(context, onPagesSaved, services::imports, services)
 
     override suspend fun startup() = open().startupRecovery
     override suspend fun list(after: DocumentId?, limit: Int) = open().store.catalog.list(after, limit)
@@ -61,9 +69,32 @@ class ApplicationLibraryActions(
     override suspend fun load(id: DocumentId) = open().store.catalog.load(id)
     override suspend fun activeImport(id: DocumentId) = open().store.catalog.activeImport(id)
     override suspend fun create(title: String) = open().store.documents.createDocument(title)
-    override suspend fun begin(document: DocumentSummary): PhotoImportRequest = PhotoImportRequest(open().store.imports.beginImport(document.documentId, document.documentRevision, null).parentId.value)
-    override suspend fun deliver(request: PhotoImportRequest, selection: LibraryPhotoResult): List<IngestResult> {
+    override suspend fun activeImportRequest(id: DocumentId): PhotoImportRequest? {
         val graph = open()
+        val services = scoped
+        if (services == null) return graph.store.catalog.activeImport(id)?.let { PhotoImportRequest.abandonmentOnly(it) }
+        return services.findDefaultPhotoBatch(graph.activation, id)?.let { PhotoImportRequest.abandonmentOnly(it, graph.activation) }
+    }
+
+    override suspend fun begin(document: DocumentSummary): PhotoImportRequest {
+        val graph = open()
+        val services = scoped
+        if (services == null) return PhotoImportRequest(graph.store.imports.beginImport(document.documentId, document.documentRevision, null).parentId.value)
+        val batch = services.reserveDefaultPhotoBatch(graph.activation, document.documentId, document.documentRevision)
+        return PhotoImportRequest(batch.value, issuedAt = graph.activation)
+    }
+
+    override suspend fun deliver(request: PhotoImportRequest, selection: LibraryPhotoResult): List<IngestResult> {
+        if (!request.canDeliver) throw RepositoryFailure(OperationError(OperationErrorCode.SESSION_EXPIRED, false, "photo_result_not_issued", request.batchId))
+        var delivered: List<IngestResult>? = null
+        route(request) { activation, controller, lifecycle ->
+            delivered = deliverIn(request, selection, activation, controller, lifecycle)
+        }
+        return checkNotNull(delivered)
+    }
+
+    private suspend fun deliverIn(request: PhotoImportRequest, selection: LibraryPhotoResult, activation: LibraryActivation,
+        controller: PhotoImportController, lifecycle: ImportSessionLifecycle): List<IngestResult> {
         val capture = if (request.kind == PhotoImportKind.CAMERA) CaptureStage(checkNotNull(context), request.batchId) else null
         val native = when (selection) {
             is LibraryPhotoResult.Selected -> {
@@ -77,8 +108,8 @@ class ApplicationLibraryActions(
             LibraryPhotoResult.Canceled -> PhotoSelection.Canceled
             is LibraryPhotoResult.Rejected -> PhotoSelection.Rejected(selection.error)
         }
-        val signal = onPagesSaved?.let { send -> { album: DocumentId, pages: List<PageId> -> send(graph.activation, album, pages) } }
-        val outcomes = PhotoImportResultRouter(graph.photoImports, graph.store.lifecycle, signal).deliver(request, native)
+        val signal = onPagesSaved?.let { send -> { album: DocumentId, pages: List<PageId> -> send(activation, album, pages) } }
+        val outcomes = PhotoImportResultRouter(controller, lifecycle, signal).deliver(request, native)
         // A late staging refusal can follow a real shutter but precede ingest. Keep the camera handoff
         // available until the user explicitly clears its pending batch; do not treat it as a completed copy.
         if (capture != null && outcomes.none { it is IngestResult.Pending || it is IngestResult.Rejected &&
@@ -89,9 +120,22 @@ class ApplicationLibraryActions(
         return outcomes
     }
     override suspend fun cancel(request: PhotoImportRequest) {
-        open().store.lifecycle.cancelBatch(request.session)
-        // A durable batch rediscovered without Activity state no longer carries its original UI route.
-        context?.let { app -> withContext(Dispatchers.IO) { CaptureStage(app, request.batchId).discard() } }
+        route(request) { _, _, lifecycle ->
+            lifecycle.cancelBatch(request.session)
+            // A durable batch rediscovered without Activity state no longer carries its original UI route.
+            context?.let { app -> withContext(Dispatchers.IO) { CaptureStage(app, request.batchId).discard() } }
+        }
+    }
+
+    private suspend fun route(request: PhotoImportRequest,
+        operation: suspend (LibraryActivation, PhotoImportController, ImportSessionLifecycle) -> Unit) {
+        val services = scoped
+        if (services != null) services.useDefaultPhotoRouting(request.issuedAt) { controller, lifecycle ->
+            operation(checkNotNull(request.issuedAt), controller, lifecycle)
+        } else {
+            val graph = open()
+            operation(graph.activation, graph.photoImports, graph.store.lifecycle)
+        }
     }
 }
 

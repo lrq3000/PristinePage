@@ -10,6 +10,7 @@ import app.pristinepage.data.library.AndroidLibraryStartup
 import app.pristinepage.data.library.DefaultLibraryOperations
 import app.pristinepage.data.library.LibraryActivation
 import app.pristinepage.data.model.DocumentId
+import app.pristinepage.data.model.ImportSessionId
 import app.pristinepage.data.model.OperationError
 import app.pristinepage.data.model.OperationErrorCode
 import app.pristinepage.data.model.PageId
@@ -17,6 +18,7 @@ import app.pristinepage.data.model.RecoveryReport
 import app.pristinepage.data.model.RepositoryFailure
 import app.pristinepage.data.files.SourceInspector
 import app.pristinepage.data.repository.PrivateImportStore
+import app.pristinepage.data.repository.ImportSessionLifecycle
 import app.pristinepage.data.repository.SourceInput
 import app.pristinepage.data.repository.SavedOcrWork
 import app.pristinepage.data.repository.ImportInitializationCleanup
@@ -55,6 +57,7 @@ class ApplicationServices(context: Context, internal val budget: ImageAllocation
     private var defaultOperations: DefaultLibraryOperations<ApplicationImports>? = null
     private data class OperationDelivery<T : Any>(val value: T?)
     private data class ReconciledPage(val target: SavedOcrWork.Target?)
+    private data class ActiveImport(val batch: ImportSessionId?)
 
     internal suspend fun recordedDefaultActivation(): LibraryActivation? = libraryStartup.recordedDefaultActivation()
 
@@ -111,6 +114,22 @@ class ApplicationServices(context: Context, internal val budget: ImageAllocation
     ): SavedOcrWork.Outcome = withDefaultLibrary(issuedAt) { graph ->
         graph.store.savedOcr.execute(target, SavedOcrPreparer(graph.renderer, graph.budget, sessions))
     } ?: SavedOcrWork.Outcome.OBSOLETE
+
+    internal suspend fun reserveDefaultPhotoBatch(issuedAt: LibraryActivation, album: DocumentId, revision: Long): ImportSessionId =
+        withDefaultLibrary(issuedAt) { it.store.imports.beginImport(album, revision, null).parentId } ?: activationChanged()
+
+    internal suspend fun findDefaultPhotoBatch(issuedAt: LibraryActivation, album: DocumentId): ImportSessionId? =
+        (withDefaultLibrary(issuedAt) { ActiveImport(it.store.catalog.activeImport(album)) } ?: activationChanged()).batch
+
+    /** Only the photo adapter borrows these two ports, through ingest/cancellation and camera-file cleanup. Nothing graph-backed is returned. */
+    internal suspend fun useDefaultPhotoRouting(
+        issuedAt: LibraryActivation?, route: suspend (PhotoImportController, ImportSessionLifecycle) -> Unit,
+    ) {
+        withDefaultLibrary(issuedAt ?: activationChanged()) { route(it.photoImports, it.store.lifecycle) } ?: activationChanged()
+    }
+
+    private fun activationChanged(): Nothing =
+        throw RepositoryFailure(OperationError(OperationErrorCode.SOURCE_UNAVAILABLE, false, "library_activation_changed", null))
 
     /** Borrow only for the typed operations above; never return a graph, store, or live port from this boundary. */
     private suspend fun <T : Any> withDefaultLibrary(
