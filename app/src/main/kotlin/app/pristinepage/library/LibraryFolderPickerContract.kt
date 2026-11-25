@@ -55,16 +55,24 @@ internal class LibraryFolderGrantHandoff(context: Context) {
     private val resolver = app.contentResolver
 
     /** On an actual picker callback, persist only the read capability needed here; never remove or retake another grant. */
-    fun persistRead(picked: LibraryFolderPickerContract.Picked): Uri {
+    fun persistRead(picked: LibraryFolderPickerContract.Picked): Uri = persist(picked, write = false)
+
+    /** Only for an explicit approved writable destination. This acquires a grant, not readiness to publish or delete files. */
+    fun persistWrite(picked: LibraryFolderPickerContract.Picked): Uri = persist(picked, write = true)
+
+    private fun persist(picked: LibraryFolderPickerContract.Picked, write: Boolean): Uri {
         val tree = picked.uri
         if (tree.toString() != picked.grant.exactUri) throw IOException("The selected folder capability changed")
         resolveRoot(tree)
         try {
-            if (picked.grant.needsReadGrant(held())) resolver.takePersistableUriPermission(tree, Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            val current = held()
+            val missing = if (write) picked.grant.missingWriteModes(current)
+                else if (picked.grant.needsReadGrant(current)) Intent.FLAG_GRANT_READ_URI_PERMISSION else 0
+            if (missing != 0) resolver.takePersistableUriPermission(tree, missing)
         } catch (_: SecurityException) {
-            throw IOException("The selected folder could not retain read permission")
+            throw IOException("The selected folder could not retain the requested permission")
         }
-        picked.grant.requirePersistedRead(held())
+        if (write) picked.grant.requirePersistedWrite(held()) else picked.grant.requirePersistedRead(held())
         return tree
     }
 

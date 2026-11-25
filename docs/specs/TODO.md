@@ -170,6 +170,8 @@ Publication review requires cancellation checks between separate provider lookup
 
 The host review follow-up passed 986 data JVM cases (eight named moves), 264 app JVM cases and data Android compilation. The separate core, fixture and image suites recorded 323, 15 and 283 cases respectively. The one-shot store hook is now mandatory; the test exercises incomplete authorization with an injected in-memory journal, not durable Android recording. The provider adapter must implement the durable hook and compare live readback against the same still-open descriptor before these host checks can be credited to export. The single-leaf helper deletes no file.
 
+For the exact writable permission boundary, a read-only picker handoff must never promote itself. Only an explicit writable-destination command may persist missing read/write bits from the actual returned tree, and only if that result included write. The focused contract reproduced at compilation. The Android witness calls the explicit handoff for the fresh synthetic provider child and releases only the write mode it acquired. An already authorized alias must not substitute for the selected URI.
+
 ### Current coordination: transition to `main`
 
 - [x] Operator approved the local fast-forward and `main`-based PR/handoff cadence; see [operational authority](OPERATIONAL_PLAN.md) and [queue rules](PARALLEL_EXECUTION_PLAN.md#coordination). Earlier branch/base references below describe their historical claims.

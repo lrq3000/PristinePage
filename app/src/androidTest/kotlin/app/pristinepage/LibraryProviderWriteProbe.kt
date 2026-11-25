@@ -14,12 +14,12 @@ import java.io.FileNotFoundException
 internal object LibraryProviderWriteProbe {
     private const val PROBE = "isolated-write-probe"
 
-    fun verify(resolver: ContentResolver, tree: Uri) {
+    fun verify(resolver: ContentResolver, tree: Uri, persistWrite: () -> Uri) {
         val held = { resolver.persistedUriPermissions.singleOrNull { it.uri.toString() == tree.toString() } }
         check(held()?.let { it.isReadPermission && !it.isWritePermission } == true)
         val write = Intent.FLAG_GRANT_WRITE_URI_PERMISSION
-        resolver.takePersistableUriPermission(tree, write)
         try {
+            check(persistWrite().toString() == tree.toString())
             check(held()?.let { it.isReadPermission && it.isWritePermission } == true)
             val root = DocumentsContract.buildDocumentUriUsingTree(tree, DocumentsContract.getTreeDocumentId(tree))
             val probe = create(resolver, root, DocumentsContract.Document.MIME_TYPE_DIR, PROBE)

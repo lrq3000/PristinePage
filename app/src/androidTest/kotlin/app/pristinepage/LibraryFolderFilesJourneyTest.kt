@@ -257,7 +257,8 @@ class LibraryFolderFilesJourneyTest {
             if (arguments.getString("libraryExpectHome") == "1") {
                 assertTrue("Files did not return the exact Documents namespace", picked.uri.toString() == home.toString())
             }
-            val uri = LibraryFolderGrantHandoff(app).persistRead(picked)
+            val handoff = LibraryFolderGrantHandoff(app)
+            val uri = handoff.persistRead(picked)
             assertEquals(before + (uri.toString() to (true to false)), existing())
             val first = runBlocking { AndroidLibraryTreeRead(app, scratch).verify(uri) }
             assertEquals("9e940d7b-76c7-45ea-b5e4-0ad86f26ea13", first.libraryId)
@@ -266,8 +267,7 @@ class LibraryFolderFilesJourneyTest {
             assertEquals(1, first.scans)
             // Promote only this exact fixture grant while the original picker recipient still owns its transient write permission.
             val writeObservation = if (probeWrite) runCatching {
-                check(picked.grant.returnedWrite)
-                LibraryProviderWriteProbe.verify(app.contentResolver, uri)
+                LibraryProviderWriteProbe.verify(app.contentResolver, uri) { handoff.persistWrite(picked) }
             } else null
             val different = DocumentsContract.buildTreeDocumentUri(requireNotNull(uri.authority), "primary:Documents/${folder}-different")
             val wrongRoot = assertThrows(IOException::class.java) {
