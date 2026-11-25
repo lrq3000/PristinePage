@@ -1,6 +1,7 @@
 package app.pristinepage.data
 
 import app.pristinepage.data.files.DirectorySync
+import app.pristinepage.data.library.LocalLibraryBackupAttempts
 import app.pristinepage.data.library.LibraryActivation
 import app.pristinepage.data.library.LibraryFolderExportRecords
 import app.pristinepage.data.library.LibraryFolderGrantRecord
@@ -17,16 +18,100 @@ import kotlin.test.assertContentEquals
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
+import kotlin.test.assertNotNull
 import kotlin.test.assertNull
+import kotlin.test.assertTrue
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.ensureActive
 import org.junit.Rule
-import kotlin.test.assertTrue
 import org.junit.rules.TemporaryFolder
 
 class LocalLibraryFolderExportJournalTest {
     @get:Rule val temporary = TemporaryFolder()
+
+    @Test fun leftoverVerificationCatalogKeepsItsActiveSlotAndAllOfItsBytes() {
+        val (root, intent) = staged()
+        val journal = LocalLibraryFolderExportJournal(root, DirectorySync { true })
+        journal.start(intent).recordCompletion()
+        journal.acknowledge(intent)
+        val extra = root.resolve("library-catalog-interrupted.sqlite").apply { writeBytes(ByteArray(512) { 53 }) }
+        val attempts = LocalLibraryBackupAttempts(checkNotNull(root.parentFile).toPath(), DirectorySync { true })
+        assertFailsWith<IOException> { attempts.archiveAcknowledged(intent.operationId, intent.issuedAt) }
+        assertEquals(root.toPath(), attempts.find(intent.operationId))
+        assertContentEquals(ByteArray(512) { 53 }, extra.readBytes())
+        assertTrue(root.resolve("catalog.sqlite").isFile)
+        assertEquals(Phase.ACKNOWLEDGED, journal.reopen(intent.operationId)?.phase)
+    }
+
+    @Test fun theArchiveCapRefusesANewOperationWithoutLosingTheExistingAcknowledgment() {
+        val (root, intent) = staged()
+        val files = checkNotNull(root.parentFile).toPath()
+        val journal = LocalLibraryFolderExportJournal(root, DirectorySync { true })
+        journal.start(intent).recordCompletion()
+        journal.acknowledge(intent)
+        val archive = files.resolve("library-backup-acknowledged").toFile().apply { assertTrue(mkdir()) }
+        repeat(127) { index -> assertTrue(archive.resolve("library-out-${java.util.UUID(0L, index.toLong())}").mkdir()) }
+        val attempts = LocalLibraryBackupAttempts(files, DirectorySync { true })
+        assertTrue(attempts.archiveAcknowledged(intent.operationId, intent.issuedAt))
+        val retained = assertNotNull(attempts.find(intent.operationId))
+        assertEquals(Phase.ACKNOWLEDGED, LocalLibraryFolderExportJournal(retained.toFile(), DirectorySync { true }).reopen(intent.operationId)?.phase)
+        assertFailsWith<IOException> { attempts.requireNew("10000000-0000-4000-8000-000000000006") }
+    }
+
+    @Test fun twoNamesForTheSameAttemptOrARegularFileCannotBeReadAsPositiveAbsence() {
+        val (root, intent) = staged()
+        val files = checkNotNull(root.parentFile).toPath()
+        val archive = files.resolve("library-backup-acknowledged").toFile().apply { assertTrue(mkdir()) }
+        val wrong = archive.resolve(root.name).apply { writeText("not a directory") }
+        val attempts = LocalLibraryBackupAttempts(files, DirectorySync { true })
+        assertFailsWith<IOException> { attempts.requireNew(intent.operationId) }
+        assertEquals("not a directory", wrong.readText())
+        Files.move(wrong.toPath(), archive.resolve("preserved").toPath())
+        assertTrue(wrong.mkdir())
+        assertFailsWith<IOException> { attempts.find(intent.operationId) }
+        assertTrue(root.isDirectory)
+        assertTrue(wrong.isDirectory)
+    }
+
+    @Test fun mirroredReceiptDoesNotAuthorizeARepeatAndAnArchivedAttemptDoesNotUseAnUnresolvedSlot() {
+        val (root, intent) = staged()
+        val files = checkNotNull(root.parentFile).toPath()
+        val catalog = root.resolve("catalog.sqlite")
+        val journal = LocalLibraryFolderExportJournal(root, DirectorySync { true })
+        val attempts = LocalLibraryBackupAttempts(files, DirectorySync { true })
+        journal.start(intent).recordCompletion()
+        assertFalse(attempts.archiveAcknowledged(intent.operationId, intent.issuedAt))
+        assertTrue(catalog.isFile)
+        journal.acknowledge(intent)
+        assertTrue(attempts.archiveAcknowledged(intent.operationId, intent.issuedAt))
+        assertFalse(root.exists())
+        val archived = checkNotNull(attempts.find(intent.operationId))
+        assertFalse(archived.toFile().resolve("catalog.sqlite").exists())
+        assertEquals(Phase.ACKNOWLEDGED, LocalLibraryFolderExportJournal(archived.toFile(), DirectorySync { true }).reopen(intent.operationId)?.phase)
+        assertFailsWith<IOException> { attempts.requireNew(intent.operationId) }
+        for (number in 7..9) files.resolve("library-out-10000000-0000-4000-8000-00000000000$number").toFile().mkdir()
+        assertEquals(files.resolve("library-out-10000000-0000-4000-8000-000000000006"), attempts.requireNew("10000000-0000-4000-8000-000000000006"))
+        files.resolve("library-out-10000000-0000-4000-8000-000000000005").toFile().mkdir()
+        assertFailsWith<IOException> { attempts.requireNew("10000000-0000-4000-8000-000000000006") }
+    }
+
+    @Test fun uncertainArchiveMoveStillBlocksReplayUntilBothParentsCanBeReverified() {
+        val (root, intent) = staged()
+        val files = checkNotNull(root.parentFile).toPath()
+        val journal = LocalLibraryFolderExportJournal(root, DirectorySync { true })
+        journal.start(intent).recordCompletion()
+        journal.acknowledge(intent)
+        val barrier = DirectorySync { dir -> dir.toPath() != files || root.exists() }
+        val interrupted = LocalLibraryBackupAttempts(files, barrier)
+        assertFailsWith<IOException> { interrupted.archiveAcknowledged(intent.operationId, intent.issuedAt) }
+        assertFalse(root.exists())
+        assertFailsWith<IOException> { interrupted.requireNew(intent.operationId) }
+        val recovered = LocalLibraryBackupAttempts(files, DirectorySync { true })
+        assertNotNull(recovered.find(intent.operationId))
+        assertTrue(recovered.archiveAcknowledged(intent.operationId, intent.issuedAt))
+        assertFailsWith<IOException> { recovered.requireNew(intent.operationId) }
+    }
 
     @Test fun onlyAnAcknowledgedOperationCanDropItsExactPrivateCatalogWithoutBecomingReusable() {
         val (root, intent) = staged()

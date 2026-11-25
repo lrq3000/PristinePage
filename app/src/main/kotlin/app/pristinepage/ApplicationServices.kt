@@ -112,6 +112,7 @@ class ApplicationServices(context: Context, internal val budget: ImageAllocation
                 if (!delivery.consume(libraryStartup.recordedDefaultActivation())) return@withDefaultLibrary EditorValue(null)
                 // Spending this result precedes even taking a grant; neither failure nor cancellation makes it reusable.
                 val request = LibraryFolderExportRequest.bind(ticket.operationId, issue, selection.uri, returnedModes = 3)
+                AndroidLibraryBackupHistory(context).preflightNew(ticket.operationId, issue)
                 val exact = withContext(Dispatchers.IO) {
                     val operation = currentCoroutineContext()
                     LibraryFolderGrantHandoff(context).persistWrite(selection) { operation.ensureActive() }
@@ -132,6 +133,9 @@ class ApplicationServices(context: Context, internal val budget: ImageAllocation
         if (ticket.operationId != receipt.operationId) throw IOException("This backup does not match the retained confirmation")
         AndroidLibraryBackupHistory(context).acknowledge(receipt, ticket.issuedAt)
     }
+
+    internal suspend fun archiveAcknowledgedDefaultBackup(ticket: LibraryBackupConfirmation.Ticket): Boolean =
+        AndroidLibraryBackupHistory(context).archiveAcknowledged(ticket.operationId, ticket.issuedAt)
 
     constructor(context: Context) : this(
         context.applicationContext,

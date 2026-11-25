@@ -8,7 +8,6 @@ import app.pristinepage.data.db.PristineDatabase
 import java.io.File
 import java.io.IOException
 import java.nio.file.Files
-import java.nio.file.LinkOption.NOFOLLOW_LINKS
 import java.nio.file.Path
 import kotlinx.coroutines.ensureActive
 
@@ -33,16 +32,14 @@ internal class RoomLibraryFolderExport(
                 history.requireSelection(files, request.issuedAt)
             }
             checkSelection()
-            val attempt = history.attempt(files, request.operationId)
-            if (!Files.notExists(attempt, NOFOLLOW_LINKS)) throw IOException("This backup operation cannot be repeated")
+            val attempts = LocalLibraryBackupAttempts(files, checkpoint = checkpoint)
+            val attempt = attempts.requireNew(request.operationId)
             val source = canonicalLibraryDirectory(originalRoot, files)
             val observed = AndroidLibraryWritableFolder(app).availableBytes(tree)
             val snapshot = RoomLibrarySavedCatalog(database).capture()
             if (files.toFile().usableSpace < 3 * maxCatalogBytes) throw IOException("Not enough private space to stage the library backup")
-            Files.newDirectoryStream(files, "library-out-*").use {
-                if (it.asSequence().take(4).count() >= 4) throw IOException("Retained library export attempts need attention")
-            }
             checkSelection()
+            if (attempts.requireNew(request.operationId) != attempt) throw IOException("The private backup attempt changed")
             Files.createDirectory(attempt)
             val closed = attempt.resolve("catalog.sqlite")
             val input = RoomLibraryExportInput.prepare(app, snapshot, source.toFile(), closed.toFile(), checkpoint)

@@ -1,10 +1,7 @@
 package app.pristinepage.data.library
 
 import android.content.Context
-import app.pristinepage.data.model.requireOpaqueId
 import java.io.IOException
-import java.nio.file.Files
-import java.nio.file.LinkOption.NOFOLLOW_LINKS
 import java.nio.file.Path
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -16,10 +13,17 @@ import kotlinx.coroutines.withContext
 class AndroidLibraryBackupHistory(context: Context) {
     private val app = context.applicationContext
 
+    /** Read-only admission before taking a new persistent grant. The writer still has to acquire the lane and recheck. */
+    suspend fun preflightNew(operationId: String, issuedAt: LibraryActivation) = withLane { files ->
+        requireSelection(files, issuedAt)
+        LocalLibraryBackupAttempts(files).requireNew(operationId)
+        requireSelection(files, issuedAt)
+    }
+
     suspend fun inspect(operationId: String, issuedAt: LibraryActivation): LibraryFolderExportState = withLane { files ->
         requireSelection(files, issuedAt)
-        val attempt = attempt(files, operationId)
-        if (Files.notExists(attempt, NOFOLLOW_LINKS)) {
+        val attempt = LocalLibraryBackupAttempts(files) { coroutineContext.ensureActive() }.find(operationId)
+        if (attempt == null) {
             requireSelection(files, issuedAt)
             return@withLane LibraryFolderExportState.NotStarted
         }
@@ -36,7 +40,9 @@ class AndroidLibraryBackupHistory(context: Context) {
 
     suspend fun acknowledge(receipt: LibraryFolderExportReceipt, issuedAt: LibraryActivation): Unit = withLane { files ->
         requireSelection(files, issuedAt)
-        val journal = openJournal(files, attempt(files, receipt.operationId)) { coroutineContext.ensureActive() }
+        val attempt = LocalLibraryBackupAttempts(files) { coroutineContext.ensureActive() }.find(receipt.operationId)
+            ?: throw IOException("This backup has no retained receipt")
+        val journal = openJournal(files, attempt) { coroutineContext.ensureActive() }
         val observed = journal.reopen(receipt.operationId) ?: throw IOException("This backup has no retained receipt")
         if (observed.intent.issuedAt != issuedAt || observed.intent.backupReceipt() != receipt) {
             throw IOException("The observed backup receipt does not match the requested acknowledgment")
@@ -46,6 +52,14 @@ class AndroidLibraryBackupHistory(context: Context) {
         requireSelection(files, issuedAt)
     }
 
+    /** Explicit private housekeeping after acknowledgment; leaves the external folder and all replay evidence untouched. */
+    suspend fun archiveAcknowledged(operationId: String, issuedAt: LibraryActivation): Boolean = withLane { files ->
+        requireSelection(files, issuedAt)
+        val archived = LocalLibraryBackupAttempts(files) { coroutineContext.ensureActive() }.archiveAcknowledged(operationId, issuedAt)
+        requireSelection(files, issuedAt)
+        archived
+    }
+
     internal fun requireSelection(files: Path, issuedAt: LibraryActivation) {
         val authority = LocalLibrarySettingsBootstrap(files.toFile()).openExisting()
             ?: throw IOException("The default library selection is unavailable")
@@ -53,11 +67,6 @@ class AndroidLibraryBackupHistory(context: Context) {
         if (identity?.libraryId != issuedAt.libraryId || identity.activation != issuedAt.number) {
             throw IOException("The backup no longer belongs to the selected default library")
         }
-    }
-
-    internal fun attempt(files: Path, operationId: String): Path {
-        requireOpaqueId(operationId)
-        return files.resolve("library-out-$operationId")
     }
 
     private fun openJournal(files: Path, attempt: Path, checkpoint: () -> Unit): LocalLibraryFolderExportJournal =

@@ -22,6 +22,7 @@ import app.pristinepage.data.model.SourceBlobId
 import app.pristinepage.data.model.SourceId
 import app.pristinepage.data.model.SourceInspection
 import app.pristinepage.data.library.LibraryFolderExportReceipt
+import app.pristinepage.data.library.AndroidLibraryBackupHistory
 import app.pristinepage.data.library.LibraryFolderExportRequest
 import app.pristinepage.data.library.LibraryFolderExportState
 import app.pristinepage.data.repository.ExportSourceBinding
@@ -214,8 +215,18 @@ internal object LibraryDefaultFolderExportProbe {
                 store.acknowledgeLibraryExport(backup, graph.activation)
                 assertEquals(LibraryFolderExportState.Acknowledged(backup), store.inspectLibraryExport(operation, graph.activation))
                 store.acknowledgeLibraryExport(backup, graph.activation)
+                assertArrayEquals(completeBefore, completion.readBytes())
+                val history = AndroidLibraryBackupHistory(context)
+                assertTrue(history.archiveAcknowledged(operation, graph.activation))
+                assertTrue(history.archiveAcknowledged(operation, graph.activation))
+                assertEquals(LibraryFolderExportState.Acknowledged(backup), history.inspect(operation, graph.activation))
+                refused("This backup operation cannot be repeated") { store.exportLibraryTo(bindResult()) }
             } finally { forbidProvider.set(false) }
-            assertArrayEquals(completeBefore, completion.readBytes())
+            assertFalse(attempt.exists())
+            val archived = File(files, "library-backup-acknowledged/${attempt.name}")
+            assertFalse(File(archived, "catalog.sqlite").exists())
+            assertArrayEquals(completeBefore, File(archived, "export.complete").readBytes())
+            assertEquals(namesBefore + backup.folderName, destinationNames())
             assertEquals(1, reads)
             return Backup(backup, album, ingest.pageId, ingest.sourceId, source.sourceBlobId, png, ingest.sourceByteHash, inspection,
                 saved.recipeRevision, producer, source.file, defaultPointer, activeBefore)
