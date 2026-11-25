@@ -40,7 +40,8 @@ class ImportLibrarySession(private val actions: LibraryActions, restored: Librar
     private var copying: Job? = null
     private var metadataRead: Job? = null
     private var albumLocale = Locale.getDefault()
-    private var albumCursor: AlbumPosition? = null
+    private data class AlbumCursor(val issuedAt: LibraryActivation?, val position: AlbumPosition)
+    private var albumCursor: AlbumCursor? = null
     private var retryFirstAlbumPage = false
     private var pageCursor: (suspend () -> HomePageSearchPage)? = null
     private var pageWindows = 0
@@ -57,11 +58,12 @@ class ImportLibrarySession(private val actions: LibraryActions, restored: Librar
             waiting?.selectedAt ?: value.activation.takeIf { value.selectedId != null })
     }
 
-    override suspend fun observePageSearch(query: String) {
+    override suspend fun observePageSearch(query: String, issuedAt: LibraryActivation?) {
         val search = actions as? SearchablePageActions ?: return
         if (query.isBlank()) return
-        fun stillOnQuery() = current.value.let { it.selectedId == null && it.albumSearch == query }
-        search.pageSearchChanges(query).catch {
+        fun stillOnQuery() = current.value.let { it.activation == issuedAt && it.selectedId == null && it.albumSearch == query }
+        if (!stillOnQuery()) return
+        search.pageSearchChanges(query, issuedAt).catch {
             if (it is CancellationException) throw it
             // A failed observation does not disable an explicit query or refresh.
         }.conflate().collect {
@@ -71,7 +73,7 @@ class ImportLibrarySession(private val actions: LibraryActions, restored: Librar
                 if (pending !== metadataRead) continue
                 if (!stillOnQuery()) break
                 val token = metadataGeneration
-                refreshPageWindow(query, search) { token == metadataGeneration && stillOnQuery() }
+                refreshPageWindow(query, search, issuedAt) { token == metadataGeneration && stillOnQuery() }
                 if (token == metadataGeneration) break
             }
         }
@@ -334,17 +336,20 @@ class ImportLibrarySession(private val actions: LibraryActions, restored: Librar
 
     private suspend fun reload(reset: Boolean, token: Long) {
         val value = current.value
+        val issuedAt = value.activation
+        fun stillCurrent() = token == metadataGeneration && current.value.activation == issuedAt
         val search = (actions as? SearchableLibraryActions)?.takeIf { value.albumSearch.isNotBlank() }
         if (search != null) {
-            reloadSearch(reset, token, value, search)
+            reloadSearch(reset, value, search, ::stillCurrent)
             return
         }
         val ordered = actions as? OrderedLibraryActions
         if (ordered != null) {
-            val cursor = if (reset) null else albumCursor
-            val page = ordered.listAlbums(value.albumOrder, albumLocale, cursor, 50)
-            if (token == metadataGeneration) {
-                albumCursor = page.next
+            val cursor = if (reset) null else albumPosition(issuedAt)
+            val page = ordered.listAlbums(value.albumOrder, albumLocale, cursor, 50, issuedAt)
+            currentCoroutineContext().ensureActive()
+            if (stillCurrent()) {
+                albumCursor = page.next?.let { AlbumCursor(issuedAt, it) }
                 // A remote/concurrent writer may move an album across cursors. Avoid duplicate lazy keys even before the next explicit refresh.
                 val albums = if (reset) page.albums else (current.value.documents + page.albums).distinctBy { it.documentId }
                 current.value = current.value.copy(documents = owned(albums), hasMore = page.next != null)
@@ -353,32 +358,38 @@ class ImportLibrarySession(private val actions: LibraryActions, restored: Librar
         }
         val after = if (reset) null else current.value.documents.lastOrNull()?.documentId
         val documents = actions.list(after, 50)
-        if (token == metadataGeneration) current.value = current.value.copy(documents = owned(if (reset) documents else current.value.documents + documents), hasMore = documents.size == 50)
+        if (stillCurrent()) current.value = current.value.copy(documents = owned(if (reset) documents else current.value.documents + documents), hasMore = documents.size == 50)
     }
 
-    private suspend fun reloadSearch(reset: Boolean, token: Long, value: LibraryState, search: SearchableLibraryActions) {
+    private fun albumPosition(issuedAt: LibraryActivation?): AlbumPosition? = albumCursor?.let {
+        check(it.issuedAt == issuedAt) { "Album cursor belongs to another activation" }
+        it.position
+    }
+
+    private suspend fun reloadSearch(reset: Boolean, value: LibraryState, search: SearchableLibraryActions, stillCurrent: () -> Boolean) {
         val firstAlbum = reset || retryFirstAlbumPage
-        val afterAlbum = if (firstAlbum) null else albumCursor
+        val afterAlbum = if (firstAlbum) null else albumPosition(value.activation)
         if (firstAlbum || afterAlbum != null) try {
-            val found = search.searchAlbums(AlbumSearchQuery(value.albumSearch, searchZone), value.albumOrder, albumLocale, afterAlbum, 50)
-            if (token != metadataGeneration) return
-            albumCursor = found.next
+            val found = search.searchAlbums(AlbumSearchQuery(value.albumSearch, searchZone), value.albumOrder, albumLocale, afterAlbum, 50, value.activation)
+            currentCoroutineContext().ensureActive()
+            if (!stillCurrent()) return
+            albumCursor = found.next?.let { AlbumCursor(value.activation, it) }
             retryFirstAlbumPage = false
             val albums = (if (firstAlbum) emptyList() else current.value.documents) + found.albums
             current.value = current.value.copy(documents = owned(albums.distinctBy { it.documentId }), albumSearchUnavailable = false)
         } catch (canceled: CancellationException) { throw canceled }
         catch (_: Exception) {
-            if (token != metadataGeneration) return
+            if (!stillCurrent()) return
             retryFirstAlbumPage = firstAlbum
             current.value = current.value.copy(documents = if (reset) emptyList() else current.value.documents, albumSearchUnavailable = true)
         }
-        reloadSearchPages(reset, value, actions as? SearchablePageActions) { token == metadataGeneration }
+        reloadSearchPages(reset, value, actions as? SearchablePageActions, stillCurrent)
     }
 
-    private suspend fun refreshPageWindow(query: String, search: SearchablePageActions, currentRead: () -> Boolean) {
+    private suspend fun refreshPageWindow(query: String, search: SearchablePageActions, issuedAt: LibraryActivation?, currentRead: () -> Boolean) {
         val hits = mutableListOf<HomePageSearchHit>()
         val extent = pageWindows.coerceAtLeast(1)
-        var next: (suspend () -> HomePageSearchPage)? = { search.searchPages(query) }
+        var next: (suspend () -> HomePageSearchPage)? = { search.searchPages(query, issuedAt) }
         var windows = 0
         try {
             while (windows < extent) {
@@ -386,6 +397,7 @@ class ImportLibrarySession(private val actions: LibraryActions, restored: Librar
                 val found = read()
                 currentCoroutineContext().ensureActive()
                 if (!currentRead()) return
+                requireIssuedHits(found, issuedAt)
                 hits += found.hits
                 next = found.next
                 ++windows
@@ -406,11 +418,12 @@ class ImportLibrarySession(private val actions: LibraryActions, restored: Librar
     }
 
     private suspend fun reloadSearchPages(reset: Boolean, value: LibraryState, pageActions: SearchablePageActions?, currentRead: () -> Boolean) {
-        val next: (suspend () -> HomePageSearchPage)? = if (reset) pageActions?.let { { it.searchPages(value.albumSearch) } } else pageCursor
+        val next: (suspend () -> HomePageSearchPage)? = if (reset) pageActions?.let { { it.searchPages(value.albumSearch, value.activation) } } else pageCursor
         if (next != null) try {
             val found = next()
             currentCoroutineContext().ensureActive()
             if (!currentRead()) return
+            requireIssuedHits(found, value.activation)
             val hits = (if (reset) emptyList() else current.value.pageMatches) + found.hits
             publishPageWindow(hits, found.next, if (reset) 1 else pageWindows + 1)
         } catch (canceled: CancellationException) { throw canceled }
@@ -422,6 +435,11 @@ class ImportLibrarySession(private val actions: LibraryActions, restored: Librar
             current.value = current.value.copy(pageMatches = if (reset) emptyList() else current.value.pageMatches, pageSearchUnavailable = true)
         }
         if (currentRead()) current.value = current.value.copy(hasMore = retryFirstAlbumPage || albumCursor != null || pageCursor != null)
+    }
+
+    private fun requireIssuedHits(page: HomePageSearchPage, issuedAt: LibraryActivation?) {
+        // The compatibility test port can supply unscoped hits, but an explicitly foreign hit cannot populate this window or advance it.
+        check(page.hits.none { it.issuedAt != null && it.issuedAt != issuedAt }) { "Search results belong to another activation" }
     }
 
     private suspend fun loadSelected(id: DocumentId?, nav: Long, token: Long) {

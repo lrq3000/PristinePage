@@ -42,16 +42,17 @@ interface LibraryActions {
 
 /** Opt-in so older/synthetic consumers of the plain ID-ordered catalog keep their own cursor contract. */
 internal interface OrderedLibraryActions {
-    suspend fun listAlbums(order: AlbumOrder, locale: Locale, after: AlbumPosition?, limit: Int): AlbumPage
+    suspend fun listAlbums(order: AlbumOrder, locale: Locale, after: AlbumPosition?, limit: Int, issuedAt: LibraryActivation? = null): AlbumPage
 }
 
 internal interface SearchableLibraryActions {
-    suspend fun searchAlbums(query: AlbumSearchQuery, order: AlbumOrder, locale: Locale, after: AlbumPosition?, limit: Int): AlbumPage
+    suspend fun searchAlbums(query: AlbumSearchQuery, order: AlbumOrder, locale: Locale, after: AlbumPosition?, limit: Int,
+        issuedAt: LibraryActivation? = null): AlbumPage
 }
 
 internal interface SearchablePageActions {
-    suspend fun searchPages(query: String): HomePageSearchPage
-    fun pageSearchChanges(query: String): Flow<Unit> = emptyFlow()
+    suspend fun searchPages(query: String, issuedAt: LibraryActivation? = null): HomePageSearchPage
+    fun pageSearchChanges(query: String, issuedAt: LibraryActivation? = null): Flow<Unit> = emptyFlow()
 }
 
 /** No recognized text or persistent search token. Revalidation belongs to the store that issued the hit. */
@@ -143,5 +144,5 @@ interface LibrarySession {
     fun accept(event: LibraryEvent)
     fun identity(): LibraryIdentity
     fun claimPickerLaunch(batchId: ImportSessionId): Boolean
-    suspend fun observePageSearch(query: String) = Unit
+    suspend fun observePageSearch(query: String, issuedAt: LibraryActivation? = state.value.activation) = Unit
 }

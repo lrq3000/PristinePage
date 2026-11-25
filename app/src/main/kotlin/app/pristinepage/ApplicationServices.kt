@@ -18,6 +18,9 @@ import app.pristinepage.data.library.LibraryActivation
 import app.pristinepage.data.library.LibraryFolderExportReceipt
 import app.pristinepage.data.library.LibraryFolderExportRequest
 import app.pristinepage.data.library.LibraryFolderExportState
+import app.pristinepage.data.model.AlbumOrder
+import app.pristinepage.data.model.AlbumPage
+import app.pristinepage.data.model.AlbumPosition
 import app.pristinepage.data.model.BatchRecipeChange
 import app.pristinepage.data.model.DocumentId
 import app.pristinepage.data.model.DocumentMutationResult
@@ -38,6 +41,7 @@ import app.pristinepage.data.files.SourceInspector
 import app.pristinepage.data.repository.PrivateImportStore
 import app.pristinepage.data.repository.ImportSessionLifecycle
 import app.pristinepage.data.repository.AtelierAcquisition
+import app.pristinepage.data.repository.AlbumSearchQuery
 import app.pristinepage.data.repository.AtelierDraftView
 import app.pristinepage.data.repository.AtelierSavedPages
 import app.pristinepage.data.repository.DocumentRepository
@@ -63,16 +67,22 @@ import app.pristinepage.library.LibraryBackupConfirmation
 import app.pristinepage.library.LibraryBackupPickerRegistration
 import app.pristinepage.library.LibraryFolderGrantHandoff
 import app.pristinepage.library.AtelierThumbnailLoader
+import app.pristinepage.library.HomePageCursor
 import app.pristinepage.library.HomePageSearchHit
+import app.pristinepage.library.HomePageSearchPage
 import app.pristinepage.library.LibraryFolderPickerContract
+import app.pristinepage.library.queryHomePages
 import java.io.FileNotFoundException
 import java.io.File
 import java.io.IOException
+import java.util.Locale
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.asExecutor
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -352,11 +362,41 @@ class ApplicationServices(context: Context, internal val budget: ImageAllocation
         } ?: activationChanged()
 
     internal suspend fun loadDefaultAlbum(issuedAt: LibraryActivation, album: DocumentId): DocumentOverview =
-        withDefaultLibrary(issuedAt) {
-            val result = it.store.catalog.load(album)
-            requireSameDefault(issuedAt)
+        readDefaultHome(issuedAt) { it.store.catalog.load(album) }
+
+    internal suspend fun readDefaultHomeAlbums(issuedAt: LibraryActivation?, query: AlbumSearchQuery?, order: AlbumOrder,
+        locale: Locale, after: AlbumPosition?, limit: Int): AlbumPage = readDefaultHome(issuedAt) { graph ->
+        if (query == null) graph.store.albums.listAlbums(order, locale, after, limit)
+        else graph.store.albumSearch.searchAlbums(query, order, locale, after, limit)
+    }
+
+    internal suspend fun readDefaultHomePage(issuedAt: LibraryActivation?, query: String): HomePageSearchPage =
+        readDefaultHomePage(issuedAt ?: activationChanged(), query, null)
+
+    private suspend fun readDefaultHomePage(issuedAt: LibraryActivation, query: String, cursor: HomePageCursor?): HomePageSearchPage =
+        readDefaultHome(issuedAt) { graph -> queryHomePages(graph, query, cursor) { readDefaultHomePage(issuedAt, query, it) } }
+
+    private suspend fun <T : Any> readDefaultHome(issuedAt: LibraryActivation?, read: suspend (ApplicationImports) -> T): T {
+        val expected = issuedAt ?: activationChanged()
+        return withDefaultLibrary(expected) { graph ->
+            val result = read(graph)
+            requireSameDefault(expected)
             result
         } ?: activationChanged()
+    }
+
+    /** An idle observer is not a graph-change lease. Its Room subscription owns only the issuing store's read lifetime; a switch must drain the foreground collector. */
+    internal fun observeDefaultHomeSearch(issuedAt: LibraryActivation?): Flow<Unit> = flow {
+        val expected = issuedAt ?: activationChanged()
+        val issuingStore = initialization.withLock {
+            requireSameDefault(expected)
+            initialized?.takeIf { it.activation == expected }?.store?.savedOcr ?: activationChanged()
+        }
+        issuingStore.observeSearchChanges().collect {
+            requireSameDefault(expected)
+            emit(Unit)
+        }
+    }
 
     internal suspend fun openDefaultPageHit(issuedAt: LibraryActivation, hit: HomePageSearchHit): DocumentOverview? {
         if (hit.issuedAt != issuedAt) return null

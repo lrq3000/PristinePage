@@ -145,9 +145,9 @@ import kotlinx.coroutines.launch
             val searching = state.albumSearch.isNotBlank()
             val query = state.albumSearch
             val lifecycle = LocalLifecycleOwner.current.lifecycle
-            LaunchedEffect(session, query, lifecycle) {
+            LaunchedEffect(session, query, lifecycle, state.activation) {
                 if (query.isNotBlank()) lifecycle.repeatOnLifecycle(Lifecycle.State.STARTED) {
-                    session.observePageSearch(query)
+                    session.observePageSearch(query, state.activation)
                 }
             }
             if (state.canSearchAlbums) OutlinedTextField(

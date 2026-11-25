@@ -41,31 +41,31 @@ class ApplicationLibraryActions private constructor(
     override suspend fun startup() = open().startupRecovery
     override suspend fun openLibrary() = open().let { LibraryStartup(it.startupRecovery, it.activation) }
     override suspend fun list(after: DocumentId?, limit: Int) = open().store.catalog.list(after, limit)
-    override suspend fun listAlbums(order: AlbumOrder, locale: Locale, after: AlbumPosition?, limit: Int) = open().store.albums.listAlbums(order, locale, after, limit)
-    override suspend fun searchAlbums(query: AlbumSearchQuery, order: AlbumOrder, locale: Locale, after: AlbumPosition?, limit: Int) =
-        open().store.albumSearch.searchAlbums(query, order, locale, after, limit)
-
-    override suspend fun searchPages(query: String): HomePageSearchPage =
-        if (SourceMetadataQuery.parse(query) != null) searchMetadata(query, null) else searchRecognizedText(query, null)
-
-    override fun pageSearchChanges(query: String) = flow {
-        if (SourceMetadataQuery.parse(query) == null) emitAll(open().store.savedOcr.observeSearchChanges())
+    override suspend fun listAlbums(order: AlbumOrder, locale: Locale, after: AlbumPosition?, limit: Int, issuedAt: LibraryActivation?): AlbumPage {
+        val services = scoped ?: return open().store.albums.listAlbums(order, locale, after, limit)
+        return services.readDefaultHomeAlbums(issuedAt, null, order, locale, after, limit)
     }
 
-    private suspend fun searchRecognizedText(query: String, cursor: SavedOcrWork.Continuation?): HomePageSearchPage {
-        val (store, issuedAt) = open().let { it.store to it.activation }
-        val page = store.savedOcr.find(query, cursor, 20)
-        return HomePageSearchPage(presentPageHits(page.hits, { it.document }, { it.page }, store.catalog, store.savedOcr::canOpen, issuedAt = issuedAt),
-            page.nextAfter?.let { next -> { searchRecognizedText(query, next) } })
+    override suspend fun searchAlbums(query: AlbumSearchQuery, order: AlbumOrder, locale: Locale, after: AlbumPosition?, limit: Int,
+        issuedAt: LibraryActivation?): AlbumPage {
+        val services = scoped ?: return open().store.albumSearch.searchAlbums(query, order, locale, after, limit)
+        return services.readDefaultHomeAlbums(issuedAt, query, order, locale, after, limit)
     }
 
-    private suspend fun searchMetadata(query: String, cursor: RoomSourceMetadataSearch.Continuation?): HomePageSearchPage {
-        val (store, issuedAt) = open().let { it.store to it.activation }
-        val page = store.sourceMetadata.find(query, cursor, 20)
-        return HomePageSearchPage(presentPageHits(page.hits, { it.document }, { it.page }, store.catalog, store.sourceMetadata::canOpen,
-            skipMalformedAlbums = true, issuedAt = issuedAt),
-            page.next?.let { next -> { searchMetadata(query, next) } })
+    override suspend fun searchPages(query: String, issuedAt: LibraryActivation?): HomePageSearchPage {
+        val services = scoped ?: return fixtureSearch(open(), query, null)
+        return services.readDefaultHomePage(issuedAt, query)
     }
+
+    override fun pageSearchChanges(query: String, issuedAt: LibraryActivation?) = flow {
+        if (SourceMetadataQuery.parse(query) == null) {
+            val services = scoped
+            emitAll(if (services != null) services.observeDefaultHomeSearch(issuedAt) else open().store.savedOcr.observeSearchChanges())
+        }
+    }
+
+    private suspend fun fixtureSearch(graph: ApplicationImports, query: String, cursor: HomePageCursor?): HomePageSearchPage =
+        queryHomePages(graph, query, cursor) { fixtureSearch(graph, query, it) }
 
     override suspend fun rename(document: DocumentId, revision: Long, title: String) = open().store.documents.renameDocument(document, revision, title)
     override suspend fun load(id: DocumentId) = open().store.catalog.load(id)
@@ -171,6 +171,30 @@ class ApplicationLibraryActions private constructor(
             val graph = open()
             operation(graph.activation, graph.photoImports, graph.store.lifecycle)
         }
+    }
+}
+
+internal sealed interface HomePageCursor {
+    data class Text(val continuation: SavedOcrWork.Continuation) : HomePageCursor
+    data class Metadata(val continuation: RoomSourceMetadataSearch.Continuation) : HomePageCursor
+}
+
+/** The next request must be wired by the caller to the exact graph admission that issued this page. */
+internal suspend fun queryHomePages(graph: ApplicationImports, query: String, cursor: HomePageCursor?,
+    nextPage: suspend (HomePageCursor) -> HomePageSearchPage): HomePageSearchPage {
+    val store = graph.store
+    return if (SourceMetadataQuery.parse(query) != null) {
+        check(cursor == null || cursor is HomePageCursor.Metadata)
+        val page = store.sourceMetadata.find(query, (cursor as? HomePageCursor.Metadata)?.continuation, 20)
+        HomePageSearchPage(presentPageHits(page.hits, { it.document }, { it.page }, store.catalog, store.sourceMetadata::canOpen,
+            skipMalformedAlbums = true, issuedAt = graph.activation),
+            page.next?.let { next -> { nextPage(HomePageCursor.Metadata(next)) } })
+    } else {
+        check(cursor == null || cursor is HomePageCursor.Text)
+        val page = store.savedOcr.find(query, (cursor as? HomePageCursor.Text)?.continuation, 20)
+        HomePageSearchPage(presentPageHits(page.hits, { it.document }, { it.page }, store.catalog, store.savedOcr::canOpen,
+            issuedAt = graph.activation),
+            page.nextAfter?.let { next -> { nextPage(HomePageCursor.Text(next)) } })
     }
 }
 

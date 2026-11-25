@@ -183,6 +183,22 @@ class LibraryPageSelectionTest {
         assertNull(session.state.value.selectedId)
     }
 
+    @Test fun paginationCannotInstallHitsFromAnotherActivationEvenWithOverlappingIds() = runTest {
+        val f = Fixture()
+        val original = HomePageSearchHit(f.doc, f.first, "Issuing album", 1, f.activation) { true }
+        val foreign = HomePageSearchHit(f.doc, f.second, "Successor album", 2, f.activation.copy(number = 2)) { true }
+        f.textMatches = { HomePageSearchPage(listOf(original)) { HomePageSearchPage(listOf(foreign), null) } }
+        val session = ImportLibrarySession(f, LibraryIdentity(), this)
+        session.accept(LibraryEvent.SetAlbumSearch("receipt", ZoneOffset.UTC))
+        advanceUntilIdle()
+        assertEquals(listOf(original), session.state.value.pageMatches)
+
+        session.accept(LibraryEvent.More)
+        advanceUntilIdle()
+        assertEquals(listOf(original), session.state.value.pageMatches)
+        assertTrue(session.state.value.pageSearchUnavailable)
+    }
+
     @Test fun committedOcrRefreshPreservesTheLoadedPageWindowAndItsCursor() = runTest {
         val f = Fixture()
         var extra = false
@@ -511,15 +527,23 @@ class LibraryPageSelectionTest {
             check(!catalogUnavailable)
             return listOf(summary(doc), summary(other))
         }
-        override suspend fun searchAlbums(query: AlbumSearchQuery, order: AlbumOrder, locale: Locale, after: AlbumPosition?, limit: Int): AlbumPage {
+        override suspend fun searchAlbums(query: AlbumSearchQuery, order: AlbumOrder, locale: Locale, after: AlbumPosition?, limit: Int,
+            issuedAt: LibraryActivation?): AlbumPage {
+            assertEquals(activation, issuedAt)
             find?.let { return it(query, after) }
             assertEquals("receipt", query.text)
             assertEquals(null, after)
             return page(other)
         }
         fun page(id: DocumentId, next: AlbumPosition? = null) = AlbumPage(listOf(summary(id)), next)
-        override suspend fun searchPages(query: String) = textMatches(query)
-        override fun pageSearchChanges(query: String) = searchChanges.onStart { if (initialSearchSignal) emit(Unit) }
+        override suspend fun searchPages(query: String, issuedAt: LibraryActivation?): HomePageSearchPage {
+            assertEquals(activation, issuedAt)
+            return textMatches(query)
+        }
+        override fun pageSearchChanges(query: String, issuedAt: LibraryActivation?) = searchChanges.onStart {
+            assertEquals(activation, issuedAt)
+            if (initialSearchSignal) emit(Unit)
+        }
         override suspend fun load(id: DocumentId): DocumentOverview {
             loaded += id
             val snapshot = DocumentOverview(summary(id), if (id == doc) pages.toList() else emptyList())
