@@ -34,11 +34,15 @@ internal data class LibraryGeneration(
         private const val MAX_MARKER_BYTES = 256
 
         /** Borrows an already authorized marker stream. Never resolve a path from an unparsed string or read the catalog on format refusal. */
-        fun read(input: InputStream): LibraryGeneration {
+        fun read(input: InputStream): LibraryGeneration = read(input) {}
+
+        fun read(input: InputStream, checkpoint: () -> Unit): LibraryGeneration {
+            checkpoint()
             val bytes = ByteArray(MAX_MARKER_BYTES)
             var length = 0
             while (true) {
                 val value = input.read()
+                checkpoint()
                 if (value == -1) break
                 if (length == bytes.size || (value != 10 && value !in 32..126)) invalid()
                 bytes[length++] = value.toByte()
