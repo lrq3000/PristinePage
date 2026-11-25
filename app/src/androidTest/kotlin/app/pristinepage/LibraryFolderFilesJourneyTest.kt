@@ -84,6 +84,7 @@ class LibraryFolderFilesJourneyTest {
 
     @Test fun settingsOpensAndCancelsFilesWithoutStartingABackup() {
         val instrumentation = InstrumentationRegistry.getInstrumentation()
+        val folder = settingsFixtureFolder()
         val app = instrumentation.targetContext.applicationContext as PristinePageApplication
         val graph = runBlocking { app.services.imports() }
         val album = runBlocking { graph.store.catalog.list(null, 2) }.single()
@@ -121,7 +122,20 @@ class LibraryFolderFilesJourneyTest {
                 "reviewing=${state.reviewing}; request=$request; notice=${state.notice}; sameActivation=$sameActivation", failure)
         }
         assertEquals(picker, foreground())
-        assertTrue("The exact Files window did not accept Back", automation.performGlobalAction(AccessibilityService.GLOBAL_ACTION_BACK))
+        selectSettingsDestination(instrumentation, picker, folder, selectFolder = false)
+        var backSteps = 0
+        while (foreground() == picker) {
+            check(++backSteps <= 5) { "The Files cancellation did not leave its bounded directory route" }
+            val root = checkNotNull(automation.rootInActiveWindow)
+            check(root.packageName?.toString() == picker)
+            val labels = buildList { root.collectLabels(this) }
+            assertTrue("The exact Files window did not accept Back", automation.performGlobalAction(AccessibilityService.GLOBAL_ACTION_BACK))
+            compose.waitUntil(3_000) {
+                val active = automation.rootInActiveWindow
+                active != null && (active.packageName?.toString() == app.packageName ||
+                    (active.packageName?.toString() == picker && buildList { active.collectLabels(this) } != labels))
+            }
+        }
         compose.waitUntil(10_000) {
             foreground() == app.packageName && backup.state.value.let { it.picker == null && it.canReview }
         }
@@ -131,13 +145,17 @@ class LibraryFolderFilesJourneyTest {
         assertEquals(ocrBefore, settingsFixtureOcr(app, page.pageId.value))
     }
 
+    private fun settingsFixtureFolder(): String =
+        InstrumentationRegistry.getArguments().getString("libraryFixtureFolder")
+            ?.takeIf { it.matches(Regex("PristinePage-tree-[0-9a-f]{12}")) }
+            ?: error("No exact synthetic folder was staged")
+
     @Test fun settingsPublishesOneBackupOfTheSyntheticDefaultLibrary() {
         val instrumentation = InstrumentationRegistry.getInstrumentation()
         val args = InstrumentationRegistry.getArguments()
         val fixture = args.getString("librarySettingsFixture")
         check(fixture == "fresh" || fixture == "retained") { "The witness requires an admitted synthetic guest" }
-        val folder = args.getString("libraryFixtureFolder")?.takeIf { it.matches(Regex("PristinePage-tree-[0-9a-f]{12}")) }
-            ?: error("No exact synthetic folder was staged")
+        val folder = settingsFixtureFolder()
         val app = instrumentation.targetContext.applicationContext as PristinePageApplication
         fun grants() = app.contentResolver.persistedUriPermissions.associate { it.uri.toString() to (it.isReadPermission to it.isWritePermission) }
         val before = grants()
@@ -146,9 +164,11 @@ class LibraryFolderFilesJourneyTest {
         assertEquals(1L, graph.activation.number)
         val privateRoot = app.filesDir.canonicalFile
         val evidence = File(privateRoot, "library-settings-native-witness")
-        val spent = File(privateRoot, "library-settings-witness-spent")
+        val spent = File(privateRoot, "library-settings-witness-spent-v2")
+        val provedNavigationOnly = args.getString("librarySettingsPriorNavigationOnly") == "1"
         val privateLeaves = checkNotNull(privateRoot.list()).toSet()
         check(evidence.name !in privateLeaves && spent.name !in privateLeaves && "library-backup-acknowledged" !in privateLeaves &&
+            ("library-settings-witness-spent" in privateLeaves) == provedNavigationOnly && (!provedNavigationOnly || fixture == "retained") &&
             privateLeaves.none { it.startsWith("library-out-") }) { "Refusing to repeat a possible prior backup" }
         val historyBefore = runBlocking { app.services.discoverDefaultBackups(graph.activation) }
         check(historyBefore.receipts.isEmpty() && historyBefore.unresolvedCount == 0)
@@ -294,7 +314,7 @@ class LibraryFolderFilesJourneyTest {
             membership + history.flatten() + undo
         }
 
-    private fun selectSettingsDestination(instrumentation: Instrumentation, picker: String, folder: String) {
+    private fun selectSettingsDestination(instrumentation: Instrumentation, picker: String, folder: String, selectFolder: Boolean = true) {
         val affirmative = setOf("SELECT", "Select", "SÉLECTIONNER", "Sélectionner", "Use this folder", "USE THIS FOLDER", "Choose this folder")
         fun containsUnder(root: AccessibilityNodeInfo, text: String, within: String) =
             root.findByTextInFixture(text).any { node ->
@@ -341,10 +361,41 @@ class LibraryFolderFilesJourneyTest {
             }
         }
         val drawer = setOf("Show roots", "Afficher les répertoires racines")
-        select("root drawer", drawer)
-        select("primary storage", setOf(Build.MODEL, "Internal storage", "Stockage interne", "Stockage interne partagé"), "roots_list")
-        select("Documents", setOf("Documents"), "dir_list")
-        select("synthetic folder", setOf(folder), "dir_list") { containsUnder(it, "Documents", "dropdown_breadcrumb") }
+        val options = setOf("More options", "Plus d'options", "Plus d’options")
+        val showStorage = setOf("Show internal storage", "Aff. mémoire stockage interne")
+        val hideStorage = setOf("Hide internal storage", "Masquer mém. stock. int.")
+        val automation = instrumentation.uiAutomation
+        // Inspect the real platform menu once; the primary-storage root is hidden by default on the fresh API 28 guest.
+        select("Files options", options)
+        val menu = await(instrumentation, picker, "internal storage preference") {
+            (unique(it, showStorage) != null) xor (unique(it, hideStorage) != null)
+        }
+        val wasHidden = unique(menu, showStorage) != null
+        var changed = false
+        try {
+            if (wasHidden) {
+                select("show internal storage", showStorage)
+                changed = true
+            } else check(automation.performGlobalAction(AccessibilityService.GLOBAL_ACTION_BACK))
+            select("root drawer", drawer)
+            select("primary storage", setOf(Build.MODEL, "Internal storage", "Stockage interne", "Stockage interne partagé"), "roots_list")
+            select("Documents", setOf("Documents"), "dir_list")
+            select("synthetic folder", setOf(folder), "dir_list") { containsUnder(it, "Documents", "dropdown_breadcrumb") }
+            await(instrumentation, picker, "exact destination before restoring Files preference", ::atTarget)
+        } finally {
+            if (changed) {
+                select("Files options to restore internal storage preference", options)
+                select("restore hidden internal storage", hideStorage)
+                select("verify restored Files options", options)
+                await(instrumentation, picker, "verified hidden internal storage preference") { unique(it, showStorage) != null }
+                check(automation.performGlobalAction(AccessibilityService.GLOBAL_ACTION_BACK))
+            }
+        }
+        if (!selectFolder) {
+            await(instrumentation, picker, "exact destination before cancellation", ::atTarget)
+            // Back from nested directories can pop one level; callers must verify and cancel the entire chooser.
+            return
+        }
         select("exact synthetic destination", affirmative, guard = ::atTarget)
         // API 28's direct return was qualified separately. Do not authorize an additional prompt without a separately verified destination binding.
         val appPackage = instrumentation.targetContext.packageName

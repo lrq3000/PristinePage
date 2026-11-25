@@ -162,14 +162,17 @@ def settings_failed_destination(raw, expected_sha, guest, app_sha):
     transcript = anchor("instrumentation.txt")
     first_refused = not artifacts["previous"] and "Files did not reach root drawer; foreground=app.pristinepage.debug;" in transcript
     preflight_refused = artifacts.get("settingsCancel") and "Unexpected retained OcrResult inventory expected:<[0]> but was:<[1]>" in transcript
-    need(read_results(transcript, (SETTINGS_BACKUP_CASE,)) == ([], [SETTINGS_BACKUP_CASE]) and (first_refused or preflight_refused),
+    navigation_refused = artifacts.get("settingsCancel") and \
+        "Files did not reach primary storage; foreground=com.android.documentsui;" in transcript
+    need(read_results(transcript, (SETTINGS_BACKUP_CASE,)) == ([], [SETTINGS_BACKUP_CASE]) and
+         (first_refused or preflight_refused or navigation_refused),
          "The retained Settings failure is not the exact observed pre-selection boundary")
     calls = [json.loads(line)["argv"] for line in anchor("commands.jsonl").splitlines()]
     candidates = [call[i + 1] for call in calls for i, value in enumerate(call[:-1])
                   if value == "libraryFixtureFolder" and SETTINGS_BACKUP_CASE in call]
     need(len(candidates) == 1 and re.fullmatch(r"PristinePage-tree-[a-f0-9]{12}", candidates[0]),
          "The original Settings destination could not be recovered")
-    return (f"/sdcard/Documents/{candidates[0]}", artifacts["fixture"]), artifacts.get("settingsPriorFailure")
+    return (f"/sdcard/Documents/{candidates[0]}", artifacts["fixture"]), artifacts.get("settingsPriorFailure"), bool(navigation_refused)
 
 
 def spend_settings_retry(raw, digest, attempt):
@@ -280,6 +283,7 @@ def run(args):
     proof = {package: exact_apk(path, hashes[package], stage, package == TEST) for package, path in built.items()}
     previous = {}
     prior_destinations = []
+    prior_navigation_only = False
     if args.previous:
         for package, file in zip(built, args.previous):
             path = Path(file).resolve()
@@ -302,8 +306,9 @@ def run(args):
                 seen.add(old_run)
                 prior = (raw.parent / old_run).resolve()
                 need(prior.parent == raw.parent.resolve() and prior.name == old_run, "Earlier witness is not a local retained receipt")
-                destination, pair = settings_failed_destination(prior, old_sha, args.guest, hashes[APP])
+                destination, pair, navigation_only = settings_failed_destination(prior, old_sha, args.guest, hashes[APP])
                 prior_destinations.append(destination)
+                prior_navigation_only = prior_navigation_only or navigation_only
     retained = {}
     for package, path in built.items():
         saved = raw / f"{package}.apk"
@@ -403,7 +408,9 @@ def run(args):
         output = adb("shell", "am", "instrument", "-w", "-r", "-e", "class", ",".join(scenarios),
                      "-e", "libraryFixtureFolder", folder, *original_args,
                      *(("-e", "librarySettingsFixture", "retained" if args.settings_retry else "fresh")
-                       if args.settings_backup else ()), RUNNER, timeout=150)
+                       if args.settings_backup else ()),
+                     *(("-e", "librarySettingsPriorNavigationOnly", "1") if prior_navigation_only else ()),
+                     RUNNER, timeout=210)
         run.path("instrumentation.txt").write_text(output, encoding="utf-8")
         passed, failed = read_results(output, scenarios)
         for relative, digest in files.items():
