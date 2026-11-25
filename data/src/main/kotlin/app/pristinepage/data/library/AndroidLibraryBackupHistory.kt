@@ -31,11 +31,15 @@ class AndroidLibraryBackupHistory(context: Context) {
         val observed = journal.reopen(operationId)
         if (observed != null && observed.intent.issuedAt != issuedAt) throw IOException("The backup belongs to another activation")
         requireSelection(files, issuedAt)
-        when (observed?.phase) {
-            null, LocalLibraryFolderExportJournal.Phase.INTENT_ONLY -> LibraryFolderExportState.NeedsVerification
-            LocalLibraryFolderExportJournal.Phase.COMPLETED -> LibraryFolderExportState.Completed(observed.intent.backupReceipt())
-            LocalLibraryFolderExportJournal.Phase.ACKNOWLEDGED -> LibraryFolderExportState.Acknowledged(observed.intent.backupReceipt())
-        }
+        observed.backupState()
+    }
+
+    /** Enumerate at most the ordinary active quota. An unresolved row is not confirmation of a finished provider write. */
+    suspend fun discoverActive(issuedAt: LibraryActivation): LibraryBackupDiscovery = withLane { files ->
+        requireSelection(files, issuedAt)
+        val active = LocalLibraryBackupAttempts(files) { coroutineContext.ensureActive() }.discoverActive(issuedAt)
+        requireSelection(files, issuedAt)
+        active
     }
 
     suspend fun acknowledge(receipt: LibraryFolderExportReceipt, issuedAt: LibraryActivation): Unit = withLane { files ->

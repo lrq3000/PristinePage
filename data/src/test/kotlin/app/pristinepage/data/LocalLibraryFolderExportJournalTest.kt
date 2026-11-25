@@ -3,6 +3,7 @@ package app.pristinepage.data
 import app.pristinepage.data.files.DirectorySync
 import app.pristinepage.data.library.LocalLibraryBackupAttempts
 import app.pristinepage.data.library.LibraryActivation
+import app.pristinepage.data.library.LibraryFolderExportState
 import app.pristinepage.data.library.LibraryFolderExportRecords
 import app.pristinepage.data.library.LibraryFolderGrantRecord
 import app.pristinepage.data.library.LibraryGeneration
@@ -29,6 +30,75 @@ import org.junit.rules.TemporaryFolder
 
 class LocalLibraryFolderExportJournalTest {
     @get:Rule val temporary = TemporaryFolder()
+
+    @Test fun coldDiscoveryFindsAnExactReceiptAndDoesNotPromoteAnUnresolvedAttempt() {
+        val (root, intent) = staged()
+        val files = checkNotNull(root.parentFile).toPath()
+        val remaining = "10000000-0000-4000-8000-000000000006"
+        Files.createDirectory(files.resolve("library-out-$remaining"))
+        val journal = LocalLibraryFolderExportJournal(root, DirectorySync { true })
+        journal.start(intent).recordCompletion()
+        val before = root.resolve("export.complete").readBytes()
+        val attempts = LocalLibraryBackupAttempts(files, DirectorySync { true })
+        val found = attempts.discoverActive(intent.issuedAt)
+        val receipt = (found.receipts.single() as LibraryFolderExportState.Completed).receipt
+        assertEquals(intent.operationId, receipt.operationId)
+        assertEquals(intent.backupName, receipt.folderName)
+        assertEquals(1, found.unresolvedCount)
+        assertFalse(root.resolve("export.ack").exists())
+        assertContentEquals(before, root.resolve("export.complete").readBytes())
+        assertTrue(attempts.discoverActive(intent.issuedAt.copy(number = 2)).receipts.isEmpty())
+        assertFailsWith<IOException> { attempts.requireNew(intent.operationId) }
+    }
+
+    @Test fun coldDiscoveryKeepsAVerifiedReceiptVisibleBesideAnUnreadableAttemptAndRemovesArchivedRowsFromTheInbox() {
+        val (root, intent) = staged()
+        val files = checkNotNull(root.parentFile).toPath()
+        val wrongId = "10000000-0000-4000-8000-000000000006"
+        val wrong = files.resolve("library-out-$wrongId").toFile().apply { writeText("preserve") }
+        val journal = LocalLibraryFolderExportJournal(root, DirectorySync { true })
+        journal.start(intent).recordCompletion()
+        journal.acknowledge(intent)
+        val attempts = LocalLibraryBackupAttempts(files, DirectorySync { true })
+        val found = attempts.discoverActive(intent.issuedAt)
+        assertTrue(found.receipts.single() is LibraryFolderExportState.Acknowledged)
+        assertEquals(intent.operationId, found.receipts.single().receipt.operationId)
+        assertEquals(1, found.unresolvedCount)
+        assertTrue(attempts.archiveAcknowledged(intent.operationId, intent.issuedAt))
+        val after = attempts.discoverActive(intent.issuedAt)
+        assertTrue(after.receipts.isEmpty())
+        assertEquals(1, after.unresolvedCount)
+        assertEquals("preserve", wrong.readText())
+        assertFailsWith<IOException> { attempts.requireNew(intent.operationId) }
+    }
+
+    @Test fun anInvalidAttemptNameDoesNotHideTheExactReceiptOrAllowAFifthSlot() {
+        val (root, intent) = staged()
+        val files = checkNotNull(root.parentFile).toPath()
+        val journal = LocalLibraryFolderExportJournal(root, DirectorySync { true })
+        journal.start(intent).recordCompletion()
+        for (index in 1..3) Files.createDirectory(files.resolve("library-out-invalid-$index"))
+        val attempts = LocalLibraryBackupAttempts(files, DirectorySync { true })
+        val observed = attempts.discoverActive(intent.issuedAt)
+        assertEquals(listOf(intent.operationId), observed.receipts.map { it.receipt.operationId })
+        assertEquals(3, observed.unresolvedCount)
+        Files.createDirectory(files.resolve("library-out-invalid-4"))
+        assertFailsWith<IOException> { attempts.discoverActive(intent.issuedAt) }
+    }
+
+    @Test fun aFailedDurabilityCheckRevealsNoForeignOperationAndDoesNotConfirmAnOwnReceipt() {
+        val (root, intent) = staged()
+        val files = checkNotNull(root.parentFile).toPath()
+        LocalLibraryFolderExportJournal(root, DirectorySync { true }).start(intent).recordCompletion()
+        val attempts = LocalLibraryBackupAttempts(files, DirectorySync { it != root })
+        val foreign = attempts.discoverActive(intent.issuedAt.copy(number = 2))
+        assertTrue(foreign.receipts.isEmpty())
+        assertEquals(0, foreign.unresolvedCount)
+        val own = attempts.discoverActive(intent.issuedAt)
+        assertTrue(own.receipts.isEmpty())
+        assertEquals(1, own.unresolvedCount)
+        assertTrue(root.resolve("export.complete").isFile)
+    }
 
     @Test fun leftoverVerificationCatalogKeepsItsActiveSlotAndAllOfItsBytes() {
         val (root, intent) = staged()

@@ -23,6 +23,7 @@ import app.pristinepage.data.model.SourceId
 import app.pristinepage.data.model.SourceInspection
 import app.pristinepage.data.library.LibraryFolderExportReceipt
 import app.pristinepage.data.library.AndroidLibraryBackupHistory
+import app.pristinepage.data.library.AndroidLibraryStartup
 import app.pristinepage.data.library.LibraryFolderExportRequest
 import app.pristinepage.data.library.LibraryFolderExportState
 import app.pristinepage.data.repository.ExportSourceBinding
@@ -139,7 +140,18 @@ internal object LibraryDefaultFolderExportProbe {
                 try { result.await(); fail("The export delivery was not canceled") }
                 catch (_: CancellationException) { assertTrue(withheld.get()) }
             }
-            val recovered = store.inspectLibraryExport(operation, graph.activation) as LibraryFolderExportState.Completed
+            // First receipt lookup uses a new context that can read the durable pointer but cannot open Room or Files.
+            val coldContext = object : ContextWrapper(context) {
+                override fun getApplicationContext(): Context = this
+                override fun getDatabasePath(name: String): File = error("Cold backup discovery touched Room")
+                override fun getContentResolver(): ContentResolver = error("Cold backup discovery touched Files")
+            }
+            val coldActivation = checkNotNull(AndroidLibraryStartup(coldContext).recordedDefaultActivation())
+            assertEquals(graph.activation, coldActivation)
+            val coldHistory = AndroidLibraryBackupHistory(coldContext)
+            val discovered = coldHistory.discoverActive(coldActivation)
+            assertEquals(0, discovered.unresolvedCount)
+            val recovered = discovered.receipts.single() as LibraryFolderExportState.Completed
             val backup = recovered.receipt
             assertEquals(operation, backup.operationId)
             assertTrue(backup.folderName.matches(Regex("PristinePage-backup-[0-9a-f-]{36}")))
@@ -211,6 +223,7 @@ internal object LibraryDefaultFolderExportProbe {
             assertFalse(app.contentResolver.persistedUriPermissions.any { it.uri == tree && it.isWritePermission })
             forbidProvider.set(true)
             try {
+                assertEquals(discovered, coldHistory.discoverActive(coldActivation))
                 assertEquals(recovered, store.inspectLibraryExport(operation, graph.activation))
                 store.acknowledgeLibraryExport(backup, graph.activation)
                 assertEquals(LibraryFolderExportState.Acknowledged(backup), store.inspectLibraryExport(operation, graph.activation))
@@ -220,6 +233,9 @@ internal object LibraryDefaultFolderExportProbe {
                 assertTrue(history.archiveAcknowledged(operation, graph.activation))
                 assertTrue(history.archiveAcknowledged(operation, graph.activation))
                 assertEquals(LibraryFolderExportState.Acknowledged(backup), history.inspect(operation, graph.activation))
+                val afterArchive = coldHistory.discoverActive(coldActivation)
+                assertTrue(afterArchive.receipts.isEmpty())
+                assertEquals(0, afterArchive.unresolvedCount)
                 refused("This backup operation cannot be repeated") { store.exportLibraryTo(bindResult()) }
             } finally { forbidProvider.set(false) }
             assertFalse(attempt.exists())

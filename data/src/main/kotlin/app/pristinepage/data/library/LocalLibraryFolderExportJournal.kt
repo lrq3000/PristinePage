@@ -75,6 +75,13 @@ internal class LocalLibraryFolderExportJournal(
         return observed
     }
 
+    /** An observed intent may rule out a foreign owner; only full reopen can admit a receipt. */
+    fun observeIntentOwner(operationId: String): LibraryActivation? {
+        requireAttempt(operationId)
+        checkpoint()
+        return readIntent(operationId)?.issuedAt
+    }
+
     private fun publish(record: ExportRecord, intent: Intent, bytes: ByteArray, phase: Phase) {
         checkpoint()
         val requiresStage = record != ExportRecord.ACKNOWLEDGED
@@ -93,7 +100,7 @@ internal class LocalLibraryFolderExportJournal(
 
     private fun observe(operationId: String): Observation? {
         checkpoint()
-        val intent = directory.openExportRecord(ExportRecord.INTENT)?.use { LibraryFolderExportRecords.readIntent(it, operationId) }
+        val intent = readIntent(operationId)
         val complete = directory.openExportRecord(ExportRecord.COMPLETE)?.use {
             (intent ?: outOfOrder()).requireCompletion(it)
             true
@@ -114,6 +121,9 @@ internal class LocalLibraryFolderExportJournal(
         return intent?.let { Observation(it, phase) }
     }
 
+    private fun readIntent(operationId: String) =
+        directory.openExportRecord(ExportRecord.INTENT)?.use { LibraryFolderExportRecords.readIntent(it, operationId) }
+
     private fun requireAttempt(operationId: String) {
         requireOpaqueId(operationId)
         if (directory.rootPath.fileName.toString() != "library-out-$operationId") {
@@ -122,4 +132,10 @@ internal class LocalLibraryFolderExportJournal(
     }
 
     private fun outOfOrder(): Nothing = throw IOException("Private backup records are out of order")
+}
+
+internal fun LocalLibraryFolderExportJournal.Observation?.backupState(): LibraryFolderExportState = when (this?.phase) {
+    null, LocalLibraryFolderExportJournal.Phase.INTENT_ONLY -> LibraryFolderExportState.NeedsVerification
+    LocalLibraryFolderExportJournal.Phase.COMPLETED -> LibraryFolderExportState.Completed(intent.backupReceipt())
+    LocalLibraryFolderExportJournal.Phase.ACKNOWLEDGED -> LibraryFolderExportState.Acknowledged(intent.backupReceipt())
 }

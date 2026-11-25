@@ -26,6 +26,10 @@ class LibraryFolderExportRequest private constructor(
 sealed interface LibraryFolderExportState {
     data object NotStarted : LibraryFolderExportState
     data object NeedsVerification : LibraryFolderExportState
-    data class Completed(val receipt: LibraryFolderExportReceipt) : LibraryFolderExportState
-    data class Acknowledged(val receipt: LibraryFolderExportReceipt) : LibraryFolderExportState
+    sealed interface Confirmed : LibraryFolderExportState { val receipt: LibraryFolderExportReceipt }
+    data class Completed(override val receipt: LibraryFolderExportReceipt) : Confirmed
+    data class Acknowledged(override val receipt: LibraryFolderExportReceipt) : Confirmed
 }
+
+/** Only owned, verified terminal receipts have IDs. Unresolved entries provide a count, never an action or a path. */
+data class LibraryBackupDiscovery internal constructor(val receipts: List<LibraryFolderExportState.Confirmed>, val unresolvedCount: Int)

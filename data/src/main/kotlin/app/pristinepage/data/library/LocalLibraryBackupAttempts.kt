@@ -36,11 +36,47 @@ internal class LocalLibraryBackupAttempts(
 
     fun requireNew(id: String): Path {
         if (find(id) != null) throw IOException("This backup operation cannot be repeated")
-        if (atLimit(files, "library-out-*", MAX_ACTIVE)) throw IOException("Retained library export attempts need attention")
+        if (atLimit(files, "$ATTEMPT_PREFIX*", MAX_ACTIVE)) throw IOException("Retained library export attempts need attention")
         if (existingArchive() != null && atLimit(archive, "*", MAX_ACKNOWLEDGED)) {
             throw IOException("The retained backup history needs attention")
         }
         return files.resolve(name(id))
+    }
+
+    /** The active inbox survives loss of UI state. Only an exact verified intent identifies its issuing activation. */
+    fun discoverActive(issuedAt: LibraryActivation): LibraryBackupDiscovery {
+        requireRoot()
+        val ids = try {
+            Files.newDirectoryStream(files, "$ATTEMPT_PREFIX*").use { entries ->
+                entries.asSequence().take(MAX_ACTIVE + 1).map { entry ->
+                    checkpoint()
+                    entry.fileName.toString().removePrefix(ATTEMPT_PREFIX)
+                }.toList()
+            }
+        } catch (_: DirectoryIteratorException) { throw IOException("The retained backup attempts could not be read") }
+        if (ids.size > MAX_ACTIVE) throw IOException("Retained library export attempts need attention")
+
+        var unresolved = 0
+        val receipts = buildList {
+            for (id in ids.sorted()) {
+                checkpoint()
+                val leaf = try { name(id) }
+                catch (_: IllegalArgumentException) { ++unresolved; continue }
+                val condition = try {
+                    val root = files.resolve(leaf)
+                    if (!directoryPresent(root)) throw IOException("The active backup attempt could not be confirmed")
+                    val journal = LocalLibraryFolderExportJournal(root.toFile(), sync, checkpoint)
+                    val owner = journal.observeIntentOwner(id)
+                    if (owner != null && owner != issuedAt) continue
+                    if (find(id) != root) throw IOException("The active backup attempt could not be confirmed")
+                    val observed = journal.reopen(id)
+                    if (observed?.intent?.issuedAt != owner) throw IOException("The backup intent changed during discovery")
+                    observed.backupState()
+                } catch (_: IOException) { LibraryFolderExportState.NeedsVerification }
+                if (condition is LibraryFolderExportState.Confirmed) add(condition) else ++unresolved
+            }
+        }
+        return LibraryBackupDiscovery(receipts, unresolved)
     }
 
     /** A refusal here is private retention only, not a failed or retryable backup. */
@@ -119,12 +155,13 @@ internal class LocalLibraryBackupAttempts(
 
     private fun name(id: String): String {
         requireOpaqueId(id)
-        return "library-out-$id"
+        return "$ATTEMPT_PREFIX$id"
     }
 
     private companion object {
         const val MAX_ACTIVE = 4
         const val MAX_ACKNOWLEDGED = 128
+        const val ATTEMPT_PREFIX = "library-out-"
         val SPEND_NAME = Regex("[a-f0-9]{64}\\.spent")
         val catalogNames = setOf("catalog.sqlite", "export.catalog.owner")
         val journalNames = LocalLibraryDirectory.ExportRecord.entries.map { it.nameOnDisk }.toSet()
