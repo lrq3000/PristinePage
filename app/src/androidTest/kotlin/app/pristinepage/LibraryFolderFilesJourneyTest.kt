@@ -20,6 +20,7 @@ import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import app.pristinepage.data.library.AndroidLibraryTreeRead
 import app.pristinepage.data.library.AndroidLibraryStartup
+import app.pristinepage.data.library.AndroidLibraryWritableFolder
 import app.pristinepage.data.library.LibraryActivation
 import app.pristinepage.data.model.DocumentId
 import app.pristinepage.data.model.RepositoryFailure
@@ -267,7 +268,16 @@ class LibraryFolderFilesJourneyTest {
             assertEquals(1, first.scans)
             // Promote only this exact fixture grant while the original picker recipient still owns its transient write permission.
             val writeObservation = if (probeWrite) runCatching {
-                LibraryProviderWriteProbe.verify(app.contentResolver, uri) { handoff.persistWrite(picked) }
+                val destination = AndroidLibraryWritableFolder(app)
+                assertThrows(IOException::class.java) { runBlocking { destination.availableBytes(uri) } }
+                LibraryProviderWriteProbe.verify(app.contentResolver, uri) {
+                    handoff.persistWrite(picked).also {
+                        assertTrue(runBlocking { destination.availableBytes(it) } > 0)
+                        val alias = if (it == home) expected else home
+                        assertThrows(IOException::class.java) { runBlocking { destination.availableBytes(alias) } }
+                    }
+                }
+                assertThrows(IOException::class.java) { runBlocking { destination.availableBytes(uri) } }
             } else null
             val different = DocumentsContract.buildTreeDocumentUri(requireNotNull(uri.authority), "primary:Documents/${folder}-different")
             val wrongRoot = assertThrows(IOException::class.java) {
