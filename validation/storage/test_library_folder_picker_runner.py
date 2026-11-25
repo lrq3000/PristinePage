@@ -12,12 +12,42 @@ from unittest.mock import patch
 
 from run_library_folder_picker_ldplayer import (
     check_fixture_root, read_backup_delivery_death, recheck_target, select_backup_case, select_backup_death_picker_case, select_provider_capacity, select_settings_picker_case, select_settings_recovery_case, select_tree_ancestry, settings_completed_destination, spend_settings_retry,
-    finish_pre_marker_outcome, verify_ancestry_cold_handoff, verify_ancestry_grant_refusal, verify_backup_death_control, verify_backup_death_intent, verify_backup_receipt_only, verify_pre_marker_handoff, verify_settings_catalog, verify_settings_ocr, verify_settings_retry_evidence,
+    finish_pre_marker_outcome, retry_pre_marker_checksum, verify_ancestry_cold_handoff, verify_ancestry_grant_refusal, verify_backup_death_control, verify_backup_death_intent, verify_backup_receipt_only, verify_pre_marker_handoff, verify_pre_marker_read_refusal, verify_settings_catalog, verify_settings_ocr, verify_settings_retry_evidence,
 )
 from run_local_ocr_guest import read_boot_serial
 
 
 class LibraryFolderPickerRunnerTest(unittest.TestCase):
+    def test_interruption_checksum_retries_only_timeout_on_the_same_read(self):
+        calls = []
+        def read(*args, **kwargs):
+            calls.append((args, kwargs))
+            if len(calls) == 1:
+                raise TimeoutExpired("sha256sum", 15)
+            return "same path"
+        args = ("shell", "sha256sum", "/sdcard/Documents/synthetic")
+        self.assertEqual("same path", retry_pre_marker_checksum(read, *args))
+        self.assertEqual([(args, {}), (args, {"timeout": 30})], calls)
+        calls.clear()
+        with self.assertRaises(TimeoutExpired):
+            retry_pre_marker_checksum(read, "shell", "am", "instrument")
+        self.assertEqual(1, len(calls))
+
+    def test_interruption_continuation_refusal_must_not_have_launched_a_test_or_changed_a_fixture(self):
+        proof = {"app.pristinepage.debug": "a"*64, "app.pristinepage.debug.test": "b"*64}
+        artifact = {"previous": proof, "guest": "assigned", "backupPreMarker": True, "backupPreMarkerHandoff": "c"*64}
+        before = {"artifacts.json": json.dumps(artifact), "installed-before.json": json.dumps(proof)}
+        path = "/sdcard/Documents/synthetic/objects/payload"
+        observed = [dict(argv=["shell", "sha256sum", path], timeout=15)]
+        def anchor(calls):
+            return (before | {"commands.jsonl": "\n".join(map(json.dumps, calls))}).__getitem__
+        verify_pre_marker_read_refusal(anchor(observed), "assigned", proof, "c"*64, path)
+        for command in (("shell", "am", "instrument"), ("install", "apk"), ("push", "a", "b"), ("shell", "mkdir", "a")):
+            with self.assertRaisesRegex(RuntimeError, "read-only.*timeout"):
+                verify_pre_marker_read_refusal(anchor(observed + [dict(argv=list(command))]), "assigned", proof, "c"*64, path)
+        with self.assertRaisesRegex(RuntimeError, "read-only.*timeout"):
+            verify_pre_marker_read_refusal(anchor([dict(argv=["shell", "sha256sum", path], exit=1)]), "assigned", proof, "c"*64, path)
+
     def test_interruption_outcome_requires_both_independent_preservation_checks(self):
         calls = []
         def fail():

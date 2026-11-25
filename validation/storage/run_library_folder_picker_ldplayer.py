@@ -88,6 +88,7 @@ ANCESTRY_COLD_PASSED = "fdc2edc0be9d2ae93fbbb73900dec9d7952df5f5850a8637ded39978
 CAPACITY_CASE = "app.pristinepage.LibraryFolderFilesJourneyTest#actualFilesCapacityRefusesBeforePublication"
 CAPACITY_PASSED = "1e113e46b58e2926ef74e36f4b1e72e32ba38b453602b6a4051b21ac9e5cc665"
 BACKUP_DELIVERY_RECOVERY_PASSED = "94965983c698ea277722e113dfd130d7d1df1cf9ee0cdf2dc40ce62bbf626981"
+PRE_MARKER_READ_TIMEOUT = "941ce5c60e6db39b3a1e41135f1dfd59bf65766836f56c0e26e643163b3bbd08"
 UUID_TEXT = r"[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}"
 BACKUP_ORIGINAL = "ebd602840377a3b3cf763cb6828fee67861ff77c444e8fe5894457ef6d99a24d"
 OCR_ACTIVATION_CASES = tuple(f"app.pristinepage.ocr.OcrWorkManagerIntegrationTest#{method}" for method in (
@@ -298,6 +299,29 @@ def verify_pre_marker_handoff(anchor, spent, guest, pair):
          "An interrupted backup can resume only if it had no prior cold launch")
     checkpoint = read_backup_delivery_death(anchor("backup-death-instrumentation.txt"), operation, before_marker=True)
     return destination, fixture, operation, checkpoint
+
+
+def verify_pre_marker_read_refusal(anchor, guest, pair, handoff_digest, timed_out_path):
+    evidence = json.loads(anchor("artifacts.json"))
+    calls = [json.loads(line) for line in anchor("commands.jsonl").splitlines()]
+    timeouts = [call["argv"][-3:] for call in calls if "exit" not in call and call.get("timeout") == 15 and
+                "sha256sum" in call["argv"]]
+    need(evidence["guest"] == guest and evidence["previous"] == pair and evidence["backupPreMarker"] is True and
+         evidence["backupPreMarkerHandoff"] == handoff_digest and json.loads(anchor("installed-before.json")) == pair and
+         timeouts == [["shell", "sha256sum", timed_out_path]] and
+         not any(any(op in call["argv"] for op in ("instrument", "install", "push", "mkdir", "force-stop")) for call in calls),
+         "Ancestry of the pre-marker handoff lacks the exact read-only checksum timeout")
+
+
+def retry_pre_marker_checksum(adb, *argv, **options):
+    try:
+        return adb(*argv, **options)
+    except subprocess.TimeoutExpired:
+        direct_hash = len(argv) == 3 and argv[:2] == ("shell", "sha256sum")
+        private_hash = len(argv) == 5 and argv[:4] == ("shell", "run-as", APP, "sha256sum")
+        if not (direct_hash or private_hash):
+            raise
+        return adb(*argv, **(options | {"timeout": 30}))
 
 
 def verify_backup_death_control(anchor, guest, pair):
@@ -824,6 +848,7 @@ def run(args):
     retained_ancestry = None
     retained_pre_marker = None
     pre_marker_claim = None
+    pre_marker_latest_claim = None
     death_authority = CAPACITY_PASSED if before_marker else args.backup_death_retry or SETTINGS_COLD_MANIFEST
     death_operation = str(uuid.uuid4()) if args.backup_delivery_death or before_marker else None
     need(args.backup_death_retry is None or (death_operation and args.backup_death_retry == BACKUP_DIRECT_CONTROL_PASS),
@@ -848,7 +873,15 @@ def run(args):
             if pre_marker_handoff:
                 need(re.fullmatch(r"[a-f0-9]{64}", pre_marker_handoff) and previous == hashes,
                      "The pre-marker handoff is read-only and cannot replace either APK")
-                handoff = settings_run_anchors(predecessor, pre_marker_handoff)
+                if pre_marker_handoff == PRE_MARKER_READ_TIMEOUT:
+                    refusal = settings_run_anchors(predecessor, PRE_MARKER_READ_TIMEOUT)
+                    writer_pin = json.loads(refusal("artifacts.json"))["backupPreMarkerHandoff"]
+                    writer_path = raw.parent / "picker-adapter-library-tree-b0b27bd6debd"
+                    handoff = settings_run_anchors(writer_path, writer_pin)
+                    pre_marker_latest_claim = json.loads(refusal("claim.json"))
+                else:
+                    writer_pin = pre_marker_handoff
+                    handoff = settings_run_anchors(predecessor, writer_pin)
                 retained_pre_marker = verify_pre_marker_handoff(handoff, json.loads(spend_path.read_bytes()), args.guest, previous)
                 pre_marker_claim = json.loads(handoff("claim.json"))
                 death_operation = retained_pre_marker[2]
@@ -882,6 +915,9 @@ def run(args):
             need(prior_baseline == json.loads(recovered("death-before-reopen.json")) and prior_baseline["operation"] == prior_op and
                  prior_attempt["destination"] == prior_target.rsplit("/", 1)[1], "The earlier death recovery lost its exact baseline")
             protected_death_backup = prior_target, prior_fixture, prior_generation, prior_op, prior_baseline
+            if pre_marker_latest_claim:
+                verify_pre_marker_read_refusal(refusal, args.guest, previous, writer_pin,
+                                               f"{prior_target}/objects/{synthetic_scan()[0]}")
         if capacity_case:
             parents = {Path(file).resolve().parent for file in args.previous}
             need(len(parents) == 1, "Require the exact released pair from the cold ancestry run")
@@ -1045,12 +1081,18 @@ def run(args):
         if pre_marker_claim:
             current = run.owned()
             verify_completed_guest(pre_marker_claim, current)
-            need(current["ownership_history"][-1]["generation"] == pre_marker_claim["generation"],
+            if pre_marker_latest_claim:
+                verify_completed_guest(pre_marker_latest_claim, current)
+            latest = pre_marker_latest_claim or pre_marker_claim
+            need(current["ownership_history"][-1]["generation"] == latest["generation"],
                  "Read-only pre-marker handoff is no longer the immediately preceding run; refusing another cold launch")
         target = [ns["ADB"], "-s", run.serial]
 
-        def adb(*argv, **options):
+        def adb_once(*argv, **options):
             return run.command([*target, *argv], **options)
+
+        def adb(*argv, **options):
+            return retry_pre_marker_checksum(adb_once, *argv, **options) if pre_marker_handoff else adb_once(*argv, **options)
 
         def check_protected_death_backup():
             prior_target, prior_fixture, prior_generation, prior_op, prior_baseline = protected_death_backup
