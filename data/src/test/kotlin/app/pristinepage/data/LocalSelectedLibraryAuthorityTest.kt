@@ -9,6 +9,7 @@ import app.pristinepage.data.library.LibraryGeneration
 import app.pristinepage.data.library.LibraryObjectTransfer.ObjectId
 import app.pristinepage.data.library.LocalSelectedLibraryAuthority
 import java.io.IOException
+import kotlin.coroutines.cancellation.CancellationException
 import org.junit.Rule
 import org.junit.rules.TemporaryFolder
 import kotlin.test.Test
@@ -50,13 +51,24 @@ class LocalSelectedLibraryAuthorityTest {
         assertEquals(LocalSelectedLibraryAuthority.Selected.Default(initial), writer.read())
     }
 
-    @Test fun missingVerificationIdentityDoesNotFallBackToDefaultAfterReopen() {
+    @Test fun missingGrantDoesNotFallBackToDefaultAfterReopen() {
         val root = roots.newFolder().canonicalFile
         val writer = LocalSelectedLibraryAuthority(root, sync)
         writer.initializeDefault(initial)
         val next = Selection(Location.Folder(grant.grantId, generation.id), Identity(generation.libraryId, 2))
         val published = writer.chooseFolder(initial, next, grant, generation)
         check(root.resolve("folder-grants").resolve(grant.grantId).delete())
+        val refused = assertIs<LocalSelectedLibraryAuthority.Selected.Reconnect>(LocalSelectedLibraryAuthority(root, sync).read())
+        assertEquals(published, refused.selection)
+    }
+
+    @Test fun missingGenerationDoesNotFallBackToDefaultAfterReopen() {
+        val root = roots.newFolder().canonicalFile
+        val writer = LocalSelectedLibraryAuthority(root, sync)
+        writer.initializeDefault(initial)
+        val next = Selection(Location.Folder(grant.grantId, generation.id), Identity(generation.libraryId, 2))
+        val published = writer.chooseFolder(initial, next, grant, generation)
+        check(root.resolve("folder-verifications").resolve("${grant.grantId}-${generation.id}").delete())
         val refused = assertIs<LocalSelectedLibraryAuthority.Selected.Reconnect>(LocalSelectedLibraryAuthority(root, sync).read())
         assertEquals(published, refused.selection)
     }
@@ -82,5 +94,37 @@ class LocalSelectedLibraryAuthorityTest {
         val next = Selection(Location.Folder(grant.grantId, generation.id), Identity(generation.libraryId, 2))
         assertFailsWith<IOException> { failing.chooseFolder(initial, next, grant, generation) }
         assertEquals(LocalSelectedLibraryAuthority.Selected.Default(initial), good.read())
+    }
+
+    @Test fun cancellationAfterSupportRecordsAreStagedDoesNotChangeThePointer() {
+        val root = roots.newFolder().canonicalFile
+        val good = LocalSelectedLibraryAuthority(root, sync)
+        good.initializeDefault(initial)
+        val next = Selection(Location.Folder(grant.grantId, generation.id), Identity(generation.libraryId, 2))
+        val support = root.resolve("folder-verifications").resolve("${grant.grantId}-${generation.id}")
+        assertFailsWith<CancellationException> {
+            good.chooseFolder(initial, next, grant, generation) {
+                if (support.exists()) throw CancellationException("Canceled before publication")
+            }
+        }
+        assertEquals(LocalSelectedLibraryAuthority.Selected.Default(initial), LocalSelectedLibraryAuthority(root, sync).read())
+    }
+
+    @Test fun failedPointerAcknowledgementCanBeReconciledOnlyAsTheExactPublishedFolder() {
+        val root = roots.newFolder().canonicalFile
+        val good = LocalSelectedLibraryAuthority(root, sync)
+        good.initializeDefault(initial)
+        val pointer = root.resolve("active-library")
+        val before = pointer.readBytes().toList()
+        val failing = LocalSelectedLibraryAuthority(root, DirectorySync { pointer.readBytes().toList() == before })
+        val next = Selection(Location.Folder(grant.grantId, generation.id), Identity(generation.libraryId, 2))
+        assertFailsWith<IOException> { failing.chooseFolder(initial, next, grant, generation) }
+        assertFailsWith<IOException> { failing.read() }
+        val reopened = assertIs<LocalSelectedLibraryAuthority.Selected.Folder>(good.read())
+        assertEquals(next.identity, reopened.selection.identity)
+        assertEquals(grant, reopened.grant)
+        assertEquals(generation, reopened.expectedGeneration)
+        assertFailsWith<IOException> { good.chooseFolder(initial, next, grant, generation) }
+        assertEquals(reopened, good.read())
     }
 }
