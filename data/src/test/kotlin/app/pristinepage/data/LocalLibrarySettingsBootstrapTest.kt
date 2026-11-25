@@ -16,6 +16,12 @@ class LocalLibrarySettingsBootstrapTest {
     @get:Rule val roots = TemporaryFolder()
     private val sync = DirectorySync { true }
 
+    @Test fun readingOnlyAnExistingSelectionDoesNotCreateDefaultSettings() {
+        val files = roots.newFolder().canonicalFile
+        assertEquals(null, LocalLibrarySettingsBootstrap(files, sync).openExisting())
+        assertEquals(emptyList(), files.list().orEmpty().toList())
+    }
+
     @Test fun firstOpenAssignsOnePersistentDefaultActivation() {
         val files = roots.newFolder().canonicalFile
         val initial = assertIs<LocalSelectedLibraryAuthority.Selected.Default>(LocalLibrarySettingsBootstrap(files, sync).open().read())

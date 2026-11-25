@@ -76,7 +76,22 @@ class LibraryFolderFilesJourneyTest {
         lateinit var context: Context
         lateinit var spool: File
         lateinit var pointer: File
-        verifyJourney { resolver, tree, _, selected, scratch ->
+        verifyJourney(revokeAfterProbe = { tree ->
+            val app = InstrumentationRegistry.getInstrumentation().targetContext.applicationContext
+            val retained = pointer.readBytes()
+            val late = assertThrows(RepositoryFailure::class.java) {
+                runBlocking {
+                    AndroidLibraryStartup(context).useSelectedCatalog(spool) { _, catalog ->
+                        assertEquals(1, catalog.list(null, 2).size)
+                        app.contentResolver.releasePersistableUriPermission(tree, Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                        "Unpublishable after grant loss"
+                    }
+                }
+            }
+            assertEquals("library_reconnect_required", late.error.safeMessageKey)
+            assertTrue(retained.contentEquals(pointer.readBytes()))
+            assertTrue(spool.list().orEmpty().isEmpty())
+        }) { resolver, tree, _, selected, scratch ->
             val files = File(scratch, "selection-fixture").apply { check(mkdir()) }
             val app = InstrumentationRegistry.getInstrumentation().targetContext.applicationContext
             context = object : ContextWrapper(app) {
@@ -84,6 +99,11 @@ class LibraryFolderFilesJourneyTest {
                 override fun getFilesDir(): File = files
             }
             spool = File(files, "verify").apply { check(mkdir()) }
+            val notSelected = assertThrows(RepositoryFailure::class.java) {
+                runBlocking { AndroidLibraryStartup(context).useSelectedCatalog(spool) { _, _ -> error("Unexpected selection") } }
+            }
+            assertEquals("library_folder_not_selected", notSelected.error.safeMessageKey)
+            assertEquals(listOf("verify"), files.list().orEmpty().toList())
             val settings = File(files, "library-settings").apply { check(mkdir()) }
             val markerDir = File(settings, "folder-verifications").apply { check(mkdir()) }
             val grantDir = File(settings, "folder-grants").apply { check(mkdir()) }
@@ -118,13 +138,16 @@ class LibraryFolderFilesJourneyTest {
                         assertFalse(files.walkTopDown().any { it.name == "original.bin" })
                     }
                 }
-                AndroidLibraryStartup(context).useSelectedCatalog(spool) { _, catalog ->
-                    pointer.writeBytes(checksummed("pristinepage-active-library-v1\n${selected.libraryId}\n3\n-\n-\n"))
-                    try {
-                        val obsolete = runCatching { catalog.load(album) }.exceptionOrNull() as RepositoryFailure
-                        assertEquals("library_reconnect_required", obsolete.error.safeMessageKey)
-                    } finally { selectWith(marker) }
-                }
+                val stale = runCatching {
+                    AndroidLibraryStartup(context).useSelectedCatalog(spool) { _, catalog ->
+                        pointer.writeBytes(checksummed("pristinepage-active-library-v1\n${selected.libraryId}\n3\n-\n-\n"))
+                        try {
+                            val obsolete = runCatching { catalog.load(album) }.exceptionOrNull() as RepositoryFailure
+                            assertEquals("library_reconnect_required", obsolete.error.safeMessageKey)
+                        } finally { selectWith(marker) }
+                    }
+                }.exceptionOrNull() as RepositoryFailure
+                assertEquals("library_reconnect_required", stale.error.safeMessageKey)
                 val wrong = marker.copyOf()
                 wrong[wrong.lastIndex - 1] = if (wrong[wrong.lastIndex - 1] == '0'.code.toByte()) '1'.code.toByte() else '0'.code.toByte()
                 selectWith(wrong)
@@ -176,6 +199,7 @@ class LibraryFolderFilesJourneyTest {
 
     private fun verifyJourney(
         probeWrite: Boolean = false,
+        revokeAfterProbe: ((Uri) -> Unit)? = null,
         probe: ((ContentResolver, Uri, AndroidLibraryTreeRead, AndroidLibraryTreeRead.Verified, File) -> Unit)? = null,
     ) {
         val instrumentation = InstrumentationRegistry.getInstrumentation()
@@ -278,17 +302,22 @@ class LibraryFolderFilesJourneyTest {
             }
             assertEquals("Cancellation must prevent the next chunk from reaching the sink", 1, canceledWrites)
             val observation = probe?.let { runCatching { it(app.contentResolver, uri, AndroidLibraryTreeRead(app, scratch), again, scratch) } }
-            var writes = 0
-            val disposable = onWrite { length ->
-                if (++writes == 1) {
-                    assertTrue("Revocation must occur before the entire original is copied", length in 1 until bytes.size())
-                    app.contentResolver.releasePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            if (revokeAfterProbe != null) {
+                observation?.getOrThrow()
+                revokeAfterProbe(uri)
+            } else {
+                var writes = 0
+                val disposable = onWrite { length ->
+                    if (++writes == 1) {
+                        assertTrue("Revocation must occur before the entire original is copied", length in 1 until bytes.size())
+                        app.contentResolver.releasePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                    }
                 }
+                assertThrows(IOException::class.java) {
+                    runBlocking { AndroidLibraryTreeRead(app, scratch).copyOriginal(again, fixtureBlob, disposable) }
+                }
+                assertTrue("The probe must revoke from an in-progress stream, not at admission", writes > 0)
             }
-            assertThrows(IOException::class.java) {
-                runBlocking { AndroidLibraryTreeRead(app, scratch).copyOriginal(again, fixtureBlob, disposable) }
-            }
-            assertTrue("The probe must revoke from an in-progress stream, not at admission", writes > 0)
             assertEquals(before, existing())
             assertThrows(IOException::class.java) { runBlocking { AndroidLibraryTreeRead(app, scratch).verify(uri, first) } }
             val afterRevocation = ByteArrayOutputStream()

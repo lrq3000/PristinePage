@@ -12,6 +12,19 @@ import kotlinx.coroutines.yield
 import org.junit.Test
 
 class LibraryWorkingCatalogAccessTest {
+    @Test fun anObservedLossPermanentlyInvalidatesTheWorkingScope() = runTest {
+        var current = false
+        val refused = IOException("The selection changed")
+        val gate = LibraryWorkingCatalogAccess {
+            if (!current) throw refused
+        }
+        assertEquals(refused, assertFailsWith<IOException> { gate.requireCurrent() })
+        current = true
+        assertEquals(refused, assertFailsWith<IOException> { gate.read { error("A lost scope must not revive") } })
+        assertEquals(refused, assertFailsWith<IOException> { gate.requireCurrent() })
+        gate.retire {}
+    }
+
     @Test fun aSuccessorPublishedDuringAnAdmittedReadPreventsStaleRowsFromBeingReturned() = runTest {
         var current = true
         val gate = LibraryWorkingCatalogAccess {

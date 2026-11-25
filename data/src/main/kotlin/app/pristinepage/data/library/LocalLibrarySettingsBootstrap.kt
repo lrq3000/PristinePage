@@ -19,13 +19,17 @@ internal class LocalLibrarySettingsBootstrap(
     filesDirectory: File, private val sync: DirectorySync = PlatformDirectorySync,
 ) {
     private val files = filesDirectory.absoluteFile.toPath()
+    private val settings = files.resolve("library-settings")
+
+    /** Selected-folder admission is read-only, including when no durable settings root exists. */
+    fun openExisting(): LocalSelectedLibraryAuthority? = synchronized(INITIALIZATION) {
+        requireFilesDirectory()
+        if (Files.notExists(settings, NOFOLLOW_LINKS)) null else readExisting(settings)
+    }
 
     /** Cooperating Android callers share this process lane. A multiprocess consumer would need the same exclusive setup lane across processes. */
     fun open(): LocalSelectedLibraryAuthority = synchronized(INITIALIZATION) {
-        if (files.toRealPath() != files || !Files.isDirectory(files, NOFOLLOW_LINKS)) {
-            throw IOException("The private library settings parent is unavailable")
-        }
-        val settings = files.resolve("library-settings")
+        requireFilesDirectory()
         if (!Files.notExists(settings, NOFOLLOW_LINKS)) return@synchronized readExisting(settings)
         forceFilesAndParent()
         try {
@@ -48,6 +52,12 @@ internal class LocalLibrarySettingsBootstrap(
         // After invoking the move, a failure is uncertain. Keep the stage (if any) and never remove the final root.
         Files.move(stage, settings, ATOMIC_MOVE)
         readExisting(settings)
+    }
+
+    private fun requireFilesDirectory() {
+        if (files.toRealPath() != files || !Files.isDirectory(files, NOFOLLOW_LINKS)) {
+            throw IOException("The private library settings parent is unavailable")
+        }
     }
 
     private fun retireUnpublished(stage: Path) {

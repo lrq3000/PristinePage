@@ -53,9 +53,9 @@ class AndroidLibraryTreeRead(context: Context, private val scratchDirectory: Fil
     }
 
     /** A durable private selection supplies the full expected marker; reject a different tip before projecting rows or opening originals. */
-    internal suspend fun verifyExact(tree: Uri, expected: LibraryGeneration?): Verified =
-        readTree(tree) { read, checkpoint ->
-            read.read(reader.schemaVersion, expected, expected, MAX_TREE_ORIGINAL_BYTES) { generation, file ->
+    private suspend fun verifyExact(tree: Uri, expected: LibraryGeneration?, scratch: File = scratchDirectory): Verified =
+        readTree(tree, scratch) { read, checkpoint ->
+            try { read.read(reader.schemaVersion, expected, expected, MAX_TREE_ORIGINAL_BYTES) { generation, file ->
                 reader.read(file) { sql ->
                     val catalog = LibraryPortableCatalogProjection(sql, checkpoint = checkpoint).snapshot()
                     val originals = catalog.originals.associate { it.sourceBlobId to ObjectId(it.byteSha256, it.byteCount) }
@@ -64,7 +64,9 @@ class AndroidLibraryTreeRead(context: Context, private val scratchDirectory: Fil
                         originals.values,
                     )
                 }
-            }.value
+            }.value } catch (_: UnexpectedLibraryTip) {
+                throw LibraryTreeUnavailable("Unexpected library tip during catalog admission")
+            }
         }
 
     /** Stream one original into caller-owned disposable output. The caller must discard that output on any failure and verify closure before using it. */
@@ -80,17 +82,20 @@ class AndroidLibraryTreeRead(context: Context, private val scratchDirectory: Fil
     /** Rebuild a private Room catalog without importing original bytes. This detached read cannot activate a library or commit an edit. */
     suspend fun <T : Any> openWorkingCatalog(
         verified: Verified, block: suspend CoroutineScope.(DocumentCatalog) -> T,
-    ): T = useWorkingCatalog(verified, {}, block)
+    ): T = useWorkingCatalog({ verified }, {}, block)
 
-    internal suspend fun <T : Any> useWorkingCatalog(
-        verified: Verified, confirmSelection: suspend () -> Unit, block: suspend CoroutineScope.(DocumentCatalog) -> T,
+    internal suspend fun <T : Any> useSelectedWorkingCatalog(
+        tree: Uri, generation: LibraryGeneration, confirmSelection: suspend () -> Unit,
+        block: suspend CoroutineScope.(DocumentCatalog) -> T,
+    ): T = useWorkingCatalog({ attempt -> verifyExact(tree, generation, attempt) }, confirmSelection, block)
+
+    private suspend fun <T : Any> useWorkingCatalog(
+        verify: suspend (File) -> Verified, confirmSelection: suspend () -> Unit, block: suspend CoroutineScope.(DocumentCatalog) -> T,
     ): T = withContext(Dispatchers.IO) {
-        val selected = requireVerifiedTree(verified)
         if (!WORKING.tryLock()) throw IOException("A library working catalog is already open")
         try {
             val checkpoint = { coroutineContext.ensureActive() }
             val scratch = canonicalLibraryDirectory(scratchDirectory, app.filesDir.toPath().toRealPath())
-            val tree = Uri.parse(selected.tree)
             if (scratch.toFile().usableSpace < 3 * MAX_PORTABLE_BYTES) throw IOException("Not enough private space for a library working catalog")
             Files.newDirectoryStream(scratch, "library-working-*").use {
                 if (it.asSequence().take(4).count() >= 4) throw IOException("Retained working catalogs need attention")
@@ -101,26 +106,32 @@ class AndroidLibraryTreeRead(context: Context, private val scratchDirectory: Fil
             val stage = RoomLibraryCatalogStage(app)
             var mayRetire = true
             try {
+                confirmSelection()
+                val selected = requireVerifiedTree(verify(attempt.toFile()))
+                val tree = Uri.parse(selected.tree)
                 val snapshot = readTree(tree, attempt.toFile()) { read, _ ->
-                    read.read(reader.schemaVersion, selected.generation, selected.generation) { _, catalog ->
+                    try { read.read(reader.schemaVersion, selected.generation, selected.generation) { _, catalog ->
                         reader.read(catalog) { sql ->
                             // The exact proof already admitted membership. This graph owns no payload; each original read authenticates bytes anew.
                             LibraryBackupRead.Projection(LibraryPortableCatalogProjection(sql, checkpoint = checkpoint).snapshot(), emptyList())
                         }
-                    }.value
+                    }.value } catch (_: UnexpectedLibraryTip) {
+                        throw LibraryTreeUnavailable("The selected library generation changed")
+                    }
                 }
                 mayRetire = false
-                stage.write(snapshot, file)
-                mayRetire = true
+                stage.write(snapshot, file, acknowledgeClose = { mayRetire = true })
                 reader.verifyStagedProjection(file, snapshot, checkpoint)
-                suspend fun requireCurrent() {
-                    readTree(tree, attempt.toFile()) { read, _ -> read.requireCurrent(selected.generation) }
+                val access = LibraryWorkingCatalogAccess {
+                    readTree(tree, attempt.toFile()) { read, _ ->
+                        try { read.requireCurrent(selected.generation) }
+                        catch (_: IOException) { throw LibraryTreeUnavailable("The selected library catalog changed or is unavailable") }
+                    }
                     confirmSelection()
                 }
-                requireCurrent()
                 mayRetire = false
-                val result = stage.useCatalog(file, ::requireCurrent, acknowledgeClose = { mayRetire = true }, block)
-                requireCurrent()
+                val result = stage.useCatalog(file, access, acknowledgeClose = { mayRetire = true }, block)
+                access.requireCurrent()
                 result
             } finally {
                 // Only close-acknowledged, attempt-owned working files are retired; uncertain attempts consume the bounded private budget.
@@ -144,7 +155,7 @@ class AndroidLibraryTreeRead(context: Context, private val scratchDirectory: Fil
         if (!ATTEMPT.tryLock()) throw IOException("A library folder verification is already in progress")
         try {
             withLibraryProviderSignal { signal ->
-                val root = localTreeDocumentId(tree) ?: throw IOException("This folder provider is not supported")
+                val root = localTreeDocumentId(tree) ?: throw LibraryTreeUnavailable("This folder provider is not supported")
                 val scratch = canonicalLibraryDirectory(scratchLocation, app.filesDir.toPath().toRealPath())
                 val backend = Backend(app, tree, root, scratch, signal, checkpoint)
                 backend.requireRoot()
@@ -170,7 +181,7 @@ class AndroidLibraryTreeRead(context: Context, private val scratchDirectory: Fil
             checkAccess()
             val rows = query(document(rootId), 1, checkpoint)
             if (rows.singleOrNull()?.let { it.id == rootId && it.directory } != true) {
-                throw IOException("The selected library root could not be verified")
+                throw LibraryTreeUnavailable("The selected library root could not be verified")
             }
         }
 
@@ -201,11 +212,11 @@ class AndroidLibraryTreeRead(context: Context, private val scratchDirectory: Fil
             val item = admitted[id] ?: throw IOException("The library file was not enumerated in the selected tree")
             if (item.entry.directory) throw IOException("The enumerated library entry is not a file")
             val descriptor = try { resolver.openAssetFileDescriptor(document(id), "r", signal) } catch (_: SecurityException) {
-                throw IOException("The selected library file is unavailable")
+                throw LibraryTreeUnavailable("The selected library file is unavailable")
             } catch (_: OperationCanceledException) {
                 checkpoint()
                 throw IOException("The selected library file was canceled")
-            } ?: throw IOException("The selected library file is unavailable")
+            } ?: throw LibraryTreeUnavailable("The selected library file is unavailable")
             try {
                 checkAccess()
                 return descriptor.createInputStream()
@@ -224,9 +235,9 @@ class AndroidLibraryTreeRead(context: Context, private val scratchDirectory: Fil
                     LibraryTreeProviderRows.read(it, maximum, checkpoint)
                 }
             } catch (_: SecurityException) {
-                throw IOException("The selected library directory is unavailable")
+                throw LibraryTreeUnavailable("The selected library directory is unavailable")
             } catch (_: IllegalArgumentException) {
-                throw IOException("The selected library directory is unavailable")
+                throw LibraryTreeUnavailable("The selected library directory is unavailable")
             } catch (_: OperationCanceledException) {
                 checkpoint()
                 throw IOException("The selected library directory query was canceled")
@@ -238,7 +249,7 @@ class AndroidLibraryTreeRead(context: Context, private val scratchDirectory: Fil
         private fun checkAccess() {
             checkpoint()
             if (!hasTrustedLocalProvider(app) || !hasExactReadGrant(app, tree)) {
-                throw IOException("Reconnect the selected library folder")
+                throw LibraryTreeUnavailable("Reconnect the selected library folder")
             }
         }
     }
@@ -274,6 +285,9 @@ class AndroidLibraryTreeRead(context: Context, private val scratchDirectory: Fil
         }
     }
 }
+
+/** Known loss of provider identity or access; private scratch and callback exceptions are not this state. */
+internal class LibraryTreeUnavailable(message: String) : IOException(message)
 
 /** Register before calling the synchronous resolver. The caller owns any returned descriptor while checking cancellation. */
 internal suspend fun <T> withLibraryProviderSignal(block: (CancellationSignal) -> T): T =

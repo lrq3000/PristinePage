@@ -20,9 +20,10 @@ import kotlinx.coroutines.coroutineScope
 
 /** Fresh, bounded, closed catalog writer for an exclusively owned stage. Never opens the portable input with Room. */
 internal class RoomLibraryCatalogStage(private val application: Context) {
-    suspend fun write(snapshot: RoomLibrarySavedCatalog.Snapshot, file: File): Int {
+    suspend fun write(snapshot: RoomLibrarySavedCatalog.Snapshot, file: File, acknowledgeClose: () -> Unit = {}): Int {
         if (!Files.notExists(file.toPath(), NOFOLLOW_LINKS)) throw IOException("Library staging catalog already exists")
         val stage = database(file)
+        var primary: Throwable? = null
         try {
             val sql = stage.openHelper.writableDatabase
             sql.query("PRAGMA journal_mode=DELETE").use {
@@ -37,16 +38,19 @@ internal class RoomLibraryCatalogStage(private val application: Context) {
             }
             RoomLibrarySavedCatalog(stage).writeFresh(snapshot)
             return sql.version
-        } finally { stage.close() }
+        } catch (failure: Throwable) {
+            primary = failure
+            throw failure
+        } finally { close(stage, primary, acknowledgeClose) }
     }
 
     /** The caller verified this closed, app-built stage. Only structured metadata reads are exposed, not Room or local writes. */
     suspend fun <T : Any> useCatalog(
-        file: File, confirmAccess: suspend () -> Unit, acknowledgeClose: () -> Unit,
+        file: File, access: LibraryWorkingCatalogAccess, acknowledgeClose: () -> Unit,
         block: suspend CoroutineScope.(DocumentCatalog) -> T,
     ): T {
         val stage = database(file)
-        val access = LibraryWorkingCatalogAccess(confirmAccess)
+        var primary: Throwable? = null
         try {
             if (stage.openHelper.readableDatabase.path != file.path) throw IOException("Working catalog path mismatch")
             val catalog = RoomDocumentCatalog(RoomMetadataAccess(stage), stage.catalog())
@@ -58,13 +62,26 @@ internal class RoomLibraryCatalogStage(private val application: Context) {
                 override suspend fun activeImport(documentId: DocumentId) =
                     access.read { catalog.activeImport(documentId) }
             }
-            return coroutineScope { block(scoped) }
-        } finally {
-            access.retire {
-                stage.close()
-                acknowledgeClose()
+            return coroutineScope {
+                access.requireCurrent()
+                block(scoped)
             }
+        } catch (failure: Throwable) {
+            primary = failure
+            throw failure
+        } finally {
+            access.retire { close(stage, primary, acknowledgeClose) }
         }
+    }
+
+    private fun close(stage: PristineDatabase, primary: Throwable?, acknowledgeClose: () -> Unit) {
+        try { stage.close() }
+        catch (failure: Exception) {
+            if (primary == null) throw failure
+            if (failure !== primary) primary.addSuppressed(failure)
+            return
+        }
+        acknowledgeClose()
     }
 
     private fun database(file: File): PristineDatabase {

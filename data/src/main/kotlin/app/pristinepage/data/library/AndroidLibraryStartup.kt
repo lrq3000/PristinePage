@@ -29,7 +29,7 @@ class AndroidLibraryStartup(context: Context) {
     private data class LoadedSelection(val authority: LocalSelectedLibraryAuthority, val selected: LocalSelectedLibraryAuthority.Selected)
 
     suspend fun requireDefaultActivation(): LibraryActivation {
-        val selected = readSelection().selected
+        val selected = checkNotNull(readSelection(allowBootstrap = true)).selected
         if (selected !is LocalSelectedLibraryAuthority.Selected.Default) reconnect()
         return selected.activation()
     }
@@ -38,30 +38,31 @@ class AndroidLibraryStartup(context: Context) {
     suspend fun <T : Any> useSelectedCatalog(
         scratchDirectory: File, block: suspend CoroutineScope.(LibraryActivation, DocumentCatalog) -> T,
     ): T {
-        val (authority, loaded) = readSelection()
+        val (authority, loaded) = readSelection(allowBootstrap = false) ?: folderNotSelected()
         val selected = when (val recorded = loaded) {
             is LocalSelectedLibraryAuthority.Selected.Folder -> recorded
             is LocalSelectedLibraryAuthority.Selected.Reconnect -> reconnect()
-            is LocalSelectedLibraryAuthority.Selected.Default -> fail(OperationErrorCode.SOURCE_UNAVAILABLE, "library_folder_not_selected")
+            is LocalSelectedLibraryAuthority.Selected.Default -> folderNotSelected()
         }
         val reader = AndroidLibraryTreeRead(app, scratchDirectory)
-        val proof = try { reader.verifyExact(Uri.parse(selected.grant.exactUri), selected.expectedGeneration) }
-        catch (_: IOException) { reconnect() }
-        catch (_: DirectoryIteratorException) { reconnect() }
         suspend fun confirmSelection() = withContext(Dispatchers.IO) {
             val current = try { authority.read() }
             catch (_: IOException) { reconnect() }
             catch (_: DirectoryIteratorException) { reconnect() }
             if (current != selected) reconnect()
         }
-        confirmSelection()
-        return reader.useWorkingCatalog(proof, ::confirmSelection) { catalog -> block(selected.activation(), catalog) }
+        return try {
+            reader.useSelectedWorkingCatalog(Uri.parse(selected.grant.exactUri), selected.expectedGeneration, ::confirmSelection) { catalog ->
+                block(selected.activation(), catalog)
+            }
+        } catch (_: LibraryTreeUnavailable) { reconnect() }
     }
 
-    private suspend fun readSelection(): LoadedSelection = withContext(Dispatchers.IO) {
+    private suspend fun readSelection(allowBootstrap: Boolean): LoadedSelection? = withContext(Dispatchers.IO) {
         coroutineContext.ensureActive()
         val selected = try {
-            val authority = LocalLibrarySettingsBootstrap(app.filesDir.canonicalFile).open()
+            val bootstrap = LocalLibrarySettingsBootstrap(app.filesDir.canonicalFile)
+            val authority = if (allowBootstrap) bootstrap.open() else bootstrap.openExisting() ?: return@withContext null
             LoadedSelection(authority, authority.read() ?: throw IOException("The initial library selection disappeared"))
         } catch (_: IOException) { selectionUnavailable() }
         catch (_: DirectoryIteratorException) { selectionUnavailable() }
@@ -73,6 +74,7 @@ class AndroidLibraryStartup(context: Context) {
         selection.identity.let { LibraryActivation(it.libraryId, it.activation) }
 
     private fun selectionUnavailable(): Nothing = fail(OperationErrorCode.STORAGE_FAILED, "library_selection_unavailable")
+    private fun folderNotSelected(): Nothing = fail(OperationErrorCode.SOURCE_UNAVAILABLE, "library_folder_not_selected")
     private fun reconnect(): Nothing = fail(OperationErrorCode.PERMISSION_LOST, "library_reconnect_required")
     private fun fail(code: OperationErrorCode, key: String): Nothing = throw RepositoryFailure(OperationError(code, true, key, null))
 }

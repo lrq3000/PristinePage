@@ -69,7 +69,7 @@ internal class LibraryBackupRead(
         val scratch = verifyScratch()
         val inventory = store.generationInventory(checkpoint)
         val tip = inventory.tip
-        if (expectedTip != null && tip != expectedTip) throw IOException("Unexpected library tip during catalog admission")
+        if (expectedTip != null && tip != expectedTip) throw UnexpectedLibraryTip()
         val selected = generation ?: tip
         inventory.requireExact(selected)
         if (selected.catalogSchema != expectedSchema || selected.catalog.byteCount > maximumCatalogBytes) {
@@ -119,3 +119,5 @@ internal class LibraryBackupRead(
 
     private fun openCatalog(tip: LibraryGeneration) = store.openCatalog(tip) ?: throw IOException("Library catalog is missing")
 }
+
+internal class UnexpectedLibraryTip : IOException("Unexpected library tip during catalog admission")
