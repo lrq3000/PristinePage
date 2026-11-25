@@ -72,6 +72,7 @@ SETTINGS_WITNESS_FILE = "files/library-settings-native-witness"
 SETTINGS_COMPLETED_MANIFEST = "cee6ac3fd210d2b36c64dff1b534830368b2677e5ea5b36b1555dc2a15c0029a"
 SETTINGS_COLD_MANIFEST = "ae398db885ea47ac131838a3011766e69d4984be224188b1a282ad8d5190adc5"
 BACKUP_DEATH_PICKER_FAILURE = "e5deb5f75e5e53dae04a8a655d6f9bfde2671e824876a155564a4323b3a156b0"
+BACKUP_MANUAL_CONTROL_FAILURE = "08fe10503d488aa4ec3775157a7d8b2690be375908cb2c7194def2dd6cf64002"
 UUID_TEXT = r"[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}"
 BACKUP_ORIGINAL = "ebd602840377a3b3cf763cb6828fee67861ff77c444e8fe5894457ef6d99a24d"
 OCR_ACTIVATION_CASES = tuple(f"app.pristinepage.ocr.OcrWorkManagerIntegrationTest#{method}" for method in (
@@ -558,7 +559,7 @@ def run(args):
     completed = None
     publication_claim = None
     pinned_cold_baseline = None
-    refused_death_destination = None
+    refused_death_destinations = []
     death_operation = str(uuid.uuid4()) if args.backup_delivery_death else None
     if args.previous:
         for package, file in zip(built, args.previous):
@@ -590,16 +591,27 @@ def run(args):
             completed, publication_claim = settings_completed_destination(original_run, SETTINGS_COMPLETED_MANIFEST, args.guest, pub_pair)
         if death_picker_case:
             parents = {Path(file).resolve().parent for file in args.previous}
-            need(len(parents) == 1 and previous[APP] == hashes[APP], "Require the exact retained failed death-witness pair")
-            failed_anchor = settings_run_anchors(parents.pop(), BACKUP_DEATH_PICKER_FAILURE)
+            need(len(parents) == 1 and previous[APP] == hashes[APP], "Require the exact retained failed navigation-control pair")
+            manual_anchor = settings_run_anchors(parents.pop(), BACKUP_MANUAL_CONTROL_FAILURE)
+            manual = json.loads(manual_anchor("artifacts.json"))
+            need(manual["guest"] == args.guest and json.loads(manual_anchor("outcomes.json")) ==
+                 {"passed": [], "failed": [BACKUP_DEATH_PICKER_CASE], "installedSha256": previous},
+                 "The retained manual navigation control is not the exact installed predecessor")
+            calls = [json.loads(line)["argv"] for line in manual_anchor("commands.jsonl").splitlines()]
+            targets = [call[i + 1] for call in calls for i, arg in enumerate(call[:-1])
+                       if arg == "libraryFixtureFolder" and BACKUP_DEATH_PICKER_CASE in call]
+            need(len(targets) == 1 and re.fullmatch(r"PristinePage-tree-[a-f0-9]{12}", targets[0]),
+                 "Could not recover the exact failed manual fixture")
+            refused_death_destinations.append((f"/sdcard/Documents/{targets[0]}", manual["fixture"]))
+            failed_anchor = settings_run_anchors(raw.parent / "picker-adapter-library-tree-9649cfde8d90", BACKUP_DEATH_PICKER_FAILURE)
             failed = json.loads(failed_anchor("artifacts.json"))
             attempted = json.loads(failed_anchor("backup-death-attempt.json"))
             need(failed["guest"] == args.guest and
-                 {package: failed["proof"][package]["sha256"] for package in previous} == previous and
+                 failed["proof"][APP]["sha256"] == hashes[APP] and
                  re.fullmatch(r"PristinePage-tree-[a-f0-9]{12}", attempted["destination"]) and
                  read_results(failed_anchor("backup-death-instrumentation.txt"), (BACKUP_DEATH_CASE,)) == ([], [BACKUP_DEATH_CASE]),
                  "The retained death attempt was not the exact failed chooser invocation")
-            refused_death_destination = f"/sdcard/Documents/{attempted['destination']}", failed["fixture"]
+            refused_death_destinations.append((f"/sdcard/Documents/{attempted['destination']}", failed["fixture"]))
         if args.settings_retry:
             parents = {Path(file).resolve().parent for file in args.previous}
             need(len(parents) == 1, "Settings cancel predecessor APKs must share the exact receipt")
@@ -668,8 +680,8 @@ def run(args):
             need(not death_operation or baseline == pinned_cold_baseline,
                  "The retained ordinary private backup no longer matches its pinned cold baseline")
             run.save(run.path("recovery-before.json"), baseline, durable=True)
-        if refused_death_destination:
-            verify_unchanged_settings_destination(adb, *refused_death_destination)
+        for refused in refused_death_destinations:
+            verify_unchanged_settings_destination(adb, *refused)
         for p, path in retained.items():
             flags = install_flags(p, installed[p], hashes[p], previous.get(TEST), previous.get(APP))
             if flags is not None:
@@ -757,7 +769,8 @@ def run(args):
             finally:
                 recheck_target(run, ns)
                 verify_unchanged_settings_destination(adb, guest_root, files)
-                verify_unchanged_settings_destination(adb, *refused_death_destination)
+                for refused in refused_death_destinations:
+                    verify_unchanged_settings_destination(adb, *refused)
             run.save(run.path("outcomes.json"), {"passed": all_passed, "failed": all_failed, "installedSha256": hashes}, durable=True)
             print(f"LDPlayer no-write picker/descriptor batch: {len(all_passed)} passed, {len(all_failed)} failed.", flush=True)
             return bool(all_failed)

@@ -401,7 +401,9 @@ class LibraryFolderFilesJourneyTest {
             membership + history.flatten() + undo
         }
 
-    private fun selectSettingsDestination(instrumentation: Instrumentation, picker: String, folder: String, selectFolder: Boolean = true) {
+    private fun selectSettingsDestination(instrumentation: Instrumentation, picker: String, folder: String,
+        selectFolder: Boolean = true, navigateFromRoot: Boolean = true,
+    ) {
         val affirmative = setOf("SELECT", "Select", "SÉLECTIONNER", "Sélectionner", "Use this folder", "USE THIS FOLDER", "Choose this folder")
         fun containsUnder(root: AccessibilityNodeInfo, text: String, within: String) =
             root.findByTextInFixture(text).any { node ->
@@ -455,6 +457,26 @@ class LibraryFolderFilesJourneyTest {
                 tap(instrumentation, control)
             }
         }
+        fun finishExactRoute() {
+            if (!selectFolder) {
+                await(instrumentation, picker, "exact destination before cancellation", ::atTarget)
+                // Back from nested directories can pop one level; callers verify cancellation of the entire chooser.
+                return
+            }
+            select("exact synthetic destination", affirmative, guard = ::atTarget)
+            // API 28 direct return was qualified separately. Do not authorize a second, unverified prompt.
+            val appPackage = instrumentation.targetContext.packageName
+            val deadline = SystemClock.uptimeMillis() + 12_000
+            while (SystemClock.uptimeMillis() < deadline) {
+                val root = instrumentation.uiAutomation.rootInActiveWindow
+                if (root?.packageName?.toString() == appPackage) return
+                if (root?.packageName?.toString() == picker &&
+                    unique(root, setOf("Allow", "ALLOW", "Autoriser", "AUTORISER")) != null) error("Unqualified additional Files confirmation")
+                SystemClock.sleep(125)
+            }
+            error("Files did not return after the one exact selection")
+        }
+        if (!navigateFromRoot) return finishExactRoute()
         val drawer = setOf("Show roots", "Afficher les répertoires racines")
         val options = setOf("More options", "Plus d'options", "Plus d’options")
         val showStorage = setOf("Show internal storage", "Aff. mémoire stockage interne")
@@ -514,23 +536,7 @@ class LibraryFolderFilesJourneyTest {
                 containsUnder(it, "Documents", "dropdown_breadcrumb")
             }
         }
-        if (!selectFolder) {
-            await(instrumentation, picker, "exact destination before cancellation", ::atTarget)
-            // Back from nested directories can pop one level; callers must verify and cancel the entire chooser.
-            return
-        }
-        select("exact synthetic destination", affirmative, guard = ::atTarget)
-        // API 28's direct return was qualified separately. Do not authorize an additional prompt without a separately verified destination binding.
-        val appPackage = instrumentation.targetContext.packageName
-        val deadline = SystemClock.uptimeMillis() + 12_000
-        while (SystemClock.uptimeMillis() < deadline) {
-            val root = instrumentation.uiAutomation.rootInActiveWindow
-            if (root?.packageName?.toString() == appPackage) return
-            if (root?.packageName?.toString() == picker &&
-                unique(root, setOf("Allow", "ALLOW", "Autoriser", "AUTORISER")) != null) error("Unqualified additional Files confirmation")
-            SystemClock.sleep(125)
-        }
-        error("Files did not return to Settings after the one exact selection")
+        finishExactRoute()
     }
 
     private fun AccessibilityNodeInfo.findByTextInFixture(text: String): List<AccessibilityNodeInfo> =
@@ -712,15 +718,13 @@ class LibraryFolderFilesJourneyTest {
         assertFalse(before.keys.any { it in exactFixtureTrees })
         // API 28 may expose filesDir through /data/user/0 rather than the canonical app-owned storage path.
         val scratch = File(app.filesDir.canonicalFile, "tree-read-${UUID.randomUUID()}").apply { check(mkdir()) }
-        val manualWritableRoute = backupDeath != null || backupDeathPickerOnly
-        val platform = LibraryFolderPickerContract(writable = manualWritableRoute)
+        val isolatedWritableRoute = backupDeath != null || backupDeathPickerOnly
+        val platform = LibraryFolderPickerContract(writable = isolatedWritableRoute)
         val result = AtomicReference<ActivityResult>()
         val receipt = CountDownLatch(1)
         val registration = compose.runOnUiThread {
             val activity = compose.activity
-            val intent = platform.createIntent(activity, Unit)
-            // The manual writable route follows the same launch contract as Settings, without a second initial navigation.
-            if (!manualWritableRoute) intent.putExtra(DocumentsContract.EXTRA_INITIAL_URI,
+            val intent = platform.createIntent(activity, Unit).putExtra(DocumentsContract.EXTRA_INITIAL_URI,
                 DocumentsContract.buildDocumentUri(requireNotNull(expected.authority), DocumentsContract.getTreeDocumentId(expected)))
             val launcher = activity.activityResultRegistry.register("library-files-native-witness", ActivityResultContracts.StartActivityForResult()) {
                 result.set(it)
@@ -731,9 +735,9 @@ class LibraryFolderFilesJourneyTest {
         }
         try {
             val picker = registration.first
-            if (manualWritableRoute) {
+            if (isolatedWritableRoute) {
                 compose.waitUntil(12_000) { instrumentation.uiAutomation.rootInActiveWindow?.packageName?.toString() == picker }
-                selectSettingsDestination(instrumentation, picker, folder, selectFolder = !backupDeathPickerOnly)
+                selectSettingsDestination(instrumentation, picker, folder, selectFolder = !backupDeathPickerOnly, navigateFromRoot = false)
                 if (backupDeathPickerOnly) {
                     cancelExactFiles(instrumentation, picker, app.packageName)
                     compose.waitUntil(10_000) { receipt.count == 0L }
