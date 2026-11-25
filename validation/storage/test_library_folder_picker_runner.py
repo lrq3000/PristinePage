@@ -12,12 +12,24 @@ from unittest.mock import patch
 
 from run_library_folder_picker_ldplayer import (
     check_fixture_root, read_backup_delivery_death, recheck_target, require_independent_manifests, select_backup_case, select_backup_death_picker_case, select_independent_roots, select_provider_capacity, select_settings_picker_case, select_settings_recovery_case, select_tree_ancestry, settings_completed_destination, spend_settings_retry, verify_released_independent_guest,
-    finish_pre_marker_outcome, independent_fixture_children, retry_pre_marker_checksum, verify_ancestry_cold_handoff, verify_ancestry_grant_refusal, verify_backup_death_control, verify_backup_death_intent, verify_backup_receipt_only, verify_pre_marker_handoff, verify_pre_marker_read_refusal, verify_settings_catalog, verify_settings_ocr, verify_settings_retry_evidence,
+    finish_pre_marker_outcome, independent_fixture_children, read_independent_grant_record, retry_pre_marker_checksum, verify_ancestry_cold_handoff, verify_ancestry_grant_refusal, verify_backup_death_control, verify_backup_death_intent, verify_backup_receipt_only, verify_pre_marker_handoff, verify_pre_marker_read_refusal, verify_settings_catalog, verify_settings_ocr, verify_settings_retry_evidence,
 )
 from run_local_ocr_guest import read_boot_serial
 
 
 class LibraryFolderPickerRunnerTest(unittest.TestCase):
+    def test_independent_cold_handoff_binds_exact_order_and_both_nested_paths(self):
+        folder = "PristinePage-tree-0123456789ab"
+        prefix = "content://com.android.externalstorage.documents/tree/"
+        rows = ["3948", prefix + f"home%3A{folder}%2FLibrary-Left-0123456789ab",
+                prefix + f"primary%3ADocuments%2F{folder}%2FLibrary-Right-0123456789ab",
+                prefix + f"home%3A{folder}", "d"*64]
+        self.assertEqual("3948", read_independent_grant_record("\n".join(rows) + "\n", folder))
+        for wrong in ([rows[0], rows[2], rows[1], *rows[3:]], [*rows[:2], rows[1], *rows[3:]],
+                      [*rows[:3], prefix + "home%3A", rows[4]], [*rows[:-1], "a"*65]):
+            with self.assertRaisesRegex(RuntimeError, "independent.*grant"):
+                read_independent_grant_record("\n".join(wrong) + "\n", folder)
+
     def test_independent_fixture_children_use_the_exact_attempt_nonce(self):
         self.assertEqual(("Library-Left-0123456789ab", "Library-Right-0123456789ab"),
                          independent_fixture_children("PristinePage-tree-0123456789ab"))
