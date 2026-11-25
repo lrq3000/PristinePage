@@ -25,6 +25,7 @@ import app.pristinepage.data.library.LibraryActivation
 import app.pristinepage.data.model.DocumentId
 import app.pristinepage.data.model.RepositoryFailure
 import app.pristinepage.data.model.SourceBlobId
+import app.pristinepage.image.decode.AndroidSourceInspector
 import app.pristinepage.library.LibraryFolderGrantHandoff
 import app.pristinepage.library.LibraryFolderPickerContract
 import java.io.ByteArrayOutputStream
@@ -37,9 +38,14 @@ import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicReference
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.awaitCancellation
+import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
+import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertThrows
@@ -284,10 +290,11 @@ class LibraryFolderFilesJourneyTest {
                 assertThrows(IOException::class.java) { runBlocking { destination.availableBytes(uri) } }
             } else if (exportBackup) runCatching {
                 val flag = Intent.FLAG_GRANT_WRITE_URI_PERMISSION
-                try { runBlocking { LibraryDefaultFolderExportProbe.verify(app, uri) { handoff.persistWrite(picked) } } }
-                finally {
+                val backup = try { runBlocking { LibraryDefaultFolderExportProbe.verify(app, uri) { handoff.persistWrite(picked) } } } finally {
                     if (existing()[uri.toString()]?.second == true) app.contentResolver.releasePersistableUriPermission(uri, flag)
                 }
+                try { reopenExportedChild(app, instrumentation, uri, backup, scratch) }
+                finally { backup.assertSourceUnchanged() }
             } else null
             val different = DocumentsContract.buildTreeDocumentUri(requireNotNull(uri.authority), "primary:Documents/${folder}-different")
             val wrongRoot = assertThrows(IOException::class.java) {
@@ -357,6 +364,101 @@ class LibraryFolderFilesJourneyTest {
             }
             val activePackage = instrumentation.uiAutomation.rootInActiveWindow?.packageName?.toString()
             if (activePackage == registration.first) instrumentalBack(instrumentation)
+        }
+    }
+
+    private fun reopenExportedChild(app: Context, instrumentation: Instrumentation, parent: Uri, backup: LibraryDefaultFolderExportProbe.Backup, scratch: File) {
+        val authority = requireNotNull(parent.authority)
+        val id = "${DocumentsContract.getTreeDocumentId(parent)}/${backup.receipt.folderName}"
+        val expected = DocumentsContract.buildTreeDocumentUri(authority, id)
+        val resolver = app.contentResolver
+        val before = resolver.persistedUriPermissions.associate { it.uri.toString() to (it.isReadPermission to it.isWritePermission) }
+        check(expected.toString() !in before)
+        val platform = LibraryFolderPickerContract()
+        val result = AtomicReference<ActivityResult>()
+        val received = CountDownLatch(1)
+        val registration = compose.runOnUiThread {
+            val activity = compose.activity
+            val intent = platform.createIntent(activity, Unit)
+                .putExtra(DocumentsContract.EXTRA_INITIAL_URI, DocumentsContract.buildDocumentUri(authority, id))
+            val launcher = activity.activityResultRegistry.register("library-backup-child-witness", ActivityResultContracts.StartActivityForResult()) {
+                result.set(it)
+                received.countDown()
+            }
+            launcher.launch(intent)
+            requireNotNull(intent.component).packageName to launcher
+        }
+        try {
+            val labels = setOf("SELECT", "Select", "SÉLECTIONNER", "Sélectionner", "Use this folder", "USE THIS FOLDER", "Choose this folder")
+            val choice = await(instrumentation, registration.first, "completed backup child") { root ->
+                root.hasText(backup.receipt.folderName) && root.hasText("catalogs") && root.hasText("generations") &&
+                    labels.any { root.find(it) != null }
+            }
+            tap(instrumentation, checkNotNull(labels.firstNotNullOfOrNull { choice.find(it) }))
+            if (!received.await(4, TimeUnit.SECONDS)) {
+                val confirmed = await(instrumentation, registration.first, "optional backup folder confirmation") { it.allowButton() != null }
+                tap(instrumentation, checkNotNull(confirmed.allowButton()))
+            }
+            assertTrue(received.await(10, TimeUnit.SECONDS))
+            val raw = checkNotNull(result.get())
+            val picked = platform.parseResult(raw.resultCode, raw.data) as LibraryFolderPickerContract.Picked
+            assertEquals(expected.toString(), picked.uri.toString())
+            assertEquals(expected, LibraryFolderGrantHandoff(app).persistRead(picked))
+            assertEquals(before + (expected.toString() to (true to false)),
+                resolver.persistedUriPermissions.associate { it.uri.toString() to (it.isReadPermission to it.isWritePermission) })
+            val reader = AndroidLibraryTreeRead(app, scratch)
+            val verified = runBlocking { reader.verify(expected) }
+            assertEquals(backup.receipt.libraryId, verified.libraryId)
+            assertEquals(backup.receipt.generationId, verified.generationId)
+            runBlocking {
+                reader.openWorkingCatalog(verified) { catalog ->
+                    val page = catalog.load(backup.album).pages.single()
+                    assertEquals(backup.page, page.pageId)
+                    assertEquals(backup.revision, page.recipeRevision)
+                }
+            }
+            var file: File? = null
+            val decoder = AndroidSourceInspector(ApplicationImageBudget.create(64))
+            runBlocking {
+                reader.withVerifiedOriginal(verified, backup.blob) {
+                    file = it
+                    assertArrayEquals(backup.original, it.readBytes())
+                    assertEquals(backup.inspection, decoder.inspect(it, backup.digest))
+                }
+            }
+            assertFalse(checkNotNull(file).exists())
+            runBlocking {
+                val entered = CompletableDeferred<File>()
+                val loan = launch {
+                    reader.withVerifiedOriginal(verified, backup.blob) {
+                        entered.complete(it)
+                        awaitCancellation()
+                    }
+                }
+                file = entered.await()
+                loan.cancelAndJoin()
+                assertTrue(loan.isCancelled)
+            }
+            assertFalse(checkNotNull(file).exists())
+            assertThrows(IOException::class.java) {
+                runBlocking {
+                    reader.withVerifiedOriginal(verified, backup.blob) {
+                        file = it
+                        assertEquals(backup.inspection, decoder.inspect(it, backup.digest))
+                        resolver.releasePersistableUriPermission(expected, Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                    }
+                }
+            }
+            assertFalse(checkNotNull(file).exists())
+            assertThrows(IOException::class.java) {
+                runBlocking { reader.withVerifiedOriginal(verified, backup.blob) { error("Revoked backup lent an original") } }
+            }
+            assertTrue(checkNotNull(scratch.list()).isEmpty())
+        } finally {
+            compose.runOnUiThread { registration.second.unregister() }
+            if (resolver.persistedUriPermissions.any { it.uri.toString() == expected.toString() && it.isReadPermission }) {
+                resolver.releasePersistableUriPermission(expected, Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            }
         }
     }
 

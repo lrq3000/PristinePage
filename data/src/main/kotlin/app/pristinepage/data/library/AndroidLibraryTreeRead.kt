@@ -6,6 +6,7 @@ import android.net.Uri
 import android.os.CancellationSignal
 import android.os.OperationCanceledException
 import android.provider.DocumentsContract
+import app.pristinepage.core.io.transferExactBytes
 import app.pristinepage.data.library.LibraryObjectTransfer.ObjectId
 import app.pristinepage.data.library.RoomLibraryCatalogReader.Companion.MAX_PORTABLE_BYTES
 import app.pristinepage.data.model.SourceBlobId
@@ -15,9 +16,12 @@ import java.io.IOException
 import java.io.InputStream
 import java.io.OutputStream
 import java.nio.file.Files
+import java.nio.file.LinkOption.NOFOLLOW_LINKS
 import java.nio.file.Path
+import java.nio.file.StandardOpenOption.READ
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.sync.Mutex
@@ -74,6 +78,31 @@ class AndroidLibraryTreeRead(context: Context, private val scratchDirectory: Fil
         val selected = requireVerifiedTree(verified)
         val id = selected.original(blob)
         readTree(Uri.parse(selected.tree)) { read, _ -> read.copyExactOriginal(selected.generation, id, output) }
+    }
+
+    /** Borrow the closed file read-only; the caller must finish all file-backed and native work and close every borrowed handle before the callback exits. Discard provisional decoder output on any failed revalidation, cleanup or canceled result delivery. */
+    suspend fun withVerifiedOriginal(
+        verified: Verified, blob: SourceBlobId, block: suspend CoroutineScope.(File) -> Unit,
+    ): Unit = withContext(Dispatchers.IO) {
+        val selected = requireVerifiedTree(verified)
+        val objectId = selected.original(blob)
+        if (!ORIGINAL.tryLock()) throw IOException("A library original is already being read")
+        try {
+            val checkpoint = { coroutineContext.ensureActive() }
+            val scratch = canonicalLibraryDirectory(scratchDirectory, app.filesDir.toPath().toRealPath())
+            if (scratch.toFile().usableSpace < objectId.byteCount + 16L * 1024) {
+                throw IOException("Not enough private space to read the selected original")
+            }
+            LibraryOriginalScratch(scratch).use(checkpoint, { copyOriginal(selected, blob, it) }) { file ->
+                Files.newInputStream(file.toPath(), READ, NOFOLLOW_LINKS).use {
+                    transferExactBytes(it, null, objectId.byteCount, objectId.sha256, checkpoint)
+                }
+                checkpoint()
+                coroutineScope { block(file) }
+                checkpoint()
+                readTree(Uri.parse(selected.tree)) { read, _ -> read.requireCurrent(selected.generation) }
+            }
+        } finally { ORIGINAL.unlock() }
     }
 
     private fun requireVerifiedTree(verified: Verified): VerifiedTree =
@@ -256,6 +285,7 @@ class AndroidLibraryTreeRead(context: Context, private val scratchDirectory: Fil
         // This caps one detached admission's cumulative provider I/O, not storage capacity or single-scan size.
         internal const val MAX_TREE_ORIGINAL_BYTES = 8L * 1024 * 1024 * 1024
         private val WORKING = Mutex()
+        private val ORIGINAL = Mutex()
 
         private fun hasExactReadGrant(app: Context, tree: Uri): Boolean =
             app.contentResolver.persistedUriPermissions.any { it.isReadPermission && it.uri.toString() == tree.toString() }

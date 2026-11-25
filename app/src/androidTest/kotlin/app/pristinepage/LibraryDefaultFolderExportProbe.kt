@@ -11,7 +11,12 @@ import app.pristinepage.core.recipe.GeometryRecipe
 import app.pristinepage.core.recipe.RecipeCodec
 import app.pristinepage.core.recipe.SourceBinding
 import app.pristinepage.data.model.IngestResult
+import app.pristinepage.data.model.DocumentId
+import app.pristinepage.data.model.PageId
 import app.pristinepage.data.model.SaveRecipeResult
+import app.pristinepage.data.model.SourceBlobId
+import app.pristinepage.data.model.SourceInspection
+import app.pristinepage.data.library.LibraryFolderExportReceipt
 import app.pristinepage.data.repository.SourceInput
 import java.io.ByteArrayInputStream
 import java.io.File
@@ -22,7 +27,18 @@ import org.junit.Assert.*
 
 /** The ordinary ingest and edit services, a real Files grant, and an independent read of the completed backup. */
 internal object LibraryDefaultFolderExportProbe {
-    suspend fun verify(app: Context, tree: Uri, persistWrite: () -> Uri) {
+    class Backup(
+        val receipt: LibraryFolderExportReceipt, val album: DocumentId, val page: PageId, val blob: SourceBlobId,
+        val original: ByteArray, val digest: String, val inspection: SourceInspection, val revision: Long,
+        private val originalFile: File, private val pointer: File, private val pointerBefore: ByteArray,
+    ) {
+        fun assertSourceUnchanged() {
+            assertArrayEquals(original, originalFile.readBytes())
+            assertArrayEquals(pointerBefore, pointer.readBytes())
+        }
+    }
+
+    suspend fun verify(app: Context, tree: Uri, persistWrite: () -> Uri): Backup {
         val isolated = File(app.filesDir.canonicalFile, "library-export-source-${UUID.randomUUID()}").apply { check(mkdir()) }
         val files = File(isolated, "files").apply { check(mkdir()) }
         val db = File(isolated, "databases").apply { check(mkdir()) }
@@ -103,6 +119,8 @@ internal object LibraryDefaultFolderExportProbe {
                 File(attempt, "export.complete").readText(Charsets.US_ASCII),
             )
             assertEquals(1, reads)
+            return Backup(backup, album, ingest.pageId, source.sourceBlobId, png, ingest.sourceByteHash, inspection,
+                saved.recipeRevision, source.file, defaultPointer, activeBefore)
         }
     }
 }
