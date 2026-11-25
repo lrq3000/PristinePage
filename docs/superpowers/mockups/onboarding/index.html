@@ -1,0 +1,565 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data:; connect-src 'none'; form-action 'none'; base-uri 'none'">
+<link rel="icon" href="data:,">
+<title>PristinePage — Three onboarding concepts</title>
+<style>
+:root{color-scheme:light;--ground:#e9ede4;--ink:#202e27;--quiet:#4d6055;--rule:#c7d0c4;--serif:Georgia,'Times New Roman',serif;--sans:'Segoe UI',system-ui,sans-serif}
+*{box-sizing:border-box}
+body{margin:0;color:var(--ink);background:radial-gradient(ellipse at 55% 8%,#f6f8ef,transparent 64%),var(--ground);font:15px/1.48 var(--sans)}
+button,input,select{font:inherit;color:inherit}
+button{cursor:pointer}
+button:disabled{cursor:default;opacity:.52}
+button:focus-visible,input:focus-visible,select:focus-visible,summary:focus-visible{outline:3px solid #b15d30;outline-offset:2px}
+svg{display:block}
+.ico{width:21px;height:21px;flex:none}
+.shell{max-width:1280px;margin:auto;padding:0 clamp(16px,4vw,58px) 14px}
+.mast{display:flex;justify-content:space-between;align-items:center;gap:12px;border-bottom:1px solid var(--rule);min-height:64px}
+.wordmark{display:flex;align-items:center;gap:10px;font-size:19px;letter-spacing:-.035em;font-weight:760}
+.mark{width:34px;height:34px}
+.mast small,.eyebrow,.step-title,.device-caption{text-transform:uppercase;letter-spacing:.14em;font-size:10px;font-weight:760}
+.mast small,.eyebrow,.device-caption{color:var(--quiet)}
+.studio{display:grid;grid-template-columns:minmax(210px,1fr) minmax(352px,430px) minmax(185px,.85fr);gap:clamp(22px,4vw,60px);align-items:start;margin:24px 0 0}
+.left,.right{padding-top:28px}
+.left h1{font:400 clamp(40px,4.5vw,68px)/.98 var(--serif);letter-spacing:-.072em;margin:12px 0 15px}
+.left p,.right p{color:var(--quiet);font-size:13px;margin:0 0 17px}
+.concepts{display:grid;gap:8px;margin-top:26px}
+.concept{display:grid;grid-template-columns:34px minmax(0,1fr) 12px;gap:10px;width:100%;min-height:58px;align-items:center;text-align:left;background:transparent;border:1px solid var(--rule);border-radius:12px;padding:8px 10px}
+.concept[aria-pressed=true]{background:#fafff3;border-color:#527261;box-shadow:0 1px 2px #2a4a3620}
+.concept strong,.concept small{display:block}
+.concept small{font-size:11px;color:var(--quiet)}
+.swatch{border-radius:8px;display:grid;place-items:center;aspect-ratio:1;background:#dce8d0;color:#214b35;font-weight:800}
+.concept[data-value=b] .swatch{background:#193735;color:#a9ead6}
+.concept[data-value=c] .swatch{background:#f2e3b5;color:#533601}
+.dot{width:8px;height:8px;border:1px solid #6f8274;border-radius:50%}
+.concept[aria-pressed=true] .dot{background:#285040;border-color:#285040}
+.right h2{font:400 32px/.98 var(--serif);letter-spacing:-.045em;margin:10px 0 12px}
+.chapter-list{list-style:none;padding:0;margin:8px 0 16px;border-top:1px solid var(--rule)}
+.chapter-list button{display:flex;align-items:center;gap:10px;background:none;border:0;border-bottom:1px solid var(--rule);text-align:left;width:100%;padding:8px 5px;min-height:43px;font-size:13px;color:var(--quiet)}
+.chapter-list button[aria-current=step]{color:#173d2e;font-weight:720;background:#f4f7ed}
+.chapter-list span{font:700 10px ui-monospace,monospace;letter-spacing:.06em}
+.reset{padding:8px 0;background:none;border:0;text-decoration:underline;text-underline-offset:4px;font-size:12px;font-weight:680}
+.device{width:100%;height:clamp(530px,calc(100dvh - 122px),800px);border:1px solid var(--outline);border-radius:33px;overflow:hidden;position:relative;display:flex;flex-direction:column;background:var(--bg);color:var(--text);isolation:isolate;box-shadow:0 28px 60px #19322a36,0 2px 9px #19322a20}
+.device,.device[data-theme=a]{--bg:#f8f8ef;--card:#fffdf4;--text:#182d24;--sub:#496055;--line:#d7dfd2;--outline:#879d8d;--acc:#244f3e;--on:#fffef2;--wash:#e2ebd3;--r:17px;--head:var(--serif);--art:#d9e5d2}
+.device[data-theme=b]{color-scheme:dark;--bg:#122320;--card:#1d322d;--text:#f0f7ee;--sub:#abd0c2;--line:#3a5d52;--outline:#37554c;--acc:#a9ead5;--on:#102721;--wash:#29483e;--r:12px;--head:var(--sans);--art:#182e28}
+.device[data-theme=c]{--bg:#fffaeb;--card:#fffdf5;--text:#292419;--sub:#63533a;--line:#e5d9b9;--outline:#aa9a74;--acc:#654713;--on:#fffbeb;--wash:#f5e7ba;--r:8px;--head:var(--sans);--art:#ecdfb9}
+.device-caption{display:flex;justify-content:space-between;gap:5px;margin:8px 3px 0;letter-spacing:.09em;font-size:9px}
+.appbar{display:flex;align-items:center;gap:9px;padding:9px 17px 7px;min-height:54px;flex:none;border-bottom:1px solid var(--line)}
+.appbar .mark{width:26px;height:26px}
+.appbar strong{font-size:14px;letter-spacing:-.022em}
+.appbar .step-title{margin-left:auto;color:var(--sub);white-space:nowrap;font-size:9px}
+.appbar button{margin-left:auto}
+.progress{height:3px;display:flex;gap:2px;background:var(--bg);flex:none}
+.progress[hidden]{display:none}
+.progress i{flex:1;background:var(--line)}
+.progress i.on{background:var(--acc)}
+.screen{flex:1;min-height:0;overflow:auto;overscroll-behavior:contain;scrollbar-width:thin;padding:17px 17px 19px;scrollbar-color:var(--outline) transparent}
+.screen h2{font:600 clamp(27px,3.6vw,39px)/1.02 var(--head);letter-spacing:-.055em;margin:0 0 9px;overflow-wrap:anywhere}
+[data-theme=a] .screen h2{font-weight:400}
+.screen p,.dialog p{margin:0 0 13px;color:var(--sub);font-size:13px}
+.screen .intro{font-size:14px}
+.screen h3,.dialog h3{font-size:14px;margin:0 0 6px;letter-spacing:-.012em}
+.screen h2:focus{outline:none}
+.device .bar{display:flex;align-items:center;gap:7px;padding:9px 13px max(10px,env(safe-area-inset-bottom));border-top:1px solid var(--line);flex:none}
+.bar .primary{margin-left:auto}
+.btn{min-height:44px;display:inline-flex;align-items:center;justify-content:center;gap:7px;border:1px solid var(--outline);background:var(--card);color:var(--text);border-radius:var(--r);padding:7px 10px;font-size:12px;font-weight:700;text-align:center}
+.btn .ico{width:17px;height:17px}
+.btn.primary{background:var(--acc);border-color:var(--acc);color:var(--on);padding-inline:13px}
+.btn.ghost{background:transparent;border-color:transparent}
+.btn[aria-pressed=true]{background:var(--wash);border-color:var(--acc)}
+.btn[aria-pressed=true]::before{content:'✓';font-weight:900}
+.btn:hover:not(:disabled){box-shadow:inset 0 0 0 1px currentColor}
+.btn.icon{padding:5px;width:44px;flex:none}
+.actions{display:flex;gap:6px;flex-wrap:wrap;margin:8px 0}
+.actions .btn{flex:1 1 auto}
+.core-list{list-style:none;margin:8px 0 0;padding:0}
+.core-list li,.setting{display:grid;grid-template-columns:28px minmax(0,1fr);align-items:start;gap:9px;border-top:1px solid var(--line);padding:7px 1px;font-size:12px;line-height:1.3}
+.core-list .ico,.setting>.ico{width:21px;height:21px;color:var(--acc);margin:1px 0}
+.core-list strong,.setting strong{display:block;color:var(--text);font-size:13px;margin-bottom:2px}
+.core-list span,.setting small{color:var(--sub);font-size:12px}
+.setting{width:100%;min-height:51px;text-align:left;color:var(--text);background:none;border:0;border-top:1px solid var(--line)}
+button.setting{grid-template-columns:26px minmax(0,1fr) 18px;align-items:center}
+button.setting:hover{background:var(--wash)}
+.setting .arrow{width:15px;height:15px}
+.art{margin:0 0 12px;border-radius:var(--r);overflow:hidden;background:var(--art);color:var(--acc)}
+.art svg{width:100%;height:auto}
+.a-cover{position:relative;background:#244f3e;color:#faffec;padding:13px 14px 11px;overflow:hidden;border-radius:19px}
+.a-cover h2{font-size:37px;color:#faffec;margin:0}
+.a-cover .art{margin:2px 0 0;background:transparent;border-radius:0}
+.a-cover .art svg{max-height:124px}
+.a-cover+.core-list li{padding-block:6px}
+.a-cover .cover-note{color:#e2ebd3;font-size:12px;margin:0}
+.b-cover{border-left:3px solid var(--acc);padding:1px 0 0 12px;margin-bottom:11px}
+.b-cover h2{font-weight:750}
+.b-cover p{margin-bottom:6px}
+.b-console{border:1px solid var(--outline);border-radius:var(--r);overflow:hidden}
+.b-console .preview{border-radius:0}
+.b-console .preview svg{max-height:176px}
+.readout{display:flex;align-items:center;justify-content:space-between;gap:8px;background:var(--card);border-top:1px solid var(--line);padding:6px 9px;font-size:10px;font-weight:730}
+.readout .status-led{color:var(--acc)}
+.c-cover .cover-index{display:grid;grid-template-columns:minmax(0,1fr) 90px;gap:10px;align-items:center;padding:11px 0;border-block:2px solid var(--text);margin-bottom:10px}
+.c-cover .cover-index h2{font-size:34px;margin:0}
+.c-cover .cover-index svg{width:100%;height:auto}
+.c-cover .core-list{counter-reset:promise}
+.c-cover .core-list li{counter-increment:promise;align-items:center}
+.c-cover .core-list li::before{content:'0' counter(promise);font:700 12px ui-monospace,monospace;color:var(--acc)}
+.c-cover .core-list .ico{display:none}
+.quick-link{min-height:44px;width:100%;display:flex;justify-content:space-between;align-items:center;text-align:left;gap:8px;border:0;border-bottom:1px solid var(--line);background:none;padding:6px 0;color:var(--acc);font-weight:700;font-size:13px}
+.callout{background:var(--wash);border-radius:var(--r);padding:9px 11px;margin:10px 0;color:var(--text);font-size:12px}
+.callout strong{display:block;margin-bottom:2px}
+.callout p{color:inherit;margin:2px 0 0;font-size:12px}
+.strip{display:flex;flex-wrap:wrap;gap:5px;margin:10px 0}
+.strip span{display:inline-flex;align-items:center;gap:4px;min-height:26px;border-radius:6px;background:var(--wash);padding:2px 6px;font-size:11px;font-weight:690}
+.preview{position:relative;color:#f8faef;background:#21362f;border-radius:var(--r);overflow:hidden}
+.preview svg{width:100%;height:auto;max-height:205px}
+.preview .frame-status{position:absolute;left:8px;bottom:8px;background:#182e26;color:#fff;padding:3px 6px;border-radius:5px;font-size:10px;font-weight:700}
+.preview-head{display:flex;justify-content:space-between;gap:8px;padding:7px 9px;background:var(--card);color:var(--text);font-size:11px;font-weight:650}
+.shutter{border-radius:50%;width:54px;min-height:54px;border:2px solid var(--acc);background:var(--wash);margin:0 3px;flex:0 0 54px!important}
+.shutter::after{content:'';width:27px;aspect-ratio:1;border-radius:50%;background:var(--acc)}
+.workflow{list-style:none;padding:0;margin:10px 0;display:grid;gap:7px}
+.workflow li{display:grid;grid-template-columns:27px 1fr;gap:8px;font-size:12px;color:var(--sub)}
+.workflow b{display:block;color:var(--text)}
+.workflow .nr{display:grid;place-items:center;width:24px;height:24px;color:var(--acc);background:var(--wash);border-radius:50%;font-weight:800}
+.ribbon{display:flex;flex-wrap:wrap;gap:5px;margin:8px 0}
+.ribbon .btn{flex:1;font-size:11px;flex-direction:column;gap:2px;min-height:46px;padding:4px}
+.ribbon .btn[aria-pressed=true]::before{display:none}
+.ribbon .btn[aria-pressed=true]{box-shadow:inset 0 -2px var(--acc)}
+.field{display:grid;gap:5px;margin:10px 0;font-size:12px;font-weight:750}
+.field input,.field select{appearance:auto;width:100%;padding:8px 10px;min-height:44px;border:1px solid var(--outline);border-radius:var(--r);color:var(--text);background:var(--card)}
+.langlist{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:5px}
+.lang{display:flex;align-items:center;gap:6px;min-height:44px;border:1px solid var(--line);background:var(--card);padding:4px 6px;border-radius:var(--r);font-size:12px}
+.lang:has(input:checked){border-color:var(--acc);background:var(--wash)}
+.lang input{accent-color:var(--acc);width:16px;height:16px;flex:none}
+.fields-title{display:flex;align-items:center;justify-content:space-between;gap:6px;margin:12px 0 1px}
+.fields-title h3{margin:0}
+.fields-title small{color:var(--sub);font-size:11px}
+.search-results{margin:5px 0;min-height:40px}
+.hit{width:100%;text-align:left;display:grid;gap:3px;background:var(--card);border:1px solid var(--outline);border-radius:var(--r);padding:9px;margin-bottom:5px;font-size:12px}
+.hit:hover{background:var(--wash)}
+.hit span{color:var(--sub)}
+.hit mark{background:var(--wash);color:var(--text);font-weight:800}
+details{border-top:1px solid var(--line);margin:9px 0 0;padding:3px 0}
+summary{cursor:pointer;min-height:44px;align-content:center;font-size:12px;font-weight:750;color:var(--acc)}
+.ends{display:grid;gap:5px;margin:10px 0}
+.ends .btn{width:100%;justify-content:flex-start}
+.dialog{position:absolute;inset:auto 0 0;width:100%;max-width:none;max-height:92%;margin:0;padding:14px 15px 17px;border:0;border-top:1px solid var(--outline);border-radius:20px 20px 0 0;background:var(--bg);color:var(--text);overflow:auto;box-shadow:0 -10px 35px #17292155}
+.dialog::backdrop{background:#091812aa}
+.dialog .grip{width:35px;height:3px;border-radius:9px;background:var(--outline);margin:0 auto 9px}
+.dialog h3{font:600 24px/1.05 var(--head);margin-bottom:8px}
+.dialog .actions{margin:5px 0}
+.dialog .actions .btn{flex:1}
+.dialog .setting:first-of-type{border-top:1px solid var(--line)}
+.flow-list{margin:7px 0 10px;padding:0;list-style:none}
+.flow-list li{display:flex;align-items:center;gap:9px;font-size:12px;padding:5px 0}
+.flow-list .ico{width:17px;height:17px;color:var(--acc)}
+.foot{font-size:11px!important;margin-top:7px!important}
+.only-sr{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip-path:inset(50%);white-space:nowrap;border:0}
+@media(max-width:1020px){.studio{grid-template-columns:minmax(180px,1fr) minmax(334px,420px) minmax(155px,.78fr);gap:17px}.shell{padding-inline:18px}.right h2{font-size:25px}}
+@media(max-width:800px){.studio{grid-template-columns:minmax(175px,1fr) minmax(333px,428px);max-width:650px;margin-inline:auto}.right{display:none}.left h1{font-size:47px}}
+@media(max-width:570px){.shell{padding:0 8px 10px}.mast{min-height:45px;padding:0 4px}.mast .mark{width:27px;height:27px}.wordmark{font-size:16px}.mast small{font-size:8px}.studio{display:block;max-width:450px;margin:7px auto 0}.left{padding:0}.left h1,.left>p,.left>.eyebrow{position:absolute;width:1px;height:1px;overflow:hidden;clip-path:inset(50%)}.concepts{margin:0 0 7px;grid-template-columns:repeat(3,minmax(0,1fr));gap:4px}.concept{grid-template-columns:20px minmax(0,1fr);min-height:44px;gap:4px;padding:4px;font-size:11px}.concept .swatch{border-radius:5px;font-size:10px}.concept small,.concept .dot{display:none}.device{height:clamp(505px,calc(100dvh - 117px),800px);border-radius:22px}.screen{padding-inline:12px}.appbar{padding-inline:12px}.a-cover h2{font-size:32px}.device-caption{font-size:8px}.bar .btn{padding-inline:8px}}
+@media(prefers-reduced-motion:no-preference){.btn,.concept,.setting{transition:background-color .14s,border-color .14s}.preview .sample-sheet{transition:transform .24s ease,filter .24s ease}}
+</style>
+</head>
+<body>
+<main class="shell">
+  <header class="mast"><div class="wordmark" id="brand"></div><small>Interactive design review</small></header>
+  <div class="studio">
+    <aside class="left" aria-label="Onboarding designs">
+      <div class="eyebrow">PristinePage onboarding</div>
+      <h1>The first<br>few minutes.</h1>
+      <p>Three ways to learn the same scanner. Switch designs to compare the current screen without losing your place.</p>
+      <nav class="concepts" id="concepts" aria-label="Switch design"></nav>
+    </aside>
+    <section aria-label="Interactive Android mockup">
+      <div id="device" class="device" data-theme="a">
+        <header class="appbar" id="appbar"></header>
+        <div class="progress" aria-hidden="true" id="progress"></div>
+        <div class="screen" id="screen"></div>
+        <footer class="bar" id="bar"></footer>
+        <dialog class="dialog" id="dialog" aria-labelledby="dialog-title"></dialog>
+      </div>
+      <div class="device-caption"><span id="caption"></span><span>Synthetic sample · demo only</span></div>
+    </section>
+    <aside class="right" aria-label="Review navigation">
+      <div class="eyebrow">Review controls</div>
+      <h2 id="guide-title"></h2>
+      <p id="guide-note"></p>
+      <nav aria-label="Jump to a chapter"><ol class="chapter-list" id="chapters"></ol></nav>
+      <button class="reset" data-act="reset">Reset demo to first launch</button>
+      <p class="foot">Permission prompts, folders and OCR output are simulated. No camera, real files, or accounts are accessed.</p>
+    </aside>
+  </div>
+</main>
+<script>
+'use strict';
+const $=id=>document.getElementById(id);
+const paths={
+  leaf:'M5 18C1 10 9 3 20 4c1 9-4 17-12 15m-4 2L16 9',
+  copy:'M9 7h8l3 3v11H9zM17 7v4h3M6 17H4V3h9v2',
+  bolt:'M13 2 4 14h7l-1 8 10-12h-7z',
+  search:'M15 15l5 5M17 10a7 7 0 1 1-14 0 7 7 0 0 1 14 0z',
+  lock:'M7 10V7a5 5 0 0 1 10 0v3M5 10h14v11H5zM12 14v3',
+  folder:'M3 7h7l2 2h9v10H3zM3 7V5h7l2 2h7v2',
+  camera:'M3 7h4l2-3h6l2 3h4v13H3zM16 13a4 4 0 1 1-8 0 4 4 0 0 1 8 0z',
+  image:'M3 4h18v16H3zM3 17l6-6 4 4 3-3 5 5M16 8h.1',
+  frame:'M3 8V3h5m8 0h5v5m0 8v5h-5m-8 0H3v-5M7 7h10v10H7z',
+  turn:'M20 10a8 8 0 1 1-2-3m2-4v7h-7',
+  light:'M12 2v3m0 14v3M2 12h3m14 0h3M5 5l2 2m10 10 2 2m0-14-2 2M7 17l-2 2m12-7a5 5 0 1 1-10 0 5 5 0 0 1 10 0z',
+  info:'M12 11v5m0-8h.1m9.9 4a10 10 0 1 1-20 0 10 10 0 0 1 20 0z',
+  arrow:'m9 5 7 7-7 7',
+  back:'m15 5-7 7 7 7',
+  check:'m4 12 5 5L20 6',
+  globe:'M2 12h20M12 2c6 6 6 14 0 20m0-20c-6 6-6 14 0 20m10-10a10 10 0 1 1-20 0 10 10 0 0 1 20 0z',
+  export:'M12 3v12M7 8l5-5 5 5M4 14v7h16v-7',
+  import:'M12 3v12m-5-5 5 5 5-5M4 14v7h16v-7',
+  play:'m9 5 11 7-11 7z',
+  gear:'M10 3h4l1 3 3 1 3 3v4l-3 1-1 3-3 3h-4l-1-3-3-1-3-3v-4l3-1 1-3zM15 12a3 3 0 1 1-6 0 3 3 0 0 1 6 0z',
+  plus:'M12 5v14M5 12h14',
+  doc:'M6 3h8l4 4v14H6zM14 3v5h5M9 13h6M9 17h6'
+};
+const icon=(key,cls='')=>`<svg class="ico ${cls}" aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.65" stroke-linecap="round" stroke-linejoin="round"><path d="${paths[key]}"/></svg>`;
+const mark=`<svg class="mark" aria-hidden="true" viewBox="0 0 108 108"><rect width="108" height="108" rx="30" fill="#24463a"/><path d="${paths.doc}" transform="translate(54 54) scale(2.7) translate(-12 -12)" fill="none" stroke="#f3f5de" stroke-width="1.65" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
+const concepts={
+  a:{name:'Carnet',kind:'Illustrated story',title:'Lead with the original.',note:'A paper-led story makes the promise tangible before the scan lesson. Closest to the existing app.',order:['welcome','workflow','edit','search','camera','languages','library','finish']},
+  b:{name:'Practice Lab',kind:'Learn by doing',title:'Let the scan prove it.',note:'A dark viewfinder opens on a practice task. Capture, edit, and find the same sample, then see the principles behind it.',order:['welcome','workflow','edit','search','principles','camera','languages','library','finish']},
+  c:{name:'Field Guide',kind:'Fast and skimmable',title:'Get in, or dig deeper.',note:'A numbered quick reference gives returning scanner users direct access to the chapter they care about.',order:['welcome','workflow','edit','search','camera','languages','library','finish']}
+};
+const names={welcome:'Welcome',workflow:'Capture or import',edit:'Correction toolbox',search:'Find a scan',principles:'What stays yours',camera:'Camera access',languages:'Languages',library:'Library storage',finish:'Ready to scan'};
+const packs=['English','French','German','Italian','Portuguese','Spanish','Arabic','Japanese','Korean','Chinese (simplified)','Ukrainian','Vietnamese'];
+const initial=()=>({theme:'a',screen:'welcome',captured:0,reviewing:false,committed:false,source:'Camera',tool:'Correction',view:'Corrected',look:'Natural light',turn:0,frame:false,applied:false,query:'',opened:false,camera:'Not requested',lang:'System default',packs:['English','French'],location:'Default app storage',hasAlbums:false,libraryNote:'',reconnect:null,area:'tour',replaying:false,libraryOp:'change',folder:'none'});
+const memKey='pristinepage-onboarding-design-preview-v1';
+const load=()=>{try{return JSON.parse(sessionStorage.getItem(memKey))||{};}catch{return {}}};
+const saved=load();
+let s={...initial(),...saved,screen:saved.done?'home':'welcome',area:saved.done?'home':'tour'};
+const remember=()=>{try{const {done,camera,lang,packs,location,hasAlbums,reconnect}=s;sessionStorage.setItem(memKey,JSON.stringify({done,camera,lang,packs,location,hasAlbums,reconnect}));}catch{/* The tour also works with browser storage disabled. */}};
+let modalContext='', modalReturn=null;
+const btn=(label,act,{value,kind='',ico,pressed,disabled=false,title}={})=>`<button type="button" class="btn ${kind}" data-act="${act}"${value===undefined?'':` data-value="${value}"`}${pressed===undefined?'':` aria-pressed="${pressed}"`}${disabled?' disabled':''}${title?` aria-label="${title}"`:''}>${ico?icon(ico):''}${label}</button>`;
+const intro=(title,body)=>`<h2 tabindex="-1" id="screen-title">${title}</h2>${body?`<p class="intro">${body}</p>`:''}`;
+const note=(title,body)=>`<div class="callout"><strong>${title}</strong><p>${body}</p></div>`;
+const details=(title,body)=>`<details><summary>${title}</summary><p>${body}</p></details>`;
+const row=(title,body,ico,act,value)=>`<button type="button" class="setting" data-act="${act}"${value?` data-value="${value}"`:''}>${icon(ico)}<span><strong>${title}</strong><small>${body}</small></span>${icon('arrow','arrow')}</button>`;
+const promises=[
+  ['copy','Keep every original','The saved photo or import stays unchanged. Reopen it and revise corrections later.'],
+  ['bolt','Collect now, refine later','Shoot or pick several images. Let automatic suggestions do the first pass.'],
+  ['search','Find words inside a scan','Background text recognition (OCR) makes saved pages searchable.'],
+  ['lock','Work offline','Capture, corrections, and text recognition run on your device. No account or upload.'],
+  ['folder','Take your library with you','Move or back up the whole library. Reopen it or merge a backup.']
+];
+const shortPromises=['Reopen and revise. The source file never changes.','Shoot or import several pages. Refine later.','Background OCR reads text on saved pages.','Corrections and OCR stay on your device.','Move, back up, reopen, or merge library folders.'];
+const promiseList=(compact=false)=>`<ul class="core-list">${promises.map(([i,t,p],n)=>`<li>${icon(i)}<div><strong>${t}</strong><span>${compact?shortPromises[n]:p}</span></div></li>`).join('')}</ul>`;
+
+// These vector scenes all depict the same invented receipt; the comparison never uses user media.
+const receipt=(paper='#fff9e7',ink='#25463a',accent='#38785d')=>`<path d="M2 2H134V171l-7-5-9 5-9-5-9 5-9-5-9 5-9-5-9 5-9-5-9 5-9-5-9 5-9-5-7 5z" fill="${paper}" stroke="#6c765d" stroke-width=".8"/><path d="M66 16c-9 0-13 6-12 13 8 1 16-4 15-13m-11 15 10-12" stroke="${accent}" stroke-width="1.4" fill="none" stroke-linecap="round"/><text x="67" y="47" fill="${ink}" text-anchor="middle" font-family="Georgia,serif" font-weight="bold" font-size="17">Juniper</text><text x="67" y="59" fill="${ink}" text-anchor="middle" font-family="monospace" font-size="7" letter-spacing="2">MARKET</text><path d="M15 69h104m-104 52h104" stroke="${accent}" stroke-dasharray="2 2"/><g fill="${ink}" font-family="monospace" font-size="8.2"><text x="16" y="83">Olive oil</text><text x="116" y="83" text-anchor="end">$12.00</text><text x="16" y="97">Pears</text><text x="116" y="97" text-anchor="end">$4.50</text><text x="16" y="111">Sourdough</text><text x="116" y="111" text-anchor="end">$6.00</text><text x="16" y="135" font-weight="bold">TOTAL</text><text x="116" y="135" text-anchor="end" font-weight="bold">$22.50</text></g><path d="M40 146v11m3-11v11m5-11v11m3-11v11m6-11v11m3-11v11m3-11v11m5-11v11m5-11v11m3-11v11m4-11v11m2-11v11m5-11v11m5-11v11" stroke="${ink}" opacity=".68" fill="none"/>`;
+const coverArt=()=>`<div class="art"><svg viewBox="0 0 362 162" role="img" aria-label="The same receipt shown as a tilted original and a clean corrected result"><path d="M0 74Q181-12 362 62v100H0" fill="#305a46"/><path d="M0 112Q180 13 362 89M0 133Q158 52 362 112" fill="none" stroke="#a4b4a1" stroke-opacity=".34"/><circle cx="179" cy="74" r="17" fill="#e2ebd3"/><path d="M173 74h12m-5-5 5 5-5 5" stroke="#244f3e" stroke-width="1.8" fill="none" stroke-linecap="round" stroke-linejoin="round"/><g transform="translate(62 5) rotate(-13 40 68) scale(.69)">${receipt('#c4b593','#314339','#45624b')}<path d="M2 2H134L2 135Z" fill="#172c25" opacity=".14"/></g><g transform="translate(218 8) rotate(5 44 62) scale(.71)">${receipt()}</g><g font-family="system-ui" font-size="10" fill="#f5f9e8" font-weight="650"><text x="109" y="148" text-anchor="middle">ORIGINAL KEPT</text><text x="266" y="148" text-anchor="middle">EDITABLE RESULT</text></g></svg></div>`;
+const indexArt=()=>`<svg viewBox="0 0 100 108" role="img" aria-label="Three stacked guide pages"><path d="m10 24 51-19 30 76-51 19z" fill="#f3e5b9" stroke="#735721"/><path d="m25 9 55 5-8 82-55-5z" fill="#ead292" stroke="#735721"/><path d="M20 15h55l13 13v73H20z" fill="#fffdf4" stroke="#735721" stroke-width="1.4"/><path d="M75 15v13h13M31 37h42M31 73h42M31 82h36" fill="none" stroke="#735721" stroke-width="1.3"/><text x="31" y="63" fill="#654713" font-family="Georgia" font-weight="bold" font-size="22">01</text></svg>`;
+const preview=({raw=false,guide=false,turn=0,look='Natural light',label='',head='Sample receipt'}={})=>{
+  const lighting=raw||look==='No enhancement';
+  const tone=look==='Grayscale'&&!raw?['#f6f6f4','#353535','#565656']:lighting?['#cdbb91','#2c4437','#416857']:['#fffbeb','#25463a','#38785d'];
+  return `<div class="preview"><div class="preview-head"><span>${head}</span><span>Illustration</span></div><svg viewBox="0 0 380 202" role="img" aria-label="${raw?'Original tilted receipt on a desk':'Straightened receipt preview'}"><defs><pattern id="desk-grid" width="17" height="17" patternUnits="userSpaceOnUse"><path d="M0 17V0h17" fill="none" stroke="#d6e8d4" stroke-opacity=".12"/></pattern><linearGradient id="desk-shade" x2="1" y2="1"><stop stop-color="#536a54"/><stop offset="1" stop-color="#192f27"/></linearGradient></defs><path d="M0 0h380v202H0z" fill="url(#desk-shade)"/><path d="M0 0h380v202H0z" fill="url(#desk-grid)"/><circle cx="325" cy="52" r="40" fill="#e4ead2" opacity=".12"/><path d="m-6 193 83-71 30 33-46 47H0M380 152l-74-66 8-10 66 35" fill="#192e26" opacity=".56"/><g class="sample-sheet" style="transform:translate(190px,101px) rotate(${turn+(raw?-13:0)}deg) skewX(${raw?-8:0}deg) scale(${turn%180===0?.96:.9}) translate(-68px,-86px);filter:drop-shadow(4px 7px 7px #10281f9c)">${receipt(...tone)}${lighting?'<path d="M2 2H134L2 137Z" fill="#122c21" opacity=".19"/>':''}${guide?`<path d="${s.frame?'M8 7H127V158H8Z':'M-3-3H139V174H-3Z'}" fill="none" stroke="#b9ffd8" stroke-width="1.7" stroke-dasharray="4 3"/>`+[[s.frame?8:-3,s.frame?7:-3],[s.frame?127:139,s.frame?7:-3],[s.frame?127:139,s.frame?158:174],[s.frame?8:-3,s.frame?158:174]].map(([x,y])=>`<circle cx="${x}" cy="${y}" r="4" fill="#f0ffe9" stroke="#3a7356"/>`).join(''):''}</g>${guide?'<path d="M27 32V20h12m302 0h12v12m0 138v12h-12m-302 0H27v-12" fill="none" stroke="#dcefd5" stroke-width="1.8"/>':''}</svg><span class="frame-status">${label}</span></div>`;
+};
+const folderArt=()=>`<div class="art"><svg viewBox="0 0 380 82" role="img" aria-label="A device library, a selected folder, and a separate backup"><g fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="42" y="14" width="32" height="47" rx="7"/><path d="M52 23h12m-9 30h6M85 36h56m-8-5 8 5-8 5m110-5h55m-8-5 8 5-8 5"/><path d="M161 31h22l6 5h30v23h-58zm0 0v-7h24l7 6h23v6m103-8h30v30h-30zM311 23h44v7h-44m19 10h7"/></g><g font-family="system-ui" text-anchor="middle" fill="currentColor" font-size="9.5" font-weight="700"><text x="58" y="75">DEVICE</text><text x="190" y="75">YOUR FOLDER</text><text x="333" y="75">BACKUP</text></g></svg></div>`;
+
+const screens={
+  welcome(){
+    if(s.theme==='a')return `<div class="a-cover"><h2 id="screen-title" tabindex="-1">Scan now.<br>Make it yours later.</h2>${coverArt()}<p class="cover-note">A scanner that keeps the photo you started with.</p></div>${promiseList(true)}`;
+    if(s.theme==='b')return `<div class="b-cover">${intro('One receipt. One quick test.','See how PristinePage handles a crooked photo. Practice with a sample, no camera access required.')}</div><div class="b-console">${preview({raw:true,guide:true,head:'Practice viewfinder',label:'Sample · ready to capture'})}<div class="readout"><span>MANUAL SHUTTER</span><span class="status-led">● OFFLINE DEMO</span></div></div><div class="actions">${btn('Capture sample','startPractice',{kind:'primary',ico:'camera'})}${btn('Import sample','startImport',{ico:'image'})}</div>${note('The original does not change','Try an edit, get the original back, then search for a word on the receipt. The sample never enters your real library.')}`;
+    return `<div class="c-cover"><div class="cover-index"><h2 id="screen-title" tabindex="-1">Your scanner,<br>at a glance.</h2>${indexArt()}</div>${promiseList()}<button class="quick-link" data-act="screen" data-value="workflow">New to scanning? Follow a receipt ${icon('arrow')}</button><button class="quick-link" data-act="screen" data-value="library">Moving from another app? See library options ${icon('arrow')}</button></div>`;
+  },
+  principles(){return `${intro('What stays yours','The practice scan showed the workflow. These are the rules behind it.')}${folderArt()}${promiseList()}`;},
+  workflow(){
+    const art=preview({raw:true,guide:s.captured>0,label:s.captured?'Suggested frame · editable':'Original sample'});
+    if(s.committed)return `${intro('Sample album saved','Open any saved page to refine the frame or look later. The original is unchanged.')}${art}${note('Weekend papers','The demo gave this album a starter title. New albums get an automatic name you can change. Search becomes available after background text recognition.')}${details('A PDF is not a library backup','Use album export to share a PDF or images. Export the library separately to keep originals and editable history.')}`;
+    if(s.reviewing)return `${intro('Save with suggested settings','The scan review walks through Perspective, Rotation, and Correction. This tour condenses the three steps.')}${preview({label:'Suggested result'})}<div class="strip"><span>Perspective</span><span>Rotation</span><span>Correction</span></div><div class="actions">${btn('Add more pages','addMore')}${btn('Save album','saveSample',{kind:'primary',ico:'check'})}</div>${details('What happens automatically?','PristinePage looks for the edges and suggests a frame. Supported corrections can straighten the page and improve uneven light or color. If a suggestion misses, adjust it or keep the whole image. Preview changes are never written over the source.')}`;
+    if(s.captured)return `${intro('Review your pages','Add more pages or finish importing when your collection is ready.')}${art}<div class="strip" aria-label="Sample page queue"><span>${s.captured} ${s.captured===1?'page':'pages'} in review</span><span>${s.source}</span><span>Automatic title</span></div><div class="actions">${btn('Add a page','capture',{value:s.source,ico:'plus'})}${btn('Finish importing','reviewSample',{kind:'primary',ico:'check'})}</div>`;
+    const workflow=`<ol class="workflow"><li><span class="nr">1</span><span><b>Collect pages</b>Tap the shutter or select images from Gallery or Files.</span></li><li><span class="nr">2</span><span><b>Review and save</b>Check the suggested frame and look. Keep those choices if they work; use the editing tools only if needed.</span></li><li><span class="nr">3</span><span><b>Refine whenever you need</b>Reopen a saved page in My scans. Changes never overwrite its original.</span></li></ol>`;
+    const pick=`<div class="actions">${btn('Gallery','capture',{value:'Gallery',ico:'image'})}${btn('','capture',{value:'Camera',kind:'shutter',title:'Shutter — capture sample'})}${btn('Files','capture',{value:'Files',ico:'folder'})}</div>`;
+    return `${intro(s.theme==='b'?'Collect the first page':'Collect pages quickly','Start with a photo or import one or more images. No need to perfect each page on the spot.')}${s.theme==='c'?workflow+art+pick:art+pick+workflow}`;
+  },
+  edit(){
+    let panel='';
+    if(s.tool==='Frame')panel=`<p class="foot">Move the frame when the automatic edges miss. Keep the whole image when that is more useful.</p><div class="actions">${btn('Adjust sample frame','frame',{pressed:s.frame})}${btn('Use suggested frame','resetFrame')}</div>`;
+    if(s.tool==='Rotation')panel=`<div class="actions">${btn('Turn left','turn',{value:'-90'})}${btn('Turn right','turn',{value:'90'})}</div>`;
+    if(s.tool==='Correction')panel=`<div class="actions">${['Natural light','Grayscale','No enhancement'].map(x=>btn(x,'look',{value:x,pressed:s.look===x})).join('')}</div>`;
+    if(s.tool==='Page info')panel=note('Page info','Sample receipt · Page 1 · Original preserved. The geometry and look are separate from the source.');
+    if(s.tool==='Original')panel=note('Original view','Viewing the original does not undo or replace the current correction.');
+    const image=preview({raw:s.view==='Original'||s.tool==='Frame',guide:s.tool==='Frame',look:s.look,turn:s.view==='Original'||s.tool==='Frame'?0:s.turn,label:s.tool==='Frame'?'Editable source frame':s.view==='Original'?'Original · unchanged':`Corrected · ${s.look}`});
+    const ribbon=`<div class="ribbon" role="group" aria-label="Correction toolbox">${[['Frame','frame'],['Rotation','turn'],['Correction','light'],['Original','copy'],['Page info','info']].map(([t,i])=>btn(t,'tool',{ico:i,value:t,pressed:s.tool===t})).join('')}</div>`;
+    return `${intro(s.opened?'Receipt · page 1':'Try the correction toolbox',s.opened?'Opened the exact page in the sample album.':'Reopen a saved page. Try Original, change the look, or turn the sample.')}${s.theme==='c'?ribbon+image:image+ribbon}${panel}<div class="actions">${btn('Apply','applySample',{kind:'primary',ico:'check'})}</div>${s.applied?note('Edit applied to the sample','The original is still available.'):''}${details('Original versus export','The original file is retained unchanged. A corrected JPEG or PDF is a separate rendered output, which may use lossy compression. Exporting it does not replace the original.')}`;
+  },
+  search(){return `${intro('Find the page, not just the album','After saving, text recognition runs in the background on your device. Search in My scans once the text is ready.')}${s.theme==='c'?note('Search shortcut','From My scans, search either an album title or a word printed on a saved page.'):''}<label class="field">Search sample scans<input type="search" id="query" placeholder="Try olive oil or Juniper" autocomplete="off" maxlength="80"></label><div class="search-results" id="results" aria-live="polite"></div><div class="actions">${btn('Try “olive oil”','example',{value:'olive oil',ico:'search'})}${btn('Try “Juniper”','example',{value:'Juniper',ico:'search'})}</div>${details('If a new scan is not searchable yet','It can take a moment for recognition to finish. Albums remain usable and can still be found by title. Recognition can also miss words, especially on poor-quality images or in a language you have not selected.')}${s.theme!=='c'?note('Private by design','Image processing and text recognition work offline. Sharing or syncing is a separate choice you make.'):''}`;},
+  camera(){return `${intro('Use the camera?','Allow camera access only if you want to take new scans. You can continue without it.')}${s.theme==='b'?`<div class="b-console">${preview({raw:true,guide:true,head:'Camera viewfinder',label:'Sample only'})}<div class="readout"><span>CAMERA ACCESS</span><span class="status-led">${s.camera==='Allowed'?'● ALLOWED':'○ OPTIONAL'}</span></div></div>`:''}<ul class="core-list"><li>${icon('camera')}<div><strong>Camera</strong><span>Take new scans with your phone.</span></div></li><li>${icon('image')}<div><strong>Gallery and Files</strong><span>Still work without camera access. You choose what to import; no broad photo or storage access is needed.</span></div></li></ul><div class="actions">${btn(s.camera==='Allowed'?'Review camera access':'Allow camera access','cameraPrompt',{kind:'primary',ico:'camera'})}${btn('Continue without camera','cameraSkip')}</div>${note('Current demo setting',s.camera)}<p class="foot">You can change access later in Android Settings. This prototype does not request any device permission.</p>`;},
+  languages(){return `${intro('Choose your languages','The language of menus is separate from the languages printed in your scans.')}<label class="field">App language<select id="app-language"><option>System default</option><option>English</option><option>French</option><option>German</option><option>Spanish</option><option>Portuguese</option></select></label><p class="foot">App language choices are simulated here; the prototype stays in English.</p><div class="fields-title"><h3>Text recognition (OCR) languages</h3><small id="pack-count"></small></div><p>Pick the languages you scan most often. These examples use bundled packs, with no download in the demo.</p><div class="langlist">${packs.map(x=>`<label class="lang"><input type="checkbox" data-pack="${x}" ${s.packs.includes(x)?'checked':''}>${x}</label>`).join('')}</div><p class="foot" id="pack-note" aria-live="polite">Defaults are English and French. Changes apply to future recognition, not existing saved text.</p>`;},
+  library(){
+    const backups=`${details('What travels with a library?','Albums, original files, accepted edits, and saved text. A library backup is a folder, not a PDF, JPEG, ZIP, or another scanner’s database. You can import supported image files separately.')}${details('Can I sync to another device?','A supported local folder can be copied or backed up with a separate tool such as Syncthing. PristinePage does not sync it for you. Prefer syncing completed backup folders. Do not open or edit the same live library on two devices at once.')}`;
+    const actions=`<div class="ends">${btn('Change library folder','folderPick',{value:'change',ico:'folder'})}${btn('Export library','folderPick',{value:'export',ico:'export'})}${btn('Import library','folderPick',{value:'import',ico:'import'})}</div>`;
+    return `${intro('Your scans, your folder','Keep the default or choose a supported local folder. You can move, back up, or restore a library later from Settings.')}${s.theme==='c'?'':folderArt()}${note('Current location',s.location)}${s.reconnect?`${note('Library unavailable','Reconnect to keep using this library. The app will not switch to default storage.')}${btn('Reconnect library','folderPick',{value:'reconnect',kind:'primary',ico:'folder'})}`:actions}${s.libraryNote?note('Demo result',s.libraryNote):''}${backups}${!s.reconnect&&s.location!=='Default app storage'?`<details><summary>Test losing folder access</summary><div class="actions">${btn('Simulate access loss','simulateLoss')}</div></details>`:''}`;
+  },
+  finish(){return `${intro('Ready when you are.','Start with a receipt, a few pages, or a photo worth keeping.')}${s.theme==='a'?coverArt():s.theme==='c'?folderArt():preview({label:'Sample · ready'})}<ol class="workflow"><li><span class="nr">1</span><span><b>Tap + in My scans</b>Take a photo or pick images from Gallery or Files.</span></li><li><span class="nr">2</span><span><b>Save first, refine later</b>Open any saved page for the correction toolbox.</span></li><li><span class="nr">3</span><span><b>Share the result, keep the source</b>Export a PDF or images to share; use a library backup to keep your originals and editable scans.</span></li></ol>${note('Find this again','Settings → Replay onboarding. Replaying will not clear your scans or reset your preferences.')}`;},
+  home(){return `${intro('My scans',s.reconnect?'Your selected library is unavailable.':s.committed?'Your sample album is here.':'Capture a document or import images to start an album.')}${s.reconnect?row('Reconnect library',s.location,'folder','settingsPage','library'):s.committed?row('Weekend papers','Sample album · receipt','doc','openResult'):note('Nothing scanned yet','Use the camera or bring in images from Gallery or Files.')}<div class="actions">${s.reconnect?'':btn('Scan or import','screen',{value:'workflow',kind:'primary',ico:'plus'})}${btn('Settings','settings',{ico:'gear'})}</div><p class="foot">This is the simulated Home screen. No real scans are saved.</p>`;},
+  settings(){return `${intro('Settings','Open the onboarding again whenever you want a refresher.')}${row('Replay onboarding','Start from the first screen without resetting your choices.','play','replay')}${row('Camera access',s.camera,'camera','settingsPage','camera')}${row('Languages','App language and text recognition.','globe','settingsPage','languages')}${row('Library storage and backup',s.location,'folder','settingsPage','library')}`;}
+};
+const order=()=>concepts[s.theme].order;
+const isTour=()=>s.area==='tour';
+const nav=(destination,{focus=true}={})=>{
+  s.screen=destination;
+  render({jump:true,focus});
+};
+const finish=()=>{
+  s.done=true;
+  s.area=s.replaying?'settings':'home';
+  s.replaying=false;
+  remember();
+  nav(s.area);
+};
+const next=()=>{
+  const index=order().indexOf(s.screen);
+  if(index===order().length-1)finish();
+  else nav(order()[Math.max(index+1,0)]);
+};
+const back=()=>{
+  if(!isTour()){const dest=s.area==='settings'&&s.screen!=='settings'?'settings':'home';s.area=dest;nav(dest);return;}
+  const index=order().indexOf(s.screen);
+  if(index>0)nav(order()[index-1]);
+};
+const focusKey=button=>button?.dataset.act?{act:button.dataset.act,value:button.dataset.value}:null;
+const restoreFocus=key=>{
+  if(!key)return;
+  const match=[...document.querySelectorAll('[data-act]')].find(b=>b.dataset.act===key.act&&b.dataset.value===key.value&&!b.disabled);
+  (match||$('screen-title'))?.focus({preventScroll:true});
+};
+function render({jump=false,focus=false,key=null}={}){
+  const concept=concepts[s.theme], index=order().indexOf(s.screen), tour=isTour(), appHome=s.screen==='home', settingsHome=s.screen==='settings';
+  $('device').dataset.theme=s.theme;
+  $('caption').textContent=`${s.theme.toUpperCase()} / ${concept.name}`;
+  $('concepts').innerHTML=Object.entries(concepts).map(([k,c])=>`<button type="button" class="concept" data-act="concept" data-value="${k}" aria-pressed="${s.theme===k}"><span class="swatch">${k.toUpperCase()}</span><span><strong>${c.name}</strong><small>${c.kind}</small></span><span class="dot" aria-hidden="true"></span></button>`).join('');
+  $('guide-title').textContent=concept.title;
+  $('guide-note').textContent=concept.note;
+  $('chapters').innerHTML=order().map((x,i)=>`<li><button type="button" data-act="chapter" data-value="${x}"${s.screen===x?' aria-current="step"':''}><span>${String(i+1).padStart(2,'0')}</span>${names[x]}</button></li>`).join('');
+  $('appbar').innerHTML=`${mark}<strong>PristinePage</strong>${tour?`<span class="step-title">Step ${index+1} of ${order().length}</span>`:appHome?btn('','settings',{kind:'icon ghost',ico:'gear',title:'Open Settings'}):`<span class="step-title">${settingsHome?'Preferences':s.area==='settings'?'Settings':'My scans'}</span>`}`;
+  $('progress').hidden=!tour;
+  $('progress').innerHTML=order().map((_,i)=>`<i class="${i<=index?'on':''}"></i>`).join('');
+  $('screen').innerHTML=screens[s.screen]();
+  if(s.screen==='search')renderSearch(true);
+  if(s.screen==='languages')renderLanguages();
+  if(tour){
+    const primary=s.screen==='finish'?(s.replaying?'Back to Settings':'Open My scans'):
+      s.screen==='welcome'?(s.theme==='a'?'See how it works':s.theme==='b'?'Start practice':'Quick start'):
+      s.screen==='library'?'Continue':s.screen==='workflow'&&s.theme==='b'&&!s.captured?'See the toolbox':'Continue';
+    $('bar').innerHTML=`${index>0?btn('Back','back',{kind:'ghost',ico:'back'}):''}${s.screen==='finish'?'':btn('Skip tour','finish',{kind:'ghost'})}${btn(primary,'next',{kind:'primary',ico:'arrow'})}`;
+  }else{
+    $('bar').innerHTML=appHome?btn('Replay tour','replay',{kind:'ghost',ico:'play'}):btn('Back','back',{kind:'ghost',ico:'back'});
+  }
+  if(jump)$('screen').scrollTop=0;
+  if(focus)$('screen-title')?.focus({preventScroll:true});
+  else restoreFocus(key);
+}
+const sampleText='Juniper Market · Olive oil · Pears · Sourdough · Total $22.50';
+function renderSearch(restore=false){
+  if(restore)$('query').value=s.query;
+  const q=s.query.trim().toLowerCase(), area=$('results');
+  area.replaceChildren();
+  if(!q){const p=document.createElement('p');p.textContent='Try a word printed on the sample receipt.';area.append(p);return;}
+  const offset=sampleText.toLowerCase().indexOf(q);
+  const titleHit='weekend papers'.includes(q);
+  if(offset<0&&!titleHit){const p=document.createElement('p');p.textContent='No sample scans match. Try “olive oil” or “Juniper”.';area.append(p);return;}
+  const hit=document.createElement('button');
+  hit.className='hit';
+  hit.type='button';
+  hit.dataset.act='openResult';
+  const title=document.createElement('strong');
+  title.textContent=offset>=0?'Weekend papers · page 1':'Weekend papers · album title';
+  const snippet=document.createElement('span');
+  if(offset>=0){
+    const highlighted=document.createElement('mark');
+    highlighted.textContent=sampleText.slice(offset,offset+q.length);
+    snippet.append(sampleText.slice(0,offset),highlighted,sampleText.slice(offset+q.length));
+  }else snippet.textContent='Open the sample receipt in this album.';
+  hit.append(title,snippet);
+  area.append(hit);
+}
+function renderLanguages(){
+  $('app-language').value=s.lang;
+  $('pack-count').textContent=`${s.packs.length} selected`;
+}
+function placeDialog(){
+  const dialog=$('dialog');
+  if(!dialog.open)return;
+  const b=$('device').getBoundingClientRect();
+  dialog.style.position='fixed';
+  dialog.style.left=`${b.left+1}px`;
+  dialog.style.bottom=`${Math.max(0,innerHeight-b.bottom+1)}px`;
+  dialog.style.width=`${b.width-2}px`;
+  dialog.style.maxHeight=`${Math.min(b.height-12,innerHeight-12,Math.max(160,b.bottom-10))}px`;
+}
+function sheet(title,content,context){
+  const dialog=$('dialog');
+  if(!dialog.open)modalReturn=focusKey(document.activeElement);
+  modalContext=context;
+  dialog.innerHTML=`<div class="grip" aria-hidden="true"></div><h3 id="dialog-title" tabindex="-1">${title}</h3>${content}`;
+  if(!dialog.open)dialog.showModal();
+  placeDialog();
+  $('dialog-title').focus({preventScroll:true});
+}
+const cancel=()=>btn('Cancel','closeDialog',{kind:'ghost'});
+$('dialog').addEventListener('close',()=>{
+  if($('dialog').open)return;
+  modalContext='';
+  restoreFocus(modalReturn);
+  modalReturn=null;
+});
+addEventListener('resize',placeDialog);
+addEventListener('scroll',placeDialog,{passive:true});
+const closeDialog=()=>$('dialog').close();
+const cameraSheet=()=>sheet('Allow camera access?',`<p>This is a simulation of the Android permission prompt. You can still use Gallery and Files if you decline.</p><div class="actions">${btn('While using the app','cameraPick',{value:'Allowed',kind:'primary'})}${btn('Do not allow','cameraPick',{value:'Not allowed'})}</div><div class="actions">${cancel()}</div>`,'camera');
+const folders={
+  empty:{name:'Documents / My scans',kind:'Empty local folder'},
+  existing:{name:'Documents / Travel archive',kind:'Existing PristinePage library'},
+  backup:{name:'Documents / PristinePage Backup',kind:'Completed PristinePage backup'},
+  out:{name:'Documents / Backups',kind:'Backup destination'},
+  unsupported:{name:'Downloads / Other scanner',kind:'Unrecognized library format'},
+  revoked:{name:'Documents / Unavailable storage',kind:'No usable access'}
+};
+const opTitles={change:'Choose a library folder',export:'Choose a backup destination',import:'Choose a library backup',reconnect:'Reconnect library'};
+function picker(op){
+  s.libraryOp=op;
+  const options=op==='change'?['empty','existing','unsupported','revoked']:op==='export'?['out','revoked']:op==='import'?['backup','unsupported','revoked']:['same','existing'];
+  sheet(opTitles[op],`<p>Simulated Android folder picker. No local files are read or written.</p>${options.map(k=>k==='same'?row(s.location,'Restore access to this exact library','folder','pick',k):row(folders[k].name,folders[k].kind,'folder','pick',k)).join('')}<div class="actions">${cancel()}</div>`,'picker');
+}
+const moveDescription=(from,to)=>`From <b>${from}</b> to <b>${to}</b>. The old app-managed library is only removed after the destination is verified and opened. Unrelated files are left alone.`;
+function chooseFolder(k){
+  s.folder=k;
+  const item=folders[k];
+  const title=opTitles[s.libraryOp];
+  const destination=s.location;
+  if(s.libraryOp==='reconnect'){
+    if(k!=='same'){
+      sheet('This is a different library',`<p>Choose <b>${s.location}</b> to reconnect. The current location was not switched.</p><div class="actions">${btn('Choose again','folderPick',{value:'reconnect',kind:'primary'})}${cancel()}</div>`,'wrongRoot');
+      return;
+    }
+    sheet('Reconnect this library?',`<p>Restore access to <b>${destination}</b>. Your scans will stay where they are.</p><div class="actions">${btn('Reconnect','libraryConfirm',{value:'reconnect',kind:'primary'})}${cancel()}</div>`,'reconnect');
+    return;
+  }
+  if(k==='unsupported'||k==='revoked'||item.name===destination){
+    sheet(k==='unsupported'?'Not a PristinePage library':k==='revoked'?'Folder unavailable':title,`<p>${k==='unsupported'?'No files were changed. To bring scans from another app, export them as supported images and import those from Gallery or Files.':k==='revoked'?'PristinePage cannot verify access to this folder. Your current library is untouched.':'You are already using this folder. Pick a different location to move your library.'}</p><div class="actions">${btn('Choose again','folderPick',{value:s.libraryOp,kind:'primary'})}${cancel()}</div>`,'refused');
+    return;
+  }
+  if(s.libraryOp==='export'){
+    sheet('Export a library backup?',`<p>Copy a complete backup from <b>${destination}</b> to a new folder inside <b>${item.name}</b>. The active library stays where it is.</p><div class="actions">${btn('Export backup','libraryConfirm',{value:'export',kind:'primary'})}${cancel()}</div>`,'export');
+    return;
+  }
+  if(s.libraryOp==='import'){
+    const merge=s.hasAlbums||s.committed;
+    sheet(merge?'Copy and merge libraries?':'Import this library?',`<p>Copy from <b>${item.name}</b> into <b>${destination}</b>. ${merge?'Combine the incoming albums with your current library. ':''}The backup stays unchanged, and your active location does not switch.</p><div class="actions">${btn(merge?'Copy and merge':'Copy library','libraryConfirm',{value:'copy',kind:'primary'})}${cancel()}</div>`,'import');
+    return;
+  }
+  if(k==='empty')sheet('This folder is empty',`<p><b>${item.name}</b> is ready. Your current location is <b>${destination}</b>.</p>${row('Move library','Move your current collection after verification.','folder','confirmMove','move')}${row('Start an empty library','Leave the previous library untouched.','plus','libraryConfirm','start')}<div class="actions">${cancel()}</div>`,'empty');
+  else sheet('A library already exists here',`<p><b>${item.name}</b> already has scans. Your current location is <b>${destination}</b>.</p>${row('Open this library','Use the selected folder as it is. No scans are moved.','folder','libraryConfirm','open')}${row('Move and merge','Bring the current library into this folder.','import','confirmMove','merge')}<div class="actions">${cancel()}</div>`,'existing');
+}
+function moveConfirmation(kind){
+  const label=kind==='merge'?'Move and merge':'Move library';
+  sheet(`${label}?`,`<p>${moveDescription(s.location,folders[s.folder].name)}</p><div class="actions">${btn(label,'libraryConfirm',{value:kind,kind:'primary'})}${cancel()}</div>`,'move');
+}
+function libraryConfirm(kind){
+  const old=s.location, target=folders[s.folder]?.name;
+  if(kind==='export')s.libraryNote=`Backup prepared in ${target}. The active library is still ${old}.`;
+  if(kind==='copy'){s.hasAlbums=true;s.libraryNote=`Copied from ${target} into ${old}. The source backup was not changed.`;}
+  if(kind==='reconnect'){s.reconnect=null;s.libraryNote=`Reconnected to ${old}.`;}
+  if(['move','merge','start','open'].includes(kind)){
+    s.location=target;
+    if(kind==='start'||kind==='open'){s.committed=false;s.captured=0;s.reviewing=false;}
+    s.hasAlbums=kind==='start'?false:kind==='move'?s.hasAlbums||s.committed:true;
+    s.libraryNote=kind==='start'?`Started an empty library in ${target}. ${old} was left untouched.`
+      :kind==='open'?`Opened ${target} in place. ${old} was left untouched.`
+      :`${target} is now active. The old app-managed library at ${old} was removed after verification in this simulation.`;
+  }
+  remember();
+  closeDialog();
+  render();
+}
+function capture(source,{start=false}={}){
+  s.source=source;
+  s.captured++;
+  if(start)nav('workflow');
+}
+function startSample(key){
+  if(!s.captured||s.committed){
+    s.captured=0;
+    s.committed=false;
+    s.source=key;
+  }
+  s.reviewing=false;
+  capture(key,{start:true});
+}
+document.addEventListener('click',event=>{
+  const button=event.target.closest('button[data-act]');
+  if(!button||button.disabled)return;
+  if(modalContext&&!$('dialog').contains(button))return;
+  const {act,value}=button.dataset, key=focusKey(button), refresh=()=>render({key});
+  switch(act){
+    case 'concept':
+      s.theme=value;
+      if(s.screen==='principles'&&s.theme!=='b')s.screen='welcome';
+      render({jump:true,key});
+      break;
+    case 'chapter':s.area='tour';nav(value);break;
+    case 'screen':
+      if(s.screen==='home'&&value==='workflow'){s.captured=0;s.committed=false;s.reviewing=false;}
+      nav(value);break;
+    case 'reset':
+      s=initial();
+      remember();
+      nav('welcome');break;
+    case 'replay':s.area='tour';s.replaying=true;s.opened=false;nav('welcome');break;
+    case 'next':next();break;
+    case 'back':back();break;
+    case 'finish':finish();break;
+    case 'settings':s.area='settings';nav('settings');break;
+    case 'settingsPage':s.area='settings';nav(value);break;
+    case 'startPractice':startSample('Camera');break;
+    case 'startImport':startSample('Gallery');break;
+    case 'capture':capture(value);refresh();break;
+    case 'reviewSample':s.reviewing=true;render({jump:true,focus:true});break;
+    case 'addMore':s.reviewing=false;render({jump:true,focus:true});break;
+    case 'saveSample':s.committed=true;s.reviewing=false;render({jump:true,focus:true});break;
+    case 'tool':s.tool=value;s.view=value==='Original'?'Original':'Corrected';s.applied=false;refresh();break;
+    case 'look':s.look=value;s.view='Corrected';s.applied=false;refresh();break;
+    case 'turn':s.turn=(s.turn+Number(value)+360)%360;s.applied=false;refresh();break;
+    case 'frame':s.frame=!s.frame;s.applied=false;refresh();break;
+    case 'resetFrame':s.frame=false;s.applied=false;refresh();break;
+    case 'applySample':s.applied=true;refresh();break;
+    case 'example':s.query=value;renderSearch(true);$('query').focus();break;
+    case 'openResult':s.opened=true;nav('edit');break;
+    case 'cameraPrompt':cameraSheet();break;
+    case 'cameraSkip':if(s.camera==='Not requested'){s.camera='Skipped';remember();}if(isTour())next();else back();break;
+    case 'cameraPick':s.camera=value;remember();closeDialog();render();break;
+    case 'closeDialog':closeDialog();break;
+    case 'folderPick':picker(value);break;
+    case 'pick':chooseFolder(value);break;
+    case 'confirmMove':moveConfirmation(value);break;
+    case 'libraryConfirm':libraryConfirm(value);break;
+    case 'simulateLoss':
+      s.reconnect=s.location;s.libraryNote='';remember();render({focus:true});break;
+  }
+});
+document.addEventListener('input',e=>{
+  if(e.target.id==='query'){s.query=e.target.value;renderSearch();}
+});
+document.addEventListener('change',e=>{
+  if(e.target.id==='app-language'){s.lang=e.target.value;remember();return;}
+  const pack=e.target.dataset.pack;
+  if(!pack)return;
+  if(e.target.checked)s.packs.push(pack);
+  else if(s.packs.length===1){e.target.checked=true;$('pack-note').textContent='Keep at least one language selected for text recognition.';return;}
+  else s.packs=s.packs.filter(t=>t!==pack);
+  $('pack-note').textContent='Selected in recognition order: '+s.packs.join(', ')+'. Existing saved text is unchanged.';
+  renderLanguages();
+  remember();
+});
+$('brand').innerHTML=`${mark}<span>PristinePage</span>`;
+render();
+</script>
+</body>
+</html>
