@@ -148,6 +148,8 @@ The reviewed working-catalog successor now has 971 data and 264 app JVM cases, 2
 
 The [reviewed combined Files and Room witness](../../validation/storage/library-folder-android.md#populated-files-witness) passed 6/6 real API 28 instrumentation cases, including a `home:` grant, mid-stream cancellation and revocation, and a staged Room reopen with no duplicate originals. Four canceled callbacks did not exhaust the private scratch budget. The dedicated app guest is stopped and released. Next core slice: connect exact verified external selection to the private durable pointer and a graph opened only for the matching activation; fail closed to **Reconnect library** while retaining the old selection. Device provider writes, Settings actions, retirement, complete portable masks/Undo and known historical-conversion rendering remain open; no merge or publication.
 
+First-use activation starts by assigning the existing default store a persistent opaque identity without moving originals or changing Room. Publish a complete initial pointer inside a single private settings-directory move. Only positively absent settings may bootstrap; a missing pointer under an existing settings directory is an integrity failure. Once the settings root might be visible, reopen and acknowledge that exact identity instead of choosing another one. Follow with a real active graph, not a second bootstrap or a Settings placeholder.
+
 ### Current coordination: transition to `main`
 
 - [x] Operator approved the local fast-forward and `main`-based PR/handoff cadence; see [operational authority](OPERATIONAL_PLAN.md) and [queue rules](PARALLEL_EXECUTION_PLAN.md#coordination). Earlier branch/base references below describe their historical claims.
