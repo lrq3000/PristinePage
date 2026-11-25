@@ -49,6 +49,19 @@ import org.junit.runner.RunWith
 class ApplicationCompositionTest {
     private val output = OutputSpec(PixelSize(2, 2), RenderPurpose.PREVIEW)
 
+    @Test fun aColdBackupReceiptLookupNeverOpensRoomOrTheProvider() = runBlocking {
+        Fixture().use { f ->
+            val activation = ApplicationServices(f.context, f.budget, f.provider).imports().useStore { it.activation }
+            val ticket = app.pristinepage.library.LibraryBackupConfirmation.Ticket("aaaaaaaa-aaaa-4aaa-8aaa-000000000031", activation)
+            f.beforeDatabasePath = { error("A receipt read opened writable Room") }
+            f.beforeResolver = { error("A receipt read opened the provider resolver") }
+            f.forbid = true
+            val cold = ApplicationServices(f.context, f.budget, f.provider)
+            assertEquals(app.pristinepage.data.library.LibraryFolderExportState.NotStarted, cold.inspectConfirmedDefaultBackup(ticket))
+            assertTrue(f.opened.isEmpty())
+        }
+    }
+
     @Test fun batchDonePreviewAndUndoCannotDeliverAfterTheirIssuingActivationChanges() = runBlocking {
         Fixture().use { f ->
             val services = ApplicationServices(f.context, f.budget, f.provider)
@@ -646,14 +659,23 @@ class ApplicationCompositionTest {
         private val files = File(root, "files").apply { check(mkdirs()) }
         private val cache = File(root, "cache").apply { check(mkdirs()) }
         var afterRoomOpen: () -> Unit = {}
+        var beforeDatabasePath: () -> Unit = {}
+        var beforeResolver: () -> Unit = {}
         val context = object : ContextWrapper(base) {
             override fun getApplicationContext(): Context = this
             override fun getCacheDir(): File = cache
+            override fun getContentResolver(): android.content.ContentResolver {
+                beforeResolver()
+                return super.getContentResolver()
+            }
             override fun getFilesDir(): File {
                 if (File(root, "databases/pristinepage.db").isFile) afterRoomOpen()
                 return files
             }
-            override fun getDatabasePath(name: String): File = File(root, "databases/$name").also { it.parentFile!!.mkdirs() }
+            override fun getDatabasePath(name: String): File {
+                beforeDatabasePath()
+                return File(root, "databases/$name").also { it.parentFile!!.mkdirs() }
+            }
         }
         val good = "content://fixture.documents/good"; val bad = "content://fixture.documents/corrupt"
         val rgb = byteArrayOf(-1, 0, 0, 0, -1, 0, 0, 0, -1, -1, -1, -1)

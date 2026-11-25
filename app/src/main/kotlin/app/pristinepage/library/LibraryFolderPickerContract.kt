@@ -15,15 +15,16 @@ import com.anggrayudi.storage.extension.fromTreeUri
 import java.io.IOException
 
 /** Direct Android tree result: SimpleStorage resolves the admitted root but never launches the picker or cleans other grants. */
-internal class LibraryFolderPickerContract : ActivityResultContract<Unit, LibraryFolderPickerContract.Selection>() {
+internal class LibraryFolderPickerContract(private val writable: Boolean = false) : ActivityResultContract<Unit, LibraryFolderPickerContract.Selection>() {
     sealed interface Selection
     data object Canceled : Selection
-    enum class Rejected : Selection { MALFORMED_RESULT, UNSUPPORTED_TREE, MISSING_PERSISTENT_READ }
+    enum class Rejected : Selection { MALFORMED_RESULT, UNSUPPORTED_TREE, MISSING_PERSISTENT_READ, MISSING_WRITE }
     class Picked internal constructor(val uri: Uri, val grant: LibraryTreeGrant) : Selection
 
     override fun createIntent(context: Context, input: Unit): Intent {
         val picker = Intent(Intent.ACTION_OPEN_DOCUMENT_TREE).putExtra(Intent.EXTRA_LOCAL_ONLY, true)
             .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION or Intent.FLAG_GRANT_PREFIX_URI_PERMISSION)
+        if (writable) picker.addFlags(Intent.FLAG_GRANT_WRITE_URI_PERMISSION)
         for (pkg in listOf("com.android.documentsui", "com.google.android.documentsui")) {
             val info = context.packageManager.resolveActivity(picker.setPackage(pkg), PackageManager.MATCH_DEFAULT_ONLY)?.activityInfo ?: continue
             if (info.packageName == pkg && info.enabled && info.exported && info.applicationInfo.flags and ApplicationInfo.FLAG_SYSTEM != 0) {
@@ -46,6 +47,7 @@ internal class LibraryFolderPickerContract : ActivityResultContract<Unit, Librar
             LibraryTreeGrant.inspect(uri.toString(), returned(Intent.FLAG_GRANT_READ_URI_PERMISSION),
                 returned(Intent.FLAG_GRANT_WRITE_URI_PERMISSION), returned(Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION))
         } catch (_: IOException) { return Rejected.MISSING_PERSISTENT_READ }
+        if (writable && !grant.returnedWrite) return Rejected.MISSING_WRITE
         return Picked(uri, grant)
     }
 }
@@ -55,23 +57,26 @@ internal class LibraryFolderGrantHandoff(context: Context) {
     private val resolver = app.contentResolver
 
     /** On an actual picker callback, persist only the read capability needed here; never remove or retake another grant. */
-    fun persistRead(picked: LibraryFolderPickerContract.Picked): Uri = persist(picked, write = false)
+    fun persistRead(picked: LibraryFolderPickerContract.Picked): Uri = persist(picked, write = false, checkpoint = {})
 
     /** Only for an explicit approved writable destination. This acquires a grant, not readiness to publish or delete files. */
-    fun persistWrite(picked: LibraryFolderPickerContract.Picked): Uri = persist(picked, write = true)
+    fun persistWrite(picked: LibraryFolderPickerContract.Picked, checkpoint: () -> Unit = {}): Uri =
+        persist(picked, write = true, checkpoint)
 
-    private fun persist(picked: LibraryFolderPickerContract.Picked, write: Boolean): Uri {
+    private fun persist(picked: LibraryFolderPickerContract.Picked, write: Boolean, checkpoint: () -> Unit): Uri {
         val tree = picked.uri
         if (tree.toString() != picked.grant.exactUri) throw IOException("The selected folder capability changed")
+        checkpoint()
         resolveRoot(tree)
         try {
             val current = held()
             val missing = if (write) picked.grant.missingWriteModes(current)
                 else if (picked.grant.needsReadGrant(current)) Intent.FLAG_GRANT_READ_URI_PERMISSION else 0
-            if (missing != 0) resolver.takePersistableUriPermission(tree, missing)
+            picked.grant.persistMissing(missing, checkpoint) { resolver.takePersistableUriPermission(tree, it) }
         } catch (_: SecurityException) {
             throw IOException("The selected folder could not retain the requested permission")
         }
+        checkpoint()
         if (write) picked.grant.requirePersistedWrite(held()) else picked.grant.requirePersistedRead(held())
         return tree
     }

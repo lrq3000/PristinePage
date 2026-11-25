@@ -5,17 +5,12 @@ import android.net.Uri
 import android.system.ErrnoException
 import android.system.Os
 import app.pristinepage.data.db.PristineDatabase
-import app.pristinepage.data.model.requireOpaqueId
 import java.io.File
 import java.io.IOException
 import java.nio.file.Files
 import java.nio.file.LinkOption.NOFOLLOW_LINKS
 import java.nio.file.Path
-import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ensureActive
-import kotlinx.coroutines.sync.Mutex
-import kotlinx.coroutines.withContext
 
 /** A verified newly written backup, not permission to select or retire either library. */
 data class LibraryFolderExportReceipt internal constructor(
@@ -27,18 +22,18 @@ internal class RoomLibraryFolderExport(
     context: Context, private val database: PristineDatabase, private val originalRoot: File,
 ) {
     private val app = context.applicationContext
+    private val history = AndroidLibraryBackupHistory(app)
     private val maxCatalogBytes = RoomLibraryCatalogReader.MAX_PORTABLE_BYTES
 
-    suspend fun write(request: LibraryFolderExportRequest): LibraryFolderExportReceipt = locked {
+    suspend fun write(request: LibraryFolderExportRequest): LibraryFolderExportReceipt = history.withLane { files ->
             val tree = Uri.parse(request.selected.exactUri)
             val checkpoint = { coroutineContext.ensureActive() }
-            val files = app.filesDir.canonicalFile.toPath()
             fun checkSelection() {
                 checkpoint()
-                requireSelection(files, request.issuedAt)
+                history.requireSelection(files, request.issuedAt)
             }
             checkSelection()
-            val attempt = attempt(files, request.operationId)
+            val attempt = history.attempt(files, request.operationId)
             if (!Files.notExists(attempt, NOFOLLOW_LINKS)) throw IOException("This backup operation cannot be repeated")
             val source = canonicalLibraryDirectory(originalRoot, files)
             val observed = AndroidLibraryWritableFolder(app).availableBytes(tree)
@@ -88,68 +83,11 @@ internal class RoomLibraryFolderExport(
             checkSelection()
             live.recordCompletion()
             checkSelection()
-            intent.receipt()
-    }
-
-    suspend fun inspect(operationId: String, issuedAt: LibraryActivation): LibraryFolderExportState = locked {
-        val files = app.filesDir.canonicalFile.toPath()
-        requireSelection(files, issuedAt)
-        val attempt = attempt(files, operationId)
-        if (Files.notExists(attempt, NOFOLLOW_LINKS)) return@locked LibraryFolderExportState.NotStarted
-        val journal = openJournal(files, attempt) { coroutineContext.ensureActive() }
-        val observed = journal.reopen(operationId)
-        if (observed != null && observed.intent.issuedAt != issuedAt) throw IOException("The backup belongs to another activation")
-        requireSelection(files, issuedAt)
-        when (observed?.phase) {
-            null, LocalLibraryFolderExportJournal.Phase.INTENT_ONLY -> LibraryFolderExportState.NeedsVerification
-            LocalLibraryFolderExportJournal.Phase.COMPLETED -> LibraryFolderExportState.Completed(observed.intent.receipt())
-            LocalLibraryFolderExportJournal.Phase.ACKNOWLEDGED -> LibraryFolderExportState.Acknowledged(observed.intent.receipt())
-        }
-    }
-
-    suspend fun acknowledge(receipt: LibraryFolderExportReceipt, issuedAt: LibraryActivation): Unit = locked {
-        val files = app.filesDir.canonicalFile.toPath()
-        requireSelection(files, issuedAt)
-        val journal = openJournal(files, attempt(files, receipt.operationId)) { coroutineContext.ensureActive() }
-        val observed = journal.reopen(receipt.operationId) ?: throw IOException("This backup has no retained receipt")
-        if (observed.intent.issuedAt != issuedAt || observed.intent.receipt() != receipt) {
-            throw IOException("The observed backup receipt does not match the requested acknowledgment")
-        }
-        requireSelection(files, issuedAt)
-        journal.acknowledge(observed.intent)
-        requireSelection(files, issuedAt)
-    }
-
-    private fun requireSelection(files: Path, issuedAt: LibraryActivation) {
-        val authority = LocalLibrarySettingsBootstrap(files.toFile()).openExisting()
-            ?: throw IOException("The default library selection is unavailable")
-        val identity = (authority.read() as? LocalSelectedLibraryAuthority.Selected.Default)?.selection?.identity
-        if (identity?.libraryId != issuedAt.libraryId || identity.activation != issuedAt.number) {
-            throw IOException("The backup no longer belongs to the selected default library")
-        }
-    }
-
-    private fun attempt(files: Path, operationId: String): Path {
-        requireOpaqueId(operationId)
-        return files.resolve("library-out-$operationId")
-    }
-
-    private fun openJournal(files: Path, attempt: Path, checkpoint: () -> Unit): LocalLibraryFolderExportJournal =
-        LocalLibraryFolderExportJournal(canonicalLibraryDirectory(attempt.toFile(), files).toFile(), checkpoint = checkpoint)
-
-    private fun LibraryFolderExportRecords.Intent.receipt() =
-        LibraryFolderExportReceipt(operationId, backupName, generation.libraryId, generation.id)
-
-    private suspend fun <T> locked(block: suspend CoroutineScope.() -> T): T = withContext(Dispatchers.IO) {
-        if (!exportLane.tryLock()) throw IOException("A default library export operation is already in progress")
-        try { block() } finally { exportLane.unlock() }
+            intent.backupReceipt()
     }
 
     private fun directoryIdentity(path: Path): Pair<Long, Long> = try {
         Os.stat(path.toString()).let { it.st_dev to it.st_ino }
     } catch (_: ErrnoException) { throw IOException("The private library directory could not be identified") }
 
-    private companion object {
-        val exportLane = Mutex()
-    }
 }

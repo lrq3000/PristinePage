@@ -26,6 +26,29 @@ import org.junit.runner.RunWith
 /** Tests our Activity-owned binding against actual AndroidX queued raw results and Android Parcel. This is not an actual Activity recreation, external picker or platform URI-grant experiment. */
 @RunWith(AndroidJUnit4::class)
 class LibraryPickerBindingTest {
+    @Test fun libraryBackupRegistryDeliversOnlyTheLaunchedWritableSelection() {
+        val activation = LibraryActivation("aaaaaaaa-aaaa-4aaa-8aaa-000000000021", 2)
+        val owner = app.pristinepage.library.LibraryBackupConfirmation()
+        val ticket = checkNotNull(owner.confirm(activation))
+        val registry = RecordingRegistry()
+        val tree = android.provider.DocumentsContract.buildTreeDocumentUri("com.android.externalstorage.documents", "primary:Documents/SyntheticBackup")
+        val delivered = mutableListOf<app.pristinepage.library.LibraryBackupPickerRegistration.Delivery>()
+        main {
+            app.pristinepage.library.LibraryBackupPickerRegistration(registry, owner, ticket, delivered::add).use { registration ->
+                assertFalse(registration.launch(activation.copy(number = 1)))
+                assertTrue(registration.launch(activation))
+                assertFalse(registration.launch(activation))
+                val result = Intent().setData(tree).addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION or Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION)
+                assertTrue(registry.dispatchResult(registry.codes.single(), Activity.RESULT_OK, result))
+                val exact = delivered.single()
+                assertSame(ticket, exact.ticket)
+                assertEquals(tree, (exact.selection as app.pristinepage.library.LibraryFolderPickerContract.Picked).uri)
+                assertTrue(exact.consume(activation))
+                assertFalse(exact.consume(activation))
+            }
+        }
+    }
+
 
     @Test fun savedEditorNeedsItsIssuingActivationAndLegacyIdsCannotReopen() {
         val identity = app.pristinepage.editor.EditorIdentity(

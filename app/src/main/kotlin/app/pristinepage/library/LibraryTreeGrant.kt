@@ -25,6 +25,13 @@ internal class LibraryTreeGrant private constructor(val exactUri: String, val re
         if (missingWriteModes(held) != 0) throw IOException("The selected folder's exact read and write permissions are unavailable")
     }
 
+    /** Check cancellation after permission lookup and immediately before the irreversible platform call. */
+    fun persistMissing(missing: Int, checkpoint: () -> Unit, take: (Int) -> Unit) {
+        if (missing == 0) return
+        checkpoint()
+        take(missing)
+    }
+
     companion object {
         fun inspect(exactUri: String, returnedRead: Boolean, returnedWrite: Boolean, persistable: Boolean): LibraryTreeGrant {
             if (!returnedRead || !persistable) throw IOException("The selected folder did not grant persistent read access")

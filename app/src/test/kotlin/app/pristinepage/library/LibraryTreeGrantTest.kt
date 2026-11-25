@@ -8,6 +8,16 @@ import org.junit.Test
 import java.io.IOException
 
 class LibraryTreeGrantTest {
+    @Test fun cancellationAfterPermissionPreflightNeverTakesThePlatformGrant() {
+        val uri = "content://com.android.externalstorage.documents/tree/primary%3ADocuments%2FBackup"
+        val grant = LibraryTreeGrant.inspect(uri, returnedRead = true, returnedWrite = true, persistable = true)
+        var platformCalls = 0
+        assertThrows(kotlinx.coroutines.CancellationException::class.java) {
+            grant.persistMissing(missing = grant.missingWriteModes(emptyList()),
+                checkpoint = { throw kotlinx.coroutines.CancellationException("Canceled after the permission lookup") }) { platformCalls++ }
+        }
+        assertEquals(0, platformCalls)
+    }
     @Test fun readOnlyHandoffDoesNotPersistExtraReturnedWriteModeOrRetakeAnExactExistingGrant() {
         val tree = "content://com.android.externalstorage.documents/tree/primary%3ADocuments%2FScans"
         val existingChild = "$tree%2FExisting"

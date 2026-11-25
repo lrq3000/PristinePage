@@ -12,8 +12,12 @@ import app.pristinepage.capture.PhotoImportController
 import app.pristinepage.capture.PhotoImportKind
 import app.pristinepage.capture.PhotoImportRequest
 import app.pristinepage.data.library.AndroidLibraryStartup
+import app.pristinepage.data.library.AndroidLibraryBackupHistory
 import app.pristinepage.data.library.DefaultLibraryOperations
 import app.pristinepage.data.library.LibraryActivation
+import app.pristinepage.data.library.LibraryFolderExportReceipt
+import app.pristinepage.data.library.LibraryFolderExportRequest
+import app.pristinepage.data.library.LibraryFolderExportState
 import app.pristinepage.data.model.BatchRecipeChange
 import app.pristinepage.data.model.DocumentId
 import app.pristinepage.data.model.DocumentMutationResult
@@ -55,13 +59,19 @@ import app.pristinepage.image.preview.OriginalPreviewBitmapLoader
 import app.pristinepage.image.preview.OriginalPreviewLoader
 import app.pristinepage.image.preview.RenderedPreviewBitmap
 import app.pristinepage.image.preview.RenderedPreviewBitmapLoader
+import app.pristinepage.library.LibraryBackupConfirmation
+import app.pristinepage.library.LibraryBackupPickerRegistration
+import app.pristinepage.library.LibraryFolderGrantHandoff
+import app.pristinepage.library.LibraryFolderPickerContract
 import java.io.FileNotFoundException
 import java.io.File
+import java.io.IOException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.asExecutor
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 
@@ -84,6 +94,44 @@ class ApplicationServices(context: Context, internal val budget: ImageAllocation
     private data class ActiveImport(val batch: ImportSessionId?)
 
     internal suspend fun recordedDefaultActivation(): LibraryActivation? = libraryStartup.recordedDefaultActivation()
+
+    /** Only a live, launched confirmation can enter the exact Files grant and provider-write lane. */
+    internal suspend fun exportConfirmedDefaultLibrary(
+        delivery: LibraryBackupPickerRegistration.Delivery,
+    ): LibraryFolderExportReceipt? {
+        if (!delivery.isPending()) return null
+        val ticket = delivery.ticket
+        val selection = delivery.selection
+        if (selection !is LibraryFolderPickerContract.Picked || !selection.grant.returnedWrite) {
+            delivery.cancel()
+            return null
+        }
+        val issue = ticket.issuedAt
+        try {
+            return withDefaultLibrary(issue) { graph ->
+                if (!delivery.consume(libraryStartup.recordedDefaultActivation())) return@withDefaultLibrary EditorValue(null)
+                // Spending this result precedes even taking a grant; neither failure nor cancellation makes it reusable.
+                val request = LibraryFolderExportRequest.bind(ticket.operationId, issue, selection.uri, returnedModes = 3)
+                val exact = withContext(Dispatchers.IO) {
+                    val operation = currentCoroutineContext()
+                    LibraryFolderGrantHandoff(context).persistWrite(selection) { operation.ensureActive() }
+                }
+                if (exact.toString() != selection.uri.toString()) throw IOException("The export destination identity changed")
+                requireSameDefault(issue)
+                val receipt = graph.store.exportLibraryTo(request)
+                requireSameDefault(issue)
+                EditorValue(receipt)
+            }?.value
+        } finally { delivery.cancel() }
+    }
+
+    internal suspend fun inspectConfirmedDefaultBackup(ticket: LibraryBackupConfirmation.Ticket): LibraryFolderExportState =
+        AndroidLibraryBackupHistory(context).inspect(ticket.operationId, ticket.issuedAt)
+
+    internal suspend fun acknowledgeConfirmedDefaultBackup(ticket: LibraryBackupConfirmation.Ticket, receipt: LibraryFolderExportReceipt) {
+        if (ticket.operationId != receipt.operationId) throw IOException("This backup does not match the retained confirmation")
+        AndroidLibraryBackupHistory(context).acknowledge(receipt, ticket.issuedAt)
+    }
 
     constructor(context: Context) : this(
         context.applicationContext,
