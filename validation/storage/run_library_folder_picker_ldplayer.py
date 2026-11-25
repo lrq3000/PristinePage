@@ -62,6 +62,7 @@ ACTIVATION_COMPATIBILITY = (
 WRITE_PROBE_CASE = "app.pristinepage.LibraryFolderFilesJourneyTest#grantedTreeCanStageAndPublishOneSyntheticFileWithoutOverwriting"
 BACKUP_CASE = "app.pristinepage.LibraryFolderFilesJourneyTest#defaultLibraryExportsItsOriginalAndAcceptedEditIntoANewFilesBackup"
 SETTINGS_BACKUP_CASE = "app.pristinepage.LibraryFolderFilesJourneyTest#settingsPublishesOneBackupOfTheSyntheticDefaultLibrary"
+SETTINGS_PICKER_CASE = "app.pristinepage.LibraryFolderFilesJourneyTest#settingsOpensAndCancelsFilesWithoutStartingABackup"
 SETTINGS_WITNESS_FILE = "files/library-settings-native-witness"
 BACKUP_ORIGINAL = "ebd602840377a3b3cf763cb6828fee67861ff77c444e8fe5894457ef6d99a24d"
 OCR_ACTIVATION_CASES = tuple(f"app.pristinepage.ocr.OcrWorkManagerIntegrationTest#{method}" for method in (
@@ -110,10 +111,20 @@ def select_backup_case(args):
     if args.settings_backup:
         need(args.fresh and not any((args.backup_export, args.probe_write, args.ocr_activation, args.working_catalog,
                                      args.probe_directory, args.activation, args.selected_catalog, args.activation_compatibility,
-                                     args.expect_home)),
+                                     args.expect_home, args.settings_picker_only)),
              "Settings backup requires a fresh standalone app witness")
         return SETTINGS_BACKUP_CASE
     return BACKUP_CASE if args.backup_export else None
+
+
+def select_settings_picker_case(args):
+    if not args.settings_picker_only:
+        return None
+    need(not any((args.fresh, args.settings_backup, args.backup_export, args.probe_write, args.ocr_activation,
+                  args.working_catalog, args.probe_directory, args.activation, args.selected_catalog,
+                  args.activation_compatibility, args.expect_home)),
+         "Settings picker cancellation requires the retained synthetic guest and a standalone invocation")
+    return SETTINGS_PICKER_CASE
 
 
 def verify_settings_catalog(path, digest, extent, expected):
@@ -155,6 +166,7 @@ def run(args):
          "The checked-out production/test build inputs do not match the admitted source")
     need(re.fullmatch(r"agent-pristinepage-tree-[a-f0-9]{12}", args.guest), "Require a dedicated library app-test guest name")
     need(args.fresh != bool(args.previous), "Choose first admission or an exact retained predecessor pair")
+    picker_case = select_settings_picker_case(args)
     backup_case = select_backup_case(args)
     if args.ocr_activation:
         need(not any((args.fresh, args.expect_home, args.probe_directory, args.working_catalog, args.activation, args.selected_catalog,
@@ -264,7 +276,7 @@ def run(args):
         original_args = ["-e", "libraryFixtureOriginal", original]
         if args.expect_home:
             original_args += ["-e", "libraryExpectHome", "1"]
-        scenarios = (SETTINGS_BACKUP_CASE,) if args.settings_backup else (*CASES, *((DESCRIPTOR_CASE,) if args.probe_directory else ()),
+        scenarios = (picker_case,) if picker_case else (SETTINGS_BACKUP_CASE,) if args.settings_backup else (*CASES, *((DESCRIPTOR_CASE,) if args.probe_directory else ()),
                      *((WORKING_CASE,) if args.working_catalog else ()),
                      *((ACTIVATION_CASE,) if args.activation else ()),
                      *((SELECTED_CATALOG_CASE,) if args.selected_catalog else ()),
@@ -342,6 +354,7 @@ if __name__ == "__main__":
     parser.add_argument("--probe-write", action="store_true", help="Write only in a fresh synthetic probe subdirectory")
     parser.add_argument("--backup-export", action="store_true", help="Export an isolated default library into a separately named backup child")
     parser.add_argument("--settings-backup", action="store_true", help="Exercise real Settings publication only on a verified fresh guest")
+    parser.add_argument("--settings-picker-only", action="store_true", help="Open and cancel Files from Settings on the retained synthetic guest; never select a destination")
     parser.add_argument("--ocr-activation", action="store_true", help="Test scoped WorkManager wakes and ordinary synthetic save/edit; no Files fixture")
     parser.add_argument("--previous", nargs=2, metavar=("APP_APK", "TEST_APK"))
     raise SystemExit(run(parser.parse_args()))

@@ -9,7 +9,9 @@ from tempfile import TemporaryDirectory
 import unittest
 from unittest.mock import patch
 
-from run_library_folder_picker_ldplayer import check_fixture_root, recheck_target, select_backup_case, verify_settings_catalog
+from run_library_folder_picker_ldplayer import (
+    check_fixture_root, recheck_target, select_backup_case, select_settings_picker_case, verify_settings_catalog,
+)
 from run_local_ocr_guest import read_boot_serial
 
 
@@ -50,13 +52,24 @@ class LibraryFolderPickerRunnerTest(unittest.TestCase):
     def test_settings_backup_does_not_run_on_a_retained_or_mixed_guest_batch(self):
         flags = dict(settings_backup=True, fresh=True, backup_export=False, probe_write=False, ocr_activation=False,
                      working_catalog=False, probe_directory=False, activation=False, selected_catalog=False,
-                     activation_compatibility=False, expect_home=False)
+                     activation_compatibility=False, expect_home=False, settings_picker_only=False)
         self.assertEqual("app.pristinepage.LibraryFolderFilesJourneyTest#settingsPublishesOneBackupOfTheSyntheticDefaultLibrary",
                          select_backup_case(Namespace(**flags)))
         for key in flags.keys() - {"settings_backup"}:
             with self.subTest(key=key), self.assertRaisesRegex(RuntimeError, "fresh.*standalone"):
                 select_backup_case(Namespace(**(flags | {key: not flags[key]})))
         self.assertIsNone(select_backup_case(Namespace(**(flags | {"settings_backup": False}))))
+
+    def test_picker_cancellation_is_standalone_on_the_retained_synthetic_guest(self):
+        flags = dict(settings_picker_only=True, settings_backup=False, fresh=False, backup_export=False,
+                     probe_write=False, ocr_activation=False, working_catalog=False, probe_directory=False,
+                     activation=False, selected_catalog=False, activation_compatibility=False, expect_home=False)
+        case = "app.pristinepage.LibraryFolderFilesJourneyTest#settingsOpensAndCancelsFilesWithoutStartingABackup"
+        self.assertEqual(case, select_settings_picker_case(Namespace(**flags)))
+        for key in flags.keys() - {"settings_picker_only"}:
+            with self.subTest(key=key), self.assertRaisesRegex(RuntimeError, "retained.*standalone"):
+                select_settings_picker_case(Namespace(**(flags | {key: True})))
+        self.assertIsNone(select_settings_picker_case(Namespace(**(flags | {"settings_picker_only": False}))))
 
     def test_settings_readback_rejects_a_valid_catalog_with_another_source_binding(self):
         first, second = (b'{"geometry":{"outputQuarterTurns":0}}', b'{"geometry":{"outputQuarterTurns":1}}')

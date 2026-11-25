@@ -22,6 +22,7 @@ import androidx.compose.ui.test.isEnabled
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.performClick
+import androidx.lifecycle.ViewModelProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import app.pristinepage.core.pipeline.OutputSpec
@@ -42,6 +43,7 @@ import app.pristinepage.data.model.SourceBlobId
 import app.pristinepage.data.repository.ScopedCommittedOriginals
 import app.pristinepage.image.decode.AndroidSourceInspector
 import app.pristinepage.image.decode.SourceDecoder
+import app.pristinepage.library.LibraryBackupViewModel
 import app.pristinepage.library.LibraryFolderGrantHandoff
 import app.pristinepage.library.LibraryFolderPickerContract
 import java.io.ByteArrayOutputStream
@@ -77,6 +79,49 @@ class LibraryFolderFilesJourneyTest {
     @get:Rule val compose = createAndroidComposeRule<MainActivity>()
 
     @Test fun actualFilesGrantReopensAfterActivityRecreationAndRevocationFailsClosed() = verifyJourney()
+
+    @Test fun settingsOpensAndCancelsFilesWithoutStartingABackup() {
+        val instrumentation = InstrumentationRegistry.getInstrumentation()
+        val app = instrumentation.targetContext.applicationContext as PristinePageApplication
+        val graph = runBlocking { app.services.imports() }
+        val album = runBlocking { graph.store.catalog.list(null, 2) }.single()
+        assertEquals("Synthetic Settings backup", album.title)
+        val backup = compose.runOnUiThread { ViewModelProvider(compose.activity)[LibraryBackupViewModel::class.java].session }
+        val grants = app.contentResolver.persistedUriPermissions.map { Triple(it.uri, it.isReadPermission, it.isWritePermission) }.toSet()
+        val pointer = File(app.filesDir.canonicalFile, "library-settings/active-library")
+        val originalPointer = pointer.readBytes()
+        fun attempts() = checkNotNull(app.filesDir.canonicalFile.list()).filter { it.startsWith("library-out-") }.toSet()
+        val before = attempts()
+        assertTrue("The retained synthetic guest must have no earlier backup attempt", before.isEmpty())
+        compose.onNodeWithTag("atelier-settings").performClick()
+        compose.onNodeWithTag("settings-open-library_storage").performClick()
+        compose.waitUntil(10_000) {
+            compose.onAllNodes(hasTestTag("library-backup-export") and isEnabled()).fetchSemanticsNodes().size == 1
+        }
+        compose.onNodeWithTag("library-backup-export").performClick()
+        val picker = checkNotNull(LibraryFolderPickerContract(writable = true).createIntent(app, Unit).component).packageName
+        compose.onNodeWithTag("library-backup-choose-folder").performClick()
+        val automation = instrumentation.uiAutomation
+        fun foreground() = automation.rootInActiveWindow?.packageName?.toString()
+        try {
+            compose.waitUntil(12_000) { foreground() == picker || backup.state.value.notice != null }
+            check(foreground() == picker)
+        } catch (failure: Exception) {
+            val state = backup.state.value
+            val request = state.picker?.let { if (it.authorization.awaitsLaunch(it.ticket)) "awaiting-launch" else "claimed" }
+            val sameActivation = runBlocking { app.services.recordedDefaultActivation() } == graph.activation
+            throw IllegalStateException("Settings picker not foreground; foreground=${foreground()}; " +
+                "reviewing=${state.reviewing}; request=$request; notice=${state.notice}; sameActivation=$sameActivation", failure)
+        }
+        assertEquals(picker, foreground())
+        assertTrue("The exact Files window did not accept Back", automation.performGlobalAction(AccessibilityService.GLOBAL_ACTION_BACK))
+        compose.waitUntil(10_000) {
+            foreground() == app.packageName && backup.state.value.let { it.picker == null && it.canReview }
+        }
+        assertEquals(before, attempts())
+        assertEquals(grants, app.contentResolver.persistedUriPermissions.map { Triple(it.uri, it.isReadPermission, it.isWritePermission) }.toSet())
+        assertArrayEquals(originalPointer, pointer.readBytes())
+    }
 
     @Test fun settingsPublishesOneBackupOfTheSyntheticDefaultLibrary() {
         val instrumentation = InstrumentationRegistry.getInstrumentation()
