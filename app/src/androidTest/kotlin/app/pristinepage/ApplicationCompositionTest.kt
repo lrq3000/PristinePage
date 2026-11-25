@@ -18,6 +18,7 @@ import app.pristinepage.core.pipeline.FallbackPolicy
 import app.pristinepage.core.recipe.GeometryRecipe
 import app.pristinepage.core.recipe.SourceBinding
 import app.pristinepage.data.files.SourceInspector
+import app.pristinepage.data.library.LibraryActivation
 import app.pristinepage.data.model.*
 import app.pristinepage.data.repository.*
 import app.pristinepage.image.decode.AndroidSourceInspector
@@ -47,6 +48,31 @@ import org.junit.runner.RunWith
 @RunWith(AndroidJUnit4::class)
 class ApplicationCompositionTest {
     private val output = OutputSpec(PixelSize(2, 2), RenderPurpose.PREVIEW)
+
+    @Test fun aColdWorkerCannotCreateOrBorrowADefaultLibraryUntilTheExactActivationExists() = runBlocking {
+        Fixture().use { f ->
+            val service = ApplicationServices(f.context, f.budget, f.provider)
+            val stale = LibraryActivation("aaaaaaaa-aaaa-4aaa-8aaa-000000000010", 1)
+            assertNull(service.reconcileDefaultOcrBatch(stale, null, null, 2))
+            assertFalse(File(f.context.filesDir, "library-settings").exists())
+            assertFalse(f.context.getDatabasePath("pristinepage.db").exists())
+            val recorded = service.imports().useStore { it.activation }
+            val reopened = ApplicationServices(f.context, f.budget, f.provider)
+            try {
+                assertNotNull(reopened.reconcileDefaultOcrBatch(recorded, null, null, 2))
+                assertNull(reopened.reconcileDefaultOcrBatch(recorded.copy(number = 2), null, null, 2))
+                val album = DocumentId("aaaaaaaa-aaaa-4aaa-8aaa-000000000011")
+                val page = PageId("aaaaaaaa-aaaa-4aaa-8aaa-000000000012")
+                assertNull(reopened.reconcileDefaultOcrPage(recorded, album, page, null))
+                val skipped = runCatching {
+                    reopened.reconcileDefaultOcrPage(recorded.copy(number = 2), album, page, null)
+                }.exceptionOrNull() as RepositoryFailure
+                assertEquals("library_activation_changed", skipped.error.safeMessageKey)
+            } finally {
+                reopened.imports().close()
+            }
+        }
+    }
 
     @Test fun firstActivationPreservesAPopulatedStoreOpenedByThePreviousComposition() = runBlocking {
         Fixture().use { f ->

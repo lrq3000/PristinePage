@@ -3,6 +3,7 @@ package app.pristinepage.ocr
 import android.content.Context
 import androidx.work.WorkManager
 import androidx.work.await
+import app.pristinepage.ApplicationServices
 import app.pristinepage.core.ocr.OcrConfiguration
 import app.pristinepage.data.library.LibraryActivation
 import app.pristinepage.data.model.DocumentId
@@ -114,19 +115,22 @@ internal class SavedOcrScheduling(
             }
         }
 
-        /** A verified runtime may have no resolvable default pack list. Null defaults preserve rediscovery without allocating new jobs. */
-        fun bind(work: SavedOcrWork, defaults: OcrConfiguration?, issuedAt: LibraryActivation): QualifiedSession = object : QualifiedSession {
-            override val activation = issuedAt
-            override val canCreateJobs = defaults != null
+        /** Each Room step borrows the issuing graph through completion and returns only detached wake hints and an issuing-store cursor. */
+        fun bind(services: ApplicationServices, defaults: OcrConfiguration?, issuedAt: LibraryActivation): QualifiedSession =
+            object : QualifiedSession {
+                override val activation = issuedAt
+                override val canCreateJobs = defaults != null
 
-            override suspend fun reconcilePage(document: DocumentId, page: PageId): SavedOcrWork.Target? =
-                work.reconcilePage(document, page, defaults)
+                override suspend fun reconcilePage(document: DocumentId, page: PageId): SavedOcrWork.Target? =
+                    services.reconcileDefaultOcrPage(issuedAt, document, page, defaults)
 
-            override fun pendingPages(): Flow<SavedOcrWork.Target> = discoverTargets<SavedOcrWork.Continuation>(defaults) { config, after, limit ->
-                val batch = work.reconcile(config, after, limit)
-                batch.targets to batch.nextAfter
+                override fun pendingPages(): Flow<SavedOcrWork.Target> =
+                    discoverTargets<SavedOcrWork.Continuation>(defaults) { config, after, limit ->
+                        val batch = services.reconcileDefaultOcrBatch(issuedAt, config, after, limit)
+                            ?: throw IllegalStateException("The pending OCR scan no longer belongs to the active library")
+                        batch.targets to batch.nextAfter
+                    }
             }
-        }
 
         /** Only the issuing store can interpret a cursor; enrollment does not derive one from the targets. */
         internal fun <Cursor : Any> discoverTargets(

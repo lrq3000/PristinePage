@@ -1,6 +1,6 @@
 package app.pristinepage.ocr
 
-import app.pristinepage.ApplicationImports
+import app.pristinepage.ApplicationServices
 import app.pristinepage.core.ocr.OcrConfiguration
 import app.pristinepage.core.ocr.OcrLayout
 import app.pristinepage.data.library.LibraryActivation
@@ -61,7 +61,6 @@ internal class SavedOcrApplication(
         if (currentActivation() != wake.activation) return null
         val runtime = activeRuntime() ?: return null
         val opened = graphForActivation(wake.activation) ?: return null
-        // The current default-only graph cannot switch in flight. A switchable graph must retain its activation lease through this execution.
         if (opened.activation != wake.activation || currentActivation() != wake.activation) return null
         currentCoroutineContext().ensureActive()
         return opened.execute(wake.target, runtime.sessions)
@@ -82,13 +81,14 @@ internal class SavedOcrApplication(
     }
 
     companion object {
-        fun bind(imports: ApplicationImports): Graph = object : Graph {
-            override val activation = imports.activation
+        fun bind(services: ApplicationServices, issuedAt: LibraryActivation): Graph = object : Graph {
+            override val activation = issuedAt
+
             override fun reconcile(defaults: OcrConfiguration?): SavedOcrScheduling.QualifiedSession =
-                SavedOcrScheduling.bind(imports.store.savedOcr, defaults, activation)
+                SavedOcrScheduling.bind(services, defaults, issuedAt)
 
             override suspend fun execute(target: SavedOcrWork.Target, sessions: SavedOcrPreparer.SessionFactory): SavedOcrWork.Outcome =
-                imports.store.savedOcr.execute(target, SavedOcrPreparer(imports.renderer, imports.budget, sessions))
+                services.recognizeDefaultOcrPage(issuedAt, target, sessions)
         }
     }
 }

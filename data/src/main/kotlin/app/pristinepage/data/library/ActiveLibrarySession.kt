@@ -98,3 +98,15 @@ internal class ActiveLibrarySession<G : AutoCloseable>(initial: Selection, graph
         }
     }
 }
+
+/** Structured operation boundary for the initialized default graph. Opening and validating the durable default selection remain the caller's responsibility. */
+class DefaultLibraryOperations<G : AutoCloseable>(activation: LibraryActivation, graph: G) {
+    private val session = ActiveLibrarySession(Selection(ActiveLibraryFence.Location.Default, activation.identity()), graph)
+
+    /** Return detached data only; the graph and its ports are lent for this structured callback, not returned to another owner. */
+    suspend fun <T : Any> use(
+        expected: LibraryActivation, operation: suspend CoroutineScope.(G) -> T,
+    ): T? = session.use(expected.identity(), operation)
+
+    private fun LibraryActivation.identity() = Identity(libraryId, number)
+}

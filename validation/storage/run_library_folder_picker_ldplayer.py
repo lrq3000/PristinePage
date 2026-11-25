@@ -44,7 +44,7 @@ OCR_ACTIVATION_CASES = tuple(f"app.pristinepage.ocr.OcrWorkManagerIntegrationTes
     "invalidInputFailsBeforeExecutingTheStandardOcrWorker",
     "coldLegacyAndStaleWakesLeaveAnExistingDefaultGraphUnopened",
     "pendingTileUsesOnlyTheLiveWakeForItsSuppliedGeneration",
-))
+)) + ("app.pristinepage.ApplicationCompositionTest#aColdWorkerCannotCreateOrBorrowADefaultLibraryUntilTheExactActivationExists",)
 OCR_SAVE_CASE = "app.pristinepage.ocr.LocalOcrImportJourneyTest#importedScansAreRecognizedAutomaticallyAndHomeOpensTheSecondPage"
 OCR_REDISCOVERY_CASE = (
     "app.pristinepage.ocr.LocalOcrStartupBackfillTest#legacyAndStaleWakesLeaveARealPendingJobForCurrentActivationRediscovery"
