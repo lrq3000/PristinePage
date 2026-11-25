@@ -30,31 +30,43 @@ internal object LibraryProviderWriteProbe {
             val sentinelIdentity = writeAndSync(resolver, sentinel, sentinelBytes)
             syncDirectory(resolver, probe)
 
-            val staged = create(resolver, probe, "application/octet-stream", "staged.bin")
-            check(displayName(resolver, staged) == "staged.bin")
+            // Stage under the final basename in a separate directory. API 28's rename calls can throw after changing the name.
+            val stageRoot = create(resolver, probe, DocumentsContract.Document.MIME_TYPE_DIR, "stage")
+            check(displayName(resolver, stageRoot) == "stage")
+            val staged = create(resolver, stageRoot, "application/octet-stream", "published.bin")
+            check(displayName(resolver, staged) == "published.bin")
             val bytes = byteArrayOf(11, 73, 123, 1, 100)
             val stagedIdentity = writeAndSync(resolver, staged, bytes)
             check(read(resolver, staged, bytes.size).contentEquals(bytes))
-            syncDirectory(resolver, probe)
-            val published = requireChild(probe, checkNotNull(DocumentsContract.renameDocument(resolver, staged, "published.bin")))
+            syncDirectory(resolver, stageRoot)
+            check(children(resolver, probe) == setOf("keep.bin", "stage"))
+            val published = requireChild(probe, checkNotNull(DocumentsContract.moveDocument(resolver, staged, stageRoot, probe)))
             check(displayName(resolver, published) == "published.bin")
+            syncDirectory(resolver, stageRoot)
             syncDirectory(resolver, probe)
-            syncDirectory(resolver, root)
+            check(children(resolver, stageRoot).isEmpty())
+            check(children(resolver, probe) == setOf("keep.bin", "stage", "published.bin"))
             check(identity(resolver, published) == stagedIdentity)
             check(read(resolver, published, bytes.size).contentEquals(bytes))
 
-            val colliding = create(resolver, probe, "application/octet-stream", "keep.bin")
-            check(DocumentsContract.getDocumentId(colliding) != DocumentsContract.getDocumentId(sentinel))
-            check(displayName(resolver, colliding) != "keep.bin")
-            val alternate = try { DocumentsContract.renameDocument(resolver, published, "keep.bin") }
-            catch (_: FileNotFoundException) { null }
-            val survivingPublication = alternate?.let { requireChild(probe, it) } ?: published
-            check(displayName(resolver, survivingPublication) != "keep.bin")
+            val colliding = create(resolver, stageRoot, "application/octet-stream", "keep.bin")
+            check(displayName(resolver, colliding) == "keep.bin")
+            val conflictIdentity = writeAndSync(resolver, colliding, bytes)
+            val conflictRefused = try { DocumentsContract.moveDocument(resolver, colliding, stageRoot, probe) == null }
+                catch (_: FileNotFoundException) { true }
+                catch (_: IllegalStateException) { true }
+            check(conflictRefused)
+            syncDirectory(resolver, stageRoot)
             syncDirectory(resolver, probe)
+            syncDirectory(resolver, root)
+            check(children(resolver, stageRoot) == setOf("keep.bin"))
+            check(children(resolver, probe) == setOf("keep.bin", "stage", "published.bin"))
+            check(identity(resolver, colliding) == conflictIdentity)
+            check(read(resolver, colliding, bytes.size).contentEquals(bytes))
             check(identity(resolver, sentinel) == sentinelIdentity)
             check(read(resolver, sentinel, sentinelBytes.size).contentEquals(sentinelBytes))
-            check(identity(resolver, survivingPublication) == stagedIdentity)
-            check(read(resolver, survivingPublication, bytes.size).contentEquals(bytes))
+            check(identity(resolver, published) == stagedIdentity)
+            check(read(resolver, published, bytes.size).contentEquals(bytes))
         } finally {
             if (held()?.isWritePermission == true) resolver.releasePersistableUriPermission(tree, write)
         }
@@ -79,6 +91,16 @@ internal object LibraryProviderWriteProbe {
             check(it.count == 1 && it.moveToFirst())
             it.getString(0)
         })
+
+    private fun children(resolver: ContentResolver, parent: Uri): Set<String> {
+        val uri = DocumentsContract.buildChildDocumentsUriUsingTree(parent, DocumentsContract.getDocumentId(parent))
+        return checkNotNull(resolver.query(uri, arrayOf(DocumentsContract.Document.COLUMN_DISPLAY_NAME), null, null, null)?.use {
+            check(it.count <= 4)
+            val names = mutableSetOf<String>()
+            while (it.moveToNext()) check(names.add(it.getString(0)))
+            names
+        })
+    }
 
     private fun writeAndSync(resolver: ContentResolver, document: Uri, contents: ByteArray): Pair<Long, Long> =
         ParcelFileDescriptor.AutoCloseOutputStream(checkNotNull(resolver.openFileDescriptor(document, "w"))).use { stream ->
