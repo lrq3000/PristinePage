@@ -76,6 +76,7 @@ BACKUP_DEATH_PICKER_FAILURE = "e5deb5f75e5e53dae04a8a655d6f9bfde2671e824876a1555
 BACKUP_MANUAL_CONTROL_FAILURE = "08fe10503d488aa4ec3775157a7d8b2690be375908cb2c7194def2dd6cf64002"
 BACKUP_DIRECT_CONTROL_PASS = "b2ac8b7795cb08629b3eb0cf888b1467a464ef8b36810afa76de07acae0d7e24"
 BACKUP_DEATH_RECEIPT_ONLY = "b6f9e9329f39c067cecdb1c1130b9f8f28bf65492e17709750c89d38bdfa86cd"
+ANCESTRY_GRANT_REFUSAL = "3271a4ebf9f4e0c55a25202fecfc160fef75626fe07ab027c767b7c2ce0b8fd1"
 UUID_TEXT = r"[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}"
 BACKUP_ORIGINAL = "ebd602840377a3b3cf763cb6828fee67861ff77c444e8fe5894457ef6d99a24d"
 OCR_ACTIVATION_CASES = tuple(f"app.pristinepage.ocr.OcrWorkManagerIntegrationTest#{method}" for method in (
@@ -227,6 +228,16 @@ def verify_settings_retry_evidence(raw, expected_sha, guest, previous):
     need(json.loads(anchor("artifacts.json"))["guest"] == guest, "Settings cancel control belongs to another guest")
     need(json.loads(anchor("outcomes.json")) == {"passed": [SETTINGS_PICKER_CASE], "failed": [], "installedSha256": previous},
          "The exact no-write Settings cancel control did not pass on the predecessor pair")
+
+
+def verify_ancestry_grant_refusal(anchor, guest, pair):
+    transcript = anchor("tree-ancestry-instrumentation.txt")
+    need(json.loads(anchor("artifacts.json"))["guest"] == guest and
+         json.loads(anchor("outcomes.json")) == {"passed": [], "failed": [ANCESTRY_CASE], "installedSha256": pair} and
+         read_results(transcript, (ANCESTRY_CASE,)) == ([], [ANCESTRY_CASE]) and
+         "INSTRUMENTATION_STATUS: stack=java.lang.AssertionError: Files retained effective write access during the read-only probe expected:<-1> but was:<0>"
+         in transcript.splitlines(),
+         "Require the exact failed read-only grant boundary on the installed predecessor")
 
 
 def verify_backup_death_control(anchor, guest, pair):
@@ -651,13 +662,11 @@ def run(args):
             completed, publication_claim = settings_completed_destination(parents.pop(), args.settings_recover, args.guest, previous)
         if ancestry_cases:
             parents = {Path(file).resolve().parent for file in args.previous}
-            need(len(parents) == 1 and previous[APP] == "1c694ab574d8ebb533541b754219133d5246c8b48344557fece0445a7d0cb26d",
-                 "Require the exact released app pair from the preceding recovery")
-            old = settings_run_anchors(parents.pop(), "94965983c698ea277722e113dfd130d7d1df1cf9ee0cdf2dc40ce62bbf626981")
-            need(json.loads(old("artifacts.json"))["guest"] == args.guest and
-                 json.loads(old("outcomes.json")) == {"passed": [BACKUP_DEATH_RECOVERY_CASE], "failed": [],
-                                                     "installedSha256": previous, "deliveryDeathPid": "3635"},
-                 "The ancestry batch must use the exact released guest and recovered pair")
+            need(len(parents) == 1 and previous[APP] == hashes[APP] and previous[TEST] != hashes[TEST],
+                 "Require the exact released app and changed instrumentation for the ancestry continuation")
+            old = settings_run_anchors(parents.pop(), ANCESTRY_GRANT_REFUSAL)
+            verify_ancestry_grant_refusal(old, args.guest, previous)
+            refused_death_destinations.append(backup_death_control_destination(old, ANCESTRY_CASE))
         if death_operation or death_receipt:
             parents = {Path(file).resolve().parent for file in args.previous}
             need(len(parents) == 1 and previous[APP] == hashes[APP], "Require the exact retained cold recovery pair")

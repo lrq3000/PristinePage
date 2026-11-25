@@ -12,7 +12,7 @@ from unittest.mock import patch
 
 from run_library_folder_picker_ldplayer import (
     check_fixture_root, read_backup_delivery_death, recheck_target, select_backup_case, select_backup_death_picker_case, select_settings_picker_case, select_settings_recovery_case, select_tree_ancestry, settings_completed_destination, spend_settings_retry,
-    verify_backup_death_control, verify_backup_death_intent, verify_backup_receipt_only, verify_settings_catalog, verify_settings_ocr, verify_settings_retry_evidence,
+    verify_ancestry_grant_refusal, verify_backup_death_control, verify_backup_death_intent, verify_backup_receipt_only, verify_settings_catalog, verify_settings_ocr, verify_settings_retry_evidence,
 )
 from run_local_ocr_guest import read_boot_serial
 
@@ -149,6 +149,25 @@ class LibraryFolderPickerRunnerTest(unittest.TestCase):
         self.assertEqual((), select_tree_ancestry(False, True))
         with self.assertRaisesRegex(RuntimeError, "read-only.*standalone"):
             select_tree_ancestry(True, True)
+
+    def test_ancestry_continuation_requires_the_exact_grant_boundary_refusal(self):
+        cls, method = "app.pristinepage.LibraryFolderFilesJourneyTest", "exactFilesTreeProvesManagedDirectoryAncestry"
+        case = f"{cls}#{method}"
+        pair = {"app.pristinepage.debug": "a" * 64, "app.pristinepage.debug.test": "b" * 64}
+        fields = f"INSTRUMENTATION_STATUS: class={cls}\nINSTRUMENTATION_STATUS: test={method}\n"
+        errors = "Files retained effective write access during the read-only probe expected:<-1> but was:<0>"
+        transcript = fields + "INSTRUMENTATION_STATUS_CODE: 1\n" + fields + (
+            f"INSTRUMENTATION_STATUS: stack=java.lang.AssertionError: {errors}\n"
+            "INSTRUMENTATION_STATUS_CODE: -2\nINSTRUMENTATION_RESULT: stream=\n"
+            "FAILURES!!!\nTests run: 1,  Failures: 1\nINSTRUMENTATION_CODE: -1\n")
+        evidence = {"artifacts.json": json.dumps({"guest": "assigned"}),
+                    "outcomes.json": json.dumps({"passed": [], "failed": [case], "installedSha256": pair}),
+                    "tree-ancestry-instrumentation.txt": transcript}
+        verify_ancestry_grant_refusal(evidence.__getitem__, "assigned", pair)
+        for guest, apks, trace in (("other", pair, transcript), ("assigned", {}, transcript),
+                                   ("assigned", pair, transcript.replace(errors, "Unrelated failure"))):
+            with self.subTest(guest=guest, apks=apks, trace=trace), self.assertRaisesRegex(RuntimeError, "grant boundary"):
+                verify_ancestry_grant_refusal((evidence | {"tree-ancestry-instrumentation.txt": trace}).__getitem__, guest, apks)
 
     def test_death_retry_requires_both_no_write_controls_on_the_same_exact_pair(self):
         def transcript(case):

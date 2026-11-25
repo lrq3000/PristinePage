@@ -851,10 +851,15 @@ class LibraryFolderFilesJourneyTest {
             val different = DocumentsContract.buildTreeDocumentUri(requireNotNull(uri.authority), "primary:Documents/${folder}-different")
             val wrongRoot = assertThrows(IOException::class.java) {
                 runBlocking { AndroidLibraryTreeRead(app, scratch).verify(different, first) }
-            }
-            assertEquals("The verified library belongs to a different selected folder", wrongRoot.message)
-            compose.runOnUiThread { registration.second.unregister() }
-            compose.activityRule.scenario.recreate()
+             }
+             assertEquals("The verified library belongs to a different selected folder", wrongRoot.message)
+             compose.runOnUiThread { registration.second.unregister() }
+             if (requireEffectiveReadOnly) {
+                 // Recreation retains the activity's URI permission owner. End it before borrowing descriptors on the persisted read grant.
+                 compose.activityRule.scenario.close()
+             } else {
+                 compose.activityRule.scenario.recreate()
+             }
             val again = runBlocking { AndroidLibraryTreeRead(app, scratch).verify(Uri.parse(uri.toString()), first) }
             assertEquals(first.generationId, again.generationId)
             val fixtureBlob = SourceBlobId("aaaaaaaa-aaaa-4aaa-8aaa-000000000003")
