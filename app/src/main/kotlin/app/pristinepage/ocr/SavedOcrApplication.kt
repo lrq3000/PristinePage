@@ -3,6 +3,7 @@ package app.pristinepage.ocr
 import app.pristinepage.ApplicationImports
 import app.pristinepage.core.ocr.OcrConfiguration
 import app.pristinepage.core.ocr.OcrLayout
+import app.pristinepage.data.library.LibraryActivation
 import app.pristinepage.data.repository.SavedOcrWork
 import app.pristinepage.image.ocr.SavedOcrPreparer
 import kotlinx.coroutines.currentCoroutineContext
@@ -13,6 +14,10 @@ internal class SavedOcrApplication(
     private val installed: suspend () -> Runtime?,
     private val defaults: () -> Defaults,
     private val graph: suspend () -> Graph,
+    private val currentActivation: suspend () -> LibraryActivation? = { null },
+    private val graphForActivation: suspend (LibraryActivation) -> Graph? = {
+        if (currentActivation() == it) graph() else null
+    },
 ) : SavedOcrWorkerHost {
     class Defaults(val orderedCodes: List<String>, val layout: OcrLayout)
 
@@ -23,16 +28,19 @@ internal class SavedOcrApplication(
     )
 
     interface Graph {
+        val activation: LibraryActivation? get() = null
         fun reconcile(defaults: OcrConfiguration?): SavedOcrScheduling.QualifiedSession
         suspend fun execute(target: SavedOcrWork.Target, sessions: SavedOcrPreparer.SessionFactory): SavedOcrWork.Outcome
     }
 
-    suspend fun reconciliation(): SavedOcrScheduling.QualifiedSession? {
+    suspend fun reconciliation(issuedAt: LibraryActivation? = null): SavedOcrScheduling.QualifiedSession? {
+        if (issuedAt != null && currentActivation() != issuedAt) return null
         val runtime = activeRuntime() ?: return null
         val requested = defaults()
         val configuration = resolveOrdered(runtime, requested.orderedCodes, requested.layout)
         // Unresolved defaults must not hide work whose original packs are still available.
-        return graph().reconcile(configuration)
+        val opened = if (issuedAt == null) graph() else graphForActivation(issuedAt)?.takeIf { it.activation == issuedAt } ?: return null
+        return opened.reconcile(configuration)
     }
 
     suspend fun resolveRerunConfiguration(saved: OcrConfiguration, useDefaults: Boolean): OcrConfiguration? {
@@ -49,10 +57,14 @@ internal class SavedOcrApplication(
         }
     }
 
-    override suspend fun executeSavedOcr(target: SavedOcrWork.Target): SavedOcrWork.Outcome? {
+    override suspend fun executeSavedOcr(wake: ActivationBoundOcrWake): SavedOcrWork.Outcome? {
+        if (currentActivation() != wake.activation) return null
         val runtime = activeRuntime() ?: return null
-        // Only the store may decode the current job and recover its original persisted configuration.
-        return graph().execute(target, runtime.sessions)
+        val opened = graphForActivation(wake.activation) ?: return null
+        // The current default-only graph cannot switch in flight. A switchable graph must retain its activation lease through this execution.
+        if (opened.activation != wake.activation || currentActivation() != wake.activation) return null
+        currentCoroutineContext().ensureActive()
+        return opened.execute(wake.target, runtime.sessions)
     }
 
     private suspend fun activeRuntime(): Runtime? {
@@ -71,8 +83,9 @@ internal class SavedOcrApplication(
 
     companion object {
         fun bind(imports: ApplicationImports): Graph = object : Graph {
+            override val activation = imports.activation
             override fun reconcile(defaults: OcrConfiguration?): SavedOcrScheduling.QualifiedSession =
-                SavedOcrScheduling.bind(imports.store.savedOcr, defaults)
+                SavedOcrScheduling.bind(imports.store.savedOcr, defaults, activation)
 
             override suspend fun execute(target: SavedOcrWork.Target, sessions: SavedOcrPreparer.SessionFactory): SavedOcrWork.Outcome =
                 imports.store.savedOcr.execute(target, SavedOcrPreparer(imports.renderer, imports.budget, sessions))

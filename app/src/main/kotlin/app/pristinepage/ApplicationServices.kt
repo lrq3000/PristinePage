@@ -43,6 +43,8 @@ class ApplicationServices(context: Context, internal val budget: ImageAllocation
     private val libraryStartup = AndroidLibraryStartup(this.context)
     private var initialized: ApplicationImports? = null
 
+    internal suspend fun recordedDefaultActivation(): LibraryActivation? = libraryStartup.recordedDefaultActivation()
+
     constructor(context: Context) : this(
         context.applicationContext,
         ApplicationImageBudget.create(checkNotNull(context.applicationContext.getSystemService(ActivityManager::class.java)).memoryClass),
@@ -72,28 +74,36 @@ class ApplicationServices(context: Context, internal val budget: ImageAllocation
     )
 
     suspend fun imports(): ApplicationImports = initialization.withLock {
-        initialized ?: run {
-            val activation = libraryStartup.requireDefaultActivation()
-            val normalizer = AndroidSourceInspector(budget)
-            val decodeQueue = Mutex()
-            // Scope the queue to normalization, not a provider read or the surrounding ingest transaction.
-            val ingress = object : SourceInspector {
-                override suspend fun inspect(file: File, expectedByteSha256: String) =
-                    decodeQueue.withLock { normalizer.inspect(file, expectedByteSha256) }
+        initialized ?: openDefault(libraryStartup.requireDefaultActivation())
+    }
 
-                override suspend fun inspectForIngest(file: File, expectedByteSha256: String) =
-                    decodeQueue.withLock { normalizer.inspectForIngest(file, expectedByteSha256) }
-            }
-            val store = PrivateImportStore.open(context, provider, ingress, ClassicalRecipeAdmission())
-            try {
-                val report = store.documents.reconcile()
-                currentCoroutineContext().ensureActive()
-                ApplicationImports(store, PhotoImportController(store.selections, store.sources), SourceDecoder(store.committedSources, normalizer), budget, report, activation, decodeQueue)
-                    .also { initialized = it }
-            } catch (failure: Throwable) {
-                ImportInitializationCleanup.close(store)
-                throw failure
-            }
+    /** An old wake cannot use the foreground bootstrap path. There is not yet a switchable application graph. */
+    internal suspend fun importsFor(issuedAt: LibraryActivation): ApplicationImports? = initialization.withLock {
+        if (libraryStartup.recordedDefaultActivation() != issuedAt) return@withLock null
+        initialized?.let { return@withLock it.takeIf { graph -> graph.activation == issuedAt } }
+        openDefault(issuedAt)
+    }
+
+    private suspend fun openDefault(activation: LibraryActivation): ApplicationImports {
+        val normalizer = AndroidSourceInspector(budget)
+        val decodeQueue = Mutex()
+        // Scope the queue to normalization, not a provider read or the surrounding ingest transaction.
+        val ingress = object : SourceInspector {
+            override suspend fun inspect(file: File, expectedByteSha256: String) =
+                decodeQueue.withLock { normalizer.inspect(file, expectedByteSha256) }
+
+            override suspend fun inspectForIngest(file: File, expectedByteSha256: String) =
+                decodeQueue.withLock { normalizer.inspectForIngest(file, expectedByteSha256) }
+        }
+        val store = PrivateImportStore.open(context, provider, ingress, ClassicalRecipeAdmission())
+        try {
+            val report = store.documents.reconcile()
+            currentCoroutineContext().ensureActive()
+            return ApplicationImports(store, PhotoImportController(store.selections, store.sources), SourceDecoder(store.committedSources, normalizer), budget, report, activation, decodeQueue)
+                .also { initialized = it }
+        } catch (failure: Throwable) {
+            ImportInitializationCleanup.close(store)
+            throw failure
         }
     }
 }

@@ -39,6 +39,16 @@ ACTIVATION_COMPATIBILITY = (
 )
 WRITE_PROBE_CASE = "app.pristinepage.LibraryFolderFilesJourneyTest#grantedTreeCanStageAndPublishOneSyntheticFileWithoutOverwriting"
 BACKUP_CASE = "app.pristinepage.LibraryFolderFilesJourneyTest#defaultLibraryExportsItsOriginalAndAcceptedEditIntoANewFilesBackup"
+OCR_ACTIVATION_CASES = tuple(f"app.pristinepage.ocr.OcrWorkManagerIntegrationTest#{method}" for method in (
+    "sameActivationKeepsTheLiveWakeButAnotherActivationDoesNotShareIt",
+    "invalidInputFailsBeforeExecutingTheStandardOcrWorker",
+    "coldLegacyAndStaleWakesLeaveAnExistingDefaultGraphUnopened",
+    "pendingTileUsesOnlyTheLiveWakeForItsSuppliedGeneration",
+))
+OCR_SAVE_CASE = "app.pristinepage.ocr.LocalOcrImportJourneyTest#importedScansAreRecognizedAutomaticallyAndHomeOpensTheSecondPage"
+OCR_REDISCOVERY_CASE = (
+    "app.pristinepage.ocr.LocalOcrStartupBackfillTest#legacyAndStaleWakesLeaveARealPendingJobForCurrentActivationRediscovery"
+)
 CASES = (
     "app.pristinepage.LibraryFolderPickerContractTest#retainsTheActualEncodedTreeAndBothReturnedModes",
     "app.pristinepage.LibraryFolderPickerContractTest#rejectsDocumentUrisAndCancelledOrNonpersistentSelections",
@@ -81,6 +91,10 @@ def run(args):
          "The checked-out production/test build inputs do not match the admitted source")
     need(re.fullmatch(r"agent-pristinepage-tree-[a-f0-9]{12}", args.guest), "Require a dedicated library app-test guest name")
     need(args.fresh != bool(args.previous), "Choose first admission or an exact retained predecessor pair")
+    if args.ocr_activation:
+        need(not any((args.fresh, args.expect_home, args.probe_directory, args.working_catalog, args.activation, args.selected_catalog,
+                      args.activation_compatibility, args.probe_write, args.backup_export)),
+             "The OCR regression batch requires the retained app guest and does not operate on Files fixtures")
     prefix = "picker-adapter-library-tree-" + uuid.uuid4().hex[:12]
     raw = ROOT / "validation/raw/storage" / prefix
     raw.mkdir()
@@ -107,9 +121,10 @@ def run(args):
         need(sha(saved) == hashes[package], "Retained candidate APK changed")
         retained[package] = saved
     fixture = raw / "synthetic-library"
-    files = make_fixture(fixture, with_scan=True)
-    original = synthetic_scan()[0]
-    need(files.get(f"objects/{original}") == original, "The populated Files fixture lacks its exact original")
+    files = {} if args.ocr_activation else make_fixture(fixture, with_scan=True)
+    original = None if args.ocr_activation else synthetic_scan()[0]
+    if not args.ocr_activation:
+        need(files.get(f"objects/{original}") == original, "The populated Files fixture lacks its exact original")
     (raw / f"{prefix}-artifacts.json").write_text(
         json.dumps(dict(proof=proof, source=args.commit, fixture=files, previous=previous, guest=args.guest)),
         encoding="utf-8",
@@ -147,6 +162,23 @@ def run(args):
             need(run.installed_hash(p) == hashes[p], "Installed APK differs from the admitted candidate")
         need(adb("shell", "pm", "list", "instrumentation", APP).splitlines() ==
              [f"instrumentation:{RUNNER} (target={APP})"], "The instrumentation registry differs")
+        if args.ocr_activation:
+            recheck_target(run, ns)
+            outcomes = []
+            for label, cases, deadline in (("transport", OCR_ACTIVATION_CASES, 150),
+                                           ("rediscovery", (OCR_REDISCOVERY_CASE,), 230),
+                                           ("save-edit", (OCR_SAVE_CASE,), 540)):
+                output = adb("shell", "am", "instrument", "-w", "-r", "-e", "class", ",".join(cases), RUNNER, timeout=deadline)
+                run.path(f"ocr-{label}-instrumentation.txt").write_text(output, encoding="utf-8")
+                passed, failed = read_results(output, cases)
+                outcomes.append({"batch": label, "passed": passed, "failed": failed})
+                if failed:
+                    break
+            run.save(run.path("outcomes.json"), {"batches": outcomes, "installedSha256": hashes}, durable=True)
+            for result in outcomes:
+                print(f"LDPlayer OCR {result['batch']}: {len(result['passed'])} passed, {len(result['failed'])} failed.", flush=True)
+            return any(result["failed"] for result in outcomes)
+
         folder = "PristinePage-tree-" + uuid.uuid4().hex[:12]
         guest_root = f"/sdcard/Documents/{folder}"
         adb("shell", "mkdir", "-p", "/sdcard/Documents")
@@ -222,5 +254,6 @@ if __name__ == "__main__":
     parser.add_argument("--activation-compatibility", action="store_true")
     parser.add_argument("--probe-write", action="store_true", help="Write only in a fresh synthetic probe subdirectory")
     parser.add_argument("--backup-export", action="store_true", help="Export an isolated default library into a separately named backup child")
+    parser.add_argument("--ocr-activation", action="store_true", help="Test scoped WorkManager wakes and ordinary synthetic save/edit; no Files fixture")
     parser.add_argument("--previous", nargs=2, metavar=("APP_APK", "TEST_APK"))
     raise SystemExit(run(parser.parse_args()))

@@ -3,6 +3,7 @@ package app.pristinepage.editor
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import app.pristinepage.ApplicationImports
+import app.pristinepage.data.library.LibraryActivation
 import app.pristinepage.data.model.*
 import app.pristinepage.image.preview.RenderedPreviewBitmapLoader
 import kotlinx.coroutines.*
@@ -16,7 +17,7 @@ data class EditorHostState(val identity: EditorIdentity? = null, val loading: Bo
 /** Retains draft/history across Activity recreation, not process death. Only opaque identity is saved by the Activity; a new process performs a guarded reopen of the accepted revision. The Application alone owns the graph/decoder/budget. */
 class EditorViewModel(
     private val openGraph: suspend () -> ApplicationImports,
-    private val onPagesSaved: (DocumentId, List<PageId>) -> Unit,
+    private val onPagesSaved: (LibraryActivation, DocumentId, List<PageId>) -> Unit,
 ) : ViewModel() {
     private val current = MutableStateFlow<EditorSession?>(null)
     val session: StateFlow<EditorSession?> = current.asStateFlow()
@@ -37,7 +38,7 @@ class EditorViewModel(
                 currentCoroutineContext().ensureActive()
                 if (generation != attempt) return@launch
                 val editor = EditorSession(documentId, pageId, ApplicationEditorActions { graph }, graph.renderer, viewModelScope,
-                    RenderedPreviewBitmapLoader(graph.budget), graph.budget, onPagesSaved)
+                     RenderedPreviewBitmapLoader(graph.budget), graph.budget, { album, pages -> onPagesSaved(graph.activation, album, pages) })
                 // Construction can begin guarded metadata loading, but rendering belongs to a STARTED composition, not an invisible retained ViewModel.
                 editor.setActive(false)
                 current.value = editor

@@ -4,6 +4,7 @@ import android.content.Context
 import androidx.work.WorkManager
 import androidx.work.await
 import app.pristinepage.core.ocr.OcrConfiguration
+import app.pristinepage.data.library.LibraryActivation
 import app.pristinepage.data.model.DocumentId
 import app.pristinepage.data.model.PageId
 import app.pristinepage.data.repository.SavedOcrWork
@@ -16,11 +17,12 @@ import kotlinx.coroutines.yield
 
 /** Save and launch hints are transport only. A missing qualified runtime resolves no session and must not open the library or WorkManager. */
 internal class SavedOcrScheduling(
-    private val resolve: suspend () -> QualifiedSession?,
-    private val enqueue: suspend (SavedOcrWork.Target) -> Unit,
+    private val resolve: suspend (LibraryActivation?) -> QualifiedSession?,
+    private val enqueue: suspend (ActivationBoundOcrWake) -> Unit,
 ) {
     interface QualifiedSession {
         val canCreateJobs: Boolean
+        val activation: LibraryActivation
         suspend fun reconcilePage(document: DocumentId, page: PageId): SavedOcrWork.Target?
         fun pendingPages(): Flow<SavedOcrWork.Target>
     }
@@ -30,6 +32,7 @@ internal class SavedOcrScheduling(
     /** Explicit command only. A wake failure cannot undo a committed rerun or turn it into a recognition error. */
     suspend fun requestRerun(
         qualify: suspend () -> OcrConfiguration?,
+        activation: LibraryActivation,
         commit: suspend (OcrConfiguration) -> SavedOcrWork.Target,
     ): RerunOutcome {
         val active = currentCoroutineContext()
@@ -40,7 +43,7 @@ internal class SavedOcrScheduling(
         val target = commit(configuration)
         active.ensureActive()
         val outcome = try {
-            enqueue(target)
+            enqueue(ActivationBoundOcrWake(activation, target))
             RerunOutcome.ENROLLED
         } catch (canceled: CancellationException) {
             throw canceled
@@ -53,18 +56,19 @@ internal class SavedOcrScheduling(
     }
 
     /** One defaults snapshot per committed notification. A partial notification leaves the next foreground backfill eligible. */
-    suspend fun onPagesSaved(document: DocumentId, pages: List<PageId>): Boolean {
+    suspend fun onPagesSaved(issuedAt: LibraryActivation, document: DocumentId, pages: List<PageId>): Boolean {
         val active = currentCoroutineContext()
         active.ensureActive()
         if (pages.isEmpty()) return true
-        val qualified = resolve() ?: return false
+        val qualified = resolve(issuedAt) ?: return false
+        if (qualified.activation != issuedAt) return false
         var complete = qualified.canCreateJobs
         for (page in pages) {
             active.ensureActive()
             try {
                 val target = qualified.reconcilePage(document, page) ?: continue
                 active.ensureActive()
-                enqueue(target)
+                enqueue(ActivationBoundOcrWake(qualified.activation, target))
             } catch (canceled: CancellationException) {
                 throw canceled
             } catch (_: Exception) {
@@ -80,12 +84,12 @@ internal class SavedOcrScheduling(
     suspend fun onStartup(): Boolean {
         val active = currentCoroutineContext()
         active.ensureActive()
-        val qualified = resolve() ?: return false
+        val qualified = resolve(null) ?: return false
         var firstFailure: Exception? = null
         qualified.pendingPages().collect { target ->
             active.ensureActive()
             try {
-                enqueue(target)
+                enqueue(ActivationBoundOcrWake(qualified.activation, target))
             } catch (canceled: CancellationException) {
                 throw canceled
             } catch (failure: Exception) {
@@ -102,16 +106,17 @@ internal class SavedOcrScheduling(
     companion object {
         private const val PAGE_BATCH = 20
 
-        fun withWorkManager(context: Context, resolve: suspend () -> QualifiedSession?): SavedOcrScheduling {
+        fun withWorkManager(context: Context, resolve: suspend (LibraryActivation?) -> QualifiedSession?): SavedOcrScheduling {
             val application = context.applicationContext
-            return SavedOcrScheduling(resolve) { target ->
+            return SavedOcrScheduling(resolve) { wake ->
                 // Wait for the request transaction, not for execution of the worker.
-                OcrPageEnrollment.forTarget(target).enqueue(WorkManager.getInstance(application)).await()
+                OcrPageEnrollment.forWake(wake).enqueue(WorkManager.getInstance(application)).await()
             }
         }
 
         /** A verified runtime may have no resolvable default pack list. Null defaults preserve rediscovery without allocating new jobs. */
-        fun bind(work: SavedOcrWork, defaults: OcrConfiguration?): QualifiedSession = object : QualifiedSession {
+        fun bind(work: SavedOcrWork, defaults: OcrConfiguration?, issuedAt: LibraryActivation): QualifiedSession = object : QualifiedSession {
+            override val activation = issuedAt
             override val canCreateJobs = defaults != null
 
             override suspend fun reconcilePage(document: DocumentId, page: PageId): SavedOcrWork.Target? =

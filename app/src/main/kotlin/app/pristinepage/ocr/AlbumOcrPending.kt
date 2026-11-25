@@ -3,6 +3,8 @@ package app.pristinepage.ocr
 import android.content.Context
 import androidx.work.WorkInfo
 import androidx.work.WorkManager
+import app.pristinepage.ApplicationImports
+import app.pristinepage.data.library.LibraryActivation
 import app.pristinepage.data.model.DocumentId
 import app.pristinepage.data.model.DocumentPage
 import app.pristinepage.data.repository.SavedOcrWork
@@ -52,16 +54,16 @@ internal object AlbumOcrPending {
             }
         }.buffer(0).distinctUntilChanged()
 
-    fun withWorkManager(context: Context, targets: Flow<SavedOcrWork.Target?>): Flow<State?> =
+    fun withWorkManager(context: Context, targets: Flow<SavedOcrWork.Target?>, activation: LibraryActivation): Flow<State?> =
         observe(targets) { target ->
-            WorkManager.getInstance(context.applicationContext).getWorkInfosForUniqueWorkFlow(OcrPageDelivery.uniqueName(target))
+            val name = ActivationBoundOcrWake(activation, target).uniqueName()
+            WorkManager.getInstance(context.applicationContext).getWorkInfosForUniqueWorkFlow(name)
                 .map { records -> records.map { it.state } }
         }
 
-    fun forSavedPage(context: Context, open: suspend () -> SavedOcrWork): (DocumentId, DocumentPage) -> Flow<State?> =
-        { document, page ->
-            withWorkManager(context, flow {
-                emitAll(open().observePendingTarget(document, page.pageId, page.recipeRevision))
-            })
-        }
+    fun forSavedPage(context: Context, open: suspend () -> ApplicationImports): (DocumentId, DocumentPage) -> Flow<State?> =
+        { document, page -> flow {
+            val graph = open()
+            emitAll(withWorkManager(context, graph.store.savedOcr.observePendingTarget(document, page.pageId, page.recipeRevision), graph.activation))
+        } }
 }

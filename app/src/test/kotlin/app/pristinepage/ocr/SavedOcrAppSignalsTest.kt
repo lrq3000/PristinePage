@@ -2,6 +2,7 @@ package app.pristinepage.ocr
 
 import app.pristinepage.core.ocr.OcrConfiguration
 import app.pristinepage.core.ocr.OcrLayout
+import app.pristinepage.data.library.LibraryActivation
 import app.pristinepage.data.model.DocumentId
 import app.pristinepage.data.model.JobId
 import app.pristinepage.data.model.PageId
@@ -23,6 +24,7 @@ class SavedOcrAppSignalsTest {
     private val first = PageId("aaaaaaaa-aaaa-4aaa-8aaa-000000000012")
     private val next = PageId("aaaaaaaa-aaaa-4aaa-8aaa-000000000013")
     private val job = JobId("aaaaaaaa-aaaa-4aaa-8aaa-000000000014")
+    private val activation = LibraryActivation("aaaaaaaa-aaaa-4aaa-8aaa-000000000019", 2)
 
     @Test fun anActiveOrSuccessfulStartupIsNotStartedAgainWithinTheProcess() = runTest {
         val release = CompletableDeferred<Unit>()
@@ -47,8 +49,8 @@ class SavedOcrAppSignalsTest {
         val nextTarget = SavedOcrWork.Target(next, JobId("aaaaaaaa-aaaa-4aaa-8aaa-000000000015"))
         val work = session(discover = { scans++ }, pending = { if (scans == 1) listOf(firstTarget, nextTarget) else listOf(firstTarget) })
         val signals = SavedOcrAppSignals(backgroundScope, SavedOcrScheduling({ work }) {
-            if (scans == 1 && it == firstTarget) throw IllegalStateException("Synthetic launch failure")
-            delivered += it
+            if (scans == 1 && it.target == firstTarget) throw IllegalStateException("Synthetic launch failure")
+            delivered += it.target
         })
         signals.onStartup()
         runCurrent()
@@ -68,7 +70,7 @@ class SavedOcrAppSignalsTest {
         val delivered = mutableListOf<SavedOcrWork.Target>()
         val work = session(discover = { scans++ }, pending = { listOf(previouslySaved) })
         val signals = SavedOcrAppSignals(backgroundScope, SavedOcrScheduling({ work.takeIf { available } }) {
-            delivered += it
+            delivered += it.target
         })
         signals.onStartup()
         runCurrent()
@@ -96,7 +98,7 @@ class SavedOcrAppSignalsTest {
                 finishFirstProbe.await()
                 null
             } else work
-        }) { delivered += it })
+        }) { delivered += it.target })
         signals.onStartup()
         runCurrent()
         assertEquals(1, probes)
@@ -117,13 +119,13 @@ class SavedOcrAppSignalsTest {
         var scans = 0
         val delivered = mutableListOf<SavedOcrWork.Target>()
         val work = session(discover = { scans++ }, pending = { if (saved) listOf(target) else emptyList() })
-        val signals = SavedOcrAppSignals(backgroundScope, SavedOcrScheduling({ work.takeIf { ready } }) { delivered += it })
+        val signals = SavedOcrAppSignals(backgroundScope, SavedOcrScheduling({ work.takeIf { ready } }) { delivered += it.target })
         signals.onStartup()
         runCurrent()
         assertEquals(1, scans)
         saved = true
         ready = false
-        signals.onPagesSaved(document, listOf(first))
+        signals.onPagesSaved(activation, document, listOf(first))
         runCurrent()
         ready = true
         assertTrue(delivered.isEmpty())
@@ -143,11 +145,11 @@ class SavedOcrAppSignalsTest {
             discover = { if (++scans == 1) finishedScanning.await() },
             pending = { if (scans > 1) listOf(target) else emptyList() },
         )
-        val signals = SavedOcrAppSignals(backgroundScope, SavedOcrScheduling({ work.takeIf { ready } }) { delivered += it })
+        val signals = SavedOcrAppSignals(backgroundScope, SavedOcrScheduling({ work.takeIf { ready } }) { delivered += it.target })
         signals.onStartup()
         runCurrent()
         ready = false
-        signals.onPagesSaved(document, listOf(first))
+        signals.onPagesSaved(activation, document, listOf(first))
         runCurrent()
         ready = true
         finishedScanning.complete(Unit)
@@ -168,11 +170,12 @@ class SavedOcrAppSignalsTest {
             SavedOcrWork.Target(page, job)
         })
         val signals = SavedOcrAppSignals(backgroundScope, SavedOcrScheduling({ work }) {
-            if (it.page == first) throw IllegalStateException("Synthetic enrollment failure")
-            delivered += it.page
+            assertEquals(activation, it.activation)
+            if (it.target.page == first) throw IllegalStateException("Synthetic enrollment failure")
+            delivered += it.target.page
         })
         val input = mutableListOf(first, next)
-        signals.onPagesSaved(document, input)
+        signals.onPagesSaved(activation, document, input)
         assertTrue(reconciled.isEmpty())
         input.clear()
         runCurrent()
@@ -186,7 +189,7 @@ class SavedOcrAppSignalsTest {
         val signals = SavedOcrAppSignals(backgroundScope, SavedOcrScheduling({ work }) {
             throw CancellationException("Synthetic canceled enqueue")
         })
-        signals.onPagesSaved(document, listOf(first, next))
+        signals.onPagesSaved(activation, document, listOf(first, next))
         runCurrent()
         assertEquals(listOf(first), seen)
     }
@@ -202,12 +205,12 @@ class SavedOcrAppSignalsTest {
                 null
             })
         }) { fail("No eligible wake") })
-        signals.onPagesSaved(document, emptyList())
+        signals.onPagesSaved(activation, document, emptyList())
         runCurrent()
         assertEquals(0, resolutions)
-        signals.onPagesSaved(document, listOf(first, next))
+        signals.onPagesSaved(activation, document, listOf(first, next))
         runCurrent()
-        signals.onPagesSaved(document, listOf(next))
+        signals.onPagesSaved(activation, document, listOf(next))
         runCurrent()
         assertEquals(listOf(first to 1, next to 1, next to 2), observed)
     }
@@ -236,11 +239,12 @@ class SavedOcrAppSignalsTest {
         val signals = SavedOcrAppSignals(backgroundScope, SavedOcrScheduling({ error("No reconciliation expected") }) {
             entered.complete(Unit)
             release.await()
-            delivered += it
+            assertEquals(activation, it.activation)
+            delivered += it.target
         })
         var returnedToCaller = false
         val panel = launch {
-            signals.onRerun({ configuration }) { target }
+            signals.onRerun({ configuration }, activation) { target }
             returnedToCaller = true
         }
         runCurrent()
@@ -260,13 +264,13 @@ class SavedOcrAppSignalsTest {
         val signals = SavedOcrAppSignals(backgroundScope, SavedOcrScheduling({ error("No reconciliation expected") }) {
             release.await()
         })
-        val firstPanel = launch { signals.onRerun({ configuration }) { commits++; target } }
+        val firstPanel = launch { signals.onRerun({ configuration }, activation) { commits++; target } }
         runCurrent()
         assertEquals(1, commits)
         assertTrue(signals.rerunInFlight.value)
         firstPanel.cancel()
         var reopenedOutcome: SavedOcrScheduling.RerunOutcome? = null
-        val reopened = launch { reopenedOutcome = signals.onRerun({ configuration }) { commits++; target } }
+        val reopened = launch { reopenedOutcome = signals.onRerun({ configuration }, activation) { commits++; target } }
         runCurrent()
         try {
             assertEquals(1, commits)
@@ -285,6 +289,7 @@ class SavedOcrAppSignalsTest {
         pending: () -> List<SavedOcrWork.Target> = { emptyList() },
         saved: suspend (DocumentId, PageId) -> SavedOcrWork.Target? = { _, _ -> error("Expected startup discovery") },
     ): SavedOcrScheduling.QualifiedSession = object : SavedOcrScheduling.QualifiedSession {
+        override val activation = this@SavedOcrAppSignalsTest.activation
         override val canCreateJobs = true
         override fun pendingPages(): Flow<SavedOcrWork.Target> = flow {
             discover()

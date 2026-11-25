@@ -2,18 +2,15 @@ package app.pristinepage.ocr
 
 import androidx.work.Data
 import androidx.work.ListenableWorker
-import app.pristinepage.data.model.JobId
 import app.pristinepage.data.model.OperationErrorCode
-import app.pristinepage.data.model.PageId
 import app.pristinepage.data.model.RepositoryFailure
-import app.pristinepage.data.repository.SavedOcrWork
 import app.pristinepage.data.repository.SavedOcrWork.Outcome
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
 
 /** WorkManager transports an exact opaque hint. It neither owns the durable attempt count nor resolves engine settings. */
-internal class OcrPageDelivery(private val executeTarget: suspend (SavedOcrWork.Target) -> Outcome?) {
+internal object OcrPageDelivery {
     enum class Result {
         DONE, RETRY, REJECT;
 
@@ -25,12 +22,14 @@ internal class OcrPageDelivery(private val executeTarget: suspend (SavedOcrWork.
         }
     }
 
-    suspend fun deliver(input: Data): Result {
+    /** Retire a legacy wake without looking up a graph. Only current Room reconciliation may rediscover pending jobs. */
+    suspend fun deliverBound(input: Data, execute: suspend (ActivationBoundOcrWake) -> Outcome?): Result {
         val active = currentCoroutineContext()
         active.ensureActive()
-        val target = decode(input) ?: return Result.REJECT
+        val wake = ActivationBoundOcrWake.decode(input)
+            ?: return if (ActivationBoundOcrWake.isLegacy(input)) Result.DONE else Result.REJECT
         val result = try {
-            when (executeTarget(target)) {
+            when (execute(wake)) {
                 null, Outcome.PUBLISHED, Outcome.OBSOLETE, Outcome.TERMINAL -> Result.DONE
                 // A final recorded failure can cause a harmless terminal lookup on the next wake; it cannot grant a fourth start.
                 Outcome.BUSY, Outcome.WAITING_FOR_OWNER, Outcome.FAILURE_RECORDED -> Result.RETRY
@@ -52,28 +51,5 @@ internal class OcrPageDelivery(private val executeTarget: suspend (SavedOcrWork.
         }
         active.ensureActive()
         return result
-    }
-
-    companion object {
-        private const val PAGE = "page"
-        private const val JOB = "job"
-
-        fun uniqueName(target: SavedOcrWork.Target): String = "saved-ocr-page-v1/${target.job.value}"
-
-        fun encode(target: SavedOcrWork.Target): Data =
-            Data.Builder().putString(PAGE, target.page.value).putString(JOB, target.job.value).build()
-
-        fun decode(input: Data): SavedOcrWork.Target? {
-            val fields = input.keyValueMap
-            if (fields.size != 2) return null
-            val page = fields[PAGE] as? String ?: return null
-            val job = fields[JOB] as? String ?: return null
-            if (page.length != 36 || job.length != 36) return null
-            return try {
-                SavedOcrWork.Target(PageId(page), JobId(job))
-            } catch (_: IllegalArgumentException) {
-                null
-            }
-        }
     }
 }

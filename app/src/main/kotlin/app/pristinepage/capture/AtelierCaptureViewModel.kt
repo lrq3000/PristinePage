@@ -13,6 +13,7 @@ import app.pristinepage.image.preview.RenderedPreviewBitmapLoader
 import app.pristinepage.library.ApplicationLibraryActions
 import app.pristinepage.library.LibraryPhotoResult
 import app.pristinepage.ocr.sendCommittedOcrHint
+import app.pristinepage.data.library.LibraryActivation
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -46,7 +47,7 @@ internal data class AtelierCaptureState(
 internal class AtelierCaptureViewModel(
     context: Context,
     private val graph: suspend () -> ApplicationImports,
-    private val onPagesSaved: (DocumentId, List<PageId>) -> Unit,
+    private val onPagesSaved: (LibraryActivation, DocumentId, List<PageId>) -> Unit,
 ) : ViewModel() {
     private val imports = ApplicationLibraryActions(context.applicationContext, graph)
     private val current = MutableStateFlow(AtelierCaptureState())
@@ -184,7 +185,7 @@ internal class AtelierCaptureViewModel(
             val saved = api.save(snapshot, pages, app.renderer)
             current.value.editor?.close()
             current.value = AtelierCaptureState(saved = saved.document)
-            sendCommittedOcrHint(saved.document, saved.pageIds, onPagesSaved)
+            sendCommittedOcrHint(saved.document, saved.pageIds) { album, pages -> onPagesSaved(app.activation, album, pages) }
         }
     }
 

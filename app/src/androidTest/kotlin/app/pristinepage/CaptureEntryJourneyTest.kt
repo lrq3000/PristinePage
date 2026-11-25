@@ -176,7 +176,7 @@ class CaptureEntryJourneyTest {
                 val factory = object : ViewModelProvider.Factory {
                     @Suppress("UNCHECKED_CAST")
                     override fun <T : ViewModel> create(modelClass: Class<T>): T =
-                        AtelierCaptureViewModel(context, { graph }) { _, _ -> check(realProvider) { "Cancel must not save pages" } } as T
+                         AtelierCaptureViewModel(context, { graph }) { _, _, _ -> check(realProvider) { "Cancel must not save pages" } } as T
                 }
                 ViewModelProvider(models, factory)[AtelierCaptureViewModel::class.java].also { acquisition ->
                     val activity = compose.activity

@@ -1,6 +1,7 @@
 package app.pristinepage.ocr
 
 import app.pristinepage.core.ocr.OcrConfiguration
+import app.pristinepage.data.library.LibraryActivation
 import app.pristinepage.data.model.DocumentId
 import app.pristinepage.data.model.PageId
 import app.pristinepage.data.repository.SavedOcrWork
@@ -58,12 +59,12 @@ internal class SavedOcrAppSignals(
         }
     }
 
-    fun onPagesSaved(document: DocumentId, pages: List<PageId>) {
+    fun onPagesSaved(activation: LibraryActivation, document: DocumentId, pages: List<PageId>) {
         val committed = pages.toList()
         if (committed.isEmpty()) return
         processScope.launch {
             var completed = false
-            try { completed = deliver { scheduling.onPagesSaved(document, committed) } == true }
+            try { completed = deliver { scheduling.onPagesSaved(activation, document, committed) } == true }
             finally {
                 if (!completed) startup.getAndUpdate {
                     when (it) {
@@ -80,13 +81,14 @@ internal class SavedOcrAppSignals(
     /** A deliberate command may finish after its dialog closes. Only the observation-bound Room job and its opaque wake can survive the dialog. */
     suspend fun onRerun(
         qualify: suspend () -> OcrConfiguration?,
+        activation: LibraryActivation,
         commit: suspend (OcrConfiguration) -> SavedOcrWork.Target,
     ): SavedOcrScheduling.RerunOutcome {
         currentCoroutineContext().ensureActive()
         return processScope.async {
             // Keep the gate with the command even when the original UI waiter is canceled or a new panel is opened.
             if (!manualRerun.compareAndSet(expect = false, update = true)) return@async SavedOcrScheduling.RerunOutcome.BUSY
-            try { scheduling.requestRerun(qualify, commit) } finally { manualRerun.value = false }
+            try { scheduling.requestRerun(qualify, activation, commit) } finally { manualRerun.value = false }
         }.await()
     }
 

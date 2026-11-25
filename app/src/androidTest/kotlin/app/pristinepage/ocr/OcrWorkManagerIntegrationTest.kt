@@ -9,6 +9,7 @@ import androidx.work.OneTimeWorkRequest
 import androidx.work.WorkInfo
 import androidx.work.WorkManager
 import app.pristinepage.PristinePageApplication
+import app.pristinepage.data.library.LibraryActivation
 import app.pristinepage.data.model.JobId
 import app.pristinepage.data.model.PageId
 import app.pristinepage.data.repository.SavedOcrWork
@@ -30,14 +31,15 @@ import org.junit.runner.RunWith
 /** Android WorkManager transport with unbound synthetic IDs; no scan, OCR result or retained library is changed. */
 @RunWith(AndroidJUnit4::class)
 class OcrWorkManagerIntegrationTest {
-    @Test fun sameJobKeepsTheLiveWakeButASuccessorOnTheSamePageRuns() = runBlocking {
+    @Test fun sameActivationKeepsTheLiveWakeButAnotherActivationDoesNotShareIt() = runBlocking {
         val context = standardTarget()
         val manager = WorkManager.getInstance(context)
         val target = newTarget()
-        val duplicate = OcrPageEnrollment.forTarget(target)
-        val successor = OcrPageEnrollment.forTarget(target.copy(job = JobId(UUID.randomUUID().toString())))
+        val original = ActivationBoundOcrWake(newActivation(), target)
+        val duplicate = OcrPageEnrollment.forWake(original)
+        val successor = OcrPageEnrollment.forWake(original.copy(activation = original.activation.copy(number = 2)))
         val held = OneTimeWorkRequest.Builder(SavedOcrPageWorker::class.java)
-            .setInputData(OcrPageDelivery.encode(target))
+            .setInputData(original.encode())
             .setInitialDelay(3, TimeUnit.MINUTES) // A real ENQUEUED hold makes the KEEP race deterministic.
             .build()
         try {
@@ -62,7 +64,7 @@ class OcrWorkManagerIntegrationTest {
         val target = newTarget()
         val database = context.getDatabasePath("pristinepage.db")
         val existedBefore = database.exists()
-        val unwantedField = Data.Builder().putAll(OcrPageDelivery.encode(target)).putBoolean("fixture_extra", true).build()
+        val unwantedField = Data.Builder().putAll(ActivationBoundOcrWake(newActivation(), target).encode()).putBoolean("fixture_extra", true).build()
         val invalid = OneTimeWorkRequest.Builder(SavedOcrPageWorker::class.java).setInputData(unwantedField).build()
         try {
             manager.enqueue(invalid).result.awaitBounded()
@@ -73,18 +75,46 @@ class OcrWorkManagerIntegrationTest {
         assertEquals(existedBefore, database.exists())
     }
 
+    @Test fun coldLegacyAndStaleWakesLeaveAnExistingDefaultGraphUnopened() = runBlocking {
+        val app = standardTarget() as PristinePageApplication
+        val manager = WorkManager.getInstance(app)
+        val services = app.services
+        val recorded = checkNotNull(services.recordedDefaultActivation())
+        assertTrue(app.getDatabasePath("pristinepage.db").isFile)
+        val cachedGraph = services.javaClass.getDeclaredField("initialized").apply { isAccessible = true }
+        assertNull("No foreground or worker must initialize the graph before this cold fixture", cachedGraph.get(services))
+        assertFalse(app.ocrRuntimeReady.value)
+        val target = newTarget()
+        val legacy = Data.Builder().putString("page", target.page.value).putString("job", target.job.value).build()
+        val request = OneTimeWorkRequest.Builder(SavedOcrPageWorker::class.java).setInputData(legacy).build()
+        val staleAt = recorded.copy(number = if (recorded.number == 1L) 2L else 1L)
+        val stale = OcrPageEnrollment.forWake(ActivationBoundOcrWake(staleAt, target))
+        try {
+            manager.enqueue(request).result.awaitBounded()
+            requireTerminal(manager, request.id, WorkInfo.State.SUCCEEDED)
+            stale.enqueue(manager).result.awaitBounded()
+            requireTerminal(manager, stale.request.id, WorkInfo.State.SUCCEEDED)
+            assertFalse(app.ocrRuntimeReady.value)
+            assertNull("Legacy or stale delivery initialized the existing library", cachedGraph.get(services))
+        } finally {
+            cancelUnfinished(manager, request.id, stale.request.id)
+        }
+    }
+
     @Test fun pendingTileUsesOnlyTheLiveWakeForItsSuppliedGeneration() = runBlocking {
         val context = standardTarget()
         val manager = WorkManager.getInstance(context)
         val target = newTarget()
+        val activation = newActivation()
+        val wake = ActivationBoundOcrWake(activation, target)
         val held = OneTimeWorkRequest.Builder(SavedOcrPageWorker::class.java)
-            .setInputData(OcrPageDelivery.encode(target))
+            .setInputData(wake.encode())
             .setInitialDelay(3, TimeUnit.MINUTES)
             .build()
         val observed = MutableStateFlow<SavedOcrWork.Target?>(target)
         try {
-            manager.enqueueUniqueWork(OcrPageDelivery.uniqueName(target), ExistingWorkPolicy.KEEP, held).result.awaitBounded()
-            assertEquals(AlbumOcrPending.State.QUEUED, withTimeout(5_000) { AlbumOcrPending.withWorkManager(context, observed).first { it != null } })
+            manager.enqueueUniqueWork(wake.uniqueName(), ExistingWorkPolicy.KEEP, held).result.awaitBounded()
+            assertEquals(AlbumOcrPending.State.QUEUED, withTimeout(5_000) { AlbumOcrPending.withWorkManager(context, observed, activation).first { it != null } })
         } finally {
             cancelUnfinished(manager, held.id)
         }
@@ -127,4 +157,6 @@ class OcrWorkManagerIntegrationTest {
         withContext(Dispatchers.IO) { get(5, TimeUnit.SECONDS) }
 
     private fun newTarget() = SavedOcrWork.Target(PageId(UUID.randomUUID().toString()), JobId(UUID.randomUUID().toString()))
+
+    private fun newActivation() = LibraryActivation(UUID.randomUUID().toString(), 1)
 }

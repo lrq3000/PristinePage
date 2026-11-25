@@ -5,10 +5,9 @@ import androidx.work.ExistingWorkPolicy
 import androidx.work.OneTimeWorkRequest
 import androidx.work.Operation
 import androidx.work.WorkManager
-import app.pristinepage.data.repository.SavedOcrWork
 import java.util.concurrent.TimeUnit
 
-/** The durable job ID, rather than a page or Activity, is the WorkManager uniqueness boundary. */
+/** Uniqueness uses the issuing activation and durable job, not just a page or Activity. */
 internal class OcrPageEnrollment private constructor(val name: String, val request: OneTimeWorkRequest) {
     val policy = ExistingWorkPolicy.KEEP
 
@@ -16,10 +15,10 @@ internal class OcrPageEnrollment private constructor(val name: String, val reque
 
     companion object {
         /** Default local constraints: no network, no foreground service, no expedited wake. Room still caps actual recognition starts. */
-        fun forTarget(target: SavedOcrWork.Target): OcrPageEnrollment = OcrPageEnrollment(
-            OcrPageDelivery.uniqueName(target),
+        fun forWake(wake: ActivationBoundOcrWake): OcrPageEnrollment = OcrPageEnrollment(
+            wake.uniqueName(),
             OneTimeWorkRequest.Builder(SavedOcrPageWorker::class.java)
-                .setInputData(OcrPageDelivery.encode(target))
+                .setInputData(wake.encode())
                 .setBackoffCriteria(BackoffPolicy.EXPONENTIAL, 30, TimeUnit.SECONDS)
                 .build(),
         )

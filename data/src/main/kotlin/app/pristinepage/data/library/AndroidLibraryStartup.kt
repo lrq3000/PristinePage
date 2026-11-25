@@ -34,6 +34,10 @@ class AndroidLibraryStartup(context: Context) {
         return selected.activation()
     }
 
+    /** Work delivered after its activation ended must not bootstrap a default library or open Room. */
+    suspend fun recordedDefaultActivation(): LibraryActivation? =
+        (readSelection(allowBootstrap = false)?.selected as? LocalSelectedLibraryAuthority.Selected.Default)?.activation()
+
     /** Scoped metadata startup for a selected folder. No grant, selection change, provider write or original copy is made. */
     suspend fun <T : Any> useSelectedCatalog(
         scratchDirectory: File, block: suspend CoroutineScope.(LibraryActivation, DocumentCatalog) -> T,

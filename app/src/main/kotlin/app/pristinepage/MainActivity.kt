@@ -193,7 +193,7 @@ class MainActivity : ComponentActivity() {
                 AtelierSettingsScreen(checkNotNull(settingsPage), app.atelierPreferences, ocrReady) { settingsPage = it }
             }
             else if (host.identity == null) libraryState.SaveableStateProvider("atelier-library") {
-                val observeOcrPending = remember(app) { AlbumOcrPending.forSavedPage(app) { services.imports().store.savedOcr } }
+                val observeOcrPending = remember(app) { AlbumOcrPending.forSavedPage(app, services::imports) }
                 val loadThumbnail: suspend (DocumentSummary, DocumentPage) -> RenderedPreviewBitmap = { album, tile ->
                     // Lazy tiles retain only their small displays. Serialize expensive full-source decoding; the existing process-owned budget still governs every allocation.
                     thumbnailPermit.withPermit {
@@ -248,9 +248,11 @@ class MainActivity : ComponentActivity() {
                             open = { services.imports().store.savedOcr },
                             rerunInFlight = app.savedOcrSignals.rerunInFlight,
                             requestRerun = { observed, defaults ->
+                                val graph = services.imports()
                                 app.savedOcrSignals.onRerun(
                                     qualify = { app.savedOcr.resolveRerunConfiguration(observed.configuration, defaults) },
-                                    commit = { services.imports().store.savedOcr.requestRerun(observed, it) },
+                                    activation = graph.activation,
+                                    commit = { graph.store.savedOcr.requestRerun(observed, it) },
                                 )
                             },
                             requestSave = textSave::save,

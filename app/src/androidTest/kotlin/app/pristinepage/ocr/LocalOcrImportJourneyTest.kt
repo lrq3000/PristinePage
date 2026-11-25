@@ -39,6 +39,9 @@ import androidx.test.platform.app.InstrumentationRegistry
 import androidx.test.platform.view.inspector.WindowInspectorCompat
 import androidx.work.WorkInfo
 import androidx.work.WorkManager
+import androidx.work.Data
+import androidx.work.ExistingWorkPolicy
+import androidx.work.OneTimeWorkRequest
 import app.pristinepage.MainActivity
 import app.pristinepage.PristinePageApplication
 import app.pristinepage.R
@@ -46,8 +49,11 @@ import app.pristinepage.core.ocr.OcrLayout
 import app.pristinepage.core.recipe.AppearanceRecipe
 import app.pristinepage.core.recipe.BinaryRecipe
 import app.pristinepage.data.model.IngestResult
+import app.pristinepage.data.model.JobId
+import app.pristinepage.data.model.PageId
 import app.pristinepage.data.repository.SavedOcrWork
 import app.pristinepage.editor.EditorViewModel
+import app.pristinepage.editor.BatchEditViewModel
 import app.pristinepage.export.AlbumExportViewModel
 import app.pristinepage.library.ApplicationLibraryActions
 import app.pristinepage.library.ImportLibraryViewModel
@@ -60,6 +66,7 @@ import kotlin.random.Random
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.async
 import kotlinx.coroutines.coroutineScope
@@ -94,6 +101,11 @@ class LocalOcrImportJourneyTest {
         val context = InstrumentationRegistry.getInstrumentation().targetContext
         val app = context.applicationContext as PristinePageApplication
         val graph = app.services.imports()
+        // Distinguish the save callback from the existing launch scan. The production latch is process-local and does not enter app data.
+        val signals = app.savedOcrSignals
+        val latch = signals.javaClass.getDeclaredField("startup").apply { isAccessible = true }.get(signals)
+            as java.util.concurrent.atomic.AtomicReference<*>
+        compose.waitUntil(45_000) { (latch.get() as Enum<*>).name == "COMPLETE" }
         val nonce = UUID.randomUUID().toString()
         val title = "Synthetic OCR import $nonce"
         val document = graph.store.documents.createDocument(title)
@@ -117,10 +129,13 @@ class LocalOcrImportJourneyTest {
         assertFalse(library.state.value.pageMatches.any { it.document == document })
         assertFalse(graph.store.savedOcr.find(query, null, 20).hits.any { it.document == document })
         val manager = WorkManager.getInstance(context)
-        suspend fun wakes() = withContext(Dispatchers.IO) {
-            manager.getWorkInfosByTag(SavedOcrPageWorker::class.java.name).get(5, TimeUnit.SECONDS)
+        suspend fun requireFinishedWake(page: PageId, job: JobId) = withTimeout(15_000) {
+            val name = ActivationBoundOcrWake(graph.activation, SavedOcrWork.Target(page, job)).uniqueName()
+            waitFor {
+                withContext(Dispatchers.IO) { manager.getWorkInfosForUniqueWork(name).get(5, TimeUnit.SECONDS) }
+                    .singleOrNull()?.takeIf { it.state == WorkInfo.State.SUCCEEDED }
+            }
         }
-        val existingWakes = wakes().map { it.id }.toSet()
         val request = actions.begin(graph.store.catalog.load(document).document)
         val saved = actions.deliver(request, LibraryPhotoResult.Selected(refs, 0)).map { it as IngestResult.Committed }
         assertEquals(2, saved.size)
@@ -131,19 +146,13 @@ class LocalOcrImportJourneyTest {
                 assertEquals(1, status.attemptsStarted)
                 assertNull(status.lastError)
                 assertEquals("tesseract-android", status.configuration.engineId)
+                val produced = readOcrJob(context, page.pageId)
+                assertEquals(produced.job.value, produced.resultJob)
+                requireFinishedWake(page.pageId, produced.job)
             }
         }
         val hits = graph.store.savedOcr.find(query, null, 20).hits.filter { it.document == document }
         assertEquals(listOf(saved[1].pageId), hits.map { it.page })
-        withTimeout(15_000) {
-            waitFor {
-                // Run on a dedicated guest with no competing import. Prior successful wakes must not satisfy this witness.
-                // A delivery can defer behind the per-store OCR lane. Only the durable recognition count above is required to be one.
-                wakes().filterNot { it.id in existingWakes }.takeIf { it.size == 2 && it.all { wake ->
-                    wake.state == WorkInfo.State.SUCCEEDED
-                } }
-            }
-        }
         compose.waitUntil(15_000) {
             library.state.value.let { it.albumSearch == query && it.pageMatches.any { h -> h.document == document && h.page == saved[1].pageId } }
         }
@@ -155,7 +164,7 @@ class LocalOcrImportJourneyTest {
         val original = checkNotNull(editor.session.value?.state?.value?.page)
         assertEquals(saved[1].pageId, original.pageId)
         val originalHash = graph.store.committedSources.load(original.sourceId).sourceByteHash
-        val precedingWakes = wakes().map { it.id }.toSet()
+        val precedingJob = readOcrJob(context, original.pageId).job
         val staleHit = hits.single()
         assertTrue(graph.store.savedOcr.canOpen(staleHit))
 
@@ -178,9 +187,10 @@ class LocalOcrImportJourneyTest {
         assertEquals(1, refreshed.attemptsStarted)
         assertNull(refreshed.lastError)
         assertEquals("tesseract-android", refreshed.configuration.engineId)
-        withTimeout(15_000) {
-            waitFor { wakes().filterNot { it.id in precedingWakes }.singleOrNull()?.takeIf { it.state == WorkInfo.State.SUCCEEDED } }
-        }
+        val producer = readOcrJob(context, edited.pageId)
+        assertTrue(producer.job != precedingJob)
+        assertEquals(producer.job.value, producer.resultJob)
+        requireFinishedWake(edited.pageId, producer.job)
         val updated = graph.store.savedOcr.find(query, null, 20).hits.filter { it.document == document }
         assertEquals(listOf(edited.pageId), updated.map { it.page })
         assertTrue(graph.store.savedOcr.canOpen(updated.single()))
@@ -196,6 +206,47 @@ class LocalOcrImportJourneyTest {
         compose.waitUntil(15_000) {
             editor.session.value?.state?.value?.page?.let { it.pageId == edited.pageId && it.recipeRevision == edited.recipeRevision } == true
         }
+
+        // Use the actual Activity-owned batch host; the single affected scan is no longer selected at Done.
+        val batch = compose.runOnUiThread { ViewModelProvider(compose.activity)[BatchEditViewModel::class.java] }
+        val album = graph.store.catalog.load(document)
+        val other = saved[0].pageId
+        val otherProducer = readOcrJob(context, other)
+        compose.runOnUiThread { editor.closeEditor(); batch.open(album, edited.pageId) }
+        compose.waitUntil(15_000) { batch.state.value.pages.size == 2 }
+        compose.runOnUiThread {
+            batch.edit { rotateClockwise() }
+            batch.edit { toggle(edited.pageId); null }
+            batch.done()
+        }
+        compose.waitUntil(15_000) { batch.state.value.undo != null }
+        val batchPage = graph.store.editablePages.load(document, edited.pageId)
+        assertEquals(edited.recipeRevision + 1, batchPage.recipeRevision)
+        assertEquals(graph.activation, batch.state.value.issuingActivation)
+        val batchProducer = withTimeout(120_000) {
+            waitFor { graph.store.savedOcr.readStatus(document, edited.pageId, batchPage.recipeRevision)
+                ?.takeIf { it.phase == SavedOcrWork.PagePhase.READY } }
+            readOcrJob(context, edited.pageId)
+        }
+        assertTrue(batchProducer.job != producer.job)
+        assertEquals(batchProducer.job.value, batchProducer.resultJob)
+        requireFinishedWake(edited.pageId, batchProducer.job)
+
+        compose.runOnUiThread { batch.undoSaved() }
+        compose.waitUntil(15_000) { !batch.state.value.saving && batch.state.value.undo == null }
+        assertNull(batch.state.value.error)
+        val restored = graph.store.editablePages.load(document, edited.pageId)
+        assertTrue(restored.recipeRevision > batchPage.recipeRevision)
+        assertEquals(edited.recipe, restored.recipe)
+        withTimeout(120_000) {
+            waitFor { graph.store.savedOcr.readStatus(document, edited.pageId, restored.recipeRevision)
+                ?.takeIf { it.phase == SavedOcrWork.PagePhase.READY } }
+        }
+        val undoProducer = readOcrJob(context, edited.pageId)
+        assertTrue(undoProducer.job != batchProducer.job)
+        assertEquals(undoProducer.job.value, undoProducer.resultJob)
+        requireFinishedWake(edited.pageId, undoProducer.job)
+        assertEquals(otherProducer, readOcrJob(context, other))
     }
 
     @Test
@@ -655,6 +706,82 @@ class LocalOcrStartupBackfillTest {
     @get:Rule val compose = createEmptyComposeRule()
 
     @Test
+    fun legacyAndStaleWakesLeaveARealPendingJobForCurrentActivationRediscovery(): Unit = runBlocking {
+        val context = InstrumentationRegistry.getInstrumentation().targetContext
+        val app = context.applicationContext as PristinePageApplication
+        val graph = app.services.imports()
+        val id = UUID.randomUUID().toString()
+        val document = graph.store.documents.createDocument("Synthetic retained OCR $id")
+        val dir = File(context.cacheDir, "editor-journey-fixtures")
+        check(dir.isDirectory || dir.mkdirs())
+        makePage(File(dir, "$id.png"), "WOODLAND")
+        val actions = ApplicationLibraryActions(context, app.services::imports)
+        val request = actions.begin(graph.store.catalog.load(document).document)
+        val page = (actions.deliver(request, LibraryPhotoResult.Selected(
+            listOf("content://${context.packageName}.editor-fixtures/$id"), 0,
+        )).single() as IngestResult.Committed).pageId
+        val store = graph.store.savedOcr
+        val session = checkNotNull(app.savedOcr.reconciliation(graph.activation))
+        val exact = ActivationBoundOcrWake(graph.activation, checkNotNull(session.reconcilePage(document, page)))
+        val before = checkNotNull(store.readStatus(document, page))
+        val jobBefore = readOcrJob(context, page)
+        assertEquals(exact.target.job, jobBefore.job)
+        assertNull(jobBefore.resultJob)
+        assertEquals(0, before.attemptsStarted)
+
+        val manager = WorkManager.getInstance(context)
+        val legacyData = Data.Builder().putString("page", page.value).putString("job", exact.target.job.value).build()
+        val legacy = OneTimeWorkRequest.Builder(SavedOcrPageWorker::class.java).setInputData(legacyData).build()
+        // Keep every opaque ID identical; the wrong activation alone must prevent recognition.
+        val otherNumber = if (graph.activation.number == 1L) 2L else 1L
+        val stale = OcrPageEnrollment.forWake(exact.copy(activation = graph.activation.copy(number = otherNumber)))
+        suspend fun wakes(name: String) = withContext(Dispatchers.IO) {
+            manager.getWorkInfosForUniqueWork(name).get(5, TimeUnit.SECONDS)
+        }
+        try {
+            withContext(Dispatchers.IO) {
+                manager.enqueueUniqueWork("saved-ocr-page-v1/${exact.target.job.value}", ExistingWorkPolicy.KEEP, legacy)
+                    .result.get(5, TimeUnit.SECONDS)
+                stale.enqueue(manager).result.get(5, TimeUnit.SECONDS)
+            }
+            for (wake in listOf(legacy.id, stale.request.id)) {
+                assertEquals(WorkInfo.State.SUCCEEDED, withTimeout(30_000) {
+                    waitFor { withContext(Dispatchers.IO) { manager.getWorkInfoById(wake).get(5, TimeUnit.SECONDS) }?.state?.takeIf { it.isFinished } }
+                })
+            }
+            assertTrue(wakes(exact.uniqueName()).isEmpty())
+            val pending = checkNotNull(store.readStatus(document, page))
+            assertEquals(SavedOcrWork.PagePhase.QUEUED, pending.phase)
+            assertEquals(0, pending.attemptsStarted)
+            assertNull(store.readText(document, page))
+            assertEquals(jobBefore, readOcrJob(context, page))
+            assertEquals(exact.target, store.observePendingTarget(document, page, graph.store.editablePages.load(document, page).recipeRevision).first())
+        } finally {
+            withContext(NonCancellable + Dispatchers.IO) {
+                for (wake in listOf(legacy.id, stale.request.id)) {
+                    if (manager.getWorkInfoById(wake).get(5, TimeUnit.SECONDS)?.state?.isFinished == false) {
+                        manager.cancelWorkById(wake).result.get(5, TimeUnit.SECONDS)
+                    }
+                }
+            }
+        }
+
+        ActivityScenario.launch(MainActivity::class.java).use {
+            val ready = withTimeout(120_000) {
+                waitFor { store.readStatus(document, page)?.takeIf { it.phase == SavedOcrWork.PagePhase.READY } }
+            }
+            assertEquals(1, ready.attemptsStarted)
+            assertEquals(before.configuration, ready.configuration)
+            assertEquals(jobBefore.copy(resultJob = jobBefore.job.value), readOcrJob(context, page))
+            assertEquals(listOf(page), store.find("WOODLAND", null, 20).hits.filter { it.document == document }.map { it.page })
+            val completed = withTimeout(15_000) {
+                waitFor { wakes(exact.uniqueName()).singleOrNull()?.takeIf { it.state == WorkInfo.State.SUCCEEDED } }
+            }
+            assertTrue(completed.runAttemptCount >= 1)
+        }
+    }
+
+    @Test
     fun firstActivityLaunchFindsAndIndexesAnExistingUnqueuedPage(): Unit = runBlocking {
         val context = InstrumentationRegistry.getInstrumentation().targetContext
         val app = context.applicationContext as PristinePageApplication
@@ -733,7 +860,7 @@ class LocalOcrStartupBackfillTest {
                 val admitted = target.await()
                 assertEquals(pageId, admitted.page)
                 val manager = WorkManager.getInstance(context)
-                val name = OcrPageDelivery.uniqueName(admitted)
+                val name = ActivationBoundOcrWake(graph.activation, admitted).uniqueName()
                 var lastSample: String? = null
                 val ready = withTimeout(125_000) {
                     waitFor {
@@ -850,6 +977,20 @@ private suspend fun <T : Any> waitFor(read: suspend () -> T?): T {
     while (true) {
         read()?.let { return it }
         delay(100)
+    }
+}
+
+/** Independent read-only Room oracle; never return text or raw durable job input. */
+private data class OcrJobProof(val job: JobId, val generation: Long, val inputDigest: String, val resultJob: String?)
+
+private suspend fun readOcrJob(context: android.content.Context, page: PageId): OcrJobProof = withContext(Dispatchers.IO) {
+    SQLiteDatabase.openDatabase(context.getDatabasePath("pristinepage.db").path, null, SQLiteDatabase.OPEN_READONLY).use { db ->
+        db.rawQuery("SELECT jobId, generation, inputSha256, resultJobId FROM OcrPageWork WHERE pageId=?", arrayOf(page.value)).use { rows ->
+            check(rows.moveToFirst())
+            val proof = OcrJobProof(JobId(rows.getString(0)), rows.getLong(1), rows.getString(2), rows.getString(3))
+            check(!rows.moveToNext())
+            proof
+        }
     }
 }
 

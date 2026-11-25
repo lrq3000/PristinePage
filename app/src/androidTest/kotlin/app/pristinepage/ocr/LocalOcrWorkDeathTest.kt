@@ -85,7 +85,8 @@ class LocalOcrWorkDeathTest {
                         val target = work.observePendingTarget(document, page, savedPage.recipeRevision).first()
                         if (target != null) {
                             val wakes = withContext(Dispatchers.IO) {
-                                manager.getWorkInfosForUniqueWork(OcrPageDelivery.uniqueName(target)).get(5, TimeUnit.SECONDS)
+                                manager.getWorkInfosForUniqueWork(ActivationBoundOcrWake(graph.activation, target).uniqueName())
+                                    .get(5, TimeUnit.SECONDS)
                             }
                             assertFalse("The exact test wake failed before the intended native interruption",
                                 wakes.isNotEmpty() && wakes.all { it.state == WorkInfo.State.FAILED })

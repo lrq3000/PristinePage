@@ -8,6 +8,7 @@ import app.pristinepage.capture.PhotoImportKind
 import app.pristinepage.capture.PhotoImportRequest
 import app.pristinepage.capture.PhotoImportResultRouter
 import app.pristinepage.capture.PhotoSelection
+import app.pristinepage.data.library.LibraryActivation
 import app.pristinepage.data.model.*
 import app.pristinepage.data.repository.AlbumSearchQuery
 import app.pristinepage.data.repository.DocumentCatalog
@@ -23,7 +24,7 @@ import java.util.Locale
 /** A cold adapter to the one Application graph, not another store or acquisition path. Temporary references return to the existing router/controller; no grant, new journal, recovery engine or source normalization is duplicated here. */
 class ApplicationLibraryActions(
     private val context: Context?,
-    private val onPagesSaved: ((DocumentId, List<PageId>) -> Unit)?,
+    private val onPagesSaved: ((LibraryActivation, DocumentId, List<PageId>) -> Unit)?,
     private val open: suspend () -> ApplicationImports,
 ) : LibraryActions, OrderedLibraryActions, SearchableLibraryActions, SearchablePageActions {
     constructor(context: Context? = null, open: suspend () -> ApplicationImports) : this(context, null, open)
@@ -76,7 +77,8 @@ class ApplicationLibraryActions(
             LibraryPhotoResult.Canceled -> PhotoSelection.Canceled
             is LibraryPhotoResult.Rejected -> PhotoSelection.Rejected(selection.error)
         }
-        val outcomes = PhotoImportResultRouter(graph.photoImports, graph.store.lifecycle, onPagesSaved).deliver(request, native)
+        val signal = onPagesSaved?.let { send -> { album: DocumentId, pages: List<PageId> -> send(graph.activation, album, pages) } }
+        val outcomes = PhotoImportResultRouter(graph.photoImports, graph.store.lifecycle, signal).deliver(request, native)
         // A late staging refusal can follow a real shutter but precede ingest. Keep the camera handoff
         // available until the user explicitly clears its pending batch; do not treat it as a completed copy.
         if (capture != null && outcomes.none { it is IngestResult.Pending || it is IngestResult.Rejected &&
