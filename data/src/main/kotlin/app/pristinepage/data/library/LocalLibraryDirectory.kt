@@ -76,6 +76,42 @@ internal class LocalLibraryDirectory(root: File, private val directorySync: Dire
         (open("catalog.sqlite") ?: throw IOException("Private backup catalog is missing"))
             .use { generation.verifyCatalog(it, checkpoint) }
 
+    /** The private owner name starts as an exclusive hard link to the actual staged inode, not a second catalog copy. */
+    fun anchorExportStage() {
+        val stage = readPath("catalog.sqlite")
+        val owner = readPath("export.catalog.owner")
+        if (!presentRegularFile(stage)) throw IOException("Private backup catalog is missing")
+        Files.createLink(owner, stage)
+        forceExportJournal()
+        requireExportStageOwner()
+    }
+
+    fun requireExportStageOwner() {
+        val stage = readPath("catalog.sqlite")
+        val owner = readPath("export.catalog.owner")
+        if (!presentRegularFile(stage) || !presentRegularFile(owner) || !Files.isSameFile(stage, owner)) {
+            throw IOException("The private backup catalog has no exact attempt owner")
+        }
+    }
+
+    /** The caller has verified the acknowledgment and holds the private writer lane. Remove only the original closed stage. */
+    fun reclaimExportStage(generation: LibraryGeneration, checkpoint: () -> Unit) {
+        val stage = readPath("catalog.sqlite")
+        val owner = readPath("export.catalog.owner")
+        if (presentRegularFile(stage) || presentRegularFile(owner)) {
+            requireExportStageOwner()
+            verifyExportStage(generation, checkpoint)
+            checkpoint()
+            requireExportStageOwner()
+            // If interruption leaves just one name, do not infer its identity from its bytes alone on the next attempt.
+            Files.delete(owner)
+            Files.delete(stage)
+        }
+        // An absent name can be a prior delivered unlink whose directory barrier failed.
+        forceExportJournal()
+        if (presentRegularFile(stage) || presentRegularFile(owner)) throw IOException("The acknowledged backup stage is still present")
+    }
+
     /** A prior closed stage is explained only by an independently verified final record still linked to the same file. */
     fun requireResolvedExportStages(records: Set<ExportRecord>) {
         try {

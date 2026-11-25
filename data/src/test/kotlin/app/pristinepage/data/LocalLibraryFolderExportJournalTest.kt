@@ -22,10 +22,102 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.ensureActive
 import org.junit.Rule
+import kotlin.test.assertTrue
 import org.junit.rules.TemporaryFolder
 
 class LocalLibraryFolderExportJournalTest {
     @get:Rule val temporary = TemporaryFolder()
+
+    @Test fun onlyAnAcknowledgedOperationCanDropItsExactPrivateCatalogWithoutBecomingReusable() {
+        val (root, intent) = staged()
+        val journal = LocalLibraryFolderExportJournal(root, DirectorySync { true })
+        val live = journal.start(intent)
+        assertFalse(journal.reclaimAcknowledgedCatalog(intent.operationId))
+        live.recordCompletion()
+        assertFalse(journal.reclaimAcknowledgedCatalog(intent.operationId))
+        journal.acknowledge(intent)
+        val spend = File(root, "${"c".repeat(64)}.spent").apply { writeText("retained spend evidence") }
+        val retained = listOf("export.intent", "export.complete", "export.ack", spend.name).associateWith { File(root, it).readBytes() }
+        val unrelated = File(root, "reserved-evidence").apply { writeText("preserve") }
+        assertTrue(journal.reclaimAcknowledgedCatalog(intent.operationId))
+        assertFalse(File(root, "catalog.sqlite").exists())
+        assertFalse(File(root, "export.catalog.owner").exists())
+        assertEquals("preserve", unrelated.readText())
+        for ((name, bytes) in retained) assertContentEquals(bytes, File(root, name).readBytes())
+        assertEquals(Phase.ACKNOWLEDGED, journal.reopen(intent.operationId)?.phase)
+        assertTrue(journal.reclaimAcknowledgedCatalog(intent.operationId))
+        assertFailsWith<IOException> { journal.start(intent) }
+    }
+
+    @Test fun aCatalogWhoseBytesChangedIsNotOwnedForReclamationEvenAfterAcknowledgment() {
+        val (root, intent) = staged()
+        val journal = LocalLibraryFolderExportJournal(root, DirectorySync { true })
+        journal.start(intent).recordCompletion()
+        journal.acknowledge(intent)
+        val candidate = File(root, "catalog.sqlite")
+        val replacement = ByteArray(512) { 99 }
+        candidate.writeBytes(replacement)
+        assertFailsWith<IOException> { journal.reclaimAcknowledgedCatalog(intent.operationId) }
+        assertContentEquals(replacement, candidate.readBytes())
+        assertEquals(Phase.ACKNOWLEDGED, journal.reopen(intent.operationId)?.phase)
+    }
+
+    @Test fun byteIdenticalReplacementCannotBorrowTheOriginalCatalogsCleanupAuthority() {
+        val (root, intent) = staged()
+        val catalog = root.resolve("catalog.sqlite").toPath()
+        val original = root.resolve("displaced-catalog").toPath()
+        val journal = LocalLibraryFolderExportJournal(root, DirectorySync { true })
+        journal.start(intent).recordCompletion()
+        journal.acknowledge(intent)
+        Files.move(catalog, original)
+        Files.copy(original, catalog)
+        assertFalse(Files.isSameFile(catalog, original))
+        assertFailsWith<IOException> { LocalLibraryFolderExportJournal(root, DirectorySync { true }).reclaimAcknowledgedCatalog(intent.operationId) }
+        assertContentEquals(Files.readAllBytes(original), Files.readAllBytes(catalog))
+        assertEquals(Phase.ACKNOWLEDGED, journal.reopen(intent.operationId)?.phase)
+    }
+
+    @Test fun unexpectedJournalEvidenceBlocksReclamationWithoutDeletingEitherFile() {
+        val (root, intent) = staged()
+        val journal = LocalLibraryFolderExportJournal(root, DirectorySync { true })
+        journal.start(intent).recordCompletion()
+        journal.acknowledge(intent)
+        val artifact = root.resolve(".pristinepage-unresolved.part").apply { writeText("unresolved") }
+        assertFailsWith<IOException> { journal.reclaimAcknowledgedCatalog(intent.operationId) }
+        assertEquals("unresolved", artifact.readText())
+        assertTrue(root.resolve("catalog.sqlite").isFile)
+    }
+
+    @Test fun anInterruptedUnlinkOrLegacyReceiptWithOnlyOneCatalogNameIsNotCleanupAuthority() {
+        val (root, intent) = staged()
+        val journal = LocalLibraryFolderExportJournal(root, DirectorySync { true })
+        journal.start(intent).recordCompletion()
+        journal.acknowledge(intent)
+        val original = root.resolve("catalog.sqlite")
+        val bytes = original.readBytes()
+        Files.delete(root.resolve("export.catalog.owner").toPath())
+        assertFailsWith<IOException> { LocalLibraryFolderExportJournal(root, DirectorySync { true }).reclaimAcknowledgedCatalog(intent.operationId) }
+        assertContentEquals(bytes, original.readBytes())
+        assertEquals(Phase.ACKNOWLEDGED, journal.reopen(intent.operationId)?.phase)
+        assertFailsWith<IOException> { journal.start(intent) }
+    }
+
+    @Test fun lossOfThePostReclamationBarrierKeepsTheSpentOperationAndCanReconcile() {
+        val (root, intent) = staged()
+        var permitSync = true
+        val candidate = File(root, "catalog.sqlite")
+        val journal = LocalLibraryFolderExportJournal(root, DirectorySync { permitSync || candidate.exists() })
+        journal.start(intent).recordCompletion()
+        journal.acknowledge(intent)
+        permitSync = false
+        assertFailsWith<IOException> { journal.reclaimAcknowledgedCatalog(intent.operationId) }
+        assertFalse(candidate.exists())
+        assertFailsWith<IOException> { journal.reopen(intent.operationId) }
+        permitSync = true
+        assertTrue(journal.reclaimAcknowledgedCatalog(intent.operationId))
+        assertEquals(Phase.ACKNOWLEDGED, journal.reopen(intent.operationId)?.phase)
+        assertFailsWith<IOException> { journal.start(intent) }
+    }
 
     @Test fun lostDeliveryCanReopenAndAcknowledgeTheSamePrivateReceiptWithoutAnotherWriteIntent() {
         val (root, intent) = staged()

@@ -36,6 +36,7 @@ internal class LocalLibraryFolderExportJournal(
         requireAttempt(intent.operationId)
         if (observe(intent.operationId) != null) throw IOException("The backup was already started")
         directory.requireAndForceExportStage(intent.generation, checkpoint)
+        directory.anchorExportStage()
         publish(ExportRecord.INTENT, intent, intent.encode(), Phase.INTENT_ONLY)
         return Started(intent)
     }
@@ -56,6 +57,15 @@ internal class LocalLibraryFolderExportJournal(
         publish(ExportRecord.ACKNOWLEDGED, intent, intent.acknowledgment(), Phase.ACKNOWLEDGED)
     }
 
+    /** Only the catalog copy is reclaimable here; terminal records and every spend still fence repeat publication. */
+    fun reclaimAcknowledgedCatalog(operationId: String): Boolean {
+        val observed = reopen(operationId) ?: return false
+        if (observed.phase != Phase.ACKNOWLEDGED) return false
+        directory.reclaimExportStage(observed.intent.generation, checkpoint)
+        if (reopen(operationId) != observed) throw IOException("The acknowledged backup record changed")
+        return true
+    }
+
     /** A positively absent private record is an observation, never permission to begin or retry a write. */
     fun reopen(operationId: String): Observation? {
         requireAttempt(operationId)
@@ -71,6 +81,7 @@ internal class LocalLibraryFolderExportJournal(
         directory.createExportRecord(record, bytes) {
             // After admitting the private acknowledgment, do not interrupt its bounded exclusive-link write between the forced stage and directory sync. Cancellation is still observed on readback.
             if (requiresStage) {
+                directory.requireExportStageOwner()
                 directory.verifyExportStage(intent.generation, checkpoint)
                 checkpoint()
             }
