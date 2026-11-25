@@ -105,3 +105,7 @@ The operator approved publishing the specifically reviewed Blue Hour composite, 
 ### Magazine geometry integration checkpoint
 
 The operator authorized a classic two-parent merge of the published magazine geometry feature into `main` with a self-contained intention and the full incoming commit record. Apply the separate development version bump and push only `refs/heads/main` to `lrq3000/PristinePage`, without force. After verifying the published tip, rebuild one local standard debug APK with the retained S-01 signer and pinned offline OCR inputs. Do not upload the APK, install or test it on a device, republish the original photograph or manual crop, or delete the feature branch, worktrees, or prior artifacts. Android runtime verification remains separate.
+
+### First-run studio design branch
+
+The operator authorized committing the three [first-run wizard mockups](../design/first-run-studio/README.md) and publishing `design/first-run-studio-astra` to `lrq3000/PristinePage`, with the suffix crediting GPT-6.2 Astra. This approval covers the design branch only.
