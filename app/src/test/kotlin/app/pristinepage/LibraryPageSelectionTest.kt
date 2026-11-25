@@ -131,6 +131,32 @@ class LibraryPageSelectionTest {
         observer.cancel()
     }
 
+    @Test fun aSearchHitCannotNavigateThroughAnUnscopedAlbumReadAfterActivationRefusal() = runTest {
+        val f = Fixture()
+        var validated = false
+        val hit = HomePageSearchHit(f.doc, f.second, "Synthetic selection", 2) {
+            validated = true
+            true
+        }
+        f.textMatches = { HomePageSearchPage(listOf(hit), null) }
+        val session = ImportLibrarySession(f, LibraryIdentity(), this)
+        session.accept(LibraryEvent.SetAlbumSearch("receipt", ZoneOffset.UTC))
+        advanceUntilIdle()
+        assertEquals(listOf(hit), session.state.value.pageMatches)
+
+        f.refuseIssuedLoads = true
+        var opened = false
+        session.accept(LibraryEvent.OpenPageMatch(hit) { _, _ -> opened = true })
+        advanceUntilIdle()
+
+        assertEquals(listOf(f.doc to f.activation), f.scopedLoads)
+        assertTrue("The ordinary catalog can still find these IDs, but is not this hit's library", f.loaded.isEmpty())
+        assertFalse(validated)
+        assertFalse(opened)
+        assertNull(session.state.value.selectedId)
+        assertTrue(session.state.value.pageSearchUnavailable)
+    }
+
     @Test fun committedOcrRefreshPreservesTheLoadedPageWindowAndItsCursor() = runTest {
         val f = Fixture()
         var extra = false
@@ -443,6 +469,7 @@ class LibraryPageSelectionTest {
         }
         override suspend fun openLibrary() = LibraryStartup(startup(), activation)
         var catalogUnavailable = false
+        var refuseIssuedLoads = false
         var revision = 1L
         var renameWrites = 0
         var afterRename: () -> DocumentMutationResult = { error("Unexpected rename write") }
@@ -476,6 +503,9 @@ class LibraryPageSelectionTest {
         override suspend fun loadIssued(id: DocumentId, issuedAt: LibraryActivation): DocumentOverview {
             assertEquals(activation, issuedAt)
             scopedLoads += id to issuedAt
+            if (refuseIssuedLoads) throw RepositoryFailure(
+                OperationError(OperationErrorCode.SOURCE_UNAVAILABLE, false, "library_activation_changed", null),
+            )
             return load(id)
         }
         override suspend fun activeIssuedImport(id: DocumentId, issuedAt: LibraryActivation): PhotoImportRequest? {

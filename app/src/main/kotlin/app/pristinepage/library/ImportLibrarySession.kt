@@ -160,9 +160,10 @@ class ImportLibrarySession(private val actions: LibraryActions, restored: Librar
         val hit = event.hit
         val token = metadataGeneration
         val nav = navigation
+        val issuedAt = current.value.activation
         fun eligible(): Boolean {
             val value = current.value
-            return token == metadataGeneration && nav == navigation && value.selectedId == null &&
+            return token == metadataGeneration && nav == navigation && value.activation == issuedAt && value.selectedId == null &&
                 !value.loading && !value.preparingImport && value.request == null
         }
         if (!eligible() || hit !in current.value.pageMatches) return
@@ -170,7 +171,8 @@ class ImportLibrarySession(private val actions: LibraryActions, restored: Librar
         val opening = hitNavigation
         fun currentHit() = opening == hitNavigation && eligible()
         openingHit = run(onFailure = { if (currentHit()) current.value = current.value.copy(pageSearchUnavailable = true) }) {
-            val overview = actions.load(hit.document)
+            // A hit can have the same IDs as an unrelated library. Check the issuing catalog before revalidating its producer.
+            val overview = if (issuedAt != null) actions.loadIssued(hit.document, issuedAt) else actions.load(hit.document)
             if (overview.document.documentId != hit.document || overview.pages.none { it.pageId == hit.page } ||
                 !currentHit() || !hit.stillMatches()) return@run
             currentCoroutineContext().ensureActive()
