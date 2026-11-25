@@ -6,6 +6,7 @@ import app.pristinepage.data.model.OperationErrorCode
 import app.pristinepage.data.model.RepositoryFailure
 import app.pristinepage.data.model.requireOpaqueId
 import java.io.IOException
+import java.nio.file.DirectoryIteratorException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.withContext
@@ -27,13 +28,15 @@ class AndroidLibraryStartup(context: Context) {
         val selected = try {
             LocalLibrarySettingsBootstrap(app.filesDir.canonicalFile).open().read()
                 ?: throw IOException("The initial library selection disappeared")
-        } catch (_: IOException) {
-            throw RepositoryFailure(OperationError(OperationErrorCode.STORAGE_FAILED, true, "library_selection_unavailable", null))
-        }
+        } catch (_: IOException) { selectionUnavailable() }
+        catch (_: DirectoryIteratorException) { selectionUnavailable() }
         coroutineContext.ensureActive()
         if (selected !is LocalSelectedLibraryAuthority.Selected.Default) {
             throw RepositoryFailure(OperationError(OperationErrorCode.PERMISSION_LOST, true, "library_reconnect_required", null))
         }
         selected.selection.identity.let { LibraryActivation(it.libraryId, it.activation) }
     }
+
+    private fun selectionUnavailable(): Nothing =
+        throw RepositoryFailure(OperationError(OperationErrorCode.STORAGE_FAILED, true, "library_selection_unavailable", null))
 }

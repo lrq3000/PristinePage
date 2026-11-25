@@ -183,9 +183,10 @@ class PhotoResultRoutingTest {
     private class Fixture : AutoCloseable {
         private val base = InstrumentationRegistry.getInstrumentation().targetContext
         private val root = File(base.filesDir, "t04-result-routing-${UUID.randomUUID()}")
+        private val files = File(root, "files").apply { check(mkdirs()) }
         private val context = object : ContextWrapper(base) {
             override fun getApplicationContext(): Context = this
-            override fun getFilesDir(): File = File(root, "files")
+            override fun getFilesDir(): File = files
             override fun getDatabasePath(name: String): File = File(root, "databases/$name").also { it.parentFile!!.mkdirs() }
         }
         var providerOpens = 0

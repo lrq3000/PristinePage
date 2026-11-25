@@ -25,6 +25,18 @@ FILES_CASE = ("app.pristinepage.LibraryFolderFilesJourneyTest"
 DESCRIPTOR_CASE = "app.pristinepage.LibraryFolderFilesJourneyTest#exactFilesTreeExposesSyncableDirectoryDescriptors"
 WORKING_CASE = "app.pristinepage.LibraryFolderFilesJourneyTest#populatingAWorkingRoomCatalogDoesNotMaterializeTheOriginal"
 ACTIVATION_CASE = "app.pristinepage.LibraryFolderFilesJourneyTest#defaultAppGraphUsesItsDurableActivationBeforeAndAfterActivityRecreation"
+ACTIVATION_COMPATIBILITY = (
+    "app.pristinepage.ApplicationCompositionTest#firstActivationPreservesAPopulatedStoreOpenedByThePreviousComposition",
+    "app.pristinepage.ApplicationCompositionTest#corruptSelectionRefusesBeforeCreatingTheDefaultStore",
+    "app.pristinepage.ApplicationCompositionTest#aFolderSelectionWithLostSupportNeverOpensTheDefaultStore",
+    "app.pristinepage.ApplicationCompositionTest#failedRecoveryDoesNotCacheReadinessAndTheSameRootCanRetry",
+    "app.pristinepage.ApplicationCompositionTest#cancellationDuringIoDeliveryLeavesNoCachedCanceledGraphAndAllowsRetry",
+    "app.pristinepage.DocumentCatalogIntegrationTest#committedMixedSelectionReopensWithExactOrderedPageMetadataWithoutProviderReads",
+    "app.pristinepage.EditorPersistenceIntegrationTest#applicationSavesThenReopensTheExactRecipeAndRendersItsUnchangedSource",
+    "app.pristinepage.PhotoResultRoutingTest#idOnlySavedRequestAndRegistryRestoreKeepTheOriginalRoomBatch",
+    "app.pristinepage.RenderCoordinatorIntegrationTest#realPrivateSourceRendersThenReopensWithoutProviderAccessOrSourceMutation",
+)
+WRITE_PROBE_CASE = "app.pristinepage.LibraryFolderFilesJourneyTest#grantedTreeCanStageAndPublishOneSyntheticFileWithoutOverwriting"
 CASES = (
     "app.pristinepage.LibraryFolderPickerContractTest#retainsTheActualEncodedTreeAndBothReturnedModes",
     "app.pristinepage.LibraryFolderPickerContractTest#rejectsDocumentUrisAndCancelledOrNonpersistentSelections",
@@ -128,20 +140,34 @@ def run(args):
             adb("push", fixture / relative, f"{guest_root}/{relative}")
             need(adb("shell", "sha256sum", f"{guest_root}/{relative}").split()[0] == digest,
                  "The synthetic Files fixture differed after staging")
+        need(set(adb("shell", "ls", "-A", "-1", guest_root).splitlines()) == set(namespaces),
+             "The fresh fixture contains an unexpected root entry before instrumentation")
         recheck_target(run, ns)
         original_args = ["-e", "libraryFixtureOriginal", original]
         if args.expect_home:
             original_args += ["-e", "libraryExpectHome", "1"]
         scenarios = (*CASES, *((DESCRIPTOR_CASE,) if args.probe_directory else ()),
                      *((WORKING_CASE,) if args.working_catalog else ()),
-                     *((ACTIVATION_CASE,) if args.activation else ()))
+                     *((ACTIVATION_CASE,) if args.activation else ()),
+                     *(ACTIVATION_COMPATIBILITY if args.activation_compatibility else ()),
+                     *((WRITE_PROBE_CASE,) if args.probe_write else ()))
         output = adb("shell", "am", "instrument", "-w", "-r", "-e", "class", ",".join(scenarios),
                      "-e", "libraryFixtureFolder", folder, *original_args, RUNNER, timeout=150)
         run.path("instrumentation.txt").write_text(output, encoding="utf-8")
         passed, failed = read_results(output, scenarios)
         for relative, digest in files.items():
             need(adb("shell", "sha256sum", f"{guest_root}/{relative}").split()[0] == digest,
-                 "The detached read changed the external Files fixture")
+                 "Instrumentation changed an existing library fixture file")
+        expected_root = set(namespaces)
+        if args.probe_write and WRITE_PROBE_CASE in passed:
+            expected_root.add("isolated-write-probe")
+        after = set(adb("shell", "ls", "-A", "-1", guest_root).splitlines())
+        need(expected_root <= after <= (expected_root | ({"isolated-write-probe"} if args.probe_write else set())),
+             "Instrumentation changed entries outside the isolated write probe")
+        for namespace in namespaces:
+            expected_leaves = {relative.split("/", 1)[1] for relative in files if relative.startswith(f"{namespace}/")}
+            need(set(adb("shell", "ls", "-A", "-1", f"{guest_root}/{namespace}").splitlines()) == expected_leaves,
+                 "Instrumentation changed the namespace of the existing fixture")
         run.save(run.path("outcomes.json"), {"passed": passed, "failed": failed, "installedSha256": hashes}, durable=True)
         print(f"LDPlayer Files grant: {len(passed)} passed, {len(failed)} failed. " + ", ".join(failed), flush=True)
         return bool(failed)
@@ -159,5 +185,7 @@ if __name__ == "__main__":
     parser.add_argument("--probe-directory", action="store_true")
     parser.add_argument("--working-catalog", action="store_true")
     parser.add_argument("--activation", action="store_true")
+    parser.add_argument("--activation-compatibility", action="store_true")
+    parser.add_argument("--probe-write", action="store_true", help="Write only in a fresh synthetic probe subdirectory")
     parser.add_argument("--previous", nargs=2, metavar=("APP_APK", "TEST_APK"))
     raise SystemExit(run(parser.parse_args()))

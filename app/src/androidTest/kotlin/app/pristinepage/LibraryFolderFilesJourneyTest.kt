@@ -44,7 +44,7 @@ import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
 
-/** System Files, actual primary-storage fixture and the exact Android grant. Detached verification must not activate or modify it. */
+/** System Files, the exact Android grant and an isolated synthetic library. The opt-in write probe touches only its newly created child. */
 @RunWith(AndroidJUnit4::class)
 class LibraryFolderFilesJourneyTest {
     @get:Rule val compose = createAndroidComposeRule<MainActivity>()
@@ -65,6 +65,8 @@ class LibraryFolderFilesJourneyTest {
     @Test fun exactFilesTreeExposesSyncableDirectoryDescriptors() = verifyJourney { resolver, tree, _, _, _ ->
         LibraryProviderDirectoryProbe.verify(resolver, tree)
     }
+
+    @Test fun grantedTreeCanStageAndPublishOneSyntheticFileWithoutOverwriting() = verifyJourney(probeWrite = true)
 
     @Test fun populatingAWorkingRoomCatalogDoesNotMaterializeTheOriginal() = verifyJourney { _, _, reader, selected, scratch ->
         runBlocking {
@@ -89,7 +91,10 @@ class LibraryFolderFilesJourneyTest {
         assertTrue("Only this attempt's own working catalog is retired", scratch.list().orEmpty().isEmpty())
     }
 
-    private fun verifyJourney(probe: ((ContentResolver, Uri, AndroidLibraryTreeRead, AndroidLibraryTreeRead.Verified, File) -> Unit)? = null) {
+    private fun verifyJourney(
+        probeWrite: Boolean = false,
+        probe: ((ContentResolver, Uri, AndroidLibraryTreeRead, AndroidLibraryTreeRead.Verified, File) -> Unit)? = null,
+    ) {
         val instrumentation = InstrumentationRegistry.getInstrumentation()
         val app = instrumentation.targetContext.applicationContext
         val folder = InstrumentationRegistry.getArguments().getString("libraryFixtureFolder")
@@ -152,6 +157,11 @@ class LibraryFolderFilesJourneyTest {
             assertEquals("25c49d9b-02d8-418f-b982-154980d89cfb", first.generationId)
             assertEquals(1, first.albums)
             assertEquals(1, first.scans)
+            // Promote only this exact fixture grant while the original picker recipient still owns its transient write permission.
+            val writeObservation = if (probeWrite) runCatching {
+                check(picked.grant.returnedWrite)
+                LibraryProviderWriteProbe.verify(app.contentResolver, uri)
+            } else null
             val different = DocumentsContract.buildTreeDocumentUri(requireNotNull(uri.authority), "primary:Documents/${folder}-different")
             val wrongRoot = assertThrows(IOException::class.java) {
                 runBlocking { AndroidLibraryTreeRead(app, scratch).verify(different, first) }
@@ -203,11 +213,14 @@ class LibraryFolderFilesJourneyTest {
                 runBlocking { AndroidLibraryTreeRead(app, scratch).copyOriginal(again, fixtureBlob, afterRevocation) }
             }
             assertEquals(0, afterRevocation.size())
+            writeObservation?.getOrThrow()
             observation?.getOrThrow()
         } finally {
             for (fixtureTree in exactFixtureTrees) {
-                if (existing()[fixtureTree] == (true to false)) {
-                    app.contentResolver.releasePersistableUriPermission(Uri.parse(fixtureTree), Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                existing()[fixtureTree]?.let { (read, write) ->
+                    val modes = (if (read) Intent.FLAG_GRANT_READ_URI_PERMISSION else 0) or
+                        (if (probeWrite && write) Intent.FLAG_GRANT_WRITE_URI_PERMISSION else 0)
+                    if (modes != 0) app.contentResolver.releasePersistableUriPermission(Uri.parse(fixtureTree), modes)
                 }
             }
             val activePackage = instrumentation.uiAutomation.rootInActiveWindow?.packageName?.toString()

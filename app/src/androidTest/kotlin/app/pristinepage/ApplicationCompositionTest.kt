@@ -48,6 +48,71 @@ import org.junit.runner.RunWith
 class ApplicationCompositionTest {
     private val output = OutputSpec(PixelSize(2, 2), RenderPurpose.PREVIEW)
 
+    @Test fun firstActivationPreservesAPopulatedStoreOpenedByThePreviousComposition() = runBlocking {
+        Fixture().use { f ->
+            val before = PrivateImportStore.open(f.context, f.provider, AndroidSourceInspector(f.budget)).use { legacy ->
+                val album = legacy.documents.createDocument("Retained album")
+                val batch = legacy.imports.beginImport(album, 1, null)
+                val scan = PhotoImportController(legacy.selections, legacy.sources)
+                    .importProviderReferences(listOf(f.good), batch.parentId).single() as IngestResult.Committed
+                legacy.catalog.load(album) to scan
+            }
+            assertFalse(File(f.context.filesDir, "library-settings").exists())
+            f.forbid = true
+            val original = File(f.context.filesDir, "store/sources").walkTopDown().single { it.name == "original.bin" }
+            assertArrayEquals(f.png, original.readBytes())
+            val first = ApplicationServices(f.context, f.budget, f.provider).imports().useStore { graph ->
+                assertEquals(before.first, graph.store.catalog.load(before.second.documentId))
+                assertArrayEquals(f.png, graph.store.committedSources.load(before.second.sourceId).file.readBytes())
+                graph.activation
+            }
+            ApplicationServices(f.context, f.budget, f.provider).imports().useStore { graph ->
+                assertEquals(first, graph.activation)
+                assertEquals(before.first, graph.store.catalog.load(before.second.documentId))
+            }
+            assertEquals(listOf(f.good), f.opened)
+        }
+    }
+
+    @Test fun corruptSelectionRefusesBeforeCreatingTheDefaultStore() = runBlocking {
+        Fixture().use { f ->
+            val settings = File(f.context.filesDir, "library-settings").apply { check(mkdir()) }
+            val marker = File(settings, "active-library").apply { writeText("damaged selection") }
+            val failure = try {
+                ApplicationServices(f.context, f.budget, f.provider).imports().also { it.store.close() }
+                throw AssertionError("Corrupt selection unexpectedly opened the default graph")
+            } catch (failure: RepositoryFailure) { failure }
+            assertEquals("library_selection_unavailable", failure.error.safeMessageKey)
+            assertEquals("damaged selection", marker.readText())
+            assertFalse(f.context.getDatabasePath("pristinepage.db").exists())
+            assertFalse(File(f.context.filesDir, "store").exists())
+        }
+    }
+
+    @Test fun aFolderSelectionWithLostSupportNeverOpensTheDefaultStore() = runBlocking {
+        Fixture().use { f ->
+            val settings = File(f.context.filesDir, "library-settings").apply { check(mkdir()) }
+            val body = "pristinepage-active-library-v2\n" +
+                "aaaaaaaa-aaaa-4aaa-8aaa-000000000001\n2\n" +
+                "aaaaaaaa-aaaa-4aaa-8aaa-000000000002\naaaaaaaa-aaaa-4aaa-8aaa-000000000003\n${"0".repeat(64)}\n"
+            val checksum = MessageDigest.getInstance("SHA-256").digest(body.toByteArray(Charsets.US_ASCII))
+                .joinToString("") { "%02x".format(it.toInt() and 255) }
+            val contents = "$body$checksum\n"
+            val marker = File(settings, "active-library").apply { writeText(contents) }
+            val failure = try {
+                ApplicationServices(f.context, f.budget, f.provider).imports().also { it.store.close() }
+                throw AssertionError("Unavailable selected folder unexpectedly opened the default graph")
+            } catch (failure: RepositoryFailure) { failure }
+            assertEquals(OperationErrorCode.PERMISSION_LOST, failure.error.code)
+            assertEquals("library_reconnect_required", failure.error.safeMessageKey)
+            assertEquals(contents, marker.readText())
+            assertFalse(f.context.getDatabasePath("pristinepage.db").exists())
+            assertFalse(File(f.context.filesDir, "store").exists())
+        }
+    }
+
+    private inline fun <T> ApplicationImports.useStore(block: (ApplicationImports) -> T): T = store.use { block(this) }
+
     @Test fun orderedMixedResultsSurviveReopenWithoutReopeningAProvider() = runBlocking {
         Fixture().use { f ->
             f.open()
@@ -200,16 +265,16 @@ class ApplicationCompositionTest {
     @Test fun failedRecoveryDoesNotCacheReadinessAndTheSameRootCanRetry() = runBlocking {
         Fixture().use { f ->
             val owner = services(f.context, f.budget, f.provider)
-            f.beforeFiles = {
+            f.afterRoomOpen = {
                 // Factory has opened the actual schema, but no graph is published. Corrupt only this fixture's otherwise unreferenced row so canonical startup listing must refuse, not report a clean pass.
-                f.beforeFiles = {}
+                f.afterRoomOpen = {}
                 SQLiteDatabase.openDatabase(f.context.getDatabasePath("pristinepage.db").path, null, SQLiteDatabase.OPEN_READWRITE).use { db ->
                     db.execSQL("INSERT INTO Document(documentId,title,documentRevision,lifecycle,createdAt,updatedAt,deletedAt) VALUES ('','Synthetic recovery fault',1,'ACTIVE',1,1,NULL)")
                 }
             }
             try { withContext(Dispatchers.Main) { runtime(owner) }; fail("Failed initialization was reported ready") }
             catch (failure: RepositoryFailure) { assertEquals(OperationErrorCode.INTEGRITY_FAILED, failure.error.code) }
-            f.beforeFiles = {}
+            f.afterRoomOpen = {}
             SQLiteDatabase.openDatabase(f.context.getDatabasePath("pristinepage.db").path, null, SQLiteDatabase.OPEN_READWRITE).use { db ->
                 db.execSQL("UPDATE Document SET documentId=? WHERE documentId=''", arrayOf(UUID.randomUUID().toString()))
             }
@@ -226,14 +291,14 @@ class ApplicationCompositionTest {
         Fixture().use { f ->
             val owner = services(f.context, f.budget, f.provider)
             val entered = CountDownLatch(1); val release = CountDownLatch(1)
-            f.beforeFiles = { entered.countDown(); check(release.await(5, TimeUnit.SECONDS)) }
+            f.afterRoomOpen = { entered.countDown(); check(release.await(5, TimeUnit.SECONDS)) }
             val request = launch(Dispatchers.Main) { runtime(owner) }
             try {
                 assertTrue(withContext(Dispatchers.IO) { entered.await(5, TimeUnit.SECONDS) })
                 request.cancel()
             } finally { release.countDown() }
             request.join(); assertTrue(request.isCancelled)
-            f.beforeFiles = {}
+            f.afterRoomOpen = {}
             val graph = withContext(Dispatchers.Main) { runtime(owner) }
             try {
                 val documents = property<DocumentRepository>(property<Any>(graph, "Store"), "Documents")
@@ -246,10 +311,14 @@ class ApplicationCompositionTest {
     private class Fixture : AutoCloseable {
         private val base = InstrumentationRegistry.getInstrumentation().targetContext
         private val root = File(base.filesDir, "t04-composition-${UUID.randomUUID()}")
-        var beforeFiles: () -> Unit = {}
+        private val files = File(root, "files").apply { check(mkdirs()) }
+        var afterRoomOpen: () -> Unit = {}
         val context = object : ContextWrapper(base) {
             override fun getApplicationContext(): Context = this
-            override fun getFilesDir(): File { beforeFiles(); return File(root, "files") }
+            override fun getFilesDir(): File {
+                if (File(root, "databases/pristinepage.db").isFile) afterRoomOpen()
+                return files
+            }
             override fun getDatabasePath(name: String): File = File(root, "databases/$name").also { it.parentFile!!.mkdirs() }
         }
         val good = "content://fixture.documents/good"; val bad = "content://fixture.documents/corrupt"

@@ -44,4 +44,20 @@ class LocalLibrarySettingsBootstrapTest {
         assertEquals(visible, LocalLibrarySettingsBootstrap(files, sync).open().read())
         assertEquals(listOf(settings), files.listFiles().orEmpty().toList())
     }
+
+    @Test fun definitePrePublicationFailuresDoNotFillTheBootstrapStageBudget() {
+        val files = roots.newFolder().canonicalFile
+        val failing = DirectorySync { directory -> !directory.name.startsWith(".library-settings-pending-") }
+        repeat(4) { assertFailsWith<IOException> { LocalLibrarySettingsBootstrap(files, failing).open() } }
+        assertEquals(emptyList(), files.list().orEmpty().toList())
+        val recovered = LocalLibrarySettingsBootstrap(files, sync).open().read()
+        assertIs<LocalSelectedLibraryAuthority.Selected.Default>(recovered)
+        assertEquals(recovered, LocalLibrarySettingsBootstrap(files, sync).open().read())
+    }
+
+    @Test fun anUnconfirmedParentOfTheFilesDirectoryCannotAcknowledgeFirstUse() {
+        val files = roots.newFolder().canonicalFile
+        val failing = DirectorySync { directory -> directory != files.parentFile }
+        assertFailsWith<IOException> { LocalLibrarySettingsBootstrap(files, failing).open() }
+    }
 }

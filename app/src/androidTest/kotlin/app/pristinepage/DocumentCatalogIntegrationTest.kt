@@ -122,9 +122,10 @@ class DocumentCatalogIntegrationTest {
     internal class Fixture(encoded: ByteArray? = null, private val realProvider: Boolean = false, private val memoryClassMiB: Int = 64) : AutoCloseable {
         private val base = InstrumentationRegistry.getInstrumentation().targetContext
         private val root = File(base.filesDir, "t04-catalog-${UUID.randomUUID()}")
+        private val files = File(root, "files").apply { check(mkdirs()) }
         private val context = object : ContextWrapper(base) {
             override fun getApplicationContext(): Context = this
-            override fun getFilesDir(): File = File(root, "files")
+            override fun getFilesDir(): File = files
             override fun getDatabasePath(name: String): File = File(root, "databases/$name").also { it.parentFile!!.mkdirs() }
         }
         val good = "content://fixture.documents/good"; val bad = "content://fixture.documents/bad"
