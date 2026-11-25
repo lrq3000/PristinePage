@@ -6,6 +6,7 @@ import app.pristinepage.data.library.LibraryGeneration
 import app.pristinepage.data.library.LibraryGenerationInventory
 import app.pristinepage.data.library.LibraryObjectTransfer.ObjectId
 import app.pristinepage.data.library.LocalLibraryDirectory
+import java.io.ByteArrayOutputStream
 import java.io.File
 import java.io.IOException
 import java.io.InputStream
@@ -24,6 +25,32 @@ import org.junit.rules.TemporaryFolder
 
 class LibraryBackupReadTest {
     @get:Rule val temporary = TemporaryFolder()
+
+    @Test fun detachedOriginalCopyRechecksTheExactCatalogBeforeAndAfterStreamingOneObject() {
+        val fixture = fixture()
+        val store = StreamBackup(fixture)
+        val output = ByteArrayOutputStream()
+        LibraryBackupRead(store, fixture.scratch.toPath(), 1024).copyExactOriginal(fixture.generation, fixture.original, output)
+        assertArrayEquals(byteArrayOf(1, 2, 3), output.toByteArray())
+        assertEquals(1, store.originalsOpened)
+        assertEquals(2, store.catalogsOpened)
+        assertEquals(emptyList<String>(), fixture.scratch.list().orEmpty().toList())
+    }
+
+    @Test fun detachedOriginalCopyRejectsLostAccessAfterStreamCloseWithoutReturningSuccess() {
+        val fixture = fixture()
+        var closed = false
+        val store = StreamBackup(fixture, beforeCatalogOpen = {
+            if (closed) throw IOException("Selected tree is unavailable")
+            true
+        }, afterOriginalClose = { closed = true })
+        val failure = assertThrows(IOException::class.java) {
+            LibraryBackupRead(store, fixture.scratch.toPath(), 1024)
+                .copyExactOriginal(fixture.generation, fixture.original, ByteArrayOutputStream())
+        }
+        assertEquals("Selected tree is unavailable", failure.message)
+        assertEquals(1, store.originalsOpened)
+    }
 
     @Test fun streamBackedBackupUsesTheSameByteAndGenerationProofWithoutAFileOrWriteCapability() {
         val fixture = fixture()

@@ -1,7 +1,6 @@
 package app.pristinepage.data.library
 
 import android.content.Context
-import app.pristinepage.core.io.transferExactBytes
 import app.pristinepage.data.library.LibraryObjectTransfer.ObjectId
 import app.pristinepage.data.library.RoomLibraryCatalogReader.Companion.MAX_PORTABLE_BYTES
 import java.io.File
@@ -45,7 +44,7 @@ internal class RoomLibraryPortableView(context: Context, private val scratchDire
             }
         }
         if (localLibraryRootKey(canonical) != key) throw IOException("The verified library root changed")
-        VerifiedView(exact, verified.value, key, store)
+        VerifiedView(exact, verified.value, key, store, scratch)
     }
 
     internal sealed interface Opened {
@@ -61,27 +60,21 @@ internal class RoomLibraryPortableView(context: Context, private val scratchDire
         override val catalog: RoomLibrarySavedCatalog.Snapshot,
         private val rootKey: String,
         private val store: LocalLibraryDirectory,
+        private val scratch: Path,
     ) : Opened {
         private val originals = catalog.originals.associate { it.sourceBlobId to ObjectId(it.byteSha256, it.byteCount) }
 
         override suspend fun copyOriginal(blobId: String, output: OutputStream) = withContext(Dispatchers.IO) {
             val checkpoint = { coroutineContext.ensureActive() }
             val id = originals[blobId] ?: throw IOException("Original is not in the verified library view")
-            checkSelection(checkpoint)
-            val input = store.open(id) ?: throw IOException("Library original is no longer available")
-            input.use { transferExactBytes(it, output, id.byteCount, id.sha256, checkpoint) }
-            checkSelection(checkpoint)
+            requireRoot()
+            LibraryBackupRead(store, scratch, MAX_PORTABLE_BYTES, checkpoint).copyExactOriginal(generation, id, output)
+            requireRoot()
+            checkpoint()
         }
 
-        private fun checkSelection(checkpoint: () -> Unit) {
-            checkTip(checkpoint)
-            val catalog = store.openCatalog(generation) ?: throw IOException("The verified catalog is no longer available")
-            catalog.use { generation.verifyCatalog(it, checkpoint) }
-            checkTip(checkpoint)
-        }
-
-        private fun checkTip(checkpoint: () -> Unit) {
-            if (localLibraryRootKey(store.rootPath) != rootKey || store.readTip(checkpoint) != generation) {
+        private fun requireRoot() {
+            if (localLibraryRootKey(store.rootPath) != rootKey) {
                 throw IOException("The verified library view is no longer current")
             }
         }

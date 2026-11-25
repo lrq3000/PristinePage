@@ -5,6 +5,7 @@ import app.pristinepage.data.library.LibraryObjectTransfer.ObjectId
 import java.io.File
 import java.io.IOException
 import java.io.InputStream
+import java.io.OutputStream
 import java.nio.file.Path
 
 /** Read-only proof for a stable cooperating backup, not authority to import its rows, activate it, or retire anything. */
@@ -26,6 +27,31 @@ internal class LibraryBackupRead(
 
     data class Projection<T>(val value: T, val objects: Collection<ObjectId>)
     data class Verified<T>(val generation: LibraryGeneration, val value: T)
+
+    /** The caller derives [objectId] from an already admitted snapshot and owns disposable output. Failure can leave output bytes but never authorizes their use. */
+    fun copyExactOriginal(generation: LibraryGeneration, objectId: ObjectId, output: OutputStream) {
+        val scratch = privateScratch.toRealPath()
+        if (scratch != privateScratch.toAbsolutePath()) throw IOException("Invalid private verification directory")
+        store.requireIndependentScratch(scratch)
+        fun requireTip() {
+            checkpoint()
+            val inventory = store.generationInventory(checkpoint)
+            inventory.requireExact(generation)
+            if (inventory.tip != generation) throw IOException("The verified library generation is no longer current")
+        }
+        fun requireCatalog() {
+            checkpoint()
+            openCatalog(generation).use { generation.verifyCatalog(it, checkpoint) }
+        }
+        requireTip()
+        requireCatalog()
+        checkpoint()
+        val input = store.open(objectId) ?: throw IOException("The verified library original is missing")
+        input.use { transferExactBytes(it, output, objectId.byteCount, objectId.sha256, checkpoint) }
+        requireCatalog()
+        requireTip()
+        checkpoint()
+    }
 
     fun <T> read(expectedSchema: Int, project: (LibraryGeneration, File) -> Projection<T>): Verified<T> =
         read(expectedSchema, generation = null, expectedTip = null, project)
