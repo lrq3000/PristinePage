@@ -6,9 +6,11 @@ import app.pristinepage.data.db.SourceBlobRow
 import app.pristinepage.data.db.SourceRow
 import app.pristinepage.data.model.*
 import app.pristinepage.data.repository.CommittedSource
+import app.pristinepage.data.repository.CommittedSourceBinding
 import app.pristinepage.data.repository.CommittedSources
 import app.pristinepage.data.repository.ExportSourceBinding
 import app.pristinepage.data.repository.ProducerCommittedSources
+import app.pristinepage.data.repository.ScopedCommittedOriginals
 import app.pristinepage.image.decode.DecodeAdmission
 import app.pristinepage.image.decode.DecodedSource
 import app.pristinepage.image.decode.ImageAllocationBudget
@@ -28,9 +30,57 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.*
 import org.junit.Test
+import kotlin.test.assertFailsWith
 
 /** Only unavailable Android codec/Room lookup are substituted. Actual SourceDecoder business checks, complete identity values, RGB storage and shared reservations execute on host; actual cross-module Room/codec tests are required separately. */
 class CommittedSourceDecodeTest {
+    @Test fun scopedOriginalIsLentThroughDecodeButNotThroughUseOfTheOwnedRaster() = runTest {
+        val f = Fixture()
+        var held = false
+        var released = false
+        val binding = CommittedSourceBinding(f.id, f.stored.sourceBlobId, f.hash, 4, f.info)
+        val sources = ScopedCommittedOriginals { id, producer, read ->
+            assertEquals(f.id, id)
+            assertNull(producer)
+            held = true
+            try { read(binding, f.file) }
+            finally { held = false; released = true }
+        }
+        val decoder = SourceDecoder(sources, SourceFileDecoder { file, hash ->
+            assertTrue(held)
+            assertEquals(f.file, file)
+            assertEquals(f.hash, hash)
+            DecodedSource(f.info, RgbImage(3, 2, 9, f.pixels), DecodeAdmission(f.budget).admit(4, 3, 2, 1), hash)
+        })
+        decoder.decode(f.id.value, OutputSpec(PixelSize(1, 1), RenderPurpose.PREVIEW)).use {
+            assertTrue(released)
+            assertFalse(held)
+            assertArrayEquals(f.pixels, it.image.toPackedByteArray())
+        }
+        assertEquals(0L, f.budget.usedBytes)
+    }
+
+    @Test fun aSelectedOriginalRefusedAfterDecodeCannotDeliverOrLeakTheDecodedRaster() = runTest {
+        val f = Fixture()
+        var decoded: RgbImage? = null
+        val loss = RepositoryFailure(OperationError(OperationErrorCode.PERMISSION_LOST, true, "library_reconnect_required", null))
+        val sources = ScopedCommittedOriginals { _, _, read ->
+            read(CommittedSourceBinding(f.id, f.stored.sourceBlobId, f.hash, 4, f.info), f.file)
+            assertTrue(f.budget.usedBytes > 0)
+            throw loss
+        }
+        val decoder = SourceDecoder(sources, SourceFileDecoder { _, _ ->
+            val image = RgbImage(3, 2, 9, f.pixels).also { decoded = it }
+            DecodedSource(f.info, image, DecodeAdmission(f.budget).admit(4, 3, 2, 1), f.hash)
+        })
+        val thrown = assertFailsWith<RepositoryFailure> {
+            decoder.decode(f.id.value, OutputSpec(PixelSize(1, 1), RenderPurpose.PREVIEW)).close()
+        }
+        assertSame(loss, thrown)
+        assertEquals(0L, f.budget.usedBytes)
+        assertThrows(IllegalStateException::class.java) { checkNotNull(decoded).toPackedByteArray() }
+    }
+
     private class Fixture {
         val id = SourceId(UUID.randomUUID().toString())
         val pixels = ByteArray(18) { (it + 1).toByte() }
