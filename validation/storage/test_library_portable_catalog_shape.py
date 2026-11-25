@@ -66,6 +66,17 @@ class LibraryPortableCatalogShapeTest(unittest.TestCase):
         self.assertFalse(self.refused("UPDATE Source SET conversionFingerprint='sRGB-É'"))
         self.assertTrue(self.refused("UPDATE Source SET conversionFingerprint=char(0)||'unreadable-in-editor'"))
 
+    def test_fresh_room_document_insert_preserves_the_exact_title_utf8(self):
+        # Execute the same statement as the portable writer against the real SQLite table.
+        writer = catalog.ROOT / "data/src/main/kotlin/app/pristinepage/data/library/RoomLibrarySavedCatalog.kt"
+        query = re.search(r'const val INSERT_DOCUMENT_EXACT = """(.*?)"""', writer.read_text(encoding="utf-8"), re.S)
+        self.assertIsNotNone(query, "The fresh Room writer needs a byte-preserving album insert")
+        title = "\ufeff\ufeff Cafe\u0301 \x00 scan".encode("utf-8").hex()
+        arguments = iter((f"'{DOC}'", f"X'{title}'", "2", "'ACTIVE'", "11", "12", "NULL"))
+        insert = re.sub(r"\?", lambda _: next(arguments), query.group(1))
+        self.assertEqual([{"storage": "text", "bytes": title.upper(), "documentRevision": 2}], catalog.LibraryCatalogReaderSqlTest().sqlite(
+            insert, "SELECT typeof(title) AS storage,hex(CAST(title AS BLOB)) AS bytes,documentRevision FROM Document"))
+
     def test_stage_fts_command_detects_postings_mismatch_and_requires_write_access(self):
         writer = catalog.ROOT / "data/src/main/kotlin/app/pristinepage/data/library/RoomLibrarySavedCatalog.kt"
         action, = re.findall(r'sql\.execSQL\("(INSERT INTO OcrResultFts.*integrity-check.*)"\)', writer.read_text(encoding="utf-8"))

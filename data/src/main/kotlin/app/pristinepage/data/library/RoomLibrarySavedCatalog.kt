@@ -4,7 +4,6 @@ import androidx.sqlite.db.SupportSQLiteDatabase
 import app.pristinepage.core.library.LibraryScanName
 import app.pristinepage.core.pipeline.PixelSize
 import app.pristinepage.core.pipeline.requireSha256
-import app.pristinepage.core.pipeline.requireWellFormedUnicode
 import app.pristinepage.core.recipe.RecipeCodec
 import app.pristinepage.core.recipe.SourceBinding
 import app.pristinepage.data.db.DocumentRow
@@ -70,8 +69,7 @@ internal class RoomLibrarySavedCatalog(private val database: PristineDatabase) {
                 if (metadata.isHiddenAtelierDraft(id)) invalid()
                 if (catalog.documentReadIsBounded(id) != true || !catalog.activePagesReadIsBounded(id)) invalid()
                 val album = catalog.document(id)?.takeIf { it.lifecycle == "ACTIVE" && it.deletedAt == null } ?: invalid()
-                requireWellFormedUnicode(album.title)
-                if (album.title.isBlank() || album.title.length > 160) invalid()
+                requireAlbumTitle(album.title)
                 val active = catalog.activePages(id)
                 val retained = removedPages(sql, id, MAX_PAGES - pageCount - active.size)
                 val rows = active + retained
@@ -145,7 +143,11 @@ internal class RoomLibrarySavedCatalog(private val database: PristineDatabase) {
             val savedOcr = RoomLibrarySavedOcr(database)
             for (album in snapshot.albums) {
                 checkpoint()
-                catalog.insertDocument(album.row)
+                requireAlbumTitle(album.row.title)
+                val row = album.row
+                // Android's UTF-16 SQLite text binding can consume a leading byte-order mark. Bind verified UTF-8 and explicitly store it as TEXT instead.
+                sql.execSQL(INSERT_DOCUMENT_EXACT, arrayOf<Any?>(row.documentId, row.title.encodeToByteArray(), row.documentRevision,
+                    row.lifecycle, row.createdAt, row.updatedAt, row.deletedAt))
                 for (page in album.pages) {
                     checkpoint()
                     val row = page.row
@@ -225,12 +227,19 @@ internal class RoomLibrarySavedCatalog(private val database: PristineDatabase) {
     private fun hasRow(sql: SupportSQLiteDatabase, query: String, vararg arguments: String): Boolean =
         sql.query(query, arguments).use { it.moveToFirst() }
 
+    private fun requireAlbumTitle(title: String) {
+        try { requireStoredAlbumTitle(title) }
+        catch (_: IllegalArgumentException) { invalid() }
+    }
+
     private fun invalid(): Nothing = fail(OperationErrorCode.INTEGRITY_FAILED, "library_saved_catalog_invalid")
     private fun unavailable(key: String): Nothing = fail(OperationErrorCode.UNSUPPORTED_VERSION, key)
     private fun limit(): Nothing = fail(OperationErrorCode.RESOURCE_LIMIT, "library_saved_catalog_limit")
     private fun fail(code: OperationErrorCode, key: String): Nothing = throw RepositoryFailure(OperationError(code, false, key, null))
 
     companion object {
+        private const val INSERT_DOCUMENT_EXACT = """INSERT INTO Document
+            (documentId,title,documentRevision,lifecycle,createdAt,updatedAt,deletedAt) VALUES (?,CAST(? AS TEXT),?,?,?,?,?)"""
         // Include independent transaction/pin/index tables: neither foreign keys nor a zero album count establishes a clean stage.
         private const val NONEMPTY_STAGE = """SELECT 1 FROM Document UNION ALL SELECT 1 FROM Page
             UNION ALL SELECT 1 FROM Source UNION ALL SELECT 1 FROM SourceBlob UNION ALL SELECT 1 FROM LibraryScanName

@@ -68,6 +68,17 @@ class RoomLibrarySavedCatalogTest {
         }
     }
 
+    @Test fun aPaddedAlbumTitleIsRefusedRatherThanCopiedIntoAnUnreadableWorkingCatalog() = runBlocking<Unit> {
+        RoomSourceIngestIntegrationTest.Fixture().use { source ->
+            val title = "\u00a0Receipts "
+            val sql = source.database.openHelper.writableDatabase
+            sql.execSQL("UPDATE Document SET title=? WHERE documentId=?", arrayOf(title, source.document.value))
+            val failure = runCatching { RoomLibrarySavedCatalog(source.database).capture() }.exceptionOrNull() as RepositoryFailure
+            assertEquals(OperationErrorCode.INTEGRITY_FAILED, failure.error.code)
+            assertEquals(title, source.database.catalog().document(source.document.value)?.title)
+        }
+    }
+
     @Test fun savedAlbumProjectionKeepsScanOrderAndEveryRecipeInAFreshRoomCatalog() = runBlocking<Unit> {
         RoomSourceIngestIntegrationTest.Fixture().use { source ->
             val (first, second) = source.reserve(count = 2)

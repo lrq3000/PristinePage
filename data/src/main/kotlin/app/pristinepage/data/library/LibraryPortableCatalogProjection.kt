@@ -17,6 +17,7 @@ import app.pristinepage.data.db.SourceRow
 import app.pristinepage.data.model.JobId
 import app.pristinepage.data.model.SourceInspection
 import app.pristinepage.data.model.requireOpaqueId
+import app.pristinepage.data.model.requireStoredAlbumTitle
 import app.pristinepage.data.repository.OcrJobInput
 import app.pristinepage.data.repository.RoomOcrResults
 import java.io.IOException
@@ -74,7 +75,7 @@ internal class LibraryPortableCatalogProjection(
                 "typeof(createdAt)='integer' AND typeof(updatedAt)='integer'", 2_000, "ORDER BY documentId",
         ) {
             val title = utf8(1)
-            if (title.isBlank() || title.length > 160) invalid()
+            requireStoredAlbumTitle(title)
             DocumentRow(id(0), title, getLong(2), "ACTIVE", getLong(3), getLong(4), null)
         }
         val pages = rows(

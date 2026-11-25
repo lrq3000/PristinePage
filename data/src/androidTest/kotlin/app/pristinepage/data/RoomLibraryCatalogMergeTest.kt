@@ -42,6 +42,45 @@ import org.junit.runner.RunWith
 
 @RunWith(AndroidJUnit4::class)
 class RoomLibraryCatalogMergeTest {
+    @Test fun closedPortableProjectionRefusesAnOtherwiseValidCatalogWithAnUnusableTitle() = runBlocking<Unit> {
+        RoomSourceIngestIntegrationTest.Fixture().use { source ->
+            val context = InstrumentationRegistry.getInstrumentation().context
+            val root = File(context.filesDir.canonicalFile, "library-title-fixture-${UUID.randomUUID()}").apply { check(mkdir()) }
+            val stage = File(root, "catalog.pending.sqlite")
+            RoomLibraryCatalogStage(context).write(RoomLibrarySavedCatalog(source.database).capture(), stage)
+            val reader = RoomLibraryCatalogReader(context, RoomLibraryCatalogReader.MAX_PORTABLE_BYTES)
+            assertEquals(source.document.value, reader.read(stage) { LibraryPortableCatalogProjection(it) {}.snapshot() }.albums.single().row.documentId)
+            SQLiteDatabase.openDatabase(stage.path, null, SQLiteDatabase.OPEN_READWRITE or SQLiteDatabase.NO_LOCALIZED_COLLATORS).use { sql ->
+                sql.rawQuery("PRAGMA journal_mode=DELETE", null).use { assertTrue(it.moveToFirst()); assertEquals("delete", it.getString(0)) }
+                sql.execSQL("UPDATE Document SET title=?", arrayOf<Any>("Receipts\u2003"))
+            }
+            val before = stage.readBytes()
+            val error = runCatching { reader.read(stage) { LibraryPortableCatalogProjection(it) {}.snapshot() } }.exceptionOrNull()
+            assertTrue(error is IOException && error.message == "Library catalog rows do not match the portable format")
+            assertArrayEquals(before, stage.readBytes())
+        }
+    }
+
+    @Test fun repeatedFreshCatalogReopenPreservesExactUnicodeTitleBytes() = runBlocking<Unit> {
+        RoomSourceIngestIntegrationTest.Fixture().use { source ->
+            val context = InstrumentationRegistry.getInstrumentation().context
+            val root = File(context.filesDir.canonicalFile, "library-title-unicode-${UUID.randomUUID()}").apply { check(mkdir()) }
+            val title = "\ufeff\ufeff Cafe\u0301 \u0000 scan"
+            source.database.openHelper.writableDatabase.execSQL("UPDATE Document SET title=CAST(? AS TEXT) WHERE documentId=?",
+                arrayOf<Any>(title.encodeToByteArray(), source.document.value))
+            val first = RoomLibrarySavedCatalog(source.database).capture()
+            assertEquals(title, first.albums.single().row.title)
+            val reader = RoomLibraryCatalogReader(context, RoomLibraryCatalogReader.MAX_PORTABLE_BYTES)
+            var snapshot = first
+            repeat(2) { n ->
+                val stage = File(root, "catalog-$n.sqlite")
+                RoomLibraryCatalogStage(context).write(snapshot, stage)
+                snapshot = reader.read(stage) { LibraryPortableCatalogProjection(it) {}.snapshot() }
+                assertEquals(title, snapshot.albums.single().row.title)
+            }
+        }
+    }
+
     @Test fun preflightStagesBothPortableCatalogsWithoutWritingEitherLibrary() = runBlocking<Unit> {
         RoomSourceIngestIntegrationTest.Fixture().use { local ->
             RoomSourceIngestIntegrationTest.Fixture().use { incoming ->
