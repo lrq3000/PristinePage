@@ -12,7 +12,7 @@ from unittest.mock import patch
 
 from run_library_folder_picker_ldplayer import (
     check_fixture_root, read_backup_delivery_death, recheck_target, select_backup_case, select_backup_death_picker_case, select_settings_picker_case, select_settings_recovery_case, settings_completed_destination, spend_settings_retry,
-    verify_backup_death_control, verify_backup_death_intent, verify_settings_catalog, verify_settings_ocr, verify_settings_retry_evidence,
+    verify_backup_death_control, verify_backup_death_intent, verify_backup_receipt_only, verify_settings_catalog, verify_settings_ocr, verify_settings_retry_evidence,
 )
 from run_local_ocr_guest import read_boot_serial
 
@@ -134,6 +134,14 @@ class LibraryFolderPickerRunnerTest(unittest.TestCase):
         for key in flags.keys() - {"backup_death_picker_only"}:
             with self.subTest(key=key), self.assertRaisesRegex(RuntimeError, "standalone"):
                 select_backup_death_picker_case(Namespace(**(flags | {key: True})))
+
+    def test_death_receipt_only_rejects_other_modes_and_unauthenticated_receipts(self):
+        pin = "b6f9e9329f39c067cecdb1c1130b9f8f28bf65492e17709750c89d38bdfa86cd"
+        self.assertIsNone(verify_backup_receipt_only(None, False))
+        self.assertEqual(pin, verify_backup_receipt_only(pin, False))
+        for receipt, mixed in ((pin, True), ("0"*64, False)):
+            with self.assertRaisesRegex(RuntimeError, "exact.*standalone"):
+                verify_backup_receipt_only(receipt, mixed)
 
     def test_death_retry_requires_both_no_write_controls_on_the_same_exact_pair(self):
         def transcript(case):

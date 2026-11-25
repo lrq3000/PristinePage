@@ -74,6 +74,7 @@ SETTINGS_COLD_MANIFEST = "ae398db885ea47ac131838a3011766e69d4984be224188b1a282ad
 BACKUP_DEATH_PICKER_FAILURE = "e5deb5f75e5e53dae04a8a655d6f9bfde2671e824876a155564a4323b3a156b0"
 BACKUP_MANUAL_CONTROL_FAILURE = "08fe10503d488aa4ec3775157a7d8b2690be375908cb2c7194def2dd6cf64002"
 BACKUP_DIRECT_CONTROL_PASS = "b2ac8b7795cb08629b3eb0cf888b1467a464ef8b36810afa76de07acae0d7e24"
+BACKUP_DEATH_RECEIPT_ONLY = "b6f9e9329f39c067cecdb1c1130b9f8f28bf65492e17709750c89d38bdfa86cd"
 UUID_TEXT = r"[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}"
 BACKUP_ORIGINAL = "ebd602840377a3b3cf763cb6828fee67861ff77c444e8fe5894457ef6d99a24d"
 OCR_ACTIVATION_CASES = tuple(f"app.pristinepage.ocr.OcrWorkManagerIntegrationTest#{method}" for method in (
@@ -188,6 +189,12 @@ def select_backup_death_picker_case(args):
                   args.ocr_activation, args.working_catalog, args.probe_directory, args.activation, args.selected_catalog,
                   args.activation_compatibility, args.expect_home)), "Backup death picker control requires the retained guest and a standalone invocation")
     return BACKUP_DEATH_PICKER_CASE
+
+
+def verify_backup_receipt_only(receipt, mixed):
+    need(receipt is None or (receipt == BACKUP_DEATH_RECEIPT_ONLY and not mixed),
+         "Require the exact retained process-death receipt in a standalone read-only invocation")
+    return receipt
 
 
 def settings_run_anchors(raw, expected_sha):
@@ -477,7 +484,15 @@ def exercise_backup_delivery_death(run, adb, ns, raw, fixture_root, fixture, fix
         inspect_abnormal_backup_death(run, adb, fixture_root, isolated, operation)
         raise
     recheck_target(run, ns)
+    return complete_backup_delivery_death(run, adb, ns, raw, fixture_root, fixture, operation, hashes,
+                                          (old_pid, (library, generation), bindings))
+
+
+def complete_backup_delivery_death(run, adb, ns, raw, fixture_root, fixture, operation, hashes, checkpoint):
+    old_pid, (library, generation), bindings = checkpoint
     require_cold_backup_app(adb)
+    folder = fixture_root.rsplit("/", 1)[1]
+    isolated = f"files/library-export-source-{operation}"
     backup_name = f"PristinePage-backup-{generation}"
     backup = f"{fixture_root}/{backup_name}"
     marker_path = f"{backup}/generations/{generation}.complete"
@@ -501,6 +516,7 @@ def exercise_backup_delivery_death(run, adb, ns, raw, fixture_root, fixture, fix
     need(before["operation"] == operation, "The durable attempt does not match the terminated operation")
     verify_backup_death_intent(adb, isolated, operation, folder, marker_text, before)
     run.save(run.path("death-before-reopen.json"), before, durable=True)
+    extras = ("-e", "libraryBackupDeathOperation", operation)
     try:
         output = adb("shell", "am", "instrument", "-w", "-r", "-e", "class", BACKUP_DEATH_RECOVERY_CASE,
                      *extras, "-e", "libraryBackupDeathGeneration", generation, "-e", "libraryBackupDeathPreviousPid", old_pid,
@@ -567,6 +583,11 @@ def run(args):
     recovery_case = select_settings_recovery_case(args)
     backup_case = select_backup_case(args)
     death_picker_case = select_backup_death_picker_case(args)
+    death_receipt = verify_backup_receipt_only(args.backup_death_receipt_only,
+        any((args.fresh, args.backup_delivery_death, args.backup_death_retry, death_picker_case, picker_case,
+             recovery_case, backup_case, args.probe_write, args.ocr_activation, args.working_catalog, args.probe_directory,
+             args.activation, args.selected_catalog, args.activation_compatibility, args.expect_home,
+             args.settings_retry, args.settings_prior_failure)))
     if args.backup_delivery_death:
         need(not any((args.fresh, args.settings_picker_only, args.settings_recover, backup_case, args.probe_write,
                       args.ocr_activation, args.working_catalog, args.probe_directory, args.activation, args.selected_catalog,
@@ -598,6 +619,7 @@ def run(args):
     pinned_cold_baseline = None
     refused_death_destinations = []
     refused_death_private = None
+    retained_death = None
     death_authority = args.backup_death_retry or SETTINGS_COLD_MANIFEST
     death_operation = str(uuid.uuid4()) if args.backup_delivery_death else None
     need(args.backup_death_retry is None or (death_operation and args.backup_death_retry == BACKUP_DIRECT_CONTROL_PASS),
@@ -614,23 +636,46 @@ def run(args):
             need(len(parents) == 1 and previous[APP] == hashes[APP] and args.settings_recover == SETTINGS_COMPLETED_MANIFEST,
                  "Require the independently pinned successful backup receipt and exact prior app")
             completed, publication_claim = settings_completed_destination(parents.pop(), args.settings_recover, args.guest, previous)
-        if death_operation:
+        if death_operation or death_receipt:
             parents = {Path(file).resolve().parent for file in args.previous}
             need(len(parents) == 1 and previous[APP] == hashes[APP], "Require the exact retained cold recovery pair")
             predecessor = parents.pop()
-            cold_run = predecessor if not args.backup_death_retry else raw.parent / "picker-adapter-library-tree-bb9159f6e027"
+            cold_run = (raw.parent / "picker-adapter-library-tree-bb9159f6e027" if args.backup_death_retry or death_receipt else predecessor)
             cold_anchor = settings_run_anchors(cold_run, SETTINGS_COLD_MANIFEST)
             cold_outcome = json.loads(cold_anchor("outcomes.json"))
             need(cold_outcome == {"passed": [SETTINGS_RECOVERY_CASE], "failed": [],
                                   "installedSha256": cold_outcome["installedSha256"]} and
                  cold_outcome["installedSha256"][APP] == hashes[APP] and
-                 (args.backup_death_retry or cold_outcome["installedSha256"] == previous),
+                 (args.backup_death_retry or death_receipt or cold_outcome["installedSha256"] == previous),
                  "The original cold recovery evidence did not pass on the retained pair")
             pinned_cold_baseline = json.loads(cold_anchor("recovery-after.json"))
             need(json.loads(cold_anchor("recovery-before.json")) == pinned_cold_baseline,
                  "The pinned ordinary backup changed during cold recovery")
-            need(not (raw.parent / f"settings-retry-spent-{death_authority}.json").exists(),
+            need(death_receipt or not (raw.parent / f"settings-retry-spent-{death_authority}.json").exists(),
                  "This isolated backup death authorization is already spent")
+            if death_receipt:
+                need(hashes == previous, "Receipt-only recovery must not update either APK")
+                old = settings_run_anchors(predecessor, death_receipt)
+                artifacts = json.loads(old("artifacts.json"))
+                attempt = json.loads(old("backup-death-attempt.json"))
+                need(artifacts["guest"] == args.guest and artifacts["previous"] == previous and
+                     {p: artifacts["proof"][p]["sha256"] for p in previous} == previous and
+                     re.fullmatch(UUID_TEXT, attempt["operation"]) and attempt["operation"] == artifacts["backupDeliveryDeath"] and
+                     artifacts["backupDeathRetry"] == BACKUP_DIRECT_CONTROL_PASS,
+                     "The previous process death does not match the exact retained guest, pair and spend")
+                destination, inventory = backup_death_control_destination(old, BACKUP_DEATH_CASE)
+                spent = json.loads((raw.parent / f"settings-retry-spent-{BACKUP_DIRECT_CONTROL_PASS}.json").read_bytes())
+                need(attempt["destination"] == destination.rsplit("/", 1)[1] and spent == {
+                    "operation": attempt["operation"], "destination": destination, "kind": "single-delivery-death"},
+                     "The previous process-death destination does not match the spent authorization")
+                checkpoint = read_backup_delivery_death(old("backup-death-instrumentation.txt"), attempt["operation"])
+                pid_results = [call for line in old("commands.jsonl").splitlines() if
+                               (call := json.loads(line))["argv"][-4:] == ["shell", "pidof", APP, TEST]]
+                need(len(pid_results) == 3 and all(call.get("exit") == 1 and not call["stdout"].strip() for call in pid_results[:2]) and
+                     pid_results[-1].get("exit") == 0 and re.fullmatch(r"[1-9][0-9]{0,8}", pid_results[-1]["stdout"].strip()) and
+                     checkpoint[0] != pid_results[-1]["stdout"].strip(),
+                     "No verified post-checkpoint refusal with a different process")
+                retained_death = destination, inventory, attempt["operation"], checkpoint
             if args.backup_death_retry:
                 need(hashes == previous, "Retry requires the same app and test APKs as the direct no-write controls")
                 control = settings_run_anchors(predecessor, BACKUP_DIRECT_CONTROL_PASS)
@@ -690,15 +735,15 @@ def run(args):
         need(sha(saved) == hashes[package], "Retained candidate APK changed")
         retained[package] = saved
     fixture = raw / "synthetic-library"
-    files = {} if args.ocr_activation or recovery_case else make_fixture(fixture, with_scan=True)
-    original = None if args.ocr_activation or recovery_case else synthetic_scan()[0]
+    files = {} if args.ocr_activation or recovery_case or death_receipt else make_fixture(fixture, with_scan=True)
+    original = None if args.ocr_activation or recovery_case or death_receipt else synthetic_scan()[0]
     if original:
         need(files.get(f"objects/{original}") == original, "The populated Files fixture lacks its exact original")
     (raw / f"{prefix}-artifacts.json").write_text(
         json.dumps(dict(proof=proof, source=args.commit, fixture=files, previous=previous, guest=args.guest,
                         settingsCancel=args.settings_retry, settingsPriorFailure=args.settings_prior_failure,
                         settingsCompleted=args.settings_recover, backupDeliveryDeath=death_operation,
-                        backupDeathRetry=args.backup_death_retry)),
+                        backupDeathRetry=args.backup_death_retry, backupDeathReceiptOnly=death_receipt)),
         encoding="utf-8",
     )
     ns = load_allocator(ROOT, args.guest, raw, "pristinepage-tree-" + os.environ["OPENCODE_SESSION_ID"])
@@ -730,7 +775,7 @@ def run(args):
             require_cold_backup_app(adb)
             verify_completed_destination(adb, *completed)
             baseline = settings_private_baseline(adb)
-            need(not death_operation or baseline == pinned_cold_baseline,
+            need(not (death_operation or death_receipt) or baseline == pinned_cold_baseline,
                  "The retained ordinary private backup no longer matches its pinned cold baseline")
             run.save(run.path("recovery-before.json"), baseline, durable=True)
         for refused in refused_death_destinations:
@@ -747,6 +792,15 @@ def run(args):
             need(run.installed_hash(p) == hashes[p], "Installed APK differs from the admitted candidate")
         need(adb("shell", "pm", "list", "instrumentation", APP).splitlines() ==
              [f"instrumentation:{RUNNER} (target={APP})"], "The instrumentation registry differs")
+        if death_receipt:
+            recheck_target(run, ns)
+            try:
+                destination, inventory, operation, checkpoint = retained_death
+                return complete_backup_delivery_death(run, adb, ns, raw, destination, inventory, operation, hashes, checkpoint)
+            finally:
+                recheck_target(run, ns)
+                verify_completed_destination(adb, *completed)
+                need(settings_private_baseline(adb) == baseline, "The retained ordinary backup attempt changed")
         if recovery_case:
             recheck_target(run, ns)
             need(settings_private_baseline(adb) == baseline and not adb("shell", "pidof", APP, TEST, allowed=(0, 1)).strip(),
@@ -935,6 +989,8 @@ if __name__ == "__main__":
     parser.add_argument("--backup-delivery-death", action="store_true", help="One isolated native process death after commit but before delivery; never replay")
     parser.add_argument("--backup-death-retry", metavar="NO_WRITE_MANIFEST_SHA",
                         help="Spend the new exact direct no-write controls after verifying the safe previous refusal")
+    parser.add_argument("--backup-death-receipt-only", metavar="DEATH_MANIFEST_SHA",
+                        help="Verify the exact retained process-death result without launching Files or the writer")
     parser.add_argument("--backup-death-picker-only", action="store_true",
                         help="Reach the exact writable chooser folder, cancel without a grant, then separately verify read-only local descriptors")
     parser.add_argument("--settings-retry", metavar="CANCEL_MANIFEST_SHA", help="Permit one new confirmation on the exact retained, independently canceled fixture")
