@@ -48,8 +48,12 @@ internal class LocalLibraryMergeCommit(
         val overhead = if (published) stageSize else (2 * stageSize + 16L * 1024 * (candidate.catalog.originals.size + 8L))
         val scratchSpace = scratch.toFile().usableSpace
         val capacity = if (published) scratchSpace else minOf(destination.rootPath.toFile().usableSpace, scratchSpace)
-        val payload = LibraryMergePayloads.prepare(candidate, destinationRows, incomingRows, destination, source,
-            overhead, capacity, published, checkpoint)
+        val payload = LibraryMergePayloads.prepare(candidate, destinationRows, incomingRows, destination, source::open,
+            requireSeparate = {
+                destination.requireIndependentScratch(source.rootPath)
+                destination.requireIndependentScratch(scratch)
+                source.requireIndependentScratch(scratch)
+            }, overhead, capacity, published, checkpoint)
         checkTips(intent, before)
         if (!published) payload.copyAndVerify()
         checkTips(intent, before)

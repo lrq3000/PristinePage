@@ -4,11 +4,20 @@ import app.pristinepage.data.db.SourceBlobRow
 import app.pristinepage.data.library.LibraryObjectTransfer.ObjectId
 import app.pristinepage.data.library.LibraryObjectTransfer.Requirement
 import java.io.IOException
-import java.nio.file.Files
+import java.io.InputStream
+import java.io.OutputStream
 
-/** Checks the planned locators against stable local portable inventories. A successful estimate cannot write, publish, or activate anything. */
+/** Checks the planned locators against admitted original inventories. A successful estimate cannot write, publish, or activate anything. */
 internal object LibraryMergePayloads {
     data class Estimate(val missingBytes: Long, val requiredBytes: Long)
+
+    interface Destination {
+        /** Return null only for positively known absence under this exact root. */
+        fun open(id: ObjectId): InputStream?
+
+        /** Keep the stage under its admitted owner; call [requireCurrent] before staging and before making the closed object visible. Never replace a final name. */
+        fun create(id: ObjectId, requireCurrent: () -> Unit, write: (OutputStream) -> Unit)
+    }
 
     fun check(
         candidate: LibraryCatalogMerge.Candidate,
@@ -20,7 +29,8 @@ internal object LibraryMergePayloads {
         availableBytes: Long,
         checkpoint: () -> Unit = {},
     ): Estimate {
-        val prepared = prepare(candidate, destinationRows, incomingRows, destination, source, catalogAndJournalBytes, availableBytes, false, checkpoint)
+        val prepared = prepare(candidate, destinationRows, incomingRows, destination, source::open,
+            requireSeparate = { destination.requireIndependentScratch(source.rootPath) }, catalogAndJournalBytes, availableBytes, false, checkpoint)
         return Estimate(prepared.missingBytes, prepared.requiredBytes)
     }
 
@@ -28,18 +38,32 @@ internal object LibraryMergePayloads {
         candidate: LibraryCatalogMerge.Candidate,
         destinationRows: List<SourceBlobRow>,
         incomingRows: List<SourceBlobRow>,
-        destination: LocalLibraryDirectory,
-        source: LocalLibraryDirectory,
+        destination: Destination,
+        openSource: (ObjectId) -> InputStream?,
+        requireSeparate: () -> Unit,
         catalogAndJournalBytes: Long,
         availableBytes: Long,
         published: Boolean,
         checkpoint: () -> Unit,
     ): LibraryObjectTransfer.Prepared {
-        val targetRoot = destination.rootPath
-        val sourceRoot = source.rootPath
-        if (targetRoot.startsWith(sourceRoot) || sourceRoot.startsWith(targetRoot) || Files.isSameFile(targetRoot, sourceRoot)) {
-            throw IOException("Merge locations overlap")
+        fun requireCurrent() {
+            checkpoint()
+            requireSeparate()
         }
+        fun openCurrent(opener: () -> InputStream?): InputStream? {
+            requireCurrent()
+            val input = opener()
+            try {
+                requireCurrent()
+            } catch (failure: Throwable) {
+                if (input != null) runCatching { input.close() }.exceptionOrNull()?.let {
+                    if (it !== failure) failure.addSuppressed(it)
+                }
+                throw failure
+            }
+            return input
+        }
+        requireCurrent()
         val target = inventory(destinationRows)
         val incoming = inventory(incomingRows)
         val staged = inventory(candidate.catalog.originals)
@@ -63,10 +87,23 @@ internal object LibraryMergePayloads {
         if (seenIncoming != incoming.keys) mismatch()
         val existing = target.values.toSet()
         val requirements = existing.map { Requirement(it, null) } + incomingObjects.map { id ->
-            Requirement(id) { source.open(id) ?: throw IOException("Merge source original is missing") }
+            Requirement(id) { openCurrent { openSource(id) } ?: throw IOException("Merge source original is missing") }
         }
-        return LibraryObjectTransfer(destination, checkpoint).prepare(requirements, catalogAndJournalBytes, availableBytes,
+        val guarded = object : LibraryObjectTransfer.Store {
+            override fun open(id: ObjectId) = openCurrent { destination.open(id) }
+            override fun create(id: ObjectId, write: (OutputStream) -> Unit) {
+                requireCurrent()
+                destination.create(id, ::requireCurrent, write)
+            }
+        }
+        val prepared = LibraryObjectTransfer(guarded, checkpoint).prepare(requirements, catalogAndJournalBytes, availableBytes,
             requiredExisting = if (published) staged.values.toSet() else existing)
+        requireCurrent()
+        return LibraryObjectTransfer.Prepared(prepared.missingBytes, prepared.requiredBytes) {
+            requireCurrent()
+            prepared.copyAndVerify()
+            requireCurrent()
+        }
     }
 
     private fun inventory(rows: List<SourceBlobRow>): Map<String, ObjectId> {

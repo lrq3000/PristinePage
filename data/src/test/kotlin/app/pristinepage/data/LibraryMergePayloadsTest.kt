@@ -1,12 +1,14 @@
 package app.pristinepage.data
 
 import app.pristinepage.data.db.SourceBlobRow
+import app.pristinepage.data.files.DirectorySync
 import app.pristinepage.data.library.LibraryCatalogMerge
 import app.pristinepage.data.library.LibraryMergePayloads
 import app.pristinepage.data.library.LibraryObjectTransfer.ObjectId
 import app.pristinepage.data.library.LocalLibraryDirectory
 import app.pristinepage.data.library.RoomLibrarySavedCatalog.Snapshot
 import java.io.File
+import java.io.FilterInputStream
 import java.io.IOException
 import java.util.UUID
 import org.junit.Assert.*
@@ -72,6 +74,65 @@ class LibraryMergePayloadsTest {
         assertThrows(IOException::class.java) {
             LibraryMergePayloads.check(candidate(listOf(prior)), listOf(prior, blob(3, hello)), emptyList(), local, backup, 0, 0)
         }
+    }
+
+    @Test fun aPreparedMergeCannotCopyAfterItsRootSeparationProofIsLost() {
+        val local: LibraryMergePayloads.Destination = folder("destination", abc to "abc")
+        val backup = folder("incoming", hello to "hello")
+        val prior = blob(1, abc)
+        val added = blob(2, hello)
+        val plan = candidate(listOf(prior, added), incoming = mapOf(id(2) to id(2)))
+        var current = true
+        val prepared = LibraryMergePayloads.prepare(plan, listOf(prior), listOf(added), local, backup::open,
+            requireSeparate = { if (!current) throw IOException("Root proof changed") }, 12, 17, published = false, checkpoint = {})
+        assertEquals(5L, prepared.missingBytes)
+        current = false
+        assertThrows(IOException::class.java) { prepared.copyAndVerify() }
+        assertNull(local.open(hello))
+        assertEquals("hello", backup.open(hello)?.use { it.readBytes().decodeToString() })
+    }
+
+    @Test fun aChangedDestinationObservationCannotReachTheOtherRootsOriginal() {
+        val local = folder("destination", abc to "abc")
+        val backup = folder("incoming", abc to "abc")
+        var separated = true
+        var sourceOpens = 0
+        val destination = object : LibraryMergePayloads.Destination by local {
+            override fun open(id: ObjectId) = local.open(id).also { separated = false }
+        }
+        val prior = blob(1, abc)
+        val incoming = blob(2, abc)
+        val plan = candidate(listOf(prior), listOf(match(1, 2)))
+        assertThrows(IOException::class.java) {
+            LibraryMergePayloads.prepare(plan, listOf(prior), listOf(incoming), destination, {
+                sourceOpens++
+                backup.open(it)
+            }, requireSeparate = { if (!separated) throw IOException("Root proof changed") }, 0, 0, published = false, checkpoint = {})
+        }
+        assertEquals(0, sourceOpens)
+    }
+
+    @Test fun lossAfterStagingAnOriginalCannotPublishItsFinalName() {
+        val local = LocalLibraryDirectory(folder("destination").rootPath.toFile(), DirectorySync { true })
+        val backup = folder("incoming", hello to "hello")
+        val added = blob(2, hello)
+        var separated = true
+        var copying = false
+        val prepared = LibraryMergePayloads.prepare(candidate(listOf(added), incoming = mapOf(id(2) to id(2))),
+            emptyList(), listOf(added), local, { object : FilterInputStream(checkNotNull(backup.open(it))) {
+                override fun close() {
+                    super.close()
+                    if (copying) separated = false
+                }
+            } }, requireSeparate = { if (!separated) throw IOException("Root proof changed") }, 0, 5,
+            published = false, checkpoint = {})
+
+        copying = true
+        val failure = assertThrows(IOException::class.java) { prepared.copyAndVerify() }
+        assertFalse("The incoming stream must close while copying", separated)
+        assertNull(local.open(hello)?.use { it.readBytes() })
+        assertEquals("Root proof changed", failure.message)
+        assertEquals("hello", backup.open(hello)?.use { it.readBytes().decodeToString() })
     }
 
     private fun candidate(blobs: List<SourceBlobRow>, matches: List<LibraryCatalogMerge.RequiredMatch> = emptyList(),

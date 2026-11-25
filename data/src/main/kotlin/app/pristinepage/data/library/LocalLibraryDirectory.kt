@@ -22,7 +22,7 @@ import java.nio.file.attribute.BasicFileAttributes
 
 /** Local filesystem only. The caller owns a stable, exclusively controlled app-managed directory; provider URIs cannot be translated into this capability. */
 internal class LocalLibraryDirectory(root: File, private val directorySync: DirectorySync = PlatformDirectorySync) :
-    LibraryObjectTransfer.Store, LibraryCatalogPublication.Store, LibraryBackupRead.Source {
+    LibraryObjectTransfer.Store, LibraryMergePayloads.Destination, LibraryCatalogPublication.Store, LibraryBackupRead.Source {
     private val paths = PrivateStorePaths(root)
 
     init {
@@ -40,6 +40,8 @@ internal class LocalLibraryDirectory(root: File, private val directorySync: Dire
 
     override fun open(id: LibraryObjectTransfer.ObjectId) = open(objectPath(id))
     override fun create(id: LibraryObjectTransfer.ObjectId, write: (OutputStream) -> Unit) = create(objectPath(id), write = write)
+    override fun create(id: LibraryObjectTransfer.ObjectId, requireCurrent: () -> Unit, write: (OutputStream) -> Unit) =
+        create(objectPath(id), beforeStage = requireCurrent, beforeLink = requireCurrent, write = write)
     override fun openCatalog(generation: LibraryGeneration) = open(generation.catalogPath)
     override fun createCatalog(generation: LibraryGeneration, write: (OutputStream) -> Unit) = create(generation.catalogPath, write = write)
     override fun openMarker(generation: LibraryGeneration) = open(markerPath(generation))
@@ -323,7 +325,9 @@ internal class LocalLibraryDirectory(root: File, private val directorySync: Dire
         throw IOException("Library path redirects outside its owned location")
     }
 
-    private fun create(relativePath: String, privateSupport: Boolean = false, beforeLink: () -> Unit = {}, write: (OutputStream) -> Unit) {
+    private fun create(relativePath: String, privateSupport: Boolean = false, beforeLink: () -> Unit = {},
+        beforeStage: () -> Unit = {}, write: (OutputStream) -> Unit,
+    ) {
         val file = paths.beneath(relativePath)
         val destination = file.toPath()
         if (presentRegularFile(destination)) throw FileAlreadyExistsException(file.name)
@@ -331,6 +335,7 @@ internal class LocalLibraryDirectory(root: File, private val directorySync: Dire
         paths.createDirectories(parent, ::forceDirectory)
         if (privateSupport) admitPrivateSupportStage(parent.toPath())
         forceDirectory(parent)
+        beforeStage()
         val stage = Files.createTempFile(parent.toPath(), ".pristinepage-", ".part")
         FileChannel.open(stage, WRITE, NOFOLLOW_LINKS).use { channel ->
             write(Channels.newOutputStream(channel))
