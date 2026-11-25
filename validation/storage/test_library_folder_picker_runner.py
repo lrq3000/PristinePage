@@ -11,7 +11,7 @@ from unittest.mock import patch
 
 from run_library_folder_picker_ldplayer import (
     check_fixture_root, recheck_target, select_backup_case, select_settings_picker_case, spend_settings_retry,
-    verify_settings_catalog, verify_settings_retry_evidence,
+    verify_settings_catalog, verify_settings_ocr, verify_settings_retry_evidence,
 )
 from run_local_ocr_guest import read_boot_serial
 
@@ -110,6 +110,26 @@ class LibraryFolderPickerRunnerTest(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "already spent"):
                 spend_settings_retry(root, "a" * 64, {"guest": "synthetic", "retry": "second"})
             self.assertIn('"retry": "first"', (root / ("settings-retry-spent-" + "a" * 64 + ".json")).read_text())
+
+    def test_settings_ocr_readback_binds_even_empty_text_to_the_exact_producer(self):
+        with closing(sqlite3.connect(":memory:")) as db:
+            db.executescript("""
+                CREATE TABLE OcrResult(pageId,recipeRevision,sourcePixelSha256,engineId,engineVersion,layout,indexedText,verbatimText);
+                CREATE TABLE OcrPageWork(pageId,resultJobId,projectionVersion);
+                CREATE TABLE Job(jobId,canonicalInputSha256,state);
+                INSERT INTO OcrResult VALUES ('page',2,'pixels','engine',1,'AUTOMATIC','',NULL);
+                INSERT INTO OcrPageWork VALUES ('page','producer',1);
+                INSERT INTO Job VALUES ('producer','input','SUCCEEDED');
+            """)
+            expected = ("page", 2, "pixels", "engine", 1, "AUTOMATIC", "producer", "input", 1, sha256(b"").hexdigest())
+            verify_settings_ocr(db, expected)
+            db.execute("UPDATE OcrResult SET verbatimText='unexpected'")
+            with self.assertRaisesRegex(RuntimeError, "OCR.*binding"):
+                verify_settings_ocr(db, expected)
+            db.execute("UPDATE OcrResult SET verbatimText=NULL")
+            db.execute("UPDATE Job SET canonicalInputSha256='different'")
+            with self.assertRaisesRegex(RuntimeError, "OCR.*binding"):
+                verify_settings_ocr(db, expected)
 
     def test_settings_readback_rejects_a_valid_catalog_with_another_source_binding(self):
         first, second = (b'{"geometry":{"outputQuarterTurns":0}}', b'{"geometry":{"outputQuarterTurns":1}}')

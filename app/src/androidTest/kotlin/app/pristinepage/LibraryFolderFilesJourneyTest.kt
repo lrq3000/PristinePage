@@ -42,6 +42,7 @@ import app.pristinepage.data.model.RepositoryFailure
 import app.pristinepage.data.model.SaveRecipeResult
 import app.pristinepage.data.model.SourceBlobId
 import app.pristinepage.data.repository.ScopedCommittedOriginals
+import app.pristinepage.data.repository.SavedOcrWork
 import app.pristinepage.image.decode.AndroidSourceInspector
 import app.pristinepage.image.decode.SourceDecoder
 import app.pristinepage.library.LibraryBackupViewModel
@@ -87,6 +88,10 @@ class LibraryFolderFilesJourneyTest {
         val graph = runBlocking { app.services.imports() }
         val album = runBlocking { graph.store.catalog.list(null, 2) }.single()
         assertEquals("Synthetic Settings backup", album.title)
+        val page = runBlocking { graph.store.catalog.load(album.documentId).pages.single() }
+        compose.waitUntil(20_000) {
+            runBlocking { graph.store.savedOcr.readStatus(album.documentId, page.pageId, 2)?.phase } == SavedOcrWork.PagePhase.READY
+        }
         val backup = compose.runOnUiThread { ViewModelProvider(compose.activity)[LibraryBackupViewModel::class.java].session }
         val grants = app.contentResolver.persistedUriPermissions.map { Triple(it.uri, it.isReadPermission, it.isWritePermission) }.toSet()
         val pointer = File(app.filesDir.canonicalFile, "library-settings/active-library")
@@ -94,6 +99,7 @@ class LibraryFolderFilesJourneyTest {
         fun attempts() = checkNotNull(app.filesDir.canonicalFile.list()).filter { it.startsWith("library-out-") }.toSet()
         val before = attempts()
         assertTrue("The retained synthetic guest must have no earlier backup attempt", before.isEmpty())
+        val ocrBefore = settingsFixtureOcr(app, page.pageId.value)
         compose.onNodeWithTag("atelier-settings").performClick()
         compose.onNodeWithTag("settings-open-library_storage").performClick()
         compose.waitUntil(10_000) {
@@ -122,6 +128,7 @@ class LibraryFolderFilesJourneyTest {
         assertEquals(before, attempts())
         assertEquals(grants, app.contentResolver.persistedUriPermissions.map { Triple(it.uri, it.isReadPermission, it.isWritePermission) }.toSet())
         assertArrayEquals(originalPointer, pointer.readBytes())
+        assertEquals(ocrBefore, settingsFixtureOcr(app, page.pageId.value))
     }
 
     @Test fun settingsPublishesOneBackupOfTheSyntheticDefaultLibrary() {
@@ -180,6 +187,11 @@ class LibraryFolderFilesJourneyTest {
         assertArrayEquals(png, source.file.readBytes())
         val geometry = page.recipe.geometry as GeometryRecipe.None
         assertEquals(1, geometry.outputQuarterTurns)
+        compose.waitUntil(20_000) {
+            runBlocking { graph.store.savedOcr.readStatus(page.documentId, page.pageId, 2)?.phase } == SavedOcrWork.PagePhase.READY
+        }
+        val ocr = settingsFixtureOcr(app, page.pageId.value)
+        assertEquals(source.inspection.sourcePixelHash, ocr.pixelHash)
         val revisions = seededRecipes ?: listOf(
             sha256(RecipeCodec.encode(page.recipe.copy(geometry = geometry.copy(outputQuarterTurns = 0)))),
             sha256(RecipeCodec.encode(page.recipe)),
@@ -207,17 +219,41 @@ class LibraryFolderFilesJourneyTest {
         assertArrayEquals(pointerBefore, pointer.readBytes())
         assertArrayEquals(png, runBlocking { graph.store.committedSources.load(page.sourceId).file.readBytes() })
         assertEquals(stateBefore, settingsFixtureInventory(app, page.documentId.value, page.pageId.value, page.sourceId.value, revisions))
+        assertEquals(ocr, settingsFixtureOcr(app, page.pageId.value))
         check(evidence.createNewFile())
         evidence.writeText(listOf(page.documentId.value, page.pageId.value, page.sourceId.value, source.inspection.sourcePixelHash,
-            revisions[0], revisions[1], receipt.libraryId, receipt.generationId, receipt.folderName).joinToString("\n", postfix = "\n"))
+            revisions[0], revisions[1], receipt.libraryId, receipt.generationId, receipt.folderName, ocr.engine, ocr.version,
+            ocr.layout, ocr.producer, ocr.intentHash, ocr.textHash).joinToString("\n", postfix = "\n"))
     }
+
+    /** Never report the recognized text, even for a synthetic scan. The closed backup must match its exact accepted producer and bytes. */
+    private data class SettingsFixtureOcr(val pixelHash: String, val engine: String, val version: Int, val layout: String,
+        val producer: String, val intentHash: String, val textHash: String)
+
+    private fun settingsFixtureOcr(context: Context, page: String): SettingsFixtureOcr =
+        SQLiteDatabase.openDatabase(context.getDatabasePath("pristinepage.db").path, null,
+            SQLiteDatabase.OPEN_READONLY or SQLiteDatabase.NO_LOCALIZED_COLLATORS).use { db ->
+            db.rawQuery("""
+                SELECT r.pageId,r.recipeRevision,r.sourcePixelSha256,r.engineId,r.engineVersion,r.layout,
+                       w.resultJobId,j.canonicalInputSha256,w.projectionVersion,j.state,
+                       CASE WHEN length(CAST(coalesce(r.verbatimText,r.indexedText) AS BLOB))<=4096
+                            THEN CAST(coalesce(r.verbatimText,r.indexedText) AS BLOB) END
+                  FROM OcrResult r LEFT JOIN OcrPageWork w ON w.pageId=r.pageId
+                  LEFT JOIN Job j ON j.jobId=w.resultJobId LIMIT 2
+            """.trimIndent(), null).use { c ->
+                check(c.moveToFirst() && c.getString(0) == page && c.getLong(1) == 2L && c.getLong(8) == 1L &&
+                    c.getString(9) == "SUCCEEDED" && !c.isNull(10)) { "The sole fixture OCR result must belong to the accepted revision" }
+                SettingsFixtureOcr(c.getString(2), c.getString(3), c.getInt(4), c.getString(5),
+                    c.getString(6), c.getString(7), sha256(c.getBlob(10))).also { check(!c.moveToNext()) }
+            }
+        }
 
     /** The visible catalog omits removed pages. Before granting a test write, independently inspect the whole synthetic saved inventory. */
     private fun settingsFixtureInventory(context: Context, document: String, page: String, source: String, revisions: List<String>): List<String?> =
         SQLiteDatabase.openDatabase(context.getDatabasePath("pristinepage.db").path, null,
             SQLiteDatabase.OPEN_READONLY or SQLiteDatabase.NO_LOCALIZED_COLLATORS).use { db ->
             val expectedCounts = mapOf("Document" to 1, "Page" to 1, "Source" to 1, "SourceBlob" to 1, "LibraryScanName" to 1,
-                "RecipeRevision" to 2, "UndoEntry" to 1, "Mask" to 0, "RecipeMask" to 0, "AtelierDraft" to 0, "OcrResult" to 0)
+                "RecipeRevision" to 2, "UndoEntry" to 1, "Mask" to 0, "RecipeMask" to 0, "AtelierDraft" to 0)
             fun row(sql: String, args: Array<String>): List<String?> = db.rawQuery(sql, args).use { c ->
                 check(c.moveToFirst())
                 List(c.columnCount) { c.getString(it) }.also { check(!c.moveToNext()) }

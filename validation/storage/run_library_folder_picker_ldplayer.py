@@ -157,18 +157,19 @@ def verify_settings_retry_evidence(raw, expected_sha, guest, previous):
 def settings_failed_destination(raw, expected_sha, guest, app_sha):
     anchor = settings_run_anchors(raw, expected_sha)
     artifacts = json.loads(anchor("artifacts.json"))
-    need(artifacts["guest"] == guest and artifacts["proof"][APP]["sha256"] == app_sha and not artifacts["previous"],
-         "The first Settings witness did not run on this fresh synthetic guest and app")
+    need(artifacts["guest"] == guest and artifacts["proof"][APP]["sha256"] == app_sha,
+         "The earlier Settings witness did not use this synthetic guest and app")
     transcript = anchor("instrumentation.txt")
-    need(read_results(transcript, (SETTINGS_BACKUP_CASE,)) == ([], [SETTINGS_BACKUP_CASE]) and
-         "Files did not reach root drawer; foreground=app.pristinepage.debug;" in transcript,
+    first_refused = not artifacts["previous"] and "Files did not reach root drawer; foreground=app.pristinepage.debug;" in transcript
+    preflight_refused = artifacts.get("settingsCancel") and "Unexpected retained OcrResult inventory expected:<[0]> but was:<[1]>" in transcript
+    need(read_results(transcript, (SETTINGS_BACKUP_CASE,)) == ([], [SETTINGS_BACKUP_CASE]) and (first_refused or preflight_refused),
          "The retained Settings failure is not the exact observed pre-selection boundary")
     calls = [json.loads(line)["argv"] for line in anchor("commands.jsonl").splitlines()]
     candidates = [call[i + 1] for call in calls for i, value in enumerate(call[:-1])
                   if value == "libraryFixtureFolder" and SETTINGS_BACKUP_CASE in call]
     need(len(candidates) == 1 and re.fullmatch(r"PristinePage-tree-[a-f0-9]{12}", candidates[0]),
          "The original Settings destination could not be recovered")
-    return f"/sdcard/Documents/{candidates[0]}", artifacts["fixture"]
+    return (f"/sdcard/Documents/{candidates[0]}", artifacts["fixture"]), artifacts.get("settingsPriorFailure")
 
 
 def spend_settings_retry(raw, digest, attempt):
@@ -200,7 +201,21 @@ def verify_unchanged_settings_destination(adb, guest_root, files):
              "The first Settings destination contains changed fixture bytes")
 
 
-def verify_settings_catalog(path, digest, extent, expected):
+def verify_settings_ocr(db, expected):
+    rows = db.execute("""
+        SELECT r.pageId,r.recipeRevision,r.sourcePixelSha256,r.engineId,r.engineVersion,r.layout,
+               w.resultJobId,j.canonicalInputSha256,w.projectionVersion,j.state,
+               CASE WHEN length(CAST(coalesce(r.verbatimText,r.indexedText) AS BLOB))<=4096
+                    THEN CAST(coalesce(r.verbatimText,r.indexedText) AS BLOB) END
+          FROM OcrResult r LEFT JOIN OcrPageWork w ON w.pageId=r.pageId
+          LEFT JOIN Job j ON j.jobId=w.resultJobId LIMIT 2
+    """).fetchall()
+    need(len(rows) == 1 and rows[0][:9] == expected[:9] and rows[0][9] == "SUCCEEDED" and
+         isinstance(rows[0][10], bytes) and sha256(rows[0][10]).hexdigest() == expected[9],
+         "Settings backup lost the exact OCR text or producer binding")
+
+
+def verify_settings_catalog(path, digest, extent, expected, expected_ocr=None):
     album, page, source, pixels, revision1, revision2 = expected
     cli = shutil.which("sqlite3")
     need(cli is not None, "The existing FTS4-capable SQLite CLI is required")
@@ -210,7 +225,10 @@ def verify_settings_catalog(path, digest, extent, expected):
     with closing(sqlite3.connect(path.as_uri() + "?mode=ro&immutable=1", uri=True)) as db:
         for table in ("Document", "Page", "SourceBlob", "Source", "LibraryScanName"):
             need(db.execute(f"SELECT COUNT(*) FROM {table}").fetchone() == (1,), "Settings backup included or omitted unrelated records")
-        need(db.execute("SELECT 1 FROM OcrResult LIMIT 1").fetchone() is None, "Settings backup included unexpected OCR text")
+        if expected_ocr is None:
+            need(db.execute("SELECT 1 FROM OcrResult LIMIT 1").fetchone() is None, "Settings backup included unexpected OCR text")
+        else:
+            verify_settings_ocr(db, expected_ocr)
         rows = db.execute("""
             SELECT d.documentId,d.title,d.documentRevision,p.pageId,p.currentRecipeRevision,p.ordinal,s.sourceId,
                    s.pixelSha256,b.byteSha256,b.byteCount,n.filename,n.documentId
@@ -261,7 +279,7 @@ def run(args):
     hashes = dict(zip(built, [args.app_sha, args.test_sha]))
     proof = {package: exact_apk(path, hashes[package], stage, package == TEST) for package, path in built.items()}
     previous = {}
-    prior_destination = None
+    prior_destinations = []
     if args.previous:
         for package, file in zip(built, args.previous):
             path = Path(file).resolve()
@@ -274,12 +292,18 @@ def run(args):
             need(len(parents) == 1, "Settings cancel predecessor APKs must share the exact receipt")
             need(previous[APP] == hashes[APP], "Settings retry must use the byte-identical app from the cancel control")
             verify_settings_retry_evidence(parents.pop(), args.settings_retry, args.guest, previous)
-            old_run, old_sha = args.settings_prior_failure
-            need(re.fullmatch(r"picker-adapter-library-tree-[a-f0-9]{12}", old_run) and re.fullmatch(r"[a-f0-9]{64}", old_sha),
-                 "Invalid first Settings witness identity")
-            prior = (raw.parent / old_run).resolve()
-            need(prior.parent == raw.parent.resolve() and prior.name == old_run, "The first witness is not a local retained receipt")
-            prior_destination = settings_failed_destination(prior, old_sha, args.guest, hashes[APP])
+            pair = args.settings_prior_failure
+            seen = set()
+            while pair is not None:
+                old_run, old_sha = pair
+                need(re.fullmatch(r"picker-adapter-library-tree-[a-f0-9]{12}", old_run) and
+                     re.fullmatch(r"[a-f0-9]{64}", old_sha) and old_run not in seen and len(seen) < 4,
+                     "Invalid retained Settings witness chain")
+                seen.add(old_run)
+                prior = (raw.parent / old_run).resolve()
+                need(prior.parent == raw.parent.resolve() and prior.name == old_run, "Earlier witness is not a local retained receipt")
+                destination, pair = settings_failed_destination(prior, old_sha, args.guest, hashes[APP])
+                prior_destinations.append(destination)
     retained = {}
     for package, path in built.items():
         saved = raw / f"{package}.apk"
@@ -361,10 +385,11 @@ def run(args):
         need(set(adb("shell", "ls", "-A", "-1", guest_root).splitlines()) == set(namespaces),
              "The fresh fixture contains an unexpected root entry before instrumentation")
         recheck_target(run, ns)
-        if prior_destination:
-            verify_unchanged_settings_destination(adb, *prior_destination)
+        if prior_destinations:
+            for previous_destination in prior_destinations:
+                verify_unchanged_settings_destination(adb, *previous_destination)
             spend_settings_retry(raw.parent, args.settings_retry, dict(guest=args.guest, candidate=prefix,
-                abandonedDestination=prior_destination[0], authorizedDestination=guest_root))
+                abandonedDestinations=[item[0] for item in prior_destinations], authorizedDestination=guest_root))
         original_args = ["-e", "libraryFixtureOriginal", original]
         if args.expect_home:
             original_args += ["-e", "libraryExpectHome", "1"]
@@ -409,8 +434,10 @@ def run(args):
             if args.settings_backup:
                 witness = adb("shell", "run-as", APP, "cat", SETTINGS_WITNESS_FILE).splitlines()
                 uuid_text = r"[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}"
-                need(len(witness) == 9 and all(re.fullmatch(uuid_text, x) for x in witness[:3] + witness[6:8])
-                     and all(re.fullmatch(r"[0-9a-f]{64}", x) for x in witness[3:6])
+                need(len(witness) == 15 and all(re.fullmatch(uuid_text, x) for x in witness[:3] + witness[6:8] + witness[12:13])
+                     and all(re.fullmatch(r"[0-9a-f]{64}", x) for x in witness[3:6] + witness[13:15])
+                     and re.fullmatch(r"[a-zA-Z0-9_-]{1,100}", witness[9]) and re.fullmatch(r"[1-9][0-9]{0,8}", witness[10])
+                     and re.fullmatch(r"[A-Z_]{1,32}", witness[11])
                      and witness[6:9] == [marker[1], marker[2], backup_name], "Settings receipt did not match the closed folder")
                 need(adb("shell", "stat", "-c", "%s", f"{backup}/objects/{BACKUP_ORIGINAL}").strip() == "81",
                      "Settings fixture original extent differs")
@@ -420,13 +447,15 @@ def run(args):
                      "Settings fixture catalog extent differs from its marker")
                 adb("pull", f"{backup}/catalogs/{generation}.sqlite", catalog, timeout=20)
                 need(catalog.stat().st_size == int(marker[5]) and sha(catalog) == marker[6], "Pulled Settings catalog changed")
-                verify_settings_catalog(catalog, BACKUP_ORIGINAL, 81, witness[:6])
+                engine, version, layout, producer, intent, text = witness[9:]
+                verify_settings_catalog(catalog, BACKUP_ORIGINAL, 81, witness[:6],
+                                        (witness[1], 2, witness[3], engine, int(version), layout, producer, intent, 1, text))
         for namespace in namespaces:
             expected_leaves = {relative.split("/", 1)[1] for relative in files if relative.startswith(f"{namespace}/")}
             need(set(adb("shell", "ls", "-A", "-1", f"{guest_root}/{namespace}").splitlines()) == expected_leaves,
                  "Instrumentation changed the namespace of the existing fixture")
-        if prior_destination:
-            verify_unchanged_settings_destination(adb, *prior_destination)
+        for previous_destination in prior_destinations:
+            verify_unchanged_settings_destination(adb, *previous_destination)
         run.save(run.path("outcomes.json"), {"passed": passed, "failed": failed, "installedSha256": hashes}, durable=True)
         print(f"LDPlayer Files grant: {len(passed)} passed, {len(failed)} failed. " + ", ".join(failed), flush=True)
         return bool(failed)
