@@ -76,6 +76,25 @@ internal object LibraryProviderDirectoryProbe {
         }
     }
 
+    suspend fun verifyIndependentRoots(resolver: ContentResolver, anchor: Uri, left: Uri, right: Uri, read: suspend () -> Unit) {
+        fun open(tree: Uri): ParcelFileDescriptor {
+            val document = DocumentsContract.buildDocumentUriUsingTree(tree, DocumentsContract.getTreeDocumentId(tree))
+            return resolver.openFileDescriptor(document, "r") ?: throw IOException("Files returned no directory descriptor")
+        }
+        open(anchor).use { parent ->
+            open(left).use { a ->
+                open(right).use { b ->
+                    if (left == right) LibraryDescriptorAncestryWitness.requireSameIdentity(a, b)
+                    LibraryDescriptorAncestryWitness.withRecheckedSiblings(parent, a, b, rebind = {
+                        for ((tree, held) in listOf(anchor to parent, left to a, right to b)) {
+                            open(tree).use { LibraryDescriptorAncestryWitness.requireSameIdentity(held, it) }
+                        }
+                    }, read = read)
+                }
+            }
+        }
+    }
+
     private fun statAndSync(resolver: ContentResolver, document: Uri, kind: String): StructStat {
         val descriptor = try {
             resolver.openFileDescriptor(document, "r")

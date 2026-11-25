@@ -14,6 +14,12 @@ internal class LibraryRootSeparation private constructor(
         if (chain(left) != leftBefore || chain(right) != rightBefore) throw IOException("Library folder ancestry changed")
     }
 
+    /** Stronger observation for callers that know the two selected roots must be immediate children of the anchor. */
+    fun requireCurrentSiblings() {
+        if (leftBefore.size != 2 || rightBefore.size != 2) throw IOException("Library folders are not direct children of the selected anchor")
+        requireCurrent()
+    }
+
     companion object {
         private const val MAX_DEPTH = 128
 

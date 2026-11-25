@@ -8,6 +8,17 @@ object LibraryDescriptorAncestryWitness {
         AndroidLibraryDescriptorAncestry.admit(left, right, anchor)
     }
 
+    suspend fun withRecheckedSiblings(anchor: ParcelFileDescriptor, left: ParcelFileDescriptor, right: ParcelFileDescriptor,
+        rebind: () -> Unit, read: suspend () -> Unit,
+    ) {
+        val proof = AndroidLibraryDescriptorAncestry.admit(left, right, anchor)
+        rebind()
+        proof.requireCurrentSiblings()
+        read()
+        rebind()
+        proof.requireCurrentSiblings()
+    }
+
     fun requireSameIdentity(held: ParcelFileDescriptor, reopened: ParcelFileDescriptor) {
         check(AndroidLibraryDescriptorAncestry.observe(held) == AndroidLibraryDescriptorAncestry.observe(reopened)) {
             "The reopened directory descriptor does not match its held identity and mount"

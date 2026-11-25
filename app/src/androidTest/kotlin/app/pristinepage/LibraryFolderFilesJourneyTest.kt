@@ -112,7 +112,8 @@ class LibraryFolderFilesJourneyTest {
             }
     }
     private val chooseHost = TestRule { next, description ->
-        val rule = if (description.methodName == "endsProcessAfterPayloadBeforeTheCompletionMarker") interruptionCompose else compose
+        val rule = if (description.methodName in setOf("endsProcessAfterPayloadBeforeTheCompletionMarker", "persistsIndependentFilesRootsAndAnchor"))
+            interruptionCompose else compose
         rule.apply(next, description)
     }
     @get:Rule val rules: RuleChain = RuleChain.outerRule(noColdRecoveryPicker).around(chooseHost)
@@ -220,7 +221,9 @@ class LibraryFolderFilesJourneyTest {
         assertEquals(ocrBefore, settingsFixtureOcr(app, page.pageId.value))
     }
 
-    private fun cancelExactFiles(instrumentation: Instrumentation, picker: String, appPackage: String) {
+    private fun cancelExactFiles(instrumentation: Instrumentation, picker: String, appPackage: String,
+        wait: (Long, () -> Boolean) -> Unit = { timeout, condition -> compose.waitUntil(timeout, condition) },
+    ) {
         val automation = instrumentation.uiAutomation
         fun foreground() = automation.rootInActiveWindow?.packageName?.toString()
         var backSteps = 0
@@ -230,7 +233,7 @@ class LibraryFolderFilesJourneyTest {
             check(root.packageName?.toString() == picker)
             val labels = buildList { root.collectLabels(this) }
             assertTrue("The exact Files window did not accept Back", automation.performGlobalAction(AccessibilityService.GLOBAL_ACTION_BACK))
-            compose.waitUntil(3_000) {
+            wait(3_000) {
                 val active = automation.rootInActiveWindow
                 active != null && (active.packageName?.toString() == appPackage ||
                     (active.packageName?.toString() == picker && buildList { active.collectLabels(this) } != labels))
@@ -410,6 +413,7 @@ class LibraryFolderFilesJourneyTest {
 
     private fun selectSettingsDestination(instrumentation: Instrumentation, picker: String, folder: String,
         selectFolder: Boolean = true, navigateFromRoot: Boolean = true,
+        expectedChildren: Set<String> = setOf("catalogs", "generations", "objects"), parentFolder: String? = null,
     ) {
         val affirmative = setOf("SELECT", "Select", "SÉLECTIONNER", "Sélectionner", "Use this folder", "USE THIS FOLDER", "Choose this folder")
         fun containsUnder(root: AccessibilityNodeInfo, text: String, within: String) =
@@ -419,7 +423,8 @@ class LibraryFolderFilesJourneyTest {
             }
         fun atTarget(root: AccessibilityNodeInfo) =
             containsUnder(root, folder, "dropdown_breadcrumb") &&
-                listOf("catalogs", "generations", "objects").all { containsUnder(root, it, "dir_list") }
+                (parentFolder == null || containsUnder(root, parentFolder, "dropdown_breadcrumb")) &&
+                expectedChildren.all { containsUnder(root, it, "dir_list") }
         fun unique(root: AccessibilityNodeInfo, labels: Set<String>, parentId: String? = null): AccessibilityNodeInfo? {
             val matches = linkedSetOf<AccessibilityNodeInfo>()
             val pending = ArrayDeque<AccessibilityNodeInfo>().apply { add(root) }
@@ -565,6 +570,77 @@ class LibraryFolderFilesJourneyTest {
     }
 
     @Test fun persistsExactFilesReadForColdAncestry() = verifyJourney(holdReadForColdAncestry = true)
+
+    @Test fun persistsIndependentFilesRootsAndAnchor() {
+        val instrumentation = InstrumentationRegistry.getInstrumentation()
+        val app = instrumentation.targetContext.applicationContext
+        val folder = requireNotNull(InstrumentationRegistry.getArguments().getString("libraryFixtureFolder"))
+        val witness = LibraryIndependentRootGrants
+        val paths = witness.paths(folder)
+        val all = paths.flatMap(witness::spellings)
+        val before = witness.inventory(app)
+        check(all.none { it.toString() in before })
+        witness.requireNewRecord(app, folder)
+        witness.refuseEffectiveWrite(app, all)
+        val selected = ArrayList<Uri>(paths.size)
+        var handedOff = false
+        try {
+            for ((index, path) in paths.withIndex()) {
+                val result = AtomicReference<ActivityResult>()
+                val platform = LibraryFolderPickerContract()
+                val (picker, launcher) = interruptionCompose.runOnUiThread {
+                    val host = interruptionCompose.activity
+                    val intent = platform.createIntent(host, Unit).putExtra(DocumentsContract.EXTRA_INITIAL_URI,
+                        DocumentsContract.buildDocumentUri(witness.AUTHORITY, "primary:Documents/$path"))
+                    val launch = host.activityResultRegistry.register("library-independent-root-$index",
+                        ActivityResultContracts.StartActivityForResult()) { result.set(it) }
+                    launch.launch(intent)
+                    requireNotNull(intent.component).packageName to launch
+                }
+                try {
+                    val anchor = path == folder
+                    if (anchor) {
+                        selectSettingsDestination(instrumentation, picker, folder, navigateFromRoot = false,
+                            expectedChildren = setOf(witness.LEFT, witness.RIGHT))
+                    } else {
+                        selectSettingsDestination(instrumentation, picker, path.substringAfterLast('/'),
+                            navigateFromRoot = false, parentFolder = folder)
+                    }
+                    interruptionCompose.waitUntil(10_000) { result.get() != null }
+                    val raw = requireNotNull(result.get())
+                    val picked = platform.parseResult(raw.resultCode, raw.data) as? LibraryFolderPickerContract.Picked
+                        ?: error("Files did not return the expected synthetic tree")
+                    check(picked.uri in witness.spellings(path))
+                    check(witness.inventory(app) == before + selected.associate { it.toString() to (true to false) })
+                    // Remember the exact previously absent URI before the platform persistence call; reconcile on failure.
+                    selected += picked.uri
+                    assertEquals(picked.uri, LibraryFolderGrantHandoff(app).persistRead(picked))
+                    check(witness.inventory(app) == before + selected.associate { it.toString() to (true to false) })
+                } catch (failure: Throwable) {
+                    if (result.get() == null && instrumentation.uiAutomation.rootInActiveWindow?.packageName?.toString() == picker) {
+                        try {
+                            cancelExactFiles(instrumentation, picker, app.packageName) { timeout, condition ->
+                                interruptionCompose.waitUntil(timeout, condition)
+                            }
+                            interruptionCompose.waitUntil(5_000) { result.get() != null }
+                            assertEquals(Activity.RESULT_CANCELED, result.get().resultCode)
+                        } catch (cancelFailure: Throwable) {
+                            failure.addSuppressed(cancelFailure)
+                        }
+                    }
+                    throw failure
+                } finally {
+                    interruptionCompose.runOnUiThread { launcher.unregister() }
+                }
+            }
+            witness.save(app, folder, selected, before)
+            handedOff = true
+        } finally {
+            if (!handedOff) {
+                witness.releaseReadDelta(app, selected) { assertEquals(before, witness.inventory(app)) }
+            }
+        }
+    }
 
     @Test fun actualFilesCapacityRefusesBeforePublication() = verifyJourney(probeCapacityOnly = true)
 

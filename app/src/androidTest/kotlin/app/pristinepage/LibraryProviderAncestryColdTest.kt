@@ -16,12 +16,49 @@ import java.security.MessageDigest
 import java.util.UUID
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertThrows
 import org.junit.Test
 import org.junit.runner.RunWith
 
 /** No Activity or chooser: reuse only the synthetic read grant retained by the preceding instrumentation. */
 @RunWith(AndroidJUnit4::class)
 class LibraryProviderAncestryColdTest {
+    @Test fun twoIndependentFilesRootsRequireDisjointPhysicalAncestry() {
+        val instrumentation = InstrumentationRegistry.getInstrumentation()
+        val app = instrumentation.targetContext.applicationContext
+        val folder = requireNotNull(InstrumentationRegistry.getArguments().getString("libraryFixtureFolder"))
+        val selection = LibraryIndependentRootGrants.reopen(app, folder)
+        val resolver = app.contentResolver
+        try {
+            selection.requireEffectiveReadOnly(app)
+            val (left, right, anchor) = selection.trees
+            val scratch = File(app.filesDir.canonicalFile, "tree-read-${UUID.randomUUID()}").apply { check(mkdir()) }
+            val reader = AndroidLibraryTreeRead(app, scratch)
+            runBlocking {
+                LibraryProviderDirectoryProbe.verifyIndependentRoots(resolver, anchor, left, right) {
+                    // Both checks occur while the explicit provider descriptors stay held.
+                    for (tree in listOf(left, right)) {
+                        selection.requireEffectiveReadOnly(app)
+                        val catalog = reader.verify(tree)
+                        assertEquals("9e940d7b-76c7-45ea-b5e4-0ad86f26ea13", catalog.libraryId)
+                        assertEquals("25c49d9b-02d8-418f-b982-154980d89cfb", catalog.generationId)
+                        assertEquals(1, catalog.albums)
+                        assertEquals(1, catalog.scans)
+                    }
+                }
+            }
+            val alias = assertThrows(IOException::class.java) { runBlocking {
+                LibraryProviderDirectoryProbe.verifyIndependentRoots(resolver, anchor, left, left) {
+                    error("An alias reached the catalog callback")
+                }
+            } }
+            assertEquals("Library folders overlap or have no proven shared storage anchor", alias.message)
+            selection.requireEffectiveReadOnly(app)
+        } finally {
+            selection.releaseOwnReads(app)
+        }
+    }
+
     @Test fun provesManagedAncestryWithoutEffectiveWrite() {
         val instrumentation = InstrumentationRegistry.getInstrumentation()
         val app = instrumentation.targetContext.applicationContext

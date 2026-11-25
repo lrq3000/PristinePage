@@ -44,4 +44,14 @@ class LibraryRootSeparationTest {
         val right = listOf(second, user, Identity(11, 9), fs)
         assertThrows(IOException::class.java) { LibraryRootSeparation.admit({ left }, { right }) }
     }
+
+    @Test fun siblingWitnessRequiresBothDirectEdgesToTheSelectedAnchorEvenAfterRebinding() {
+        var right = listOf(second, user)
+        val exact = LibraryRootSeparation.admit({ listOf(first, user) }, { right })
+        exact.requireCurrentSiblings()
+        right = listOf(second, fs, user)
+        assertThrows(IOException::class.java) { exact.requireCurrentSiblings() }
+        val commonAncestorOnly = LibraryRootSeparation.admit({ listOf(first, user) }, { right })
+        assertThrows(IOException::class.java) { commonAncestorOnly.requireCurrentSiblings() }
+    }
 }

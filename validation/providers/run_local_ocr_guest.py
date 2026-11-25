@@ -197,7 +197,7 @@ def load_allocator(root, guest, raw, owner):
 
 
 def run_type(ns, *, purpose="pristinepage-ocr-qualification", operation="PristinePage local OCR guest",
-             fresh_disk_floor_gib=12, add_statuses=(0, 1, 2)):
+             fresh_disk_floor_gib=12, add_statuses=(0, 1, 2), admit_released=None):
     base, console, adb, now = (ns[key] for key in ("PickerAdapterRun", "CONSOLE", "ADB", "now"))
 
     class Run(base):
@@ -260,6 +260,8 @@ def run_type(ns, *, purpose="pristinepage-ocr-qualification", operation="Pristin
                     for pid, start in record["shutdown_processes"]:
                         process = self.process(pid)
                         need(not process or process["start"] != start or not process["running"], "Prior owned process is live")
+                    if admit_released is not None:
+                        admit_released(record)
                     record["ownership_history"].append({k: record[k] for k in ("generation", "stopped", "shutdown_processes")})
 
                 record.update(owner=ns["OWNER"], generation=self.generation, claim_generation=self.generation,
