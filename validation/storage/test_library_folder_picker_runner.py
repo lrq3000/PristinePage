@@ -12,7 +12,7 @@ from unittest.mock import patch
 
 from run_library_folder_picker_ldplayer import (
     check_fixture_root, read_backup_delivery_death, recheck_target, select_backup_case, select_backup_death_picker_case, select_settings_picker_case, select_settings_recovery_case, settings_completed_destination, spend_settings_retry,
-    verify_backup_death_intent, verify_settings_catalog, verify_settings_ocr, verify_settings_retry_evidence,
+    verify_backup_death_control, verify_backup_death_intent, verify_settings_catalog, verify_settings_ocr, verify_settings_retry_evidence,
 )
 from run_local_ocr_guest import read_boot_serial
 
@@ -134,6 +134,30 @@ class LibraryFolderPickerRunnerTest(unittest.TestCase):
         for key in flags.keys() - {"backup_death_picker_only"}:
             with self.subTest(key=key), self.assertRaisesRegex(RuntimeError, "standalone"):
                 select_backup_death_picker_case(Namespace(**(flags | {key: True})))
+
+    def test_death_retry_requires_both_no_write_controls_on_the_same_exact_pair(self):
+        def transcript(case):
+            cls, method = case.split("#")
+            fields = f"INSTRUMENTATION_STATUS: class={cls}\nINSTRUMENTATION_STATUS: test={method}\n"
+            return fields + "INSTRUMENTATION_STATUS_CODE: 1\n" + fields + (
+                "INSTRUMENTATION_STATUS_CODE: 0\nINSTRUMENTATION_RESULT: stream=\nOK (1 test)\nINSTRUMENTATION_CODE: -1\n")
+
+        prefix = "app.pristinepage.LibraryFolderFilesJourneyTest#"
+        picker = prefix + "checksTheBackupDeathPickerRouteWithoutSelection"
+        descriptor = prefix + "exactFilesTreeExposesSyncableDirectoryDescriptors"
+        pair = {"app": "a"*64, "test": "b"*64}
+        def receipt(passed):
+            return {
+                "artifacts.json": json.dumps({"guest": "synthetic", "backupDeliveryDeath": None}),
+                "outcomes.json": json.dumps({"passed": passed, "failed": [], "installedSha256": pair}),
+                "death-picker-instrumentation.txt": transcript(picker),
+                "directory-probe-instrumentation.txt": transcript(descriptor),
+            }
+        verify_backup_death_control(receipt([picker, descriptor]).__getitem__, "synthetic", pair)
+        with self.assertRaisesRegex(RuntimeError, "exact.*controls"):
+            verify_backup_death_control(receipt([picker]).__getitem__, "synthetic", pair)
+        with self.assertRaisesRegex(RuntimeError, "exact.*controls"):
+            verify_backup_death_control(receipt([picker, descriptor]).__getitem__, "synthetic", pair | {"test": "c"*64})
 
     def test_cold_recovery_does_not_trust_a_replaced_local_catalog(self):
         case = "app.pristinepage.LibraryFolderFilesJourneyTest#settingsPublishesOneBackupOfTheSyntheticDefaultLibrary"
