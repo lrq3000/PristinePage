@@ -20,6 +20,12 @@ The structural witness returned a canonical two-segment tree from the expected a
 
 The first corrected API 28 pair passed all three picker contract cases, matched the actual fixture URI and persisted only read permission. It stopped at the private scratch check before reading the catalog: the test used the framework's aliased spelling of `filesDir` rather than the canonical app-private parent used by the existing data witnesses. The next witness creates scratch beneath the canonical Android-owned parent rather than weakening the shared verifier. A separately named, opt-in descriptor probe checks whether the provider exposes distinct directory identities, reports capacity and accepts descriptor sync. It creates no provider file or grant beyond the synthetic read capability, and does not qualify create, rename, write, marker or power-loss behavior.
 
+## Populated Files witness
+
+On API 28 in the dedicated LDPlayer app guest, `83370f7` using the verified development package pair `ac567e04698f…` / `6a6d03a79884…` passed five of five named instrumentation cases. Files selected the synthetic folder, only its exact read grant was retained, the closed catalog admitted its one scan, and a new verifier after Activity recreation streamed the original with the host-generated SHA-256. Revocation then refused new verification and streaming; other grants were unchanged. The separate descriptor case observed distinct root/catalogs/generations/objects identities, a successful capacity query and directory sync. The harness verified unchanged fixture bytes, both process exits and release of the exclusive claim. No provider writes, activated application store, or physical device were exercised.
+
+Independent review found a Kotlin-only construction restriction compiled to a public JVM constructor, the need for a practical deduplicated I/O ceiling before opening payloads, and a witness mode that could skip its original. The successor keeps the concrete capability private, enforces an 8 GiB read-admission budget before opening any original, requires a populated fixture and tests cancellation and grant revocation mid-stream. Files grant confirmation is still distinct from proving write access or safe ownership of an existing destination.
+
 ## Gates before activating or publishing
 
 - Matched Files folder, real returned modes, exact persisted readback, fresh catalog admission, Activity recreation, and refusal after revocation on the same approved emulator.

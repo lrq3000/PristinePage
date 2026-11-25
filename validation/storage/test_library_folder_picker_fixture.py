@@ -49,6 +49,9 @@ class LibraryFolderPickerFixtureTest(unittest.TestCase):
         self.assertEqual(count, len(original))
         self.assertEqual(digest, sha256(original).hexdigest())
         self.assertEqual(digest, hashes[f"objects/{digest}"])
+        unowned = [relative for relative in hashes if relative.startswith("objects/") and relative != f"objects/{digest}"]
+        self.assertEqual(1, len(unowned))
+        self.assertEqual(hashes[unowned[0]], sha256((root / unowned[0]).read_bytes()).hexdigest())
 
     def test_existing_folder_is_left_untouched(self):
         root = Path(mkdtemp(prefix="pristinepage-library-files-refusal-"))

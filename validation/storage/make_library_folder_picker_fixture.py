@@ -27,6 +27,8 @@ def synthetic_scan():
         return pack(">I", len(data)) + kind + data + pack(">I", crc32(kind + data))
 
     payload = b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0))
+    # Force more than one bounded stream chunk without changing the six normalized pixels.
+    payload += chunk(b"tEXt", b"Comment\0" + b"R" * 70_000)
     payload += chunk(b"IDAT", compress(b"\0" + rgb[:9] + b"\0" + rgb[9:])) + chunk(b"IEND", b"")
     digest = sha256(payload).hexdigest()
     fingerprint = b"srgb-v1"
@@ -88,6 +90,10 @@ def make_fixture(destination: Path, *, with_scan=False):
         object_digest, payload, _ = scan
         (objects / object_digest).write_bytes(payload)
         hashes[f"objects/{object_digest}"] = object_digest
+        unowned = b"Unreferenced synthetic object"
+        unowned_digest = sha256(unowned).hexdigest()
+        (objects / unowned_digest).write_bytes(unowned)
+        hashes[f"objects/{unowned_digest}"] = unowned_digest
     return hashes
 
 

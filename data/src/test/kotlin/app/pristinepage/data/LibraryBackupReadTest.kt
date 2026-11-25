@@ -26,6 +26,21 @@ import org.junit.rules.TemporaryFolder
 class LibraryBackupReadTest {
     @get:Rule val temporary = TemporaryFolder()
 
+    @Test fun originalBudgetCountsUniqueObjectsAndRefusesBeforeOpeningAnyOriginal() {
+        val fixture = fixture()
+        fun verify(store: StreamBackup, maximum: Long) =
+            LibraryBackupRead(store, fixture.scratch.toPath(), 1024).read(8, maximumOriginalBytes = maximum) { _, _ ->
+                LibraryBackupRead.Projection(Unit, listOf(fixture.original, fixture.original))
+            }
+        val exact = StreamBackup(fixture)
+        verify(exact, 3)
+        assertEquals(1, exact.originalsOpened)
+        val refused = StreamBackup(fixture)
+        val failure = assertThrows(IOException::class.java) { verify(refused, 2) }
+        assertEquals("The library exceeds the original verification budget", failure.message)
+        assertEquals(0, refused.originalsOpened)
+    }
+
     @Test fun detachedOriginalCopyRechecksTheExactCatalogBeforeAndAfterStreamingOneObject() {
         val fixture = fixture()
         val store = StreamBackup(fixture)

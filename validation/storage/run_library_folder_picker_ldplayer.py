@@ -10,7 +10,7 @@ import subprocess
 import sys
 import uuid
 
-from make_library_folder_picker_fixture import make_fixture
+from make_library_folder_picker_fixture import make_fixture, synthetic_scan
 from run_library_restore_ldplayer import close_owned, inspect_prior_pid, read_results, wait_for_allocator
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -77,7 +77,9 @@ def run(args):
         need(sha(saved) == hashes[package], "Retained candidate APK changed")
         retained[package] = saved
     fixture = raw / "synthetic-library"
-    files = make_fixture(fixture, with_scan=args.with_scan)
+    files = make_fixture(fixture, with_scan=True)
+    original = synthetic_scan()[0]
+    need(files.get(f"objects/{original}") == original, "The populated Files fixture lacks its exact original")
     (raw / f"{prefix}-artifacts.json").write_text(
         json.dumps(dict(proof=proof, source=args.commit, fixture=files, previous=previous, guest=args.guest)),
         encoding="utf-8",
@@ -125,10 +127,9 @@ def run(args):
             need(adb("shell", "sha256sum", f"{guest_root}/{relative}").split()[0] == digest,
                  "The synthetic Files fixture differed after staging")
         recheck_target(run, ns)
-        original_args = []
-        if args.with_scan:
-            original, = (digest for relative, digest in files.items() if relative.startswith("objects/"))
-            original_args = ["-e", "libraryFixtureOriginal", original]
+        original_args = ["-e", "libraryFixtureOriginal", original]
+        if args.expect_home:
+            original_args += ["-e", "libraryExpectHome", "1"]
         scenarios = (*CASES, DESCRIPTOR_CASE) if args.probe_directory else CASES
         output = adb("shell", "am", "instrument", "-w", "-r", "-e", "class", ",".join(scenarios),
                      "-e", "libraryFixtureFolder", folder, *original_args, RUNNER, timeout=150)
@@ -150,7 +151,7 @@ if __name__ == "__main__":
     for field in ("commit", "app_sha", "test_sha", "guest"):
         parser.add_argument(field)
     parser.add_argument("--fresh", action="store_true")
-    parser.add_argument("--with-scan", action="store_true")
+    parser.add_argument("--expect-home", action="store_true", help="Require the actual AOSP Documents namespace")
     parser.add_argument("--probe-directory", action="store_true")
     parser.add_argument("--previous", nargs=2, metavar=("APP_APK", "TEST_APK"))
     raise SystemExit(run(parser.parse_args()))

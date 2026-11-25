@@ -25,26 +25,34 @@ class AndroidLibraryTreeRead(context: Context, private val scratchDirectory: Fil
     private val app = context.applicationContext
     private val reader = RoomLibraryCatalogReader(app, MAX_PORTABLE_BYTES)
 
-    class Verified internal constructor(
-        internal val tree: String, internal val generation: LibraryGeneration, val albums: Int, val scans: Int,
-        private val originals: Map<String, ObjectId>,
-    ) {
-        val libraryId: String get() = generation.libraryId
-        val generationId: String get() = generation.id
+    sealed interface Verified {
+        val albums: Int
+        val scans: Int
+        val libraryId: String
+        val generationId: String
+    }
 
-        internal fun original(blob: SourceBlobId): ObjectId =
+    private class VerifiedTree(
+        val tree: String, val generation: LibraryGeneration, override val albums: Int, override val scans: Int,
+        private val originals: Map<String, ObjectId>,
+    ) : Verified {
+        override val libraryId: String get() = generation.libraryId
+        override val generationId: String get() = generation.id
+
+        fun original(blob: SourceBlobId): ObjectId =
             originals[blob.value] ?: throw IOException("Original is not in the verified library view")
     }
 
     suspend fun verify(tree: Uri, expected: Verified? = null): Verified {
-        if (expected != null && expected.tree != tree.toString()) throw IOException("The verified library belongs to a different selected folder")
+        val previous = expected?.let(::requireVerifiedTree)
+        if (previous != null && previous.tree != tree.toString()) throw IOException("The verified library belongs to a different selected folder")
         return readTree(tree) { read, checkpoint ->
-            read.read(reader.schemaVersion, expected?.generation, expected?.generation) { generation, file ->
+            read.read(reader.schemaVersion, previous?.generation, previous?.generation, MAX_TREE_ORIGINAL_BYTES) { generation, file ->
                 reader.read(file) { sql ->
                     val catalog = LibraryPortableCatalogProjection(sql, checkpoint = checkpoint).snapshot()
                     val originals = catalog.originals.associate { it.sourceBlobId to ObjectId(it.byteSha256, it.byteCount) }
                     LibraryBackupRead.Projection(
-                        Verified(tree.toString(), generation, catalog.albums.size, catalog.albums.sumOf { it.pages.size }, originals),
+                        VerifiedTree(tree.toString(), generation, catalog.albums.size, catalog.albums.sumOf { it.pages.size }, originals),
                         originals.values,
                     )
                 }
@@ -54,9 +62,13 @@ class AndroidLibraryTreeRead(context: Context, private val scratchDirectory: Fil
 
     /** Stream one original into caller-owned disposable output. The caller must discard that output on any failure and verify closure before using it. */
     suspend fun copyOriginal(verified: Verified, blob: SourceBlobId, output: OutputStream) {
-        val id = verified.original(blob)
-        readTree(Uri.parse(verified.tree)) { read, _ -> read.copyExactOriginal(verified.generation, id, output) }
+        val selected = requireVerifiedTree(verified)
+        val id = selected.original(blob)
+        readTree(Uri.parse(selected.tree)) { read, _ -> read.copyExactOriginal(selected.generation, id, output) }
     }
+
+    private fun requireVerifiedTree(verified: Verified): VerifiedTree =
+        verified as? VerifiedTree ?: throw IOException("The library tree was not verified by this reader")
 
     private suspend fun <T> readTree(tree: Uri, block: (LibraryBackupRead, () -> Unit) -> T): T = withContext(Dispatchers.IO) {
         val checkpoint = { coroutineContext.ensureActive() }
@@ -166,6 +178,8 @@ class AndroidLibraryTreeRead(context: Context, private val scratchDirectory: Fil
     companion object {
         private const val AUTHORITY = "com.android.externalstorage.documents"
         private const val PACKAGE = "com.android.externalstorage"
+        // This caps one detached admission's cumulative provider I/O, not storage capacity or single-scan size.
+        private const val MAX_TREE_ORIGINAL_BYTES = 8L * 1024 * 1024 * 1024
         private val ATTEMPT = Mutex()
 
         /** Exact primary shared-storage or AOSP Documents-subtree grant. Never a volume root, single document URI, or translated filesystem path. */

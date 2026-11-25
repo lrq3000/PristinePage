@@ -23,11 +23,15 @@ import app.pristinepage.library.LibraryFolderPickerContract
 import java.io.ByteArrayOutputStream
 import java.io.File
 import java.io.IOException
+import java.io.OutputStream
 import java.security.MessageDigest
 import java.util.UUID
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicReference
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -53,9 +57,9 @@ class LibraryFolderFilesJourneyTest {
         val app = instrumentation.targetContext.applicationContext
         val folder = InstrumentationRegistry.getArguments().getString("libraryFixtureFolder")
             ?.takeIf { it.matches(Regex("PristinePage-tree-[0-9a-f]{12}")) } ?: error("No exact synthetic folder was staged")
-        val originalDigest = InstrumentationRegistry.getArguments().getString("libraryFixtureOriginal")?.also {
-            check(it.matches(Regex("[0-9a-f]{64}")))
-        }
+        val arguments = InstrumentationRegistry.getArguments()
+        val originalDigest = arguments.getString("libraryFixtureOriginal")?.takeIf { it.matches(Regex("[0-9a-f]{64}")) }
+            ?: error("No populated synthetic folder was staged")
         val expected = DocumentsContract.buildTreeDocumentUri("com.android.externalstorage.documents", "primary:Documents/$folder")
         val home = DocumentsContract.buildTreeDocumentUri("com.android.externalstorage.documents", "home:$folder")
         val exactFixtureTrees = setOf(expected.toString(), home.toString())
@@ -101,13 +105,16 @@ class LibraryFolderFilesJourneyTest {
                     resultShape(raw.data?.data, expected, folder),
             )
             assertTrue("Files returned a tree other than the exact synthetic directory", picked.uri.toString() in exactFixtureTrees)
+            if (arguments.getString("libraryExpectHome") == "1") {
+                assertTrue("Files did not return the exact Documents namespace", picked.uri.toString() == home.toString())
+            }
             val uri = LibraryFolderGrantHandoff(app).persistRead(picked)
             assertEquals(before + (uri.toString() to (true to false)), existing())
             val first = runBlocking { AndroidLibraryTreeRead(app, scratch).verify(uri) }
             assertEquals("9e940d7b-76c7-45ea-b5e4-0ad86f26ea13", first.libraryId)
             assertEquals("25c49d9b-02d8-418f-b982-154980d89cfb", first.generationId)
             assertEquals(1, first.albums)
-            assertEquals(if (originalDigest == null) 0 else 1, first.scans)
+            assertEquals(1, first.scans)
             val different = DocumentsContract.buildTreeDocumentUri(requireNotNull(uri.authority), "primary:Documents/${folder}-different")
             val wrongRoot = assertThrows(IOException::class.java) {
                 runBlocking { AndroidLibraryTreeRead(app, scratch).verify(different, first) }
@@ -118,29 +125,47 @@ class LibraryFolderFilesJourneyTest {
             val again = runBlocking { AndroidLibraryTreeRead(app, scratch).verify(Uri.parse(uri.toString()), first) }
             assertEquals(first.generationId, again.generationId)
             val fixtureBlob = SourceBlobId("aaaaaaaa-aaaa-4aaa-8aaa-000000000003")
-            if (originalDigest != null) {
-                val bytes = ByteArrayOutputStream()
-                runBlocking { AndroidLibraryTreeRead(app, scratch).copyOriginal(again, fixtureBlob, bytes) }
-                assertTrue(bytes.size() > 32)
-                assertEquals(originalDigest, MessageDigest.getInstance("SHA-256").digest(bytes.toByteArray())
-                    .joinToString("") { "%02x".format(it.toInt() and 255) })
-                val unrelated = ByteArrayOutputStream()
-                assertThrows(IOException::class.java) {
-                    runBlocking { AndroidLibraryTreeRead(app, scratch).copyOriginal(again, SourceBlobId(UUID.randomUUID().toString()), unrelated) }
-                }
-                assertEquals(0, unrelated.size())
+            val bytes = ByteArrayOutputStream()
+            runBlocking { AndroidLibraryTreeRead(app, scratch).copyOriginal(again, fixtureBlob, bytes) }
+            assertTrue(bytes.size() > 65_536)
+            assertEquals(originalDigest, MessageDigest.getInstance("SHA-256").digest(bytes.toByteArray())
+                .joinToString("") { "%02x".format(it.toInt() and 255) })
+            val unrelated = ByteArrayOutputStream()
+            assertThrows(IOException::class.java) {
+                runBlocking { AndroidLibraryTreeRead(app, scratch).copyOriginal(again, SourceBlobId(UUID.randomUUID().toString()), unrelated) }
             }
+            assertEquals(0, unrelated.size())
+
+            var canceledWrites = 0
+            assertThrows(CancellationException::class.java) {
+                runBlocking {
+                    val owner = requireNotNull(currentCoroutineContext()[Job])
+                    val canceledSink = onWrite {
+                        if (++canceledWrites == 1) owner.cancel()
+                    }
+                    AndroidLibraryTreeRead(app, scratch).copyOriginal(again, fixtureBlob, canceledSink)
+                }
+            }
+            assertEquals("Cancellation must prevent the next chunk from reaching the sink", 1, canceledWrites)
             val observation = probe?.let { runCatching { it(app.contentResolver, uri) } }
-            app.contentResolver.releasePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            var writes = 0
+            val disposable = onWrite { length ->
+                if (++writes == 1) {
+                    assertTrue("Revocation must occur before the entire original is copied", length in 1 until bytes.size())
+                    app.contentResolver.releasePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                }
+            }
+            assertThrows(IOException::class.java) {
+                runBlocking { AndroidLibraryTreeRead(app, scratch).copyOriginal(again, fixtureBlob, disposable) }
+            }
+            assertTrue("The probe must revoke from an in-progress stream, not at admission", writes > 0)
             assertEquals(before, existing())
             assertThrows(IOException::class.java) { runBlocking { AndroidLibraryTreeRead(app, scratch).verify(uri, first) } }
-            if (originalDigest != null) {
-                val afterRevocation = ByteArrayOutputStream()
-                assertThrows(IOException::class.java) {
-                    runBlocking { AndroidLibraryTreeRead(app, scratch).copyOriginal(again, fixtureBlob, afterRevocation) }
-                }
-                assertEquals(0, afterRevocation.size())
+            val afterRevocation = ByteArrayOutputStream()
+            assertThrows(IOException::class.java) {
+                runBlocking { AndroidLibraryTreeRead(app, scratch).copyOriginal(again, fixtureBlob, afterRevocation) }
             }
+            assertEquals(0, afterRevocation.size())
             observation?.getOrThrow()
         } finally {
             for (fixtureTree in exactFixtureTrees) {
@@ -151,6 +176,11 @@ class LibraryFolderFilesJourneyTest {
             val activePackage = instrumentation.uiAutomation.rootInActiveWindow?.packageName?.toString()
             if (activePackage == registration.first) instrumentalBack(instrumentation)
         }
+    }
+
+    private fun onWrite(receiveCount: (Int) -> Unit): OutputStream = object : OutputStream() {
+        override fun write(value: Int) = error("Expected a bounded bulk write")
+        override fun write(bytes: ByteArray, offset: Int, length: Int) = receiveCount(length)
     }
 
     /** Report only structural information about a returned URI; no raw path or non-fixture title. */

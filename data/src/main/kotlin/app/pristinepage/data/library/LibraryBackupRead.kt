@@ -53,12 +53,11 @@ internal class LibraryBackupRead(
         checkpoint()
     }
 
-    fun <T> read(expectedSchema: Int, project: (LibraryGeneration, File) -> Projection<T>): Verified<T> =
-        read(expectedSchema, generation = null, expectedTip = null, project)
-
-    fun <T> read(expectedSchema: Int, generation: LibraryGeneration?, expectedTip: LibraryGeneration?,
+    fun <T> read(expectedSchema: Int, generation: LibraryGeneration? = null, expectedTip: LibraryGeneration? = null,
+        maximumOriginalBytes: Long = Long.MAX_VALUE,
         project: (LibraryGeneration, File) -> Projection<T>,
     ): Verified<T> {
+        require(maximumOriginalBytes >= 0)
         val scratch = privateScratch.toRealPath()
         if (scratch != privateScratch.toAbsolutePath()) throw IOException("Invalid private verification directory")
         store.requireIndependentScratch(scratch)
@@ -73,7 +72,7 @@ internal class LibraryBackupRead(
         val projection = openCatalog(selected).use { input ->
             LibraryCatalogVerification(scratch, checkpoint).read(input, selected) { project(selected, it) }
         }
-        verifyOriginals(projection.objects)
+        verifyOriginals(projection.objects, maximumOriginalBytes)
         // Closing the last original (or projecting an empty catalog) can observe cancellation before another provider open.
         checkpoint()
         openCatalog(selected).use { selected.verifyCatalog(it, checkpoint) }
@@ -84,13 +83,19 @@ internal class LibraryBackupRead(
         return Verified(selected, projection.value)
     }
 
-    private fun verifyOriginals(objects: Collection<ObjectId>) {
+    private fun verifyOriginals(objects: Collection<ObjectId>, maximumBytes: Long) {
         // Reject contradictory declarations before opening any payload; identical references need only one read.
         val unique = LinkedHashMap<String, ObjectId>()
+        var remaining = maximumBytes
         for (id in objects) {
             checkpoint()
-            val retained = unique.getOrPut(id.sha256) { id }
-            if (retained != id) throw IOException("Conflicting library object lengths")
+            val retained = unique.putIfAbsent(id.sha256, id)
+            if (retained != null) {
+                if (retained != id) throw IOException("Conflicting library object lengths")
+            } else {
+                if (id.byteCount > remaining) throw IOException("The library exceeds the original verification budget")
+                remaining -= id.byteCount
+            }
         }
         for (id in unique.values) {
             checkpoint()
