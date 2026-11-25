@@ -29,7 +29,7 @@ class SavedOcrSchedulingTest {
     @Test fun missingRuntimeLeavesBothSignalsDormant(): Unit = runBlocking {
         val schedule = SavedOcrScheduling(resolve = { null }) { throw AssertionError("No runtime, no WorkManager enrollment") }
         schedule.onPagesSaved(activeLibrary, document, listOf(page))
-        assertFalse(schedule.onStartup())
+        assertFalse(schedule.onStartup(activeLibrary))
     }
 
     @Test fun saveReconcilesOnlyTheNamedPageAndSkipsAnAbsentTarget() = runBlocking {
@@ -66,14 +66,18 @@ class SavedOcrSchedulingTest {
                 emit(second)
             }
         }
-        val schedule = SavedOcrScheduling(resolve = { events += "resolved"; store }) { (activation, target) ->
+        val schedule = SavedOcrScheduling(resolve = { issued ->
+            assertEquals(activeLibrary, issued)
+            events += "resolved"
+            store
+        }) { (activation, target) ->
             assertEquals(activeLibrary, activation)
             events += if (target == first) "first enrolled" else {
                 assertEquals(second, target)
                 "second enrolled"
             }
         }
-        schedule.onStartup()
+        schedule.onStartup(activeLibrary)
         assertEquals(listOf("resolved", "first discovered", "first enrolled", "second discovered", "second enrolled"), events)
     }
 
@@ -106,7 +110,7 @@ class SavedOcrSchedulingTest {
             override fun pendingPages(): Flow<SavedOcrWork.Target> = flow { emit(first) }
         }
         val schedule = SavedOcrScheduling({ partial }) { enrolled += it.target }
-        assertFalse(schedule.onStartup())
+        assertFalse(schedule.onStartup(activeLibrary))
         assertEquals(listOf(first), enrolled)
     }
 
@@ -116,7 +120,7 @@ class SavedOcrSchedulingTest {
             entered.complete(Unit)
             awaitCancellation()
         }
-        val startup = launch { schedule.onStartup() }
+        val startup = launch { schedule.onStartup(activeLibrary) }
         try { withTimeout(1_000) { entered.await() } }
         finally { startup.cancelAndJoin() }
         assertTrue(startup.isCancelled)
@@ -140,7 +144,7 @@ class SavedOcrSchedulingTest {
             if (target == first) throw failure
             enrolled += target
         }
-        assertSame(failure, runCatching { schedule.onStartup() }.exceptionOrNull())
+        assertSame(failure, runCatching { schedule.onStartup(activeLibrary) }.exceptionOrNull())
         assertEquals(listOf(second), enrolled)
     }
 

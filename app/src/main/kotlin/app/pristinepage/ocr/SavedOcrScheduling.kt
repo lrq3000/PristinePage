@@ -18,7 +18,7 @@ import kotlinx.coroutines.yield
 
 /** Save and launch hints are transport only. A missing qualified runtime resolves no session and must not open the library or WorkManager. */
 internal class SavedOcrScheduling(
-    private val resolve: suspend (LibraryActivation?) -> QualifiedSession?,
+    private val resolve: suspend (LibraryActivation) -> QualifiedSession?,
     private val enqueue: suspend (ActivationBoundOcrWake) -> Unit,
 ) {
     interface QualifiedSession {
@@ -82,10 +82,11 @@ internal class SavedOcrScheduling(
     }
 
     /** Keep offering later pages after a failed wake. An incomplete scan remains eligible for the next launch. */
-    suspend fun onStartup(): Boolean {
+    suspend fun onStartup(issuedAt: LibraryActivation): Boolean {
         val active = currentCoroutineContext()
         active.ensureActive()
-        val qualified = resolve(null) ?: return false
+        val qualified = resolve(issuedAt) ?: return false
+        if (qualified.activation != issuedAt) return false
         var firstFailure: Exception? = null
         qualified.pendingPages().collect { target ->
             active.ensureActive()

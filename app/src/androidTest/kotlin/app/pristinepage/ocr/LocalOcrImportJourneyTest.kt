@@ -103,9 +103,7 @@ class LocalOcrImportJourneyTest {
         val graph = app.services.imports()
         // Distinguish the save callback from the existing launch scan. The production latch is process-local and does not enter app data.
         val signals = app.savedOcrSignals
-        val latch = signals.javaClass.getDeclaredField("startup").apply { isAccessible = true }.get(signals)
-            as java.util.concurrent.atomic.AtomicReference<*>
-        compose.waitUntil(45_000) { (latch.get() as Enum<*>).name == "COMPLETE" }
+        compose.waitUntil(45_000) { signals.isStartupComplete(graph.activation) }
         val nonce = UUID.randomUUID().toString()
         val title = "Synthetic OCR import $nonce"
         val document = graph.store.documents.createDocument(title)

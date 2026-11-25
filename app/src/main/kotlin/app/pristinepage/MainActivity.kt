@@ -69,7 +69,9 @@ import app.pristinepage.ocr.OcrTextSaveViewModel
 import app.pristinepage.image.preview.OriginalPreviewBitmap
 import app.pristinepage.image.preview.RenderedPreviewBitmap
 import app.pristinepage.image.preview.RenderedPreviewBitmapLoader
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withPermit
@@ -150,7 +152,15 @@ class MainActivity : ComponentActivity() {
         observing = lifecycleScope.launch {
             repeatOnLifecycle(Lifecycle.State.STARTED) {
                 // A failed or unavailable earlier reconciliation may recover on the next foreground visit.
-                app.savedOcrSignals.onStartup()
+                launch {
+                    try {
+                        // Only the library owner initiates Room startup. The foreground OCR hint observes its verified default selection afterward.
+                        retained.state.first { it.recovery != null }
+                        services.recordedDefaultActivation()?.let(app.savedOcrSignals::onStartup)
+                    }
+                    catch (canceled: CancellationException) { throw canceled }
+                    catch (_: Exception) { /* Library startup owns the unavailable state. */ }
+                }
                 retained.state.collect { binding.synchronize() }
             }
         }

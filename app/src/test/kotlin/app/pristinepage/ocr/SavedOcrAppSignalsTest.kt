@@ -26,6 +26,99 @@ class SavedOcrAppSignalsTest {
     private val job = JobId("aaaaaaaa-aaaa-4aaa-8aaa-000000000014")
     private val activation = LibraryActivation("aaaaaaaa-aaaa-4aaa-8aaa-000000000019", 2)
 
+    @Test fun aCompletedPassForOneActivationDoesNotSuppressAnother() = runTest {
+        val successor = activation.copy(number = 3)
+        val conflicting = successor.copy(libraryId = "aaaaaaaa-aaaa-4aaa-8aaa-000000000020")
+        val scanned = mutableListOf<LibraryActivation>()
+        val signals = SavedOcrAppSignals(backgroundScope, SavedOcrScheduling({ issued ->
+            session(discover = { scanned += issued }, issuing = issued)
+        }) { fail("No saved pages") })
+        signals.onStartup(activation)
+        runCurrent()
+        signals.onStartup(successor)
+        signals.onStartup(activation)
+        signals.onStartup(conflicting)
+        runCurrent()
+        signals.onStartup(successor)
+        runCurrent()
+        assertEquals(listOf(activation, successor), scanned)
+    }
+
+    @Test fun aCanceledDiscoveryDoesNotDropAnAlreadyPendingForegroundVisit() = runTest {
+        val cancelFirst = CompletableDeferred<Unit>()
+        val pendingTarget = SavedOcrWork.Target(first, job)
+        val delivered = mutableListOf<SavedOcrWork.Target>()
+        var scans = 0
+        val signals = SavedOcrAppSignals(backgroundScope, SavedOcrScheduling({
+            session(discover = {
+                if (++scans == 1) {
+                    cancelFirst.await()
+                    throw CancellationException("The first discovery attempt ended")
+                }
+            }, pending = { listOf(pendingTarget) })
+        }) { delivered += it.target })
+        signals.onStartup(activation)
+        runCurrent()
+        signals.onStartup(activation)
+        cancelFirst.complete(Unit)
+        runCurrent()
+        assertEquals(listOf(pendingTarget), delivered)
+        assertEquals(2, scans)
+    }
+
+    @Test fun aCanceledOldPassCannotMakeTheRunningSuccessorAdmitADuplicate() = runTest {
+        val successor = activation.copy(number = 3)
+        val cancelOld = CompletableDeferred<Unit>()
+        val finishSuccessor = CompletableDeferred<Unit>()
+        val target = SavedOcrWork.Target(first, job)
+        val delivered = mutableListOf<SavedOcrWork.Target>()
+        val signals = SavedOcrAppSignals(backgroundScope, SavedOcrScheduling({ issued ->
+            when (issued) {
+                activation -> session(discover = { cancelOld.await(); throw CancellationException("Old pass canceled") })
+                successor -> session(discover = { finishSuccessor.await() }, pending = { listOf(target) }, issuing = successor)
+                else -> error("Unexpected activation")
+            }
+        }) { delivered += it.target })
+        signals.onStartup(activation)
+        runCurrent()
+        signals.onStartup(successor)
+        runCurrent()
+        cancelOld.complete(Unit)
+        runCurrent()
+        signals.onStartup(successor)
+        runCurrent()
+        finishSuccessor.complete(Unit)
+        runCurrent()
+        assertEquals(listOf(target), delivered)
+    }
+
+    @Test fun aLateFailedSaveOrPassFromAnOlderActivationCannotInvalidateTheNewPass() = runTest {
+        val successor = activation.copy(number = 3)
+        val releaseOld = CompletableDeferred<Unit>()
+        val scanned = mutableListOf<LibraryActivation>()
+        val signals = SavedOcrAppSignals(backgroundScope, SavedOcrScheduling({ issued ->
+            when (issued) {
+                activation -> session(discover = {
+                    scanned += activation
+                    releaseOld.await()
+                    throw IllegalStateException("An old catalog was retired")
+                }, saved = { _, _ -> error("Old save failed") })
+                successor -> session(discover = { scanned += successor }, issuing = successor)
+                else -> error("Unexpected activation")
+            }
+        }) { fail("No saved pages") })
+        signals.onStartup(activation)
+        runCurrent()
+        signals.onStartup(successor)
+        runCurrent()
+        signals.onPagesSaved(activation, document, listOf(first))
+        releaseOld.complete(Unit)
+        runCurrent()
+        signals.onStartup(successor)
+        runCurrent()
+        assertEquals(listOf(activation, successor), scanned)
+    }
+
     @Test fun anActiveOrSuccessfulStartupIsNotStartedAgainWithinTheProcess() = runTest {
         val release = CompletableDeferred<Unit>()
         var scans = 0
@@ -288,8 +381,9 @@ class SavedOcrAppSignalsTest {
         discover: suspend () -> Unit = { fail("Expected a save hint") },
         pending: () -> List<SavedOcrWork.Target> = { emptyList() },
         saved: suspend (DocumentId, PageId) -> SavedOcrWork.Target? = { _, _ -> error("Expected startup discovery") },
+        issuing: LibraryActivation = activation,
     ): SavedOcrScheduling.QualifiedSession = object : SavedOcrScheduling.QualifiedSession {
-        override val activation = this@SavedOcrAppSignalsTest.activation
+        override val activation = issuing
         override val canCreateJobs = true
         override fun pendingPages(): Flow<SavedOcrWork.Target> = flow {
             discover()
@@ -297,4 +391,6 @@ class SavedOcrAppSignalsTest {
         }
         override suspend fun reconcilePage(document: DocumentId, page: PageId): SavedOcrWork.Target? = saved(document, page)
     }
+
+    private fun SavedOcrAppSignals.onStartup() = onStartup(activation)
 }
