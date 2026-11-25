@@ -43,6 +43,72 @@ class LibraryCatalogPublicationTest {
         assertEquals("old catalog", directory.previous.readText())
     }
 
+    @Test fun interruptionAfterThePayloadBarrierLeavesNoCompletionMarker() {
+        val directory = fixture()
+        val events = mutableListOf<String>()
+        val store = object : LibraryCatalogPublication.Store by directory {
+            override fun confirmPayloadDurability(generation: LibraryGeneration, requiresObjects: Boolean) {
+                assertEquals(listOf("reopened"), events)
+                events += "payload durable"
+            }
+        }
+        val failure = assertThrows(IOException::class.java) {
+            publisher(store).publish(generation, 100, { "abc".byteInputStream() }, beforeNewMarker = { observed ->
+                assertEquals(generation, observed)
+                assertEquals(listOf("reopened", "payload durable"), events)
+                assertFalse(directory.marker.exists())
+                throw IOException("Interrupted before the completion marker")
+            }) { reopened ->
+                assertEquals("abc", reopened.readText())
+                events += "reopened"
+            }
+        }
+        assertEquals("Interrupted before the completion marker", failure.message)
+        assertFalse(directory.marker.exists())
+        assertEquals("abc", directory.catalog.readText())
+        assertEquals("old catalog", directory.previous.readText())
+    }
+
+    @Test fun verificationOfAnExistingMarkerDoesNotReachTheNewMarkerBoundary() {
+        val directory = fixture()
+        publish(directory) {}
+        val verified = publisher(directory).publish(generation, 100, { error("Must not recopy") },
+            verifyExistingOnly = true, beforeNewMarker = { fail("Historical verification must not announce a new marker") }) {}
+        assertEquals(generation, verified)
+    }
+
+    @Test fun ordinaryPublicationHasNoObserverOnlyCancellationCheckpoint() {
+        val directory = fixture()
+        val events = mutableListOf<String>()
+        val store = object : LibraryCatalogPublication.Store by directory {
+            override fun confirmPayloadDurability(generation: LibraryGeneration, requiresObjects: Boolean) {
+                events.clear()
+            }
+
+            override fun createMarker(generation: LibraryGeneration, bytes: ByteArray) {
+                assertEquals(listOf("checkpoint"), events)
+                directory.createMarker(generation, bytes)
+            }
+        }
+        val published = LibraryCatalogPublication(store, temporary.newFolder().toPath()) { events += "checkpoint" }
+            .publish(generation, 100, { "abc".byteInputStream() }) {}
+        assertEquals(generation, published)
+    }
+
+    @Test fun cancellationRequestedByTheObserverPreventsMarkerCreation() {
+        val directory = fixture()
+        var canceled = false
+        val publisher = LibraryCatalogPublication(directory, temporary.newFolder().toPath()) {
+            if (canceled) throw java.util.concurrent.CancellationException("Canceled after the observation")
+        }
+        assertThrows(java.util.concurrent.CancellationException::class.java) {
+            publisher.publish(generation, 100, { "abc".byteInputStream() },
+                beforeNewMarker = { canceled = true }) {}
+        }
+        assertFalse(directory.marker.exists())
+        assertEquals("abc", directory.catalog.readText())
+    }
+
     @Test fun verifiesDestinationBytesBeforeHandingThemToCatalogReader() {
         val directory = fixture()
         val store = object : LibraryCatalogPublication.Store by directory {

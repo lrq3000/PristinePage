@@ -36,6 +36,7 @@ internal class LibraryCatalogPublication(private val store: Store, private val p
         openIncoming: () -> InputStream,
         verifyExistingOnly: Boolean = false,
         requiresObjects: Boolean = false,
+        beforeNewMarker: ((LibraryGeneration) -> Unit)? = null,
         verifyReopen: (File) -> Unit,
     ): LibraryGeneration {
         require(maximumCatalogBytes > 0)
@@ -56,7 +57,14 @@ internal class LibraryCatalogPublication(private val store: Store, private val p
         openCatalog(generation).use { generation.verifyCatalog(it, checkpoint) }
         store.confirmPayloadDurability(generation, requiresObjects)
         checkpoint()
-        if (!alreadyMarked) store.createMarker(generation, generation.encode())
+        if (!alreadyMarked) {
+            // Observe only a new publication, after the exact payload is verified and its directory barriers have returned.
+            if (beforeNewMarker != null) {
+                beforeNewMarker(generation)
+                checkpoint()
+            }
+            store.createMarker(generation, generation.encode())
+        }
         store.confirmMarkerDurability(generation)
         if (!markerExists(generation)) throw IOException("Library completion marker is missing")
         checkpoint()
