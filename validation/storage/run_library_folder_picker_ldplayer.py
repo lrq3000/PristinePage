@@ -24,6 +24,7 @@ FILES_CASE = ("app.pristinepage.LibraryFolderFilesJourneyTest"
               "#actualFilesGrantReopensAfterActivityRecreationAndRevocationFailsClosed")
 DESCRIPTOR_CASE = "app.pristinepage.LibraryFolderFilesJourneyTest#exactFilesTreeExposesSyncableDirectoryDescriptors"
 WORKING_CASE = "app.pristinepage.LibraryFolderFilesJourneyTest#populatingAWorkingRoomCatalogDoesNotMaterializeTheOriginal"
+ACTIVATION_CASE = "app.pristinepage.LibraryFolderFilesJourneyTest#defaultAppGraphUsesItsDurableActivationBeforeAndAfterActivityRecreation"
 CASES = (
     "app.pristinepage.LibraryFolderPickerContractTest#retainsTheActualEncodedTreeAndBothReturnedModes",
     "app.pristinepage.LibraryFolderPickerContractTest#rejectsDocumentUrisAndCancelledOrNonpersistentSelections",
@@ -132,7 +133,8 @@ def run(args):
         if args.expect_home:
             original_args += ["-e", "libraryExpectHome", "1"]
         scenarios = (*CASES, *((DESCRIPTOR_CASE,) if args.probe_directory else ()),
-                     *((WORKING_CASE,) if args.working_catalog else ()))
+                     *((WORKING_CASE,) if args.working_catalog else ()),
+                     *((ACTIVATION_CASE,) if args.activation else ()))
         output = adb("shell", "am", "instrument", "-w", "-r", "-e", "class", ",".join(scenarios),
                      "-e", "libraryFixtureFolder", folder, *original_args, RUNNER, timeout=150)
         run.path("instrumentation.txt").write_text(output, encoding="utf-8")
@@ -156,5 +158,6 @@ if __name__ == "__main__":
     parser.add_argument("--expect-home", action="store_true", help="Require the actual AOSP Documents namespace")
     parser.add_argument("--probe-directory", action="store_true")
     parser.add_argument("--working-catalog", action="store_true")
+    parser.add_argument("--activation", action="store_true")
     parser.add_argument("--previous", nargs=2, metavar=("APP_APK", "TEST_APK"))
     raise SystemExit(run(parser.parse_args()))

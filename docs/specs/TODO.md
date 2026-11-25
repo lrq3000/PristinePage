@@ -150,6 +150,8 @@ The [reviewed combined Files and Room witness](../../validation/storage/library-
 
 First-use activation starts by assigning the existing default store a persistent opaque identity without moving originals or changing Room. Publish a complete initial pointer inside a single private settings-directory move. Only positively absent settings may bootstrap; a missing pointer under an existing settings directory is an integrity failure. Once the settings root might be visible, reopen and acknowledge that exact identity instead of choosing another one. Follow with a real active graph, not a second bootstrap or a Settings placeholder.
 
+Three first-use regressions passed in 974 data JVM cases: stable default identity, missing pointer under an existing root, and uncertain final directory sync. The ordinary application must now obtain that identity before opening or reconciling the default Room graph. This startup guard is not live switching: a selected folder is still structurally refused until its graph and **Reconnect library** interaction exist. The exact next API 28 batch must show the current default graph holds the durable identity across Activity recreation without modifying any unrelated guest state.
+
 ### Current coordination: transition to `main`
 
 - [x] Operator approved the local fast-forward and `main`-based PR/handoff cadence; see [operational authority](OPERATIONAL_PLAN.md) and [queue rules](PARALLEL_EXECUTION_PLAN.md#coordination). Earlier branch/base references below describe their historical claims.

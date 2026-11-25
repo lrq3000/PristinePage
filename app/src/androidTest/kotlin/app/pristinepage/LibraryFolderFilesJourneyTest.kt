@@ -17,6 +17,7 @@ import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import app.pristinepage.data.library.AndroidLibraryTreeRead
+import app.pristinepage.data.library.AndroidLibraryStartup
 import app.pristinepage.data.model.DocumentId
 import app.pristinepage.data.model.SourceBlobId
 import app.pristinepage.library.LibraryFolderGrantHandoff
@@ -49,6 +50,17 @@ class LibraryFolderFilesJourneyTest {
     @get:Rule val compose = createAndroidComposeRule<MainActivity>()
 
     @Test fun actualFilesGrantReopensAfterActivityRecreationAndRevocationFailsClosed() = verifyJourney()
+
+    @Test fun defaultAppGraphUsesItsDurableActivationBeforeAndAfterActivityRecreation() {
+        val app = InstrumentationRegistry.getInstrumentation().targetContext.applicationContext as PristinePageApplication
+        val initial = runBlocking { app.services.imports().activation }
+        assertEquals(1L, initial.number)
+        assertEquals(initial, runBlocking { AndroidLibraryStartup(app).requireDefaultActivation() })
+        compose.activityRule.scenario.recreate()
+        val reopened = runBlocking { app.services.imports().activation }
+        assertEquals(initial, reopened)
+        assertEquals(initial, runBlocking { AndroidLibraryStartup(app).requireDefaultActivation() })
+    }
 
     @Test fun exactFilesTreeExposesSyncableDirectoryDescriptors() = verifyJourney { resolver, tree, _, _, _ ->
         LibraryProviderDirectoryProbe.verify(resolver, tree)

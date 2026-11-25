@@ -5,6 +5,8 @@ import android.content.Context
 import android.net.Uri
 import android.provider.OpenableColumns
 import app.pristinepage.capture.PhotoImportController
+import app.pristinepage.data.library.AndroidLibraryStartup
+import app.pristinepage.data.library.LibraryActivation
 import app.pristinepage.data.model.RecoveryReport
 import app.pristinepage.data.files.SourceInspector
 import app.pristinepage.data.repository.PrivateImportStore
@@ -38,6 +40,7 @@ class ApplicationServices(context: Context, internal val budget: ImageAllocation
 
     private val context = context.applicationContext
     private val initialization = Mutex()
+    private val libraryStartup = AndroidLibraryStartup(this.context)
     private var initialized: ApplicationImports? = null
 
     constructor(context: Context) : this(
@@ -70,6 +73,7 @@ class ApplicationServices(context: Context, internal val budget: ImageAllocation
 
     suspend fun imports(): ApplicationImports = initialization.withLock {
         initialized ?: run {
+            val activation = libraryStartup.requireDefaultActivation()
             val normalizer = AndroidSourceInspector(budget)
             val decodeQueue = Mutex()
             // Scope the queue to normalization, not a provider read or the surrounding ingest transaction.
@@ -84,7 +88,7 @@ class ApplicationServices(context: Context, internal val budget: ImageAllocation
             try {
                 val report = store.documents.reconcile()
                 currentCoroutineContext().ensureActive()
-                ApplicationImports(store, PhotoImportController(store.selections, store.sources), SourceDecoder(store.committedSources, normalizer), budget, report, decodeQueue)
+                ApplicationImports(store, PhotoImportController(store.selections, store.sources), SourceDecoder(store.committedSources, normalizer), budget, report, activation, decodeQueue)
                     .also { initialized = it }
             } catch (failure: Throwable) {
                 ImportInitializationCleanup.close(store)
@@ -95,7 +99,7 @@ class ApplicationServices(context: Context, internal val budget: ImageAllocation
 }
 
 /** One identity/lifetime for foreground import and later source consumption. Reports describe implemented recovery domains only; a blocked report is not successful provider resumption or all-domain integrity proof. */
-class ApplicationImports internal constructor(val store: PrivateImportStore, val photoImports: PhotoImportController, val decoder: SourceDecoder, val budget: ImageAllocationBudget, val startupRecovery: RecoveryReport, private val decodeQueue: Mutex = Mutex()) {
+class ApplicationImports internal constructor(val store: PrivateImportStore, val photoImports: PhotoImportController, val decoder: SourceDecoder, val budget: ImageAllocationBudget, val startupRecovery: RecoveryReport, val activation: LibraryActivation, private val decodeQueue: Mutex = Mutex()) {
     private val originals = OriginalPreviewBitmapLoader(OriginalPreviewLoader(store.committedSources, decoder, budget), budget)
     /** One queue per initialized Application graph, sharing the SAME decoded/intermediate/retained-output allowance. A val, not a factory/getter: Activity/editor consumers must not create independent processing slots or budgets. Construction opens no files and starts no work. */
     val renderer: RenderCoordinator = DefaultRenderCoordinator(decoder, GeometryEngine(budget), AppearanceEngine(budget), queue = decodeQueue)
