@@ -7,6 +7,7 @@ import android.content.Context
 import android.content.ContextWrapper
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.database.sqlite.SQLiteDatabase
 import android.graphics.Rect
 import android.net.Uri
 import android.os.Build
@@ -126,44 +127,64 @@ class LibraryFolderFilesJourneyTest {
     @Test fun settingsPublishesOneBackupOfTheSyntheticDefaultLibrary() {
         val instrumentation = InstrumentationRegistry.getInstrumentation()
         val args = InstrumentationRegistry.getArguments()
-        check(args.getString("librarySettingsFresh") == "1") { "The witness requires a verified fresh guest" }
+        val fixture = args.getString("librarySettingsFixture")
+        check(fixture == "fresh" || fixture == "retained") { "The witness requires an admitted synthetic guest" }
         val folder = args.getString("libraryFixtureFolder")?.takeIf { it.matches(Regex("PristinePage-tree-[0-9a-f]{12}")) }
             ?: error("No exact synthetic folder was staged")
         val app = instrumentation.targetContext.applicationContext as PristinePageApplication
         fun grants() = app.contentResolver.persistedUriPermissions.associate { it.uri.toString() to (it.isReadPermission to it.isWritePermission) }
         val before = grants()
-        assertTrue("The fresh app may not hold any persisted picker grant", before.isEmpty())
+        assertTrue("The synthetic app may not hold any persisted picker grant", before.isEmpty())
         val graph = runBlocking { app.services.imports() }
         assertEquals(1L, graph.activation.number)
-        assertTrue("Refuse an existing default album before any synthetic ingest", runBlocking { graph.store.catalog.list(null, 1).isEmpty() })
+        val privateRoot = app.filesDir.canonicalFile
+        val evidence = File(privateRoot, "library-settings-native-witness")
+        val spent = File(privateRoot, "library-settings-witness-spent")
+        val privateLeaves = checkNotNull(privateRoot.list()).toSet()
+        check(evidence.name !in privateLeaves && spent.name !in privateLeaves && "library-backup-acknowledged" !in privateLeaves &&
+            privateLeaves.none { it.startsWith("library-out-") }) { "Refusing to repeat a possible prior backup" }
+        val historyBefore = runBlocking { app.services.discoverDefaultBackups(graph.activation) }
+        check(historyBefore.receipts.isEmpty() && historyBefore.unresolvedCount == 0)
         val pointer = File(app.filesDir.canonicalFile, "library-settings/active-library")
         val pointerBefore = pointer.readBytes()
         val png = LibraryDefaultFolderExportProbe.originalPng()
-        val file = File(app.cacheDir, "editor-journey-fixtures/${UUID.randomUUID()}.png")
-        check(file.parentFile!!.isDirectory || file.parentFile!!.mkdirs())
-        check(file.createNewFile())
-        file.writeBytes(png)
-        val authority = "${app.packageName}.editor-fixtures"
-        var revision1 = ""
-        var revision2 = ""
-        val page = runBlocking {
-            val album = graph.store.documents.createDocument("Synthetic Settings backup")
-            val batch = graph.store.imports.beginImport(album, 1, null)
-            val committed = graph.photoImports.importProviderReferences(listOf("content://$authority/${file.nameWithoutExtension}"), batch.parentId)
-                .single() as IngestResult.Committed
-            val edit = graph.store.editablePages.load(album, committed.pageId)
-            val geometry = edit.recipe.geometry as GeometryRecipe.None
-            val changed = edit.recipe.copy(geometry = geometry.copy(outputQuarterTurns = 1))
-            revision1 = sha256(RecipeCodec.encode(edit.recipe))
-            revision2 = sha256(RecipeCodec.encode(changed))
-            val saved = graph.store.documents.saveRecipe(committed.pageId, 1,
-                changed) as SaveRecipeResult.Saved
-            assertEquals(2L, saved.recipeRevision)
-            assertEquals(3L, saved.documentRevision)
-            committed
+        val seededRecipes = if (fixture == "fresh") {
+            assertTrue("Refuse an existing default album before any synthetic ingest", runBlocking { graph.store.catalog.list(null, 1).isEmpty() })
+            val file = File(app.cacheDir, "editor-journey-fixtures/${UUID.randomUUID()}.png")
+            check(file.parentFile!!.isDirectory || file.parentFile!!.mkdirs())
+            check(file.createNewFile())
+            file.writeBytes(png)
+            val authority = "${app.packageName}.editor-fixtures"
+            runBlocking {
+                val album = graph.store.documents.createDocument("Synthetic Settings backup")
+                val batch = graph.store.imports.beginImport(album, 1, null)
+                val committed = graph.photoImports.importProviderReferences(listOf("content://$authority/${file.nameWithoutExtension}"), batch.parentId)
+                    .single() as IngestResult.Committed
+                val edit = graph.store.editablePages.load(album, committed.pageId)
+                val changed = edit.recipe.copy(geometry = (edit.recipe.geometry as GeometryRecipe.None).copy(outputQuarterTurns = 1))
+                val saved = graph.store.documents.saveRecipe(committed.pageId, 1, changed) as SaveRecipeResult.Saved
+                assertEquals(2L, saved.recipeRevision)
+                assertEquals(3L, saved.documentRevision)
+                listOf(sha256(RecipeCodec.encode(edit.recipe)), sha256(RecipeCodec.encode(changed)))
+            }
+        } else null
+        val (page, source) = runBlocking {
+            val album = graph.store.catalog.list(null, 2).single()
+            check(album.title == "Synthetic Settings backup" && album.documentRevision == 3L && !album.hasPendingImport)
+            val item = graph.store.catalog.load(album.documentId).pages.single()
+            check(item.ordinal == 0 && item.recipeRevision == 2L)
+            val saved = graph.store.editablePages.load(album.documentId, item.pageId)
+            saved to graph.store.committedSources.load(saved.sourceId)
         }
-        assertEquals(sha256(png), page.sourceByteHash)
-        assertEquals(listOf(page.documentId), runBlocking { graph.store.catalog.list(null, 2).map { it.documentId } })
+        assertEquals(sha256(png), source.sourceByteHash)
+        assertArrayEquals(png, source.file.readBytes())
+        val geometry = page.recipe.geometry as GeometryRecipe.None
+        assertEquals(1, geometry.outputQuarterTurns)
+        val revisions = seededRecipes ?: listOf(
+            sha256(RecipeCodec.encode(page.recipe.copy(geometry = geometry.copy(outputQuarterTurns = 0)))),
+            sha256(RecipeCodec.encode(page.recipe)),
+        )
+        val stateBefore = settingsFixtureInventory(app, page.documentId.value, page.pageId.value, page.sourceId.value, revisions)
         compose.onNodeWithTag("atelier-settings").performClick()
         compose.onNodeWithTag("settings-open-library_storage").performClick()
         compose.waitUntil(10_000) {
@@ -171,7 +192,10 @@ class LibraryFolderFilesJourneyTest {
         }
         compose.onNodeWithTag("library-backup-export").performClick()
         val picker = checkNotNull(LibraryFolderPickerContract(writable = true).createIntent(app, Unit).component).packageName
+        check(spent.createNewFile()) { "The synthetic witness already spent its one confirmation" }
         compose.onNodeWithTag("library-backup-choose-folder").performClick()
+        // Let Compose schedule the chooser effect before switching to standalone system-window navigation.
+        compose.waitUntil(12_000) { instrumentation.uiAutomation.rootInActiveWindow?.packageName?.toString() == picker }
         selectSettingsDestination(instrumentation, picker, folder)
         compose.waitUntil(40_000) {
             compose.onAllNodes(hasTestTag("library-backup-completed")).fetchSemanticsNodes().size == 1
@@ -182,11 +206,57 @@ class LibraryFolderFilesJourneyTest {
         assertEquals(before, grants())
         assertArrayEquals(pointerBefore, pointer.readBytes())
         assertArrayEquals(png, runBlocking { graph.store.committedSources.load(page.sourceId).file.readBytes() })
-        val evidence = File(app.filesDir, "library-settings-native-witness")
+        assertEquals(stateBefore, settingsFixtureInventory(app, page.documentId.value, page.pageId.value, page.sourceId.value, revisions))
         check(evidence.createNewFile())
-        evidence.writeText(listOf(page.documentId.value, page.pageId.value, page.sourceId.value, page.sourcePixelHash,
-            revision1, revision2, receipt.libraryId, receipt.generationId, receipt.folderName).joinToString("\n", postfix = "\n"))
+        evidence.writeText(listOf(page.documentId.value, page.pageId.value, page.sourceId.value, source.inspection.sourcePixelHash,
+            revisions[0], revisions[1], receipt.libraryId, receipt.generationId, receipt.folderName).joinToString("\n", postfix = "\n"))
     }
+
+    /** The visible catalog omits removed pages. Before granting a test write, independently inspect the whole synthetic saved inventory. */
+    private fun settingsFixtureInventory(context: Context, document: String, page: String, source: String, revisions: List<String>): List<String?> =
+        SQLiteDatabase.openDatabase(context.getDatabasePath("pristinepage.db").path, null,
+            SQLiteDatabase.OPEN_READONLY or SQLiteDatabase.NO_LOCALIZED_COLLATORS).use { db ->
+            val expectedCounts = mapOf("Document" to 1, "Page" to 1, "Source" to 1, "SourceBlob" to 1, "LibraryScanName" to 1,
+                "RecipeRevision" to 2, "UndoEntry" to 1, "Mask" to 0, "RecipeMask" to 0, "AtelierDraft" to 0, "OcrResult" to 0)
+            fun row(sql: String, args: Array<String>): List<String?> = db.rawQuery(sql, args).use { c ->
+                check(c.moveToFirst())
+                List(c.columnCount) { c.getString(it) }.also { check(!c.moveToNext()) }
+            }
+            for ((table, count) in expectedCounts) {
+                assertEquals("Unexpected retained $table inventory", listOf(count.toString()),
+                    row("SELECT COUNT(*) FROM (SELECT 1 FROM `$table` LIMIT ${count + 1})", emptyArray()))
+            }
+            val membership = row("""
+                SELECT d.title,d.documentRevision,d.lifecycle,p.state,p.ordinal,p.currentRecipeRevision,n.filename,b.byteSha256,
+                       b.byteCount,s.pixelSha256
+                  FROM Document d JOIN Page p ON p.documentId=d.documentId JOIN Source s ON s.sourceId=p.sourceId
+                  JOIN SourceBlob b ON b.sourceBlobId=s.sourceBlobId JOIN LibraryScanName n ON n.pageId=p.pageId AND n.documentId=d.documentId
+                 WHERE d.documentId=? AND p.pageId=? AND s.sourceId=? LIMIT 2
+            """.trimIndent(), arrayOf(document, page, source))
+            assertEquals(listOf("Synthetic Settings backup", "3", "ACTIVE", "ACTIVE", "0", "2", "Scan $page.png",
+                sha256(LibraryDefaultFolderExportProbe.originalPng()), "81"), membership.take(9))
+            val history = db.rawQuery("""
+                SELECT recipeRevision,parentRevision,CASE WHEN length(canonicalRecipe)<=524288 THEN canonicalRecipe END
+                  FROM RecipeRevision WHERE pageId=? AND sourceId=? ORDER BY recipeRevision LIMIT 3
+            """.trimIndent(), arrayOf(page, source)).use { c ->
+                buildList {
+                    while (c.moveToNext()) {
+                        check(!c.isNull(2))
+                        add(listOf(c.getString(0), c.getString(1), sha256(c.getBlob(2))))
+                    }
+                }
+            }
+            assertEquals(listOf(listOf("1", null, revisions[0]), listOf("2", "1", revisions[1])), history)
+            val undo = row("""
+                SELECT action,appliedDocumentRevision,state,expiresAt,
+                       CASE WHEN length(beforeState)<=524288 THEN hex(beforeState) END,
+                       CASE WHEN length(afterState)<=524288 THEN hex(afterState) END
+                  FROM UndoEntry WHERE documentId=? LIMIT 2
+            """.trimIndent(), arrayOf(document))
+            assertEquals(listOf("RECIPE_EDIT", "3", "AVAILABLE"), undo.take(3))
+            check(undo.drop(3).none { it.isNullOrEmpty() })
+            membership + history.flatten() + undo
+        }
 
     private fun selectSettingsDestination(instrumentation: Instrumentation, picker: String, folder: String) {
         val affirmative = setOf("SELECT", "Select", "SÉLECTIONNER", "Sélectionner", "Use this folder", "USE THIS FOLDER", "Choose this folder")

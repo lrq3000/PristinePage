@@ -108,11 +108,14 @@ def check_fixture_root(namespaces, after, probe_write, probe_passed, backup_expo
 
 
 def select_backup_case(args):
+    need(args.settings_retry is None or (args.settings_backup and not args.fresh and
+         isinstance(args.settings_retry, str) and re.fullmatch(r"[a-f0-9]{64}", args.settings_retry)),
+         "Settings backup requires a fresh standalone run or an exact retained cancel receipt")
     if args.settings_backup:
-        need(args.fresh and not any((args.backup_export, args.probe_write, args.ocr_activation, args.working_catalog,
+        need((args.fresh or args.settings_retry) and not any((args.backup_export, args.probe_write, args.ocr_activation, args.working_catalog,
                                      args.probe_directory, args.activation, args.selected_catalog, args.activation_compatibility,
                                      args.expect_home, args.settings_picker_only)),
-             "Settings backup requires a fresh standalone app witness")
+             "Settings backup requires a fresh standalone app witness or an exact retained cancel receipt")
         return SETTINGS_BACKUP_CASE
     return BACKUP_CASE if args.backup_export else None
 
@@ -122,9 +125,79 @@ def select_settings_picker_case(args):
         return None
     need(not any((args.fresh, args.settings_backup, args.backup_export, args.probe_write, args.ocr_activation,
                   args.working_catalog, args.probe_directory, args.activation, args.selected_catalog,
-                  args.activation_compatibility, args.expect_home)),
+                  args.activation_compatibility, args.expect_home, args.settings_retry)),
          "Settings picker cancellation requires the retained synthetic guest and a standalone invocation")
     return SETTINGS_PICKER_CASE
+
+
+def settings_run_anchors(raw, expected_sha):
+    manifest = raw / f"{raw.name}-final-manifest.json"
+    need(sha(manifest) == expected_sha, "Retained Settings manifest changed")
+    proof = json.loads(manifest.read_bytes())
+    need(proof["stage"] == "verified-before-release", "Unverified Settings manifest")
+    anchors = proof["evidence"] + proof["ancillaryEvidence"]
+
+    def anchored(suffix):
+        path = raw / f"{raw.name}-{suffix}"
+        matching = [entry for entry in anchors if Path(entry["path"]).resolve() == path.resolve()]
+        need(len(matching) == 1 and matching[0]["bytes"] == path.stat().st_size and matching[0]["sha256"] == sha(path),
+             "Retained Settings anchor changed")
+        return path.read_text(encoding="utf-8")
+    return anchored
+
+
+def verify_settings_retry_evidence(raw, expected_sha, guest, previous):
+    """Require the exact completed no-write picker control immediately preceding the retained run."""
+    anchor = settings_run_anchors(raw, expected_sha)
+    need(json.loads(anchor("artifacts.json"))["guest"] == guest, "Settings cancel control belongs to another guest")
+    need(json.loads(anchor("outcomes.json")) == {"passed": [SETTINGS_PICKER_CASE], "failed": [], "installedSha256": previous},
+         "The exact no-write Settings cancel control did not pass on the predecessor pair")
+
+
+def settings_failed_destination(raw, expected_sha, guest, app_sha):
+    anchor = settings_run_anchors(raw, expected_sha)
+    artifacts = json.loads(anchor("artifacts.json"))
+    need(artifacts["guest"] == guest and artifacts["proof"][APP]["sha256"] == app_sha and not artifacts["previous"],
+         "The first Settings witness did not run on this fresh synthetic guest and app")
+    transcript = anchor("instrumentation.txt")
+    need(read_results(transcript, (SETTINGS_BACKUP_CASE,)) == ([], [SETTINGS_BACKUP_CASE]) and
+         "Files did not reach root drawer; foreground=app.pristinepage.debug;" in transcript,
+         "The retained Settings failure is not the exact observed pre-selection boundary")
+    calls = [json.loads(line)["argv"] for line in anchor("commands.jsonl").splitlines()]
+    candidates = [call[i + 1] for call in calls for i, value in enumerate(call[:-1])
+                  if value == "libraryFixtureFolder" and SETTINGS_BACKUP_CASE in call]
+    need(len(candidates) == 1 and re.fullmatch(r"PristinePage-tree-[a-f0-9]{12}", candidates[0]),
+         "The original Settings destination could not be recovered")
+    return f"/sdcard/Documents/{candidates[0]}", artifacts["fixture"]
+
+
+def spend_settings_retry(raw, digest, attempt):
+    path = raw / f"settings-retry-spent-{digest}.json"
+    try:
+        with path.open("x", encoding="utf-8") as file:
+            json.dump(attempt, file)
+            file.flush()
+            os.fsync(file.fileno())
+    except FileExistsError as error:
+        raise RuntimeError("This Settings retry is already spent") from error
+
+
+def verify_unchanged_settings_destination(adb, guest_root, files):
+    namespaces = {"catalogs", "generations", "objects"}
+    ident = r"[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}"
+    locator = rf"(?:catalogs/{ident}\.sqlite|generations/{ident}\.complete|objects/[a-f0-9]{{64}})"
+    need({relative.split("/")[0] for relative in files} == namespaces and
+         all(re.fullmatch(locator, file) and re.fullmatch(r"[a-f0-9]{64}", digest) for file, digest in files.items()),
+         "Invalid retained synthetic inventory")
+    need(set(adb("shell", "ls", "-A", "-1", guest_root).splitlines()) == namespaces,
+         "The first Settings destination is not unchanged; the backup must not be repeated")
+    for namespace in namespaces:
+        leaves = {relative.split("/", 1)[1] for relative in files if relative.startswith(f"{namespace}/")}
+        need(set(adb("shell", "ls", "-A", "-1", f"{guest_root}/{namespace}").splitlines()) == leaves,
+             "The first Settings destination contains changed fixture entries")
+    for relative, digest in files.items():
+        need(adb("shell", "sha256sum", f"{guest_root}/{relative}").split() == [digest, f"{guest_root}/{relative}"],
+             "The first Settings destination contains changed fixture bytes")
 
 
 def verify_settings_catalog(path, digest, extent, expected):
@@ -137,6 +210,7 @@ def verify_settings_catalog(path, digest, extent, expected):
     with closing(sqlite3.connect(path.as_uri() + "?mode=ro&immutable=1", uri=True)) as db:
         for table in ("Document", "Page", "SourceBlob", "Source", "LibraryScanName"):
             need(db.execute(f"SELECT COUNT(*) FROM {table}").fetchone() == (1,), "Settings backup included or omitted unrelated records")
+        need(db.execute("SELECT 1 FROM OcrResult LIMIT 1").fetchone() is None, "Settings backup included unexpected OCR text")
         rows = db.execute("""
             SELECT d.documentId,d.title,d.documentRevision,p.pageId,p.currentRecipeRevision,p.ordinal,s.sourceId,
                    s.pixelSha256,b.byteSha256,b.byteCount,n.filename,n.documentId
@@ -168,6 +242,7 @@ def run(args):
     need(args.fresh != bool(args.previous), "Choose first admission or an exact retained predecessor pair")
     picker_case = select_settings_picker_case(args)
     backup_case = select_backup_case(args)
+    need(bool(args.settings_retry) == bool(args.settings_prior_failure), "A retained retry requires the exact first failure receipt")
     if args.ocr_activation:
         need(not any((args.fresh, args.expect_home, args.probe_directory, args.working_catalog, args.activation, args.selected_catalog,
                       args.activation_compatibility, args.probe_write, args.backup_export)),
@@ -186,6 +261,7 @@ def run(args):
     hashes = dict(zip(built, [args.app_sha, args.test_sha]))
     proof = {package: exact_apk(path, hashes[package], stage, package == TEST) for package, path in built.items()}
     previous = {}
+    prior_destination = None
     if args.previous:
         for package, file in zip(built, args.previous):
             path = Path(file).resolve()
@@ -193,6 +269,17 @@ def run(args):
                  "The predecessor must be the retained evidence file for this package")
             previous[package] = sha(path)
             exact_apk(path, previous[package], stage, package == TEST)
+        if args.settings_retry:
+            parents = {Path(file).resolve().parent for file in args.previous}
+            need(len(parents) == 1, "Settings cancel predecessor APKs must share the exact receipt")
+            need(previous[APP] == hashes[APP], "Settings retry must use the byte-identical app from the cancel control")
+            verify_settings_retry_evidence(parents.pop(), args.settings_retry, args.guest, previous)
+            old_run, old_sha = args.settings_prior_failure
+            need(re.fullmatch(r"picker-adapter-library-tree-[a-f0-9]{12}", old_run) and re.fullmatch(r"[a-f0-9]{64}", old_sha),
+                 "Invalid first Settings witness identity")
+            prior = (raw.parent / old_run).resolve()
+            need(prior.parent == raw.parent.resolve() and prior.name == old_run, "The first witness is not a local retained receipt")
+            prior_destination = settings_failed_destination(prior, old_sha, args.guest, hashes[APP])
     retained = {}
     for package, path in built.items():
         saved = raw / f"{package}.apk"
@@ -206,7 +293,8 @@ def run(args):
     if not args.ocr_activation:
         need(files.get(f"objects/{original}") == original, "The populated Files fixture lacks its exact original")
     (raw / f"{prefix}-artifacts.json").write_text(
-        json.dumps(dict(proof=proof, source=args.commit, fixture=files, previous=previous, guest=args.guest)),
+        json.dumps(dict(proof=proof, source=args.commit, fixture=files, previous=previous, guest=args.guest,
+                        settingsCancel=args.settings_retry, settingsPriorFailure=args.settings_prior_failure)),
         encoding="utf-8",
     )
     ns = load_allocator(ROOT, args.guest, raw, "pristinepage-tree-" + os.environ["OPENCODE_SESSION_ID"])
@@ -273,6 +361,10 @@ def run(args):
         need(set(adb("shell", "ls", "-A", "-1", guest_root).splitlines()) == set(namespaces),
              "The fresh fixture contains an unexpected root entry before instrumentation")
         recheck_target(run, ns)
+        if prior_destination:
+            verify_unchanged_settings_destination(adb, *prior_destination)
+            spend_settings_retry(raw.parent, args.settings_retry, dict(guest=args.guest, candidate=prefix,
+                abandonedDestination=prior_destination[0], authorizedDestination=guest_root))
         original_args = ["-e", "libraryFixtureOriginal", original]
         if args.expect_home:
             original_args += ["-e", "libraryExpectHome", "1"]
@@ -285,7 +377,8 @@ def run(args):
                      *((BACKUP_CASE,) if args.backup_export else ()))
         output = adb("shell", "am", "instrument", "-w", "-r", "-e", "class", ",".join(scenarios),
                      "-e", "libraryFixtureFolder", folder, *original_args,
-                     *(("-e", "librarySettingsFresh", "1") if args.settings_backup else ()), RUNNER, timeout=150)
+                     *(("-e", "librarySettingsFixture", "retained" if args.settings_retry else "fresh")
+                       if args.settings_backup else ()), RUNNER, timeout=150)
         run.path("instrumentation.txt").write_text(output, encoding="utf-8")
         passed, failed = read_results(output, scenarios)
         for relative, digest in files.items():
@@ -332,6 +425,8 @@ def run(args):
             expected_leaves = {relative.split("/", 1)[1] for relative in files if relative.startswith(f"{namespace}/")}
             need(set(adb("shell", "ls", "-A", "-1", f"{guest_root}/{namespace}").splitlines()) == expected_leaves,
                  "Instrumentation changed the namespace of the existing fixture")
+        if prior_destination:
+            verify_unchanged_settings_destination(adb, *prior_destination)
         run.save(run.path("outcomes.json"), {"passed": passed, "failed": failed, "installedSha256": hashes}, durable=True)
         print(f"LDPlayer Files grant: {len(passed)} passed, {len(failed)} failed. " + ", ".join(failed), flush=True)
         return bool(failed)
@@ -353,8 +448,10 @@ if __name__ == "__main__":
     parser.add_argument("--activation-compatibility", action="store_true")
     parser.add_argument("--probe-write", action="store_true", help="Write only in a fresh synthetic probe subdirectory")
     parser.add_argument("--backup-export", action="store_true", help="Export an isolated default library into a separately named backup child")
-    parser.add_argument("--settings-backup", action="store_true", help="Exercise real Settings publication only on a verified fresh guest")
+    parser.add_argument("--settings-backup", action="store_true", help="Exercise real Settings publication on an admitted synthetic guest")
     parser.add_argument("--settings-picker-only", action="store_true", help="Open and cancel Files from Settings on the retained synthetic guest; never select a destination")
+    parser.add_argument("--settings-retry", metavar="CANCEL_MANIFEST_SHA", help="Permit one new confirmation on the exact retained, independently canceled fixture")
+    parser.add_argument("--settings-prior-failure", nargs=2, metavar=("RUN_ID", "MANIFEST_SHA"), help="Verify the exact first pre-selection failure and its unchanged destination")
     parser.add_argument("--ocr-activation", action="store_true", help="Test scoped WorkManager wakes and ordinary synthetic save/edit; no Files fixture")
     parser.add_argument("--previous", nargs=2, metavar=("APP_APK", "TEST_APK"))
     raise SystemExit(run(parser.parse_args()))
