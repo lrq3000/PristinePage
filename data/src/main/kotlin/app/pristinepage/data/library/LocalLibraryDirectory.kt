@@ -52,6 +52,29 @@ internal class LocalLibraryDirectory(root: File, private val directorySync: Dire
 
     fun openMergeStage(generation: String) = open(mergeStagePath(generation) + "/catalog.sqlite")
 
+    /** Private grant records never cross a library export or accept a destination path from a provider. */
+    fun createFolderGrant(record: LibraryFolderGrantRecord) =
+        create(folderGrantPath(record.grantId)) { it.write(record.encode()) }
+
+    fun readFolderGrant(grantId: String): LibraryFolderGrantRecord? =
+        open(folderGrantPath(grantId))?.use { input ->
+            val bytes = ByteArray(LibraryFolderGrantRecord.MAX_BYTES)
+            var count = 0
+            while (count < bytes.size) {
+                val read = input.read(bytes, count, bytes.size - count)
+                if (read < 0) break
+                if (read == 0) throw IOException("The private folder binding could not be read")
+                count += read
+            }
+            if (input.read() != -1) throw IOException("The private folder binding is oversized")
+            LibraryFolderGrantRecord.decode(bytes.copyOf(count), grantId)
+        }
+
+    fun forceFolderGrants(grantId: String) {
+        forceParentOf(folderGrantPath(grantId))
+        forceDirectory(paths.root)
+    }
+
     fun forceMergeStage(generation: String, durableAncestor: Path) {
         val directory = mergeStagePath(generation)
         val stage = readPath("$directory/catalog.sqlite")
@@ -199,6 +222,10 @@ internal class LocalLibraryDirectory(root: File, private val directorySync: Dire
 
     private fun objectPath(id: LibraryObjectTransfer.ObjectId) = "objects/${id.sha256}"
     private fun markerPath(generation: LibraryGeneration) = "generations/${generation.id}.complete"
+    private fun folderGrantPath(grantId: String): String {
+        requireOpaqueId(grantId)
+        return "folder-grants/$grantId"
+    }
     private fun mergeStagePath(generation: String): String {
         requireOpaqueId(generation)
         return "merge-stages/$generation"

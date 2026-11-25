@@ -6,6 +6,8 @@ The Android adapter accepts only canonical primary shared-storage subdirectories
 
 The first pinned development pair passed offline app/data tests (264 and 950), both Android test compilations, and local APK identity, signer, alignment, merged permission and bundled-asset verification. The dedicated API 28 guest passed the two picker contract cases. The actual Files journey stopped before folder confirmation: its exact fixture/action predicate did not match the active system picker. No grant or library-open claim follows. The host compared the staged files after the run and verified both player and VM shutdown and exclusive usage release. The pinned local run evidence is kept outside publishable Git. The next diagnostic run reuses the retained guest and verifies its already installed predecessor.
 
+The first restart for diagnostics booted and answered targeted ADB and package manager readiness, then timed out on the immediate LDPlayer serial identity recheck before replacing either installed package. Shutdown and release passed. The runner now retries only a timed-out read of the exact owned identity once, never a positive mismatch or an uncertain install. A private grant locator is separately checksummed and bound to an opaque ID. Publication reuses an exclusive link plus directory sync and exact readback; a visible binding after failed sync cannot supply acknowledgement until a separately verified reopen. It is not yet consumed by the active selection pointer.
+
 ## Gates before activating or publishing
 
 - Matched Files folder, real returned modes, exact persisted readback, fresh catalog admission, Activity recreation, and refusal after revocation on the same approved emulator.

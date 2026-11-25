@@ -31,6 +31,14 @@ INPUTS = ("app", "data", "core", "image-android", "test-fixtures", "gradle",
           "settings.gradle.kts", "build.gradle.kts", "gradle.properties", "gradlew", "gradlew.bat", "buildSrc", "build-logic")
 
 
+def recheck_target(run, ns):
+    """Retry a deadlined identity read once; reject any observed mismatching identity immediately."""
+    try:
+        verify_target(run, ns)
+    except subprocess.TimeoutExpired:
+        verify_target(run, ns)
+
+
 def run(args):
     need(__debug__ and ROOT == Path.cwd().resolve() and not any(os.environ.get(k) for k in LOCAL_ADB_OVERRIDES),
          "Require the exact build worktree and default scoped ADB transport")
@@ -83,7 +91,7 @@ def run(args):
     print(f"Runtime evidence: {raw.relative_to(ROOT)}", flush=True)
     try:
         wait_for_allocator(run, lambda: run.prepare(args.fresh, None, args.fresh), before_claim=True)
-        verify_target(run, ns)
+        recheck_target(run, ns)
         target = [ns["ADB"], "-s", run.serial]
 
         def adb(*argv, **options):
@@ -113,7 +121,7 @@ def run(args):
             adb("push", fixture / relative, f"{guest_root}/{relative}")
             need(adb("shell", "sha256sum", f"{guest_root}/{relative}").split()[0] == digest,
                  "The synthetic Files fixture differed after staging")
-        verify_target(run, ns)
+        recheck_target(run, ns)
         output = adb("shell", "am", "instrument", "-w", "-r", "-e", "class", ",".join(CASES),
                      "-e", "libraryFixtureFolder", folder, RUNNER, timeout=150)
         run.path("instrumentation.txt").write_text(output, encoding="utf-8")
