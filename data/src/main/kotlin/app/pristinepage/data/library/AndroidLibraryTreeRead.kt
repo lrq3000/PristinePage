@@ -7,10 +7,17 @@ import android.os.CancellationSignal
 import android.os.OperationCanceledException
 import android.provider.DocumentsContract
 import app.pristinepage.core.io.transferExactBytes
+import app.pristinepage.core.pipeline.PixelSize
 import app.pristinepage.data.library.LibraryObjectTransfer.ObjectId
 import app.pristinepage.data.library.RoomLibraryCatalogReader.Companion.MAX_PORTABLE_BYTES
+import app.pristinepage.data.model.OperationError
+import app.pristinepage.data.model.OperationErrorCode
+import app.pristinepage.data.model.RepositoryFailure
 import app.pristinepage.data.model.SourceBlobId
+import app.pristinepage.data.model.SourceInspection
+import app.pristinepage.data.repository.CommittedSourceBinding
 import app.pristinepage.data.repository.DocumentCatalog
+import app.pristinepage.data.repository.ScopedCommittedOriginals
 import java.io.File
 import java.io.IOException
 import java.io.InputStream
@@ -111,15 +118,21 @@ class AndroidLibraryTreeRead(context: Context, private val scratchDirectory: Fil
     /** Rebuild a private Room catalog without importing original bytes. This detached read cannot activate a library or commit an edit. */
     suspend fun <T : Any> openWorkingCatalog(
         verified: Verified, block: suspend CoroutineScope.(DocumentCatalog) -> T,
-    ): T = useWorkingCatalog({ verified }, {}, block)
+    ): T = useWorkingCatalog({ verified }, {}) { catalog, _ -> block(catalog) }
 
-    internal suspend fun <T : Any> useSelectedWorkingCatalog(
+    /** A detached read-only original port under the same verified catalog lifetime; it cannot change the selected library. */
+    suspend fun openWorkingOriginals(
+        verified: Verified, block: suspend CoroutineScope.(ScopedCommittedOriginals) -> Unit,
+    ) = useWorkingCatalog({ verified }, {}) { _, originals -> block(originals) }
+
+    internal suspend fun <T : Any> useSelectedWorkingLibrary(
         tree: Uri, generation: LibraryGeneration, confirmSelection: suspend () -> Unit,
-        block: suspend CoroutineScope.(DocumentCatalog) -> T,
+        block: suspend CoroutineScope.(DocumentCatalog, ScopedCommittedOriginals) -> T,
     ): T = useWorkingCatalog({ attempt -> verifyExact(tree, generation, attempt) }, confirmSelection, block)
 
     private suspend fun <T : Any> useWorkingCatalog(
-        verify: suspend (File) -> Verified, confirmSelection: suspend () -> Unit, block: suspend CoroutineScope.(DocumentCatalog) -> T,
+        verify: suspend (File) -> Verified, confirmSelection: suspend () -> Unit,
+        block: suspend CoroutineScope.(DocumentCatalog, ScopedCommittedOriginals) -> T,
     ): T = withContext(Dispatchers.IO) {
         if (!WORKING.tryLock()) throw IOException("A library working catalog is already open")
         try {
@@ -158,8 +171,11 @@ class AndroidLibraryTreeRead(context: Context, private val scratchDirectory: Fil
                     }
                     confirmSelection()
                 }
+                val originals = workingOriginals(selected, snapshot, access, checkpoint)
                 mayRetire = false
-                val result = stage.useCatalog(file, access, acknowledgeClose = { mayRetire = true }, block)
+                val result = stage.useCatalog(file, access, acknowledgeClose = { mayRetire = true }) { catalog ->
+                    block(catalog, originals)
+                }
                 access.requireCurrent()
                 result
             } finally {
@@ -173,6 +189,37 @@ class AndroidLibraryTreeRead(context: Context, private val scratchDirectory: Fil
             }
         } finally {
             WORKING.unlock()
+        }
+    }
+
+    private fun workingOriginals(
+        selected: VerifiedTree, snapshot: RoomLibrarySavedCatalog.Snapshot, access: LibraryWorkingCatalogAccess, checkpoint: () -> Unit,
+    ): ScopedCommittedOriginals {
+        val sources = snapshot.sources.associateBy { checkpoint(); it.sourceId }
+        val blobs = snapshot.originals.associateBy { checkpoint(); it.sourceBlobId }
+        return ScopedCommittedOriginals { id, expected, read ->
+            access.read {
+                val source = sources[id.value] ?: throw RepositoryFailure(OperationError(
+                    OperationErrorCode.SOURCE_UNAVAILABLE, false, "source_not_found", id.value,
+                ))
+                val blob = blobs.getValue(source.sourceBlobId)
+                if (expected != null && (source != expected.source.copy(refCount = source.refCount) ||
+                        blob != expected.blob.copy(sourceCount = blob.sourceCount))) {
+                    throw RepositoryFailure(OperationError(OperationErrorCode.INTEGRITY_FAILED, false, "committed_source_binding_mismatch", id.value))
+                }
+                val inspection = SourceInspection(blob.mime, PixelSize(blob.encodedWidth, blob.encodedHeight),
+                    PixelSize(source.width, source.height), source.exifOrientation, source.profileSha256,
+                    source.conversionFingerprint, source.pixelSha256)
+                val binding = CommittedSourceBinding(id, SourceBlobId(blob.sourceBlobId), blob.byteSha256, blob.byteCount, inspection)
+                try {
+                    withVerifiedOriginal(selected, binding.sourceBlobId) { file ->
+                        access.requireLoanDelivery()
+                        read(binding, file)
+                    }
+                } catch (_: UnexpectedLibraryTip) {
+                    throw LibraryTreeUnavailable("The selected library generation changed during decode")
+                }
+            }
         }
     }
 

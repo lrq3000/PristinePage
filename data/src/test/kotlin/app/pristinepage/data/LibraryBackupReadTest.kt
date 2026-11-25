@@ -240,6 +240,16 @@ class LibraryBackupReadTest {
         assertEquals(successor, fixture.store.readTip())
     }
 
+    @Test fun checkingAnAdmittedCatalogAfterASuccessorPublishesReportsATypedTipChange() {
+        val fixture = fixture()
+        fixture.reader.requireCurrent(fixture.generation)
+        val successor = fixture.generation.copy(id = "1bbb6a89-836f-4858-811d-e73237b95422", predecessorId = fixture.generation.id)
+        fixture.store.createMarker(successor, successor.encode())
+        assertThrows(app.pristinepage.data.library.UnexpectedLibraryTip::class.java) {
+            fixture.reader.requireCurrent(fixture.generation)
+        }
+    }
+
     @Test fun changingTheRetainedMarkerDuringProjectionCannotBeAcknowledgedEvenWhenTheTipStaysExact() {
         val fixture = fixture()
         val original = fixture.generation

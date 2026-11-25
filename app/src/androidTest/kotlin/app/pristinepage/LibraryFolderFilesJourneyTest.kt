@@ -18,14 +18,19 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
+import app.pristinepage.core.pipeline.OutputSpec
+import app.pristinepage.core.pipeline.RenderPurpose
 import app.pristinepage.data.library.AndroidLibraryTreeRead
 import app.pristinepage.data.library.AndroidLibraryStartup
 import app.pristinepage.data.library.AndroidLibraryWritableFolder
 import app.pristinepage.data.library.LibraryActivation
 import app.pristinepage.data.model.DocumentId
+import app.pristinepage.data.model.OperationErrorCode
 import app.pristinepage.data.model.RepositoryFailure
 import app.pristinepage.data.model.SourceBlobId
+import app.pristinepage.data.repository.ScopedCommittedOriginals
 import app.pristinepage.image.decode.AndroidSourceInspector
+import app.pristinepage.image.decode.SourceDecoder
 import app.pristinepage.library.LibraryFolderGrantHandoff
 import app.pristinepage.library.LibraryFolderPickerContract
 import java.io.ByteArrayOutputStream
@@ -410,15 +415,90 @@ class LibraryFolderFilesJourneyTest {
             val verified = runBlocking { reader.verify(expected) }
             assertEquals(backup.receipt.libraryId, verified.libraryId)
             assertEquals(backup.receipt.generationId, verified.generationId)
+            var file: File? = null
+            val budget = ApplicationImageBudget.create(64)
+            val decoder = AndroidSourceInspector(budget)
+            val output = OutputSpec(backup.inspection.normalizedSize, RenderPurpose.PREVIEW)
+            lateinit var escaped: ScopedCommittedOriginals
+            val files = File(app.filesDir.canonicalFile, "backup-activation-witness-${UUID.randomUUID()}").apply { check(mkdir()) }
+            val startup = AndroidLibraryStartup(object : ContextWrapper(app) {
+                override fun getApplicationContext(): Context = this
+                override fun getFilesDir(): File = files
+            })
+            val loanDirectory = File(files, "verify").apply { check(mkdir()) }
+            val settings = File(files, "library-settings").apply { check(mkdir()) }
+            val grantDir = File(settings, "folder-grants").apply { check(mkdir()) }
+            val markers = File(settings, "folder-verifications").apply { check(mkdir()) }
+            val grantId = UUID.randomUUID().toString()
+            val grantBytes = checksummed("pristinepage-library-grant-v1\n$grantId\n1\n$expected\n")
+            val markerUri = DocumentsContract.buildDocumentUriUsingTree(expected, "$id/generations/${verified.generationId}.complete")
+            val generationBytes = checkNotNull(resolver.openInputStream(markerUri)).use { input ->
+                val out = ByteArrayOutputStream()
+                repeat(257) {
+                    val byte = input.read()
+                    if (byte == -1) return@use out.toByteArray()
+                    out.write(byte)
+                }
+                error("The marker exceeded its maximum extent")
+            }
+            File(grantDir, grantId).writeBytes(grantBytes)
+            File(markers, "$grantId-${verified.generationId}").writeBytes(generationBytes)
+            val pointer = File(settings, "active-library")
+            val recorded = checksummed("pristinepage-active-library-v2\n${verified.libraryId}\n2\n$grantId\n${verified.generationId}\n${sha256(grantBytes + generationBytes)}\n")
+            pointer.writeBytes(recorded)
             runBlocking {
-                reader.openWorkingCatalog(verified) { catalog ->
+                startup.useSelectedLibrary(loanDirectory) { activation, catalog, sources ->
+                    assertEquals(LibraryActivation(verified.libraryId, 2), activation)
+                    escaped = sources
                     val page = catalog.load(backup.album).pages.single()
                     assertEquals(backup.page, page.pageId)
                     assertEquals(backup.revision, page.recipeRevision)
+                    assertEquals(backup.source, page.sourceId)
+                    val producer = backup.producer
+                    val wrong = producer.copy(source = producer.source.copy(createdAt = producer.source.createdAt + 1))
+                    val refused = runCatching {
+                        sources.withOriginal(page.sourceId, wrong) { _, _ -> error("The row-only mismatch reached the original") }
+                    }.exceptionOrNull() as RepositoryFailure
+                    assertEquals(OperationErrorCode.INTEGRITY_FAILED, refused.error.code)
+                    val bound = ScopedCommittedOriginals { source, _, consume -> sources.withOriginal(source, producer, consume) }
+                    SourceDecoder(bound, decoder).decode(page.sourceId.value, output).use {
+                        assertEquals(backup.inspection, it.inspection)
+                        assertTrue(budget.usedBytes > 0)
+                        assertFalse(files.walkTopDown().any { original -> original.name == "original.bin" })
+                    }
                 }
             }
-            var file: File? = null
-            val decoder = AndroidSourceInspector(ApplicationImageBudget.create(64))
+            assertEquals(0L, budget.usedBytes)
+            assertTrue(checkNotNull(loanDirectory.list()).isEmpty())
+            assertThrows(IOException::class.java) {
+                runBlocking { escaped.withOriginal(backup.source, null) { _, _ -> error("Retired catalog offered a file") } }
+            }
+            val successor = checksummed("pristinepage-active-library-v1\n${verified.libraryId}\n3\n-\n-\n")
+            var nativeBeforeSwitch = false
+            val stale = assertThrows(RepositoryFailure::class.java) {
+                runBlocking {
+                    startup.useSelectedLibrary(loanDirectory) { _, catalog, sources ->
+                        val page = catalog.load(backup.album).pages.single()
+                        val switching = SourceDecoder(sources) { original, digest ->
+                            val decoded = decoder.decodeFile(original, digest)
+                            try {
+                                pointer.writeBytes(successor)
+                                nativeBeforeSwitch = true
+                                decoded
+                            } catch (failure: Throwable) {
+                                decoded.close()
+                                throw failure
+                            }
+                        }
+                        switching.decode(page.sourceId.value, output).use { error("Stale activation delivered native pixels") }
+                    }
+                }
+            }
+            assertTrue(nativeBeforeSwitch)
+            assertEquals("library_reconnect_required", stale.error.safeMessageKey)
+            assertArrayEquals(successor, pointer.readBytes())
+            assertEquals(0L, budget.usedBytes)
+            assertTrue(checkNotNull(loanDirectory.list()).isEmpty())
             runBlocking {
                 reader.withVerifiedOriginal(verified, backup.blob) {
                     file = it
@@ -440,16 +520,31 @@ class LibraryFolderFilesJourneyTest {
                 assertTrue(loan.isCancelled)
             }
             assertFalse(checkNotNull(file).exists())
+            file = null
+            var revokedInsideCodec = false
             assertThrows(IOException::class.java) {
                 runBlocking {
-                    reader.withVerifiedOriginal(verified, backup.blob) {
-                        file = it
-                        assertEquals(backup.inspection, decoder.inspect(it, backup.digest))
-                        resolver.releasePersistableUriPermission(expected, Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                    reader.openWorkingOriginals(verified) { sources ->
+                        val revoking = SourceDecoder(sources) { original, digest ->
+                            file = original
+                            val decoded = decoder.decodeFile(original, digest)
+                            try {
+                                assertEquals(backup.inspection, decoded.inspection)
+                                resolver.releasePersistableUriPermission(expected, Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                                revokedInsideCodec = true
+                                decoded
+                            } catch (failure: Throwable) {
+                                decoded.close()
+                                throw failure
+                            }
+                        }
+                        revoking.decode(backup.source.value, output).use { error("Revoked check delivered native pixels") }
                     }
                 }
             }
+            assertTrue(revokedInsideCodec)
             assertFalse(checkNotNull(file).exists())
+            assertEquals(0L, budget.usedBytes)
             assertThrows(IOException::class.java) {
                 runBlocking { reader.withVerifiedOriginal(verified, backup.blob) { error("Revoked backup lent an original") } }
             }

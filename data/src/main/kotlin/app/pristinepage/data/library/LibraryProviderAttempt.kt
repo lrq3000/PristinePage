@@ -12,7 +12,7 @@ internal object LibraryProviderAttempt {
     suspend fun <T> run(block: suspend () -> T): T {
         val context = currentCoroutineContext()
         context.ensureActive()
-        if (!lane.tryLock()) throw IOException("Another library folder operation is still in progress")
+        if (!lane.tryLock()) throw LibraryProviderBusy()
         try {
             context.ensureActive()
             return block().also { context.ensureActive() }
@@ -21,3 +21,5 @@ internal object LibraryProviderAttempt {
         }
     }
 }
+
+internal class LibraryProviderBusy : IOException("Another library folder operation is still in progress")

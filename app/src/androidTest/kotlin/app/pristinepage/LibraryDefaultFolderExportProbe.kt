@@ -12,15 +12,19 @@ import app.pristinepage.core.pipeline.Recipe
 import app.pristinepage.core.recipe.GeometryRecipe
 import app.pristinepage.core.recipe.RecipeCodec
 import app.pristinepage.core.recipe.SourceBinding
+import app.pristinepage.data.db.SourceBlobRow
+import app.pristinepage.data.db.SourceRow
 import app.pristinepage.data.model.IngestResult
 import app.pristinepage.data.model.DocumentId
 import app.pristinepage.data.model.PageId
 import app.pristinepage.data.model.SaveRecipeResult
 import app.pristinepage.data.model.SourceBlobId
+import app.pristinepage.data.model.SourceId
 import app.pristinepage.data.model.SourceInspection
 import app.pristinepage.data.library.LibraryFolderExportReceipt
 import app.pristinepage.data.library.LibraryFolderExportRequest
 import app.pristinepage.data.library.LibraryFolderExportState
+import app.pristinepage.data.repository.ExportSourceBinding
 import app.pristinepage.data.repository.SourceInput
 import app.pristinepage.library.LibraryFolderPickerContract
 import java.io.ByteArrayInputStream
@@ -42,8 +46,9 @@ import org.junit.Assert.*
 /** The ordinary ingest and edit services, a real Files grant, and an independent read of the completed backup. */
 internal object LibraryDefaultFolderExportProbe {
     class Backup(
-        val receipt: LibraryFolderExportReceipt, val album: DocumentId, val page: PageId, val blob: SourceBlobId,
+        val receipt: LibraryFolderExportReceipt, val album: DocumentId, val page: PageId, val source: SourceId, val blob: SourceBlobId,
         val original: ByteArray, val digest: String, val inspection: SourceInspection, val revision: Long,
+        val producer: ExportSourceBinding,
         private val originalFile: File, private val pointer: File, private val pointerBefore: ByteArray,
     ) {
         fun assertSourceUnchanged() {
@@ -159,7 +164,7 @@ internal object LibraryDefaultFolderExportProbe {
             assertEquals(listOf("pristinepage-library-v1", backup.libraryId, backup.generationId, "-"), marker.take(4))
             assertEquals(catalog.length(), marker[5].toLong())
             assertEquals(marker[6], MessageDigest.getInstance("SHA-256").digest(catalog.readBytes()).joinToString("") { "%02x".format(it.toInt() and 255) })
-            SQLiteDatabase.openDatabase(catalog.path, null, SQLiteDatabase.OPEN_READONLY).use { sql ->
+            val producer = SQLiteDatabase.openDatabase(catalog.path, null, SQLiteDatabase.OPEN_READONLY).use { sql ->
                 sql.rawQuery(
                     """SELECT r.recipeRevision, r.canonicalRecipe FROM RecipeRevision r
                         JOIN Page p ON p.pageId=r.pageId JOIN Document d ON d.documentId=p.documentId
@@ -171,6 +176,21 @@ internal object LibraryDefaultFolderExportProbe {
                     assertTrue(rows.moveToLast())
                     assertEquals(saved.recipeRevision, rows.getLong(0))
                     assertEquals(recipe, RecipeCodec.decode(rows.getBlob(1)))
+                }
+                sql.rawQuery(
+                    "SELECT s.createdAt,b.ingestTransactionId,b.createdAt FROM Source s JOIN SourceBlob b ON b.sourceBlobId=s.sourceBlobId WHERE s.sourceId=?",
+                    arrayOf(ingest.sourceId.value),
+                ).use { rows ->
+                    assertEquals(1, rows.count)
+                    assertTrue(rows.moveToFirst())
+                    ExportSourceBinding(
+                        SourceRow(ingest.sourceId.value, source.sourceBlobId.value, inspection.sourcePixelHash,
+                            inspection.normalizedSize.width, inspection.normalizedSize.height, inspection.exifOrientation,
+                            inspection.conversionFingerprint, inspection.profileSha256, 1, "READY", rows.getLong(0)),
+                        SourceBlobRow(source.sourceBlobId.value, ingest.sourceByteHash, png.size.toLong(), inspection.mime,
+                            inspection.encodedSize.width, inspection.encodedSize.height, "sources/${source.sourceBlobId.value}/original.bin",
+                            "READY", 1, rows.getString(1), rows.getLong(2)),
+                    )
                 }
             }
             assertArrayEquals(activeBefore, defaultPointer.readBytes())
@@ -197,8 +217,8 @@ internal object LibraryDefaultFolderExportProbe {
             } finally { forbidProvider.set(false) }
             assertArrayEquals(completeBefore, completion.readBytes())
             assertEquals(1, reads)
-            return Backup(backup, album, ingest.pageId, source.sourceBlobId, png, ingest.sourceByteHash, inspection,
-                saved.recipeRevision, source.file, defaultPointer, activeBefore)
+            return Backup(backup, album, ingest.pageId, ingest.sourceId, source.sourceBlobId, png, ingest.sourceByteHash, inspection,
+                saved.recipeRevision, producer, source.file, defaultPointer, activeBefore)
         }
     }
 

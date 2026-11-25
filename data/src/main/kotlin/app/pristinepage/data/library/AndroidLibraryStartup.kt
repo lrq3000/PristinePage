@@ -7,6 +7,7 @@ import app.pristinepage.data.model.OperationErrorCode
 import app.pristinepage.data.model.RepositoryFailure
 import app.pristinepage.data.model.requireOpaqueId
 import app.pristinepage.data.repository.DocumentCatalog
+import app.pristinepage.data.repository.ScopedCommittedOriginals
 import java.io.File
 import java.io.IOException
 import java.nio.file.DirectoryIteratorException
@@ -41,6 +42,15 @@ class AndroidLibraryStartup(context: Context) {
     /** Scoped metadata startup for a selected folder. No grant, selection change, provider write or original copy is made. */
     suspend fun <T : Any> useSelectedCatalog(
         scratchDirectory: File, block: suspend CoroutineScope.(LibraryActivation, DocumentCatalog) -> T,
+    ): T = useRecordedWorkingLibrary(scratchDirectory) { activation, catalog, _ -> block(activation, catalog) }
+
+    /** Admit the catalog and original loans under the same activation; finish using and close any owned results before returning. */
+    suspend fun useSelectedLibrary(
+        scratchDirectory: File, block: suspend CoroutineScope.(LibraryActivation, DocumentCatalog, ScopedCommittedOriginals) -> Unit,
+    ) = useRecordedWorkingLibrary(scratchDirectory, block)
+
+    private suspend fun <T : Any> useRecordedWorkingLibrary(
+        scratchDirectory: File, block: suspend CoroutineScope.(LibraryActivation, DocumentCatalog, ScopedCommittedOriginals) -> T,
     ): T {
         val (authority, loaded) = readSelection(allowBootstrap = false) ?: folderNotSelected()
         val selected = when (val recorded = loaded) {
@@ -56,8 +66,8 @@ class AndroidLibraryStartup(context: Context) {
             if (current != selected) reconnect()
         }
         return try {
-            reader.useSelectedWorkingCatalog(Uri.parse(selected.grant.exactUri), selected.expectedGeneration, ::confirmSelection) { catalog ->
-                block(selected.activation(), catalog)
+            reader.useSelectedWorkingLibrary(Uri.parse(selected.grant.exactUri), selected.expectedGeneration, ::confirmSelection) { catalog, originals ->
+                block(selected.activation(), catalog, originals)
             }
         } catch (_: LibraryTreeUnavailable) { reconnect() }
     }

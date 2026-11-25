@@ -81,6 +81,29 @@ class CommittedSourceDecodeTest {
         assertThrows(IllegalStateException::class.java) { checkNotNull(decoded).toPackedByteArray() }
     }
 
+    @Test fun cancellationAfterTheBorrowedFileCallbackClosesTheUndeliveredRaster() = runTest {
+        val f = Fixture()
+        var decoded: RgbImage? = null
+        var pastCallback = false
+        var delivered = false
+        val sources = ScopedCommittedOriginals { _, _, read ->
+            read(f.stored.binding(), f.file)
+            pastCallback = true
+            currentCoroutineContext().cancel()
+        }
+        val decoder = SourceDecoder(sources, SourceFileDecoder { _, _ ->
+            val image = RgbImage(3, 2, 9, f.pixels).also { decoded = it }
+            DecodedSource(f.info, image, DecodeAdmission(f.budget).admit(4, 3, 2, 1), f.hash)
+        })
+        launch {
+            decoder.decode(f.id.value, OutputSpec(PixelSize(1, 1), RenderPurpose.PREVIEW)).use { delivered = true }
+        }.join()
+        assertTrue(pastCallback)
+        assertFalse(delivered)
+        assertEquals(0L, f.budget.usedBytes)
+        assertThrows(IllegalStateException::class.java) { checkNotNull(decoded).toPackedByteArray() }
+    }
+
     private class Fixture {
         val id = SourceId(UUID.randomUUID().toString())
         val pixels = ByteArray(18) { (it + 1).toByte() }

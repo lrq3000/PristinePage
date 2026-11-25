@@ -58,7 +58,7 @@ internal class LibraryBackupRead(
         checkpoint()
         val inventory = store.generationInventory(checkpoint)
         inventory.requireExact(generation)
-        if (inventory.tip != generation) throw IOException("The verified library generation is no longer current")
+        if (inventory.tip != generation) throw UnexpectedLibraryTip()
     }
 
     fun <T> read(expectedSchema: Int, generation: LibraryGeneration? = null, expectedTip: LibraryGeneration? = null,
@@ -120,4 +120,4 @@ internal class LibraryBackupRead(
     private fun openCatalog(tip: LibraryGeneration) = store.openCatalog(tip) ?: throw IOException("Library catalog is missing")
 }
 
-internal class UnexpectedLibraryTip : IOException("Unexpected library tip during catalog admission")
+internal class UnexpectedLibraryTip : IOException("The verified library generation is no longer current")
