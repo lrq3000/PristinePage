@@ -413,7 +413,7 @@ class LibraryFolderFilesJourneyTest {
 
     private fun selectSettingsDestination(instrumentation: Instrumentation, picker: String, folder: String,
         selectFolder: Boolean = true, navigateFromRoot: Boolean = true,
-        expectedChildren: Set<String> = setOf("catalogs", "generations", "objects"), parentFolder: String? = null,
+        expectedChildren: Set<String> = setOf("catalogs", "generations", "objects"), allowExactWindowTitle: Boolean = false,
     ) {
         val affirmative = setOf("SELECT", "Select", "SÉLECTIONNER", "Sélectionner", "Use this folder", "USE THIS FOLDER", "Choose this folder")
         fun containsUnder(root: AccessibilityNodeInfo, text: String, within: String) =
@@ -421,10 +421,15 @@ class LibraryFolderFilesJourneyTest {
                 node.isVisibleToUser && node.packageName?.toString() == picker &&
                     generateSequence(node) { it.parent }.any { it.viewIdResourceName?.substringAfterLast('/') == within }
             }
-        fun atTarget(root: AccessibilityNodeInfo) =
-            containsUnder(root, folder, "dropdown_breadcrumb") &&
-                (parentFolder == null || containsUnder(root, parentFolder, "dropdown_breadcrumb")) &&
+        fun atTarget(root: AccessibilityNodeInfo): Boolean {
+            // The direct API 28 route can expose only the current folder in its header. Allow that form only for a nonce-bound test name, not a matching row in the directory listing.
+            val syntheticTitle = allowExactWindowTitle && root.findByTextInFixture(folder).any { node ->
+                node.isVisibleToUser && node.packageName?.toString() == picker && node.viewIdResourceName == "android:id/title" &&
+                    generateSequence(node) { it.parent }.none { it.viewIdResourceName?.substringAfterLast('/') == "dir_list" }
+            }
+            return (containsUnder(root, folder, "dropdown_breadcrumb") || syntheticTitle) &&
                 expectedChildren.all { containsUnder(root, it, "dir_list") }
+        }
         fun unique(root: AccessibilityNodeInfo, labels: Set<String>, parentId: String? = null): AccessibilityNodeInfo? {
             val matches = linkedSetOf<AccessibilityNodeInfo>()
             val pending = ArrayDeque<AccessibilityNodeInfo>().apply { add(root) }
@@ -580,6 +585,13 @@ class LibraryFolderFilesJourneyTest {
         val all = paths.flatMap(witness::spellings)
         val before = witness.inventory(app)
         check(all.none { it.toString() in before })
+        InstrumentationRegistry.getArguments().getString("libraryPriorIndependentFolder")?.let { old ->
+            witness.paths(old) // Reuse the same exact fixture-folder syntax guard.
+            val oldPaths = listOf(old, "$old/Library-Left", "$old/Library-Right")
+            val oldTrees = oldPaths.flatMap(witness::spellings)
+            check(old != folder && oldTrees.none { it.toString() in before }) { "An earlier synthetic picker grant needs reconciliation" }
+            witness.refuseEffectiveWrite(app, oldTrees)
+        }
         witness.requireNewRecord(app, folder)
         witness.refuseEffectiveWrite(app, all)
         val selected = ArrayList<Uri>(paths.size)
@@ -601,10 +613,10 @@ class LibraryFolderFilesJourneyTest {
                     val anchor = path == folder
                     if (anchor) {
                         selectSettingsDestination(instrumentation, picker, folder, navigateFromRoot = false,
-                            expectedChildren = setOf(witness.LEFT, witness.RIGHT))
+                            expectedChildren = paths.take(2).map { it.substringAfterLast('/') }.toSet(), allowExactWindowTitle = true)
                     } else {
                         selectSettingsDestination(instrumentation, picker, path.substringAfterLast('/'),
-                            navigateFromRoot = false, parentFolder = folder)
+                            navigateFromRoot = false, allowExactWindowTitle = true)
                     }
                     interruptionCompose.waitUntil(10_000) { result.get() != null }
                     val raw = requireNotNull(result.get())

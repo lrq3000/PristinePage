@@ -39,14 +39,13 @@ internal class LibraryIndependentRootGrants private constructor(
     }
 
     companion object {
-        const val LEFT = "Library-Left"
-        const val RIGHT = "Library-Right"
         const val AUTHORITY = "com.android.externalstorage.documents"
         private val readMode = true to false
 
         fun paths(folder: String): List<String> {
             check(folder.matches(Regex("PristinePage-tree-[0-9a-f]{12}")))
-            return listOf("$folder/$LEFT", "$folder/$RIGHT", folder)
+            val nonce = folder.substringAfterLast('-')
+            return listOf("$folder/Library-Left-$nonce", "$folder/Library-Right-$nonce", folder)
         }
 
         fun spellings(path: String): Set<Uri> = setOf("primary:Documents/$path", "home:$path")

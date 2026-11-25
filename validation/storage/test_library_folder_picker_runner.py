@@ -12,12 +12,18 @@ from unittest.mock import patch
 
 from run_library_folder_picker_ldplayer import (
     check_fixture_root, read_backup_delivery_death, recheck_target, require_independent_manifests, select_backup_case, select_backup_death_picker_case, select_independent_roots, select_provider_capacity, select_settings_picker_case, select_settings_recovery_case, select_tree_ancestry, settings_completed_destination, spend_settings_retry, verify_released_independent_guest,
-    finish_pre_marker_outcome, retry_pre_marker_checksum, verify_ancestry_cold_handoff, verify_ancestry_grant_refusal, verify_backup_death_control, verify_backup_death_intent, verify_backup_receipt_only, verify_pre_marker_handoff, verify_pre_marker_read_refusal, verify_settings_catalog, verify_settings_ocr, verify_settings_retry_evidence,
+    finish_pre_marker_outcome, independent_fixture_children, retry_pre_marker_checksum, verify_ancestry_cold_handoff, verify_ancestry_grant_refusal, verify_backup_death_control, verify_backup_death_intent, verify_backup_receipt_only, verify_pre_marker_handoff, verify_pre_marker_read_refusal, verify_settings_catalog, verify_settings_ocr, verify_settings_retry_evidence,
 )
 from run_local_ocr_guest import read_boot_serial
 
 
 class LibraryFolderPickerRunnerTest(unittest.TestCase):
+    def test_independent_fixture_children_use_the_exact_attempt_nonce(self):
+        self.assertEqual(("Library-Left-0123456789ab", "Library-Right-0123456789ab"),
+                         independent_fixture_children("PristinePage-tree-0123456789ab"))
+        with self.assertRaisesRegex(RuntimeError, "synthetic parent"):
+            independent_fixture_children("PristinePage-tree-../other")
+
     def test_independent_probe_rejects_broad_permissions_from_either_apk(self):
         require_independent_manifests(({"manifest": "E: manifest"}, {"manifest": "E: instrumentation"}))
         for name in ("READ_EXTERNAL_STORAGE", "WRITE_EXTERNAL_STORAGE", "MANAGE_EXTERNAL_STORAGE", "READ_MEDIA_IMAGES"):
