@@ -1,0 +1,150 @@
+package app.pristinepage
+
+import android.accessibilityservice.AccessibilityService
+import android.app.Instrumentation
+import android.content.Intent
+import android.graphics.Rect
+import android.net.Uri
+import android.os.SystemClock
+import android.provider.DocumentsContract
+import android.view.InputDevice
+import android.view.MotionEvent
+import android.view.accessibility.AccessibilityNodeInfo
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.ui.test.junit4.createAndroidComposeRule
+import androidx.test.ext.junit.runners.AndroidJUnit4
+import androidx.test.platform.app.InstrumentationRegistry
+import app.pristinepage.data.library.AndroidLibraryTreeRead
+import app.pristinepage.library.LibraryFolderGrantHandoff
+import app.pristinepage.library.LibraryFolderPickerContract
+import java.io.File
+import java.io.IOException
+import java.util.UUID
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicReference
+import kotlinx.coroutines.runBlocking
+import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertThrows
+import org.junit.Assert.assertTrue
+import org.junit.Rule
+import org.junit.Test
+import org.junit.runner.RunWith
+
+/** System Files, actual primary-storage fixture and the exact Android grant. Detached verification must not activate or modify it. */
+@RunWith(AndroidJUnit4::class)
+class LibraryFolderFilesJourneyTest {
+    @get:Rule val compose = createAndroidComposeRule<MainActivity>()
+
+    @Test fun actualFilesGrantReopensAfterActivityRecreationAndRevocationFailsClosed() {
+        val instrumentation = InstrumentationRegistry.getInstrumentation()
+        val app = instrumentation.targetContext.applicationContext
+        val folder = InstrumentationRegistry.getArguments().getString("libraryFixtureFolder")
+            ?.takeIf { it.matches(Regex("PristinePage-tree-[0-9a-f]{12}")) } ?: error("No exact synthetic folder was staged")
+        val expected = DocumentsContract.buildTreeDocumentUri("com.android.externalstorage.documents", "primary:Documents/$folder")
+        val existing = { app.contentResolver.persistedUriPermissions.associate { it.uri.toString() to (it.isReadPermission to it.isWritePermission) } }
+        val before = existing()
+        assertFalse(before.containsKey(expected.toString()))
+        val scratch = File(app.filesDir, "tree-read-${UUID.randomUUID()}").apply { check(mkdir()) }
+        val platform = LibraryFolderPickerContract()
+        val result = AtomicReference<LibraryFolderPickerContract.Picked?>()
+        val receipt = CountDownLatch(1)
+        val registration = compose.runOnUiThread {
+            val activity = compose.activity
+            val intent = platform.createIntent(activity, Unit).putExtra(DocumentsContract.EXTRA_INITIAL_URI,
+                DocumentsContract.buildDocumentUri(requireNotNull(expected.authority), DocumentsContract.getTreeDocumentId(expected)))
+            val launcher = activity.activityResultRegistry.register("library-files-native-witness", ActivityResultContracts.StartActivityForResult()) {
+                result.set(platform.parseResult(it.resultCode, it.data) as? LibraryFolderPickerContract.Picked)
+                receipt.countDown()
+            }
+            launcher.launch(intent)
+            (requireNotNull(intent.component).packageName) to launcher
+        }
+        try {
+            val picker = registration.first
+            val root = await(instrumentation, picker) { it.hasText(folder) || it.find("Show roots") != null }
+            if (!root.hasText(folder)) {
+                tap(instrumentation, root.find("Show roots") ?: error("Files did not show its roots"))
+                val drawer = await(instrumentation, picker) { it.find("Internal storage") != null }
+                tap(instrumentation, drawer.find("Internal storage") ?: error("Internal shared storage is not listed"))
+                val documents = await(instrumentation, picker) { it.find("Documents") != null }
+                tap(instrumentation, documents.find("Documents") ?: error("Documents is not listed"))
+                val parent = await(instrumentation, picker) { it.find(folder) != null }
+                tap(instrumentation, parent.find(folder) ?: error("The exact synthetic directory is not listed"))
+            }
+            val labels = setOf("SELECT", "Select", "Use this folder", "USE THIS FOLDER", "Choose this folder")
+            val choice = await(instrumentation, picker) { it.hasText(folder) && (it.hasText("catalogs") || it.hasText("generations")) &&
+                labels.any { name -> it.find(name) != null } }
+            val button = labels.firstNotNullOfOrNull { choice.find(it) } ?: error("Files did not expose a folder confirmation")
+            tap(instrumentation, button)
+            if (!receipt.await(4, TimeUnit.SECONDS)) {
+                val confirm = await(instrumentation, picker) { it.hasText("Allow") && it.find("Allow") != null }
+                tap(instrumentation, confirm.find("Allow") ?: error("No Files confirmation"))
+            }
+            assertTrue("Files did not return a selection", receipt.await(10, TimeUnit.SECONDS))
+            val picked = requireNotNull(result.get())
+            assertEquals(expected.toString(), picked.uri.toString())
+            val uri = LibraryFolderGrantHandoff(app).persistRead(picked)
+            assertEquals(before + (expected.toString() to (true to false)), existing())
+            val first = runBlocking { AndroidLibraryTreeRead(app, scratch).verify(uri) }
+            assertEquals("9e940d7b-76c7-45ea-b5e4-0ad86f26ea13", first.libraryId)
+            assertEquals("25c49d9b-02d8-418f-b982-154980d89cfb", first.generationId)
+            assertEquals(1, first.albums)
+            assertEquals(0, first.scans)
+            val different = DocumentsContract.buildTreeDocumentUri(requireNotNull(uri.authority), "primary:Documents/${folder}-different")
+            val wrongRoot = assertThrows(IOException::class.java) {
+                runBlocking { AndroidLibraryTreeRead(app, scratch).verify(different, first) }
+            }
+            assertEquals("The verified library belongs to a different selected folder", wrongRoot.message)
+            compose.runOnUiThread { registration.second.unregister() }
+            compose.activityRule.scenario.recreate()
+            val again = runBlocking { AndroidLibraryTreeRead(app, scratch).verify(Uri.parse(uri.toString()), first) }
+            assertEquals(first.generationId, again.generationId)
+            app.contentResolver.releasePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            assertEquals(before, existing())
+            assertThrows(IOException::class.java) { runBlocking { AndroidLibraryTreeRead(app, scratch).verify(uri, first) } }
+        } finally {
+            if (existing()[expected.toString()] == (true to false)) {
+                app.contentResolver.releasePersistableUriPermission(expected, Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            }
+            val activePackage = instrumentation.uiAutomation.rootInActiveWindow?.packageName?.toString()
+            if (activePackage == registration.first) instrumentalBack(instrumentation)
+        }
+    }
+
+    private fun await(instrumentation: Instrumentation, picker: String, predicate: (AccessibilityNodeInfo) -> Boolean): AccessibilityNodeInfo {
+        val deadline = SystemClock.uptimeMillis() + 12_000
+        while (SystemClock.uptimeMillis() < deadline) {
+            val root = instrumentation.uiAutomation.rootInActiveWindow
+            if (root?.packageName?.toString() == picker && predicate(root)) return root
+            SystemClock.sleep(125)
+        }
+        error("Files did not reach the expected verified screen")
+    }
+
+    private fun AccessibilityNodeInfo.hasText(value: String) = find(value) != null
+
+    private fun AccessibilityNodeInfo.find(value: String): AccessibilityNodeInfo? {
+        if (isVisibleToUser && (text?.toString() == value || contentDescription?.toString() == value)) return this
+        for (i in 0 until childCount) getChild(i)?.find(value)?.let { return it }
+        return null
+    }
+
+    private fun tap(instrumentation: Instrumentation, node: AccessibilityNodeInfo) {
+        val bounds = Rect().also(node::getBoundsInScreen)
+        check(node.isEnabled && node.isVisibleToUser && !bounds.isEmpty)
+        val time = SystemClock.uptimeMillis()
+        for (action in listOf(MotionEvent.ACTION_DOWN, MotionEvent.ACTION_UP)) {
+            val event = MotionEvent.obtain(time, SystemClock.uptimeMillis(), action, bounds.exactCenterX(), bounds.exactCenterY(), 0)
+            try {
+                event.source = InputDevice.SOURCE_TOUCHSCREEN
+                check(instrumentation.uiAutomation.injectInputEvent(event, true))
+            } finally { event.recycle() }
+        }
+    }
+
+    private fun instrumentalBack(instrumentation: Instrumentation) {
+        instrumentation.uiAutomation.performGlobalAction(AccessibilityService.GLOBAL_ACTION_BACK)
+    }
+}
