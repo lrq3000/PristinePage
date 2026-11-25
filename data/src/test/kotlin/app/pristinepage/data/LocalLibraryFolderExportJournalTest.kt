@@ -18,6 +18,9 @@ import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
 import kotlin.test.assertNull
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.ensureActive
 import org.junit.Rule
 import org.junit.rules.TemporaryFolder
 
@@ -61,6 +64,25 @@ class LocalLibraryFolderExportJournalTest {
         assertContentEquals(observed, File(root, "export.complete").readBytes())
         permitSync = true
         assertEquals(Phase.COMPLETED, journal.reopen(intent.operationId)?.phase)
+    }
+
+    @Test fun cancellationWhileForcingAnAcknowledgmentStageDoesNotHideTheCompletedBackup() {
+        val (root, intent) = staged()
+        LocalLibraryFolderExportJournal(root, DirectorySync { true }).start(intent).recordCompletion()
+        val job = Job()
+        var publishing = false
+        val journal = LocalLibraryFolderExportJournal(root, DirectorySync {
+            if (root.resolve("export.ack").isFile) publishing = true
+            true
+        }) {
+            if (publishing || root.list().orEmpty().any { it.endsWith(".part") }) job.cancel()
+            job.ensureActive()
+        }
+
+        assertFailsWith<CancellationException> { journal.acknowledge(intent) }
+        val reopened = LocalLibraryFolderExportJournal(root, DirectorySync { true })
+        assertEquals(Phase.ACKNOWLEDGED, reopened.reopen(intent.operationId)?.phase)
+        assertContentEquals(intent.completion(), root.resolve("export.complete").readBytes())
     }
 
     @Test fun corruptOrOutOfOrderReceiptNeverLooksLikeAnUnspentOperation() {

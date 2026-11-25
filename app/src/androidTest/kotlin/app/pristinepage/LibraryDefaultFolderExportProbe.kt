@@ -2,6 +2,8 @@ package app.pristinepage
 
 import android.content.Context
 import android.content.ContextWrapper
+import android.content.ContentResolver
+import android.content.Intent
 import android.database.sqlite.SQLiteDatabase
 import android.net.Uri
 import android.provider.DocumentsContract
@@ -17,12 +19,24 @@ import app.pristinepage.data.model.SaveRecipeResult
 import app.pristinepage.data.model.SourceBlobId
 import app.pristinepage.data.model.SourceInspection
 import app.pristinepage.data.library.LibraryFolderExportReceipt
+import app.pristinepage.data.library.LibraryFolderExportRequest
+import app.pristinepage.data.library.LibraryFolderExportState
 import app.pristinepage.data.repository.SourceInput
+import app.pristinepage.library.LibraryFolderPickerContract
 import java.io.ByteArrayInputStream
 import java.io.File
 import java.io.IOException
 import java.security.MessageDigest
 import java.util.UUID
+import java.util.concurrent.atomic.AtomicBoolean
+import kotlin.coroutines.CoroutineContext
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineDispatcher
+import kotlinx.coroutines.CoroutineStart
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.async
+import kotlinx.coroutines.coroutineScope
 import org.junit.Assert.*
 
 /** The ordinary ingest and edit services, a real Files grant, and an independent read of the completed backup. */
@@ -38,14 +52,20 @@ internal object LibraryDefaultFolderExportProbe {
         }
     }
 
-    suspend fun verify(app: Context, tree: Uri, persistWrite: () -> Uri): Backup {
+    suspend fun verify(app: Context, picked: LibraryFolderPickerContract.Picked, persistWrite: () -> Uri): Backup {
+        val tree = picked.uri
         val isolated = File(app.filesDir.canonicalFile, "library-export-source-${UUID.randomUUID()}").apply { check(mkdir()) }
         val files = File(isolated, "files").apply { check(mkdir()) }
         val db = File(isolated, "databases").apply { check(mkdir()) }
+        val forbidProvider = AtomicBoolean()
         val context = object : ContextWrapper(app) {
             override fun getApplicationContext(): Context = this
             override fun getFilesDir(): File = files
             override fun getDatabasePath(name: String): File = File(db, name)
+            override fun getContentResolver(): ContentResolver {
+                check(!forbidProvider.get()) { "Refused or historical export accessed the provider" }
+                return app.contentResolver
+            }
         }
         val png = Base64.decode("iVBORw0KGgoAAAANSUhEUgAAAAMAAAACCAIAAAASFvFNAAAAGElEQVR4nGP4z8DAAME2NjYVFRX///8HAD+JCBdips5AAAAAAElFTkSuQmCC", Base64.NO_WRAP)
         val reference = "content://fixture.documents/library-export-original"
@@ -66,12 +86,56 @@ internal object LibraryDefaultFolderExportProbe {
             val saved = store.documents.saveRecipe(ingest.pageId, 1, recipe) as SaveRecipeResult.Saved
             val defaultPointer = File(files, "library-settings/active-library")
             val activeBefore = defaultPointer.readBytes()
-            try {
-                store.exportLibraryTo(tree)
-                fail("Export used a read-only grant")
-            } catch (_: IOException) { /* Do not proceed until this fixture has the exact write grant. */ }
+            val operation = UUID.randomUUID().toString()
+            val modes = if (picked.grant.returnedWrite) 3 else 1
+            val attempt = files.resolve("library-out-$operation")
+            val completion = attempt.resolve("export.complete")
+            fun grants() = app.contentResolver.persistedUriPermissions.associate { it.uri.toString() to (it.isReadPermission to it.isWritePermission) }
+            val parent = DocumentsContract.getTreeDocumentId(tree)
+            fun destinationNames(): Set<String> = checkNotNull(app.contentResolver.query(
+                DocumentsContract.buildChildDocumentsUriUsingTree(tree, parent),
+                arrayOf(DocumentsContract.Document.COLUMN_DISPLAY_NAME), null, null, null,
+            )).use { cursor -> buildSet { while (cursor.moveToNext()) add(cursor.getString(0)) } }
+            fun noAttempt() = assertTrue(files.listFiles()!!.none { it.name.startsWith("library-out-") })
+            val namesBefore = destinationNames()
+            val readGrants = grants()
+            val bindResult = { LibraryFolderExportRequest.bind(operation, graph.activation, tree, modes) }
+            refused("The selected backup folder did not return writable local access") {
+                LibraryFolderExportRequest.bind(operation, graph.activation, tree, Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            }
+            refused("The exact library folder is not writable") { store.exportLibraryTo(bindResult()) }
+            assertEquals(readGrants, grants())
+            assertEquals(namesBefore, destinationNames())
+            noAttempt()
             assertEquals(tree, persistWrite())
-            val backup = store.exportLibraryTo(tree)
+            val writeGrants = grants()
+            val stale = LibraryFolderExportRequest.bind(operation, graph.activation.copy(number = graph.activation.number + 1), tree, modes)
+            forbidProvider.set(true)
+            try { refused("The backup no longer belongs to the selected default library") { store.exportLibraryTo(stale) } }
+            finally { forbidProvider.set(false) }
+            assertEquals(writeGrants, grants())
+            assertEquals(namesBefore, destinationNames())
+            noAttempt()
+
+            // Run the real Room/provider publication. Cancel only the dispatch back to the caller after the private completion is visible.
+            val withheld = AtomicBoolean()
+            val delivery = object : CoroutineDispatcher() {
+                override fun dispatch(context: CoroutineContext, block: Runnable) {
+                    if (completion.isFile && withheld.compareAndSet(false, true)) checkNotNull(context[Job]).cancel()
+                    Dispatchers.Default.dispatch(context, block)
+                }
+            }
+            coroutineScope {
+                val result = async(delivery, start = CoroutineStart.UNDISPATCHED) {
+                    store.exportLibraryTo(bindResult())
+                    fail("The canceled caller received a successful export")
+                }
+                try { result.await(); fail("The export delivery was not canceled") }
+                catch (_: CancellationException) { assertTrue(withheld.get()) }
+            }
+            val recovered = store.inspectLibraryExport(operation, graph.activation) as LibraryFolderExportState.Completed
+            val backup = recovered.receipt
+            assertEquals(operation, backup.operationId)
             assertTrue(backup.folderName.matches(Regex("PristinePage-backup-[0-9a-f-]{36}")))
             val root = "${DocumentsContract.getTreeDocumentId(tree)}/${backup.folderName}"
             fun document(path: String) = DocumentsContract.buildDocumentUriUsingTree(tree, "$root/$path")
@@ -112,15 +176,34 @@ internal object LibraryDefaultFolderExportProbe {
             assertArrayEquals(activeBefore, defaultPointer.readBytes())
             assertArrayEquals(png, source.file.readBytes())
             assertEquals(saved.recipeHash, store.editablePages.load(album, ingest.pageId).recipeHash)
-            val attempt = files.listFiles().orEmpty().single { it.name.startsWith("library-out-") }
+            assertEquals(attempt, files.listFiles().orEmpty().single { it.name.startsWith("library-out-") })
             assertTrue(File(attempt, "export.intent").isFile)
-            assertEquals(
-                "pristinepage-library-export-complete-v1\n${backup.folderName}\n${marker.joinToString("\n")}",
-                File(attempt, "export.complete").readText(Charsets.US_ASCII),
-            )
+            val completeBefore = completion.readBytes()
+            assertFalse(File(attempt, "export.ack").exists())
+            forbidProvider.set(true)
+            try {
+                refused("This backup operation cannot be repeated") { store.exportLibraryTo(bindResult()) }
+            } finally { forbidProvider.set(false) }
+            assertEquals(namesBefore + backup.folderName, destinationNames())
+            assertEquals(writeGrants, grants())
+            app.contentResolver.releasePersistableUriPermission(tree, Intent.FLAG_GRANT_WRITE_URI_PERMISSION)
+            assertFalse(app.contentResolver.persistedUriPermissions.any { it.uri == tree && it.isWritePermission })
+            forbidProvider.set(true)
+            try {
+                assertEquals(recovered, store.inspectLibraryExport(operation, graph.activation))
+                store.acknowledgeLibraryExport(backup, graph.activation)
+                assertEquals(LibraryFolderExportState.Acknowledged(backup), store.inspectLibraryExport(operation, graph.activation))
+                store.acknowledgeLibraryExport(backup, graph.activation)
+            } finally { forbidProvider.set(false) }
+            assertArrayEquals(completeBefore, completion.readBytes())
             assertEquals(1, reads)
             return Backup(backup, album, ingest.pageId, source.sourceBlobId, png, ingest.sourceByteHash, inspection,
                 saved.recipeRevision, source.file, defaultPointer, activeBefore)
         }
+    }
+
+    private suspend fun refused(expected: String, block: suspend () -> Unit) {
+        try { block(); fail("The backup refusal did not run") }
+        catch (failure: IOException) { assertEquals(expected, failure.message) }
     }
 }

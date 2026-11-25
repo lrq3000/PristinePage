@@ -290,7 +290,7 @@ class LibraryFolderFilesJourneyTest {
                 assertThrows(IOException::class.java) { runBlocking { destination.availableBytes(uri) } }
             } else if (exportBackup) runCatching {
                 val flag = Intent.FLAG_GRANT_WRITE_URI_PERMISSION
-                val backup = try { runBlocking { LibraryDefaultFolderExportProbe.verify(app, uri) { handoff.persistWrite(picked) } } } finally {
+                val backup = try { runBlocking { LibraryDefaultFolderExportProbe.verify(app, picked) { handoff.persistWrite(picked) } } } finally {
                     if (existing()[uri.toString()]?.second == true) app.contentResolver.releasePersistableUriPermission(uri, flag)
                 }
                 try { reopenExportedChild(app, instrumentation, uri, backup, scratch) }

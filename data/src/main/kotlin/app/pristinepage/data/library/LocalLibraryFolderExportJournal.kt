@@ -69,8 +69,11 @@ internal class LocalLibraryFolderExportJournal(
         checkpoint()
         val requiresStage = record != ExportRecord.ACKNOWLEDGED
         directory.createExportRecord(record, bytes) {
-            if (requiresStage) directory.verifyExportStage(intent.generation, checkpoint)
-            checkpoint()
+            // After admitting the private acknowledgment, do not interrupt its bounded exclusive-link write between the forced stage and directory sync. Cancellation is still observed on readback.
+            if (requiresStage) {
+                directory.verifyExportStage(intent.generation, checkpoint)
+                checkpoint()
+            }
         }
         if (reopen(intent.operationId) != Observation(intent, phase)) throw IOException("The private backup record was not acknowledged")
         if (requiresStage) directory.verifyExportStage(intent.generation, checkpoint)

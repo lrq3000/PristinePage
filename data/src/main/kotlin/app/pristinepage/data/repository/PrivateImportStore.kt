@@ -16,6 +16,9 @@ import app.pristinepage.data.files.SourceFiles
 import app.pristinepage.data.files.SourceInspector
 import app.pristinepage.data.library.LibraryFolderExportReceipt
 import app.pristinepage.data.library.RoomLibraryFolderExport
+import app.pristinepage.data.library.LibraryActivation
+import app.pristinepage.data.library.LibraryFolderExportRequest
+import app.pristinepage.data.library.LibraryFolderExportState
 import app.pristinepage.data.model.ExportSnapshot
 import app.pristinepage.data.model.JobId
 import app.pristinepage.data.model.OperationError
@@ -56,8 +59,15 @@ class PrivateImportStore private constructor(
     override fun close() = exportLifetime.close()
 
     /** Caller must have obtained the exact writable Files capability for an explicit backup. Does not change the active location. */
-    suspend fun exportLibraryTo(destination: Uri): LibraryFolderExportReceipt =
-        exportLifetime.retainLibraryBackup { RoomLibraryFolderExport(context, database, root).write(destination) }
+    suspend fun exportLibraryTo(request: LibraryFolderExportRequest): LibraryFolderExportReceipt =
+        exportLifetime.retainLibraryBackup { RoomLibraryFolderExport(context, database, root).write(request) }
+
+    /** Recovery observes only the private result of the exact operation; never reopens the provider for a write. */
+    suspend fun inspectLibraryExport(operationId: String, issuedAt: LibraryActivation): LibraryFolderExportState =
+        exportLifetime.retainLibraryBackup { RoomLibraryFolderExport(context, database, root).inspect(operationId, issuedAt) }
+
+    suspend fun acknowledgeLibraryExport(receipt: LibraryFolderExportReceipt, issuedAt: LibraryActivation): Unit =
+        exportLifetime.retainLibraryBackup { RoomLibraryFolderExport(context, database, root).acknowledge(receipt, issuedAt) }
 
     /** Pair the readonly metadata reader with the issuing store's exact database and retirement boundary. */
     internal class SourceMetadataComposition private constructor(store: PrivateImportStore) {
