@@ -2,6 +2,7 @@ package app.pristinepage
 
 import android.accessibilityservice.AccessibilityService
 import android.app.Instrumentation
+import android.content.ContentResolver
 import android.content.Intent
 import android.graphics.Rect
 import android.net.Uri
@@ -41,7 +42,13 @@ import org.junit.runner.RunWith
 class LibraryFolderFilesJourneyTest {
     @get:Rule val compose = createAndroidComposeRule<MainActivity>()
 
-    @Test fun actualFilesGrantReopensAfterActivityRecreationAndRevocationFailsClosed() {
+    @Test fun actualFilesGrantReopensAfterActivityRecreationAndRevocationFailsClosed() = verifyJourney()
+
+    @Test fun exactFilesTreeExposesSyncableDirectoryDescriptors() = verifyJourney { resolver, tree ->
+        LibraryProviderDirectoryProbe.verify(resolver, tree)
+    }
+
+    private fun verifyJourney(probe: ((ContentResolver, Uri) -> Unit)? = null) {
         val instrumentation = InstrumentationRegistry.getInstrumentation()
         val app = instrumentation.targetContext.applicationContext
         val folder = InstrumentationRegistry.getArguments().getString("libraryFixtureFolder")
@@ -55,7 +62,8 @@ class LibraryFolderFilesJourneyTest {
         val existing = { app.contentResolver.persistedUriPermissions.associate { it.uri.toString() to (it.isReadPermission to it.isWritePermission) } }
         val before = existing()
         assertFalse(before.keys.any { it in exactFixtureTrees })
-        val scratch = File(app.filesDir, "tree-read-${UUID.randomUUID()}").apply { check(mkdir()) }
+        // API 28 may expose filesDir through /data/user/0 rather than the canonical app-owned storage path.
+        val scratch = File(app.filesDir.canonicalFile, "tree-read-${UUID.randomUUID()}").apply { check(mkdir()) }
         val platform = LibraryFolderPickerContract()
         val result = AtomicReference<ActivityResult>()
         val receipt = CountDownLatch(1)
@@ -122,6 +130,7 @@ class LibraryFolderFilesJourneyTest {
                 }
                 assertEquals(0, unrelated.size())
             }
+            val observation = probe?.let { runCatching { it(app.contentResolver, uri) } }
             app.contentResolver.releasePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
             assertEquals(before, existing())
             assertThrows(IOException::class.java) { runBlocking { AndroidLibraryTreeRead(app, scratch).verify(uri, first) } }
@@ -132,6 +141,7 @@ class LibraryFolderFilesJourneyTest {
                 }
                 assertEquals(0, afterRevocation.size())
             }
+            observation?.getOrThrow()
         } finally {
             for (fixtureTree in exactFixtureTrees) {
                 if (existing()[fixtureTree] == (true to false)) {

@@ -22,6 +22,7 @@ from run_local_ocr_guest import (
 
 FILES_CASE = ("app.pristinepage.LibraryFolderFilesJourneyTest"
               "#actualFilesGrantReopensAfterActivityRecreationAndRevocationFailsClosed")
+DESCRIPTOR_CASE = "app.pristinepage.LibraryFolderFilesJourneyTest#exactFilesTreeExposesSyncableDirectoryDescriptors"
 CASES = (
     "app.pristinepage.LibraryFolderPickerContractTest#retainsTheActualEncodedTreeAndBothReturnedModes",
     "app.pristinepage.LibraryFolderPickerContractTest#rejectsDocumentUrisAndCancelledOrNonpersistentSelections",
@@ -128,10 +129,11 @@ def run(args):
         if args.with_scan:
             original, = (digest for relative, digest in files.items() if relative.startswith("objects/"))
             original_args = ["-e", "libraryFixtureOriginal", original]
-        output = adb("shell", "am", "instrument", "-w", "-r", "-e", "class", ",".join(CASES),
+        scenarios = (*CASES, DESCRIPTOR_CASE) if args.probe_directory else CASES
+        output = adb("shell", "am", "instrument", "-w", "-r", "-e", "class", ",".join(scenarios),
                      "-e", "libraryFixtureFolder", folder, *original_args, RUNNER, timeout=150)
         run.path("instrumentation.txt").write_text(output, encoding="utf-8")
-        passed, failed = read_results(output, CASES)
+        passed, failed = read_results(output, scenarios)
         for relative, digest in files.items():
             need(adb("shell", "sha256sum", f"{guest_root}/{relative}").split()[0] == digest,
                  "The detached read changed the external Files fixture")
@@ -149,5 +151,6 @@ if __name__ == "__main__":
         parser.add_argument(field)
     parser.add_argument("--fresh", action="store_true")
     parser.add_argument("--with-scan", action="store_true")
+    parser.add_argument("--probe-directory", action="store_true")
     parser.add_argument("--previous", nargs=2, metavar=("APP_APK", "TEST_APK"))
     raise SystemExit(run(parser.parse_args()))
