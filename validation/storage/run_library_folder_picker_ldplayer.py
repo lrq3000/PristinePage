@@ -65,6 +65,8 @@ SETTINGS_BACKUP_CASE = "app.pristinepage.LibraryFolderFilesJourneyTest#settingsP
 SETTINGS_PICKER_CASE = "app.pristinepage.LibraryFolderFilesJourneyTest#settingsOpensAndCancelsFilesWithoutStartingABackup"
 SETTINGS_RECOVERY_CASE = "app.pristinepage.LibraryFolderFilesJourneyTest#coldSettingsRecoversTheExactCompletedBackupWithoutWriting"
 SETTINGS_WITNESS_FILE = "files/library-settings-native-witness"
+SETTINGS_COMPLETED_MANIFEST = "cee6ac3fd210d2b36c64dff1b534830368b2677e5ea5b36b1555dc2a15c0029a"
+UUID_TEXT = r"[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}"
 BACKUP_ORIGINAL = "ebd602840377a3b3cf763cb6828fee67861ff77c444e8fe5894457ef6d99a24d"
 OCR_ACTIVATION_CASES = tuple(f"app.pristinepage.ocr.OcrWorkManagerIntegrationTest#{method}" for method in (
     "sameActivationKeepsTheLiveWakeButAnotherActivationDoesNotShareIt",
@@ -234,21 +236,27 @@ def verify_settings_ocr(db, expected):
 def settings_completed_destination(raw, digest, guest, previous):
     anchor = settings_run_anchors(raw, digest)
     artifacts = json.loads(anchor("artifacts.json"))
-    need(artifacts["guest"] == guest and
+    need(artifacts["guest"] == guest and {package: artifacts["proof"][package]["sha256"] for package in previous} == previous and
          json.loads(anchor("outcomes.json")) == {"passed": [SETTINGS_BACKUP_CASE], "failed": [], "installedSha256": previous},
          "No exact completed Settings backup on the admitted synthetic guest")
-    ident = r"[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}"
+    need(read_results(anchor("instrumentation.txt"), (SETTINGS_BACKUP_CASE,)) == ([SETTINGS_BACKUP_CASE], []),
+         "Instrumentation did not pass the exact Settings publication")
+    claim = json.loads(anchor("claim.json"))
+    proof = json.loads((raw / f"{raw.name}-final-manifest.json").read_bytes())
+    need(claim["name"] == guest and claim["generation"] == proof["generation"] and claim["state"] == "running" and
+         claim["created_by_agent"] is True and claim["purpose"] == "pristinepage-library-app-tree" and claim["api"] == 28 and
+         len(claim["runtime_processes"]) == 2, "The original Settings execution has no exact synthetic guest claim")
     calls = [json.loads(line) for line in anchor("commands.jsonl").splitlines()]
-    marker_path = rf"(/sdcard/Documents/PristinePage-tree-[a-f0-9]{{12}}/PristinePage-backup-({ident}))/generations/\2\.complete"
-    markers = [(match, call["stdout"]) for call in calls if call["exit"] == 0 and call["argv"][-3:-1] == ["shell", "cat"]
+    marker_path = rf"(/sdcard/Documents/PristinePage-tree-[a-f0-9]{{12}}/PristinePage-backup-({UUID_TEXT}))/generations/\2\.complete"
+    markers = [(match, call["stdout"]) for call in calls if call["argv"][-3:-1] == ["shell", "cat"] and call.get("exit") == 0
                if (match := re.fullmatch(marker_path, call["argv"][-1]))]
-    witnesses = [call["stdout"] for call in calls if call["exit"] == 0 and
-                 call["argv"][-5:] == ["shell", "run-as", APP, "cat", SETTINGS_WITNESS_FILE]]
+    witnesses = [call["stdout"] for call in calls if
+                 call["argv"][-5:] == ["shell", "run-as", APP, "cat", SETTINGS_WITNESS_FILE] and call.get("exit") == 0]
     need(len(markers) == len(witnesses) == 1, "Exactly one anchored backup marker and private witness are required")
     (match, marker_text), witness = markers[0], witnesses[0]
     backup, generation = match.groups()
     marker = marker_text.splitlines()
-    need(len(marker) == 7 and marker[0] == "pristinepage-library-v1" and re.fullmatch(ident, marker[1]) and
+    need(len(marker) == 7 and marker[0] == "pristinepage-library-v1" and re.fullmatch(UUID_TEXT, marker[1]) and
          marker[2:4] == [generation, "-"] and re.fullmatch(r"[1-9][0-9]{0,5}", marker[4]) and
          re.fullmatch(r"[1-9][0-9]{0,6}", marker[5]) and 0 < int(marker[5]) <= 2 * 1024 * 1024 and
          re.fullmatch(r"[a-f0-9]{64}", marker[6]), "The retained backup marker is invalid")
@@ -257,7 +265,7 @@ def settings_completed_destination(raw, digest, guest, previous):
     catalog = raw / "settings-closed-catalog.sqlite"
     need(catalog.stat().st_size == int(marker[5]) and sha(catalog) == marker[6],
          "The retained catalog does not match the anchored closed-folder readback")
-    return backup, generation, marker_text, artifacts["fixture"], witness
+    return (backup, generation, marker_text, artifacts["fixture"], witness), claim
 
 
 def verify_completed_destination(adb, backup, generation, marker_text, fixture, witness):
@@ -276,6 +284,43 @@ def verify_completed_destination(adb, backup, generation, marker_text, fixture, 
         path = f"{backup}/{relative}"
         need(adb("shell", "sha256sum", path).split() == [digest, path], "Completed backup bytes changed")
     need(adb("shell", "run-as", APP, "cat", SETTINGS_WITNESS_FILE) == witness, "The private publication witness changed")
+
+
+def verify_completed_guest(original, current):
+    stable = ("name", "installation", "index", "created", "worktree", "purpose")
+    need(all(current.get(k) == original[k] for k in stable) and current.get("api") == 28 and
+         current.get("created_by_agent") is True and
+         any(entry["generation"] == original["generation"] and entry["shutdown_processes"] == original["runtime_processes"]
+             for entry in current["ownership_history"]), "The current allocator claim is not the retained publication guest")
+
+
+def settings_private_baseline(adb):
+    """Observe bounded evidence without starting the app or deriving authority from a prior record."""
+    def private(*arguments):
+        return adb("shell", "run-as", APP, *arguments)
+
+    leaves = [leaf for leaf in private("ls", "-A", "-1", "files").splitlines()
+              if leaf.startswith("library-out-") or leaf == "library-backup-acknowledged"]
+    need(len(leaves) == 1 and re.fullmatch(rf"library-out-{UUID_TEXT}", leaves[0]),
+         "Expected one retained active backup attempt and no archive")
+    attempt = f"files/{leaves[0]}"
+    need(private("stat", "-c", "%F", attempt).strip() == "directory", "The backup attempt is not an exact directory")
+    need(private("stat", "-c", "%F", "files/library-settings").strip() == "directory", "The active pointer parent changed")
+    records = private("ls", "-A", "-1", attempt).splitlines()
+    need(2 <= len(records) <= 16 and len(set(records)) == len(records) and
+         {"export.intent", "export.complete"} <= set(records) and "export.ack" not in records and
+         all(re.fullmatch(r"[a-zA-Z0-9_.-]{1,128}", leaf) and leaf not in (".", "..") for leaf in records),
+         "The retained backup journal inventory is not an unacknowledged completion")
+    fingerprints = {}
+    for path in ["files/library-settings/active-library", *(f"{attempt}/{leaf}" for leaf in records)]:
+        metadata = re.fullmatch(r"regular file:([1-9][0-9]{0,6})", private("stat", "-c", "%F:%s", path).strip())
+        need(metadata and int(metadata[1]) <= 2 * 1024 * 1024,
+             "The retained backup journal extent is unexpected")
+        digest = private("sha256sum", path).split()
+        need(len(digest) == 2 and digest[1] == path and re.fullmatch(r"[a-f0-9]{64}", digest[0]),
+             "The retained backup journal hash is unavailable")
+        fingerprints[path] = [int(metadata[1]), digest[0]]
+    return dict(operation=leaves[0].removeprefix("library-out-"), files=fingerprints)
 
 
 def verify_settings_catalog(path, digest, extent, expected, expected_ocr=None):
@@ -346,6 +391,7 @@ def run(args):
     prior_destinations = []
     prior_navigation_only = False
     completed = None
+    publication_claim = None
     if args.previous:
         for package, file in zip(built, args.previous):
             path = Path(file).resolve()
@@ -355,8 +401,9 @@ def run(args):
             exact_apk(path, previous[package], stage, package == TEST)
         if recovery_case:
             parents = {Path(file).resolve().parent for file in args.previous}
-            need(len(parents) == 1 and previous[APP] == hashes[APP], "Require the exact prior backup app and publication evidence")
-            completed = settings_completed_destination(parents.pop(), args.settings_recover, args.guest, previous)
+            need(len(parents) == 1 and previous[APP] == hashes[APP] and args.settings_recover == SETTINGS_COMPLETED_MANIFEST,
+                 "Require the independently pinned successful backup receipt and exact prior app")
+            completed, publication_claim = settings_completed_destination(parents.pop(), args.settings_recover, args.guest, previous)
         if args.settings_retry:
             parents = {Path(file).resolve().parent for file in args.previous}
             need(len(parents) == 1, "Settings cancel predecessor APKs must share the exact receipt")
@@ -417,6 +464,12 @@ def run(args):
         if not args.fresh:
             check_installed_pair(installed, previous, hashes)
         run.save(run.path("installed-before.json"), installed, durable=True)
+        if recovery_case:
+            verify_completed_guest(publication_claim, run.owned())
+            need(not adb("shell", "pidof", APP, TEST, allowed=(0, 1)).strip(), "The guest must be cold before recovery admission")
+            verify_completed_destination(adb, *completed)
+            baseline = settings_private_baseline(adb)
+            run.save(run.path("recovery-before.json"), baseline, durable=True)
         for p, path in retained.items():
             flags = install_flags(p, installed[p], hashes[p], previous.get(TEST), previous.get(APP))
             if flags is not None:
@@ -428,14 +481,22 @@ def run(args):
              [f"instrumentation:{RUNNER} (target={APP})"], "The instrumentation registry differs")
         if recovery_case:
             recheck_target(run, ns)
-            need(not adb("shell", "pidof", APP, allowed=(0, 1)).strip(), "The completed-backup app process must be absent before cold recovery")
-            verify_completed_destination(adb, *completed)
-            folder = completed[0].rsplit("/", 1)[1]
-            output = adb("shell", "am", "instrument", "-w", "-r", "-e", "class", recovery_case,
-                         "-e", "settingsCompletedFolder", folder, RUNNER, timeout=100)
-            run.path("instrumentation.txt").write_text(output, encoding="utf-8")
+            need(settings_private_baseline(adb) == baseline and not adb("shell", "pidof", APP, TEST, allowed=(0, 1)).strip(),
+                 "The prelaunch backup journal or cold process state changed")
+            parent, folder = completed[0].rsplit("/", 2)[1:]
+            try:
+                output = adb("shell", "am", "instrument", "-w", "-r", "-e", "class", recovery_case,
+                             "-e", "settingsCompletedFolder", folder, "-e", "settingsCompletedParent", parent,
+                             "-e", "settingsCompletedOperation", baseline["operation"], RUNNER, timeout=100)
+                run.path("instrumentation.txt").write_text(output, encoding="utf-8")
+            finally:
+                # Read back even after a malformed runner response or timeout, but only on the verified target.
+                recheck_target(run, ns)
+                verify_completed_destination(adb, *completed)
+                after = settings_private_baseline(adb)
+                run.save(run.path("recovery-after.json"), after, durable=True)
+                need(after == baseline, "Cold recovery changed the private backup journal or active pointer")
             passed, failed = read_results(output, (recovery_case,))
-            verify_completed_destination(adb, *completed)
             run.save(run.path("outcomes.json"), {"passed": passed, "failed": failed, "installedSha256": hashes}, durable=True)
             print(f"Cold Settings receipt recovery: {len(passed)} passed, {len(failed)} failed.", flush=True)
             return bool(failed)

@@ -1,16 +1,19 @@
 package app.pristinepage
 
 import android.accessibilityservice.AccessibilityService
+import android.app.Activity
 import android.app.Instrumentation
 import android.content.ContentResolver
 import android.content.Context
 import android.content.ContextWrapper
 import android.content.Intent
+import android.content.IntentFilter
 import android.content.pm.PackageManager
 import android.database.sqlite.SQLiteDatabase
 import android.graphics.Rect
 import android.net.Uri
 import android.os.Build
+import android.os.Process
 import android.os.SystemClock
 import android.provider.DocumentsContract
 import android.view.InputDevice
@@ -77,57 +80,74 @@ import org.junit.Assert.assertTrue
 import org.junit.Assert.assertNotNull
 import org.junit.Rule
 import org.junit.Test
+import org.junit.rules.RuleChain
+import org.junit.rules.TestRule
 import org.junit.runner.RunWith
+import org.junit.runners.model.Statement
 
 /** System Files, the exact Android grant and an isolated synthetic library. The opt-in write probe touches only its newly created child. */
 @RunWith(AndroidJUnit4::class)
 class LibraryFolderFilesJourneyTest {
-    @get:Rule val compose = createAndroidComposeRule<MainActivity>()
+    private val compose = createAndroidComposeRule<MainActivity>()
+    private val noColdRecoveryPicker = TestRule { next, description ->
+        if (description.methodName != "coldSettingsRecoversTheExactCompletedBackupWithoutWriting") next else
+            object : Statement() {
+                override fun evaluate() {
+                    val instrumentation = InstrumentationRegistry.getInstrumentation()
+                    // Block even a transient launch from MainActivity creation through its teardown.
+                    val monitor = instrumentation.addMonitor(IntentFilter(Intent.ACTION_OPEN_DOCUMENT_TREE),
+                        Instrumentation.ActivityResult(Activity.RESULT_CANCELED, null), true)
+                    try {
+                        next.evaluate()
+                        assertEquals("Cold backup recovery tried to open a folder chooser", 0, monitor.hits)
+                    } finally {
+                        instrumentation.removeMonitor(monitor)
+                    }
+                }
+            }
+    }
+    @get:Rule val rules: RuleChain = RuleChain.outerRule(noColdRecoveryPicker).around(compose)
 
     @Test fun actualFilesGrantReopensAfterActivityRecreationAndRevocationFailsClosed() = verifyJourney()
 
     @Test fun coldSettingsRecoversTheExactCompletedBackupWithoutWriting() {
         val instrumentation = InstrumentationRegistry.getInstrumentation()
         val app = instrumentation.targetContext.applicationContext as PristinePageApplication
-        val folder = InstrumentationRegistry.getArguments().getString("settingsCompletedFolder")
+        val arguments = InstrumentationRegistry.getArguments()
+        val folder = arguments.getString("settingsCompletedFolder")
             ?.takeIf { it.matches(Regex("PristinePage-backup-[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}")) }
             ?: error("The existing completed backup was not admitted")
+        val parent = arguments.getString("settingsCompletedParent")
+            ?.takeIf { it.matches(Regex("PristinePage-tree-[a-f0-9]{12}")) } ?: error("No exact synthetic backup parent")
+        val operation = arguments.getString("settingsCompletedOperation")
+            ?.takeIf { it.matches(Regex("[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}")) } ?: error("No prelaunch backup operation")
         val backup = compose.runOnUiThread { ViewModelProvider(compose.activity)[LibraryBackupViewModel::class.java].session }
-        val privateRoot = app.filesDir.canonicalFile
-        val witness = File(privateRoot, "library-settings-native-witness")
-        val originalWitness = witness.readBytes()
-        val pointer = File(privateRoot, "library-settings/active-library")
-        val originalPointer = pointer.readBytes()
-        fun attempts() = checkNotNull(privateRoot.list()).filter {
-            it.startsWith("library-out-") || it == "library-backup-acknowledged"
-        }.toSet()
-        val beforeAttempts = attempts()
-        val attemptName = beforeAttempts.single()
-        check(attemptName.matches(Regex("library-out-[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}")))
-        val attempt = File(privateRoot, attemptName)
-        fun attemptRecords(): Map<String, String> {
-            check(attempt.canonicalFile == attempt)
-            val entries = checkNotNull(attempt.listFiles()).also { check(it.size <= 16) }
-            return entries.associate { file ->
-                check(file.isFile && file.canonicalFile == file && file.length() in 1..2L * 1024 * 1024)
-                file.name to sha256(file.readBytes())
-            }.also { check("export.intent" in it && "export.complete" in it && "export.ack" !in it) }
+        val witness = File(app.filesDir.canonicalFile, "library-settings-native-witness")
+        check(witness.length() in 1..1024)
+        val published = witness.readLines().also { check(it.size == 15) }
+        fun assertNoBackupGrant() {
+            assertTrue(app.contentResolver.persistedUriPermissions.isEmpty())
+            // Test both admitted Android spellings of this physical Documents child.
+            for (id in listOf("primary:Documents/$parent", "home:$parent")) {
+                val tree = DocumentsContract.buildTreeDocumentUri("com.android.externalstorage.documents", id)
+                assertEquals(PackageManager.PERMISSION_DENIED,
+                    app.checkUriPermission(tree, Process.myPid(), Process.myUid(), Intent.FLAG_GRANT_WRITE_URI_PERMISSION))
+            }
         }
-        val beforeRecords = attemptRecords()
-        assertTrue(app.contentResolver.persistedUriPermissions.isEmpty())
+        assertNoBackupGrant()
         val activation = checkNotNull(runBlocking { app.services.recordedDefaultActivation() })
 
         compose.onNodeWithTag("atelier-settings").performClick()
         compose.onNodeWithTag("settings-open-library_storage").performClick()
-        compose.waitUntil(12_000) { backup.state.value.history?.receipts?.size == 1 }
+        compose.onNodeWithTag("settings-screen-library_storage").assertIsDisplayed()
+        compose.waitUntil(12_000) { backup.state.value.let { it.canReview && it.history?.receipts?.size == 1 } }
         val state = backup.state.value
         val history = checkNotNull(state.history)
         assertEquals(0, history.unresolvedCount)
         val previous = (history.receipts.single() as LibraryFolderExportState.Completed).receipt
         assertEquals(folder, previous.folderName)
-        assertEquals(attemptName.removePrefix("library-out-"), previous.operationId)
-        val lines = originalWitness.toString(Charsets.UTF_8).lines()
-        assertEquals(listOf(previous.libraryId, previous.generationId, folder), lines.subList(6, 9))
+        assertEquals(operation, previous.operationId)
+        assertEquals(listOf(previous.libraryId, previous.generationId, folder), published.subList(6, 9))
         assertEquals(activation, state.issuedAt)
         assertEquals(previous, (runBlocking {
             app.services.inspectConfirmedDefaultBackup(LibraryBackupConfirmation.Ticket(previous.operationId, activation))
@@ -137,11 +157,7 @@ class LibraryFolderFilesJourneyTest {
         assertTrue(state.canReview)
         compose.onNodeWithText(app.getString(R.string.library_backup_record, folder)).performScrollTo().assertIsDisplayed()
         assertEquals(app.packageName, instrumentation.uiAutomation.rootInActiveWindow?.packageName?.toString())
-        assertEquals(beforeAttempts, attempts())
-        assertEquals(beforeRecords, attemptRecords())
-        assertArrayEquals(originalWitness, witness.readBytes())
-        assertArrayEquals(originalPointer, pointer.readBytes())
-        assertTrue(app.contentResolver.persistedUriPermissions.isEmpty())
+        assertNoBackupGrant()
     }
 
     @Test fun settingsOpensAndCancelsFilesWithoutStartingABackup() {

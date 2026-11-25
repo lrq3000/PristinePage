@@ -126,6 +126,10 @@ class LibraryFolderPickerRunnerTest(unittest.TestCase):
 
     def test_cold_recovery_does_not_trust_a_replaced_local_catalog(self):
         case = "app.pristinepage.LibraryFolderFilesJourneyTest#settingsPublishesOneBackupOfTheSyntheticDefaultLibrary"
+        class_name, method = case.split("#")
+        fields = f"INSTRUMENTATION_STATUS: class={class_name}\nINSTRUMENTATION_STATUS: test={method}\n"
+        transcript = fields + "INSTRUMENTATION_STATUS_CODE: 1\n" + fields + (
+            "INSTRUMENTATION_STATUS_CODE: 0\nINSTRUMENTATION_RESULT: stream=\nOK (1 test)\nINSTRUMENTATION_CODE: -1\n")
         pair = {"app.pristinepage.debug": "a" * 64, "app.pristinepage.debug.test": "b" * 64}
         generation = "10000000-aaaa-4aaa-8aaa-000000000001"
         library = "10000000-aaaa-4aaa-8aaa-000000000002"
@@ -136,25 +140,39 @@ class LibraryFolderPickerRunnerTest(unittest.TestCase):
         with TemporaryDirectory() as scratch:
             raw = Path(scratch)
             entries = {
-                "artifacts.json": {"guest": "exact-test-guest", "fixture": {}},
+                "artifacts.json": {"guest": "exact-test-guest", "fixture": {},
+                                   "proof": {p: {"sha256": sha} for p, sha in pair.items()}},
                 "outcomes.json": {"passed": [case], "failed": [], "installedSha256": pair},
+                "claim.json": {"name": "exact-test-guest", "generation": generation, "state": "running",
+                               "created_by_agent": True, "api": 28, "purpose": "pristinepage-library-app-tree",
+                               "created": "fixture", "index": 3, "installation": "sample", "worktree": "sample",
+                               "runtime_processes": [[10, 100], [11, 101]]},
                 "commands.jsonl": [
+                    {"argv": ["adb", "shell", "getprop", "sys.boot_completed"], "timeout": 1},
                     {"argv": ["adb", "shell", "cat", f"{backup}/generations/{generation}.complete"], "exit": 0, "stdout": marker},
                     {"argv": ["adb", "shell", "run-as", "app.pristinepage.debug", "cat", "files/library-settings-native-witness"], "exit": 0, "stdout": witness},
                 ],
+                "instrumentation.txt": transcript,
             }
-            anchors = []
-            for suffix, value in entries.items():
-                path = raw / f"{raw.name}-{suffix}"
-                text = "\n".join(map(json.dumps, value)) if suffix == "commands.jsonl" else json.dumps(value)
-                path.write_bytes(text.encode("utf-8"))
-                anchors.append({"path": str(path), "bytes": path.stat().st_size, "sha256": sha256(path.read_bytes()).hexdigest()})
-            manifest = raw / f"{raw.name}-final-manifest.json"
-            manifest.write_text(json.dumps({"stage": "verified-before-release", "evidence": anchors, "ancillaryEvidence": []}),
-                                encoding="utf-8")
-            digest = sha256(manifest.read_bytes()).hexdigest()
+
+            def pin(inputs):
+                anchors = []
+                for suffix, value in inputs.items():
+                    path = raw / f"{raw.name}-{suffix}"
+                    text = "\n".join(map(json.dumps, value)) if suffix == "commands.jsonl" else value if isinstance(value, str) else json.dumps(value)
+                    path.write_bytes(text.encode("utf-8"))
+                    anchors.append({"path": str(path), "bytes": path.stat().st_size, "sha256": sha256(path.read_bytes()).hexdigest()})
+                manifest = raw / f"{raw.name}-final-manifest.json"
+                manifest.write_text(json.dumps({"stage": "verified-before-release", "generation": generation,
+                                                "evidence": anchors, "ancillaryEvidence": []}), encoding="utf-8")
+                return sha256(manifest.read_bytes()).hexdigest()
+
             local = raw / "settings-closed-catalog.sqlite"
             local.write_bytes(catalog)
+            for invalid in (entries | {"instrumentation.txt": "No execution"}, {k: v for k, v in entries.items() if k != "instrumentation.txt"}):
+                with self.assertRaisesRegex(RuntimeError, "Instrumentation|anchor"):
+                    settings_completed_destination(raw, pin(invalid), "exact-test-guest", pair)
+            digest = pin(entries)
             settings_completed_destination(raw, digest, "exact-test-guest", pair)
             local.write_bytes(b"replaced")
             with self.assertRaisesRegex(RuntimeError, "retained catalog"):
