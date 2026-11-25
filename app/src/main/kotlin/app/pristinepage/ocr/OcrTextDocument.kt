@@ -18,8 +18,10 @@ internal suspend fun writeOcrTextDocument(
     sha256: String,
     open: () -> ParcelFileDescriptor?,
     reopen: (() -> InputStream?)?,
+    admit: suspend () -> Boolean = { true },
 ): TextSaveOutcome = withContext(Dispatchers.IO) {
     val active = currentCoroutineContext()
+    if (!admit()) return@withContext TextSaveOutcome.DESTINATION_REFUSED
     val descriptor = try {
         active.ensureActive()
         open() ?: return@withContext TextSaveOutcome.DESTINATION_REFUSED
@@ -39,6 +41,7 @@ internal suspend fun writeOcrTextDocument(
     }
     try {
         ParcelFileDescriptor.AutoCloseOutputStream(descriptor).use { sink ->
+            if (!admit()) return@withContext TextSaveOutcome.DESTINATION_REFUSED
             transferExactExport(bytes.inputStream(), sink, bytes.size.toLong(), sha256, active::ensureActive)
             sink.flush()
         }
@@ -50,6 +53,7 @@ internal suspend fun writeOcrTextDocument(
     if (reopen == null) return@withContext TextSaveOutcome.OUTPUT_COMPLETED
     try {
         active.ensureActive()
+        if (!admit()) return@withContext TextSaveOutcome.NEEDS_VERIFICATION
         val source = reopen() ?: return@withContext TextSaveOutcome.NEEDS_VERIFICATION
         source.use { transferExactExport(it, null, bytes.size.toLong(), sha256, active::ensureActive) }
         TextSaveOutcome.READBACK_VERIFIED

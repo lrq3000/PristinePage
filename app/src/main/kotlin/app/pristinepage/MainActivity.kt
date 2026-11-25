@@ -137,7 +137,7 @@ class MainActivity : ComponentActivity() {
         val textSave = ViewModelProvider(this, object : ViewModelProvider.Factory {
             @Suppress("UNCHECKED_CAST") override fun <T : ViewModel> create(modelClass: Class<T>): T {
                 require(modelClass == OcrTextSaveViewModel::class.java)
-                return OcrTextSaveViewModel(app) { services.imports().store.savedOcr } as T
+                 return OcrTextSaveViewModel(app, services) as T
             }
         })[OcrTextSaveViewModel::class.java]
         val backup = ViewModelProvider(this, object : ViewModelProvider.Factory {
@@ -181,7 +181,10 @@ class MainActivity : ComponentActivity() {
             val host by editorOwner.state.collectAsStateWithLifecycle()
             val editing by editorOwner.session.collectAsStateWithLifecycle()
              val library by retained.state.collectAsStateWithLifecycle()
-             LaunchedEffect(library.activation) { backup.show(library.activation) }
+              LaunchedEffect(library.activation) {
+                  backup.show(library.activation)
+                  textSave.show(library.activation)
+              }
             val batch by batchOwner.state.collectAsStateWithLifecycle()
             val acquiring by acquisition.state.collectAsStateWithLifecycle()
              val camera = library.request?.takeIf { it.kind == PhotoImportKind.CAMERA && library.phase == ImportPhase.WAITING_PICKER }
@@ -319,7 +322,7 @@ class MainActivity : ComponentActivity() {
                                      commit = { services.rerunDefaultEditorOcr(issuing, observed, it) },
                                 )
                             },
-                            requestSave = textSave::save,
+                             requestSave = { textSave.save(issuing.issuedAt, it) },
                         )
                     }
                       PageEditorScreen(loadOriginal = loadEditorOriginal, savedOcr = savedOcr, showOcrDiagnostics = settings.ocrDiagnostics,

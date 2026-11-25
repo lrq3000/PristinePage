@@ -7,6 +7,11 @@ import android.graphics.Bitmap
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import app.pristinepage.capture.PhotoImportController
+import app.pristinepage.core.ocr.OcrConfiguration
+import app.pristinepage.core.ocr.OcrLanguagePack
+import app.pristinepage.core.ocr.OcrLanguagePacks
+import app.pristinepage.core.ocr.OcrLayout
+import app.pristinepage.core.ocr.OcrText
 import app.pristinepage.core.pipeline.OutputSpec
 import app.pristinepage.core.pipeline.PixelSize
 import app.pristinepage.core.pipeline.RenderPurpose
@@ -48,6 +53,102 @@ import org.junit.runner.RunWith
 @RunWith(AndroidJUnit4::class)
 class ApplicationCompositionTest {
     private val output = OutputSpec(PixelSize(2, 2), RenderPurpose.PREVIEW)
+
+    @Test fun aTextSaveResultFromAnObsoleteActivationNeverReachesItsTransfer() = runBlocking {
+        Fixture().use { f ->
+            val services = ApplicationServices(f.context, f.budget, f.provider)
+            services.imports().useStore { graph ->
+                val album = graph.store.documents.createDocument("Synthetic text save")
+                val batch = graph.store.imports.beginImport(album, 1, null)
+                val scan = graph.photoImports.importProviderReferences(listOf(f.good), batch.parentId).single() as IngestResult.Committed
+                val work = graph.store.savedOcr
+                val config = OcrConfiguration("tesseract", 1, OcrLayout.AUTOMATIC,
+                    OcrLanguagePacks(listOf(OcrLanguagePack("eng", "1".repeat(64)))))
+                val target = checkNotNull(work.reconcilePage(album, scan.pageId, config))
+                val text = "  Receipt\r\nÉcole "
+                assertEquals(SavedOcrWork.Outcome.PUBLISHED, work.execute(target) { _, _, handoff ->
+                    handoff.retain(object : SavedOcrWork.Prepared {
+                        override suspend fun recognize() = OcrText(text)
+                        override fun close() = Unit
+                    })
+                })
+                val observed = checkNotNull(work.readText(album, scan.pageId)).exportObservation
+                val prepared = checkNotNull(services.prepareDefaultTextExport(graph.activation, observed))
+                val marker = File(f.context.filesDir, "library-settings/active-library")
+                val before = marker.readBytes()
+                val body = "pristinepage-active-library-v1\n${graph.activation.libraryId}\n${graph.activation.number + 1}\n-\n-\n"
+                val digest = MessageDigest.getInstance("SHA-256").digest(body.toByteArray(Charsets.US_ASCII))
+                    .joinToString("") { "%02x".format(it.toInt() and 255) }
+                try {
+                    val refused = runCatching { services.publishDefaultTextExport(graph.activation, prepared, choose = {
+                        marker.writeText("$body$digest\n", Charsets.US_ASCII)
+                        "content://synthetic.example/document/old-consent"
+                    }) { _, _, _ -> throw AssertionError("The obsolete chooser wrote through its activation fence") } }
+                    assertEquals("library_activation_changed", (refused.exceptionOrNull() as RepositoryFailure).error.safeMessageKey)
+                } finally {
+                    marker.writeBytes(before)
+                }
+                assertFalse(services.recoverDefaultTextPublications(graph.activation).needsVerification)
+                val next = "content://synthetic.example/document/refused-before-open"
+                try {
+                    val refused = runCatching { services.publishDefaultTextExport(graph.activation, prepared, choose = { next }) { _, bytes, admit ->
+                        assertArrayEquals(text.encodeToByteArray(), bytes)
+                        marker.writeText("$body$digest\n", Charsets.US_ASCII)
+                        app.pristinepage.ocr.writeOcrTextDocument(bytes, prepared.byteSha256,
+                            open = { throw AssertionError("A known-obsolete descriptor was opened") }, reopen = null, admit = admit)
+                    } }
+                    assertEquals("library_activation_changed", (refused.exceptionOrNull() as RepositoryFailure).error.safeMessageKey)
+                } finally {
+                    marker.writeBytes(before)
+                }
+                assertFalse(services.recoverDefaultTextPublications(graph.activation).needsVerification)
+                val unconfirmed = "content://synthetic.example/document/closed-before-delivery"
+                try {
+                    val refused = runCatching {
+                        services.publishDefaultTextExport(graph.activation, prepared, choose = { unconfirmed }) { exact, bytes, admit ->
+                            assertEquals(unconfirmed, exact)
+                            assertTrue(admit())
+                            assertArrayEquals(text.encodeToByteArray(), bytes)
+                            marker.writeText("$body$digest\n", Charsets.US_ASCII)
+                            SavedOcrWork.TextSaveOutcome.READBACK_VERIFIED
+                        }
+                    }
+                    assertEquals("library_text_output_delivery_unconfirmed",
+                        (refused.exceptionOrNull() as RepositoryFailure).error.safeMessageKey)
+                } finally { marker.writeBytes(before) }
+                assertTrue(runCatching { services.publishDefaultTextExport(graph.activation, prepared, choose = {
+                    throw AssertionError("An already verified result allowed another chooser")
+                }) { _, _, _ -> throw AssertionError("An already verified result allowed a replay") } }.exceptionOrNull() is RepositoryFailure)
+                SQLiteDatabase.openDatabase(f.context.getDatabasePath("pristinepage.db").path, null, SQLiteDatabase.OPEN_READONLY).use { sql ->
+                    sql.rawQuery("SELECT state, targetUri FROM OcrTextPublication ORDER BY state", null).use { rows ->
+                        val outcomes = buildList {
+                            while (rows.moveToNext()) add(rows.getString(0) to rows.getString(1))
+                        }
+                        assertEquals(listOf("CANCELED" to null, "DESTINATION_REFUSED" to next, "READBACK_VERIFIED" to unconfirmed), outcomes)
+                    }
+                }
+
+                val another = checkNotNull(services.prepareDefaultTextExport(graph.activation, observed))
+                val interrupted = "content://synthetic.example/document/interrupted"
+                assertEquals(SavedOcrWork.TextSaveOutcome.NEEDS_VERIFICATION,
+                    services.publishDefaultTextExport(graph.activation, another, choose = { interrupted }) { _, _, _ ->
+                        SavedOcrWork.TextSaveOutcome.NEEDS_VERIFICATION
+                    })
+                val reopenedFacade = ApplicationServices(f.context, f.budget, f.provider)
+                reopenedFacade.imports().useStore {
+                    assertEquals(interrupted, reopenedFacade.recoverDefaultTextPublications(graph.activation).priorDestination)
+                }
+                try {
+                    marker.writeText("$body$digest\n", Charsets.US_ASCII)
+                    val freshFacade = ApplicationServices(f.context, f.budget, f.provider)
+                    val recovery = runCatching { freshFacade.recoverDefaultTextPublications(graph.activation.copy(number = graph.activation.number + 1)) }
+                    assertEquals("library_text_recovery_activation_unqualified",
+                        (recovery.exceptionOrNull() as RepositoryFailure).error.safeMessageKey)
+                } finally { marker.writeBytes(before) }
+                assertEquals(listOf(f.good), f.opened)
+            }
+        }
+    }
 
     @Test fun aColdBackupReceiptLookupNeverOpensRoomOrTheProvider() = runBlocking {
         Fixture().use { f ->

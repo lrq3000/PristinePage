@@ -47,6 +47,7 @@ import app.pristinepage.data.repository.AtelierSavedPages
 import app.pristinepage.data.repository.DocumentRepository
 import app.pristinepage.data.repository.SourceInput
 import app.pristinepage.data.repository.SavedOcrWork
+import app.pristinepage.data.repository.SavedOcrWork.TextSaveOutcome
 import app.pristinepage.data.repository.ImportInitializationCleanup
 import app.pristinepage.image.decode.AndroidSourceInspector
 import app.pristinepage.image.decode.ImageAllocationBudget
@@ -492,6 +493,56 @@ class ApplicationServices(context: Context, internal val budget: ImageAllocation
 
     internal suspend fun readDefaultEditorOcrText(identity: EditorIdentity, revision: Long): SavedOcrWork.ReadText? =
         defaultEditorOperation(identity) { it.store.savedOcr.readText(identity.documentId, identity.pageId, revision) }
+
+    internal suspend fun prepareDefaultTextExport(
+        issuedAt: LibraryActivation, observed: SavedOcrWork.TextExportObservation,
+    ): SavedOcrWork.PreparedTextExport? = defaultTextOperation(issuedAt) { it.prepareTextExport(observed) }
+
+    internal suspend fun recoverDefaultTextPublications(issuedAt: LibraryActivation): SavedOcrWork.TextSaveRecovery {
+        // The legacy rows have no activation field. They are admissible only on the original default graph, never reattached after a return to it.
+        if (issuedAt.number != 1L) throw RepositoryFailure(
+            OperationError(OperationErrorCode.SOURCE_UNAVAILABLE, false, "library_text_recovery_activation_unqualified", null),
+        )
+        return defaultTextOperation(issuedAt, SavedOcrWork::recoverTextPublications)
+    }
+
+    /** Keep the issuing graph through picker wait, actual transfer, and the old journal's terminal write or cleanup. */
+    internal suspend fun publishDefaultTextExport(
+        issuedAt: LibraryActivation, prepared: SavedOcrWork.PreparedTextExport,
+        choose: suspend (String) -> String?, transfer: suspend (String, ByteArray, suspend () -> Boolean) -> TextSaveOutcome,
+    ): TextSaveOutcome = withDefaultLibrary(issuedAt) { graph ->
+        var obsolete = false
+        suspend fun admitted(): Boolean {
+            if (!obsolete) obsolete = libraryStartup.recordedDefaultActivation() != issuedAt
+            return !obsolete
+        }
+        val outcome = graph.store.savedOcr.publishPreparedText(prepared, choose = pick@{ consent ->
+            if (!admitted()) return@pick null
+            val target = choose(consent)
+            // The old journal can close a definitely obsolete chooser with no target. Do not bind its returned URI or open a provider.
+            target.takeIf { admitted() }
+        }) { target, bytes ->
+            if (admitted()) transfer(target, bytes, ::admitted) else TextSaveOutcome.DESTINATION_REFUSED
+        }
+        try {
+            if (!admitted()) activationChanged()
+        } catch (failure: RepositoryFailure) {
+            when (outcome) {
+                TextSaveOutcome.READBACK_VERIFIED, TextSaveOutcome.OUTPUT_COMPLETED, TextSaveOutcome.NEEDS_VERIFICATION, TextSaveOutcome.PARTIAL_EXTERNAL ->
+                    throw RepositoryFailure(OperationError(OperationErrorCode.STORAGE_FAILED, false, "library_text_output_delivery_unconfirmed", null))
+                else -> throw failure
+            }
+        }
+        outcome
+    } ?: activationChanged()
+
+    /** Preparation/recovery issue only detached opaque results from the checked graph. */
+    private suspend fun <T> defaultTextOperation(issuedAt: LibraryActivation, operation: suspend (SavedOcrWork) -> T): T =
+        (withDefaultLibrary(issuedAt) { graph ->
+            val value = operation(graph.store.savedOcr)
+            requireSameDefault(issuedAt)
+            EditorValue(value)
+        } ?: activationChanged()).value
 
     internal suspend fun rerunDefaultEditorOcr(identity: EditorIdentity, observed: SavedOcrWork.PageStatus, configuration: OcrConfiguration) =
         defaultEditorOperation(identity) { it.store.savedOcr.requestRerun(observed, configuration) }
