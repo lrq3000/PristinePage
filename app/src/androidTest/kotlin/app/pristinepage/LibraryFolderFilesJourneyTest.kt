@@ -63,23 +63,23 @@ class LibraryFolderFilesJourneyTest {
         }
         try {
             val picker = registration.first
-            val root = await(instrumentation, picker) { it.hasText(folder) || it.find("Show roots") != null }
+            val root = await(instrumentation, picker, "initial folder view") { it.hasText(folder) || it.find("Show roots") != null }
             if (!root.hasText(folder)) {
                 tap(instrumentation, root.find("Show roots") ?: error("Files did not show its roots"))
-                val drawer = await(instrumentation, picker) { it.find("Internal storage") != null }
+                val drawer = await(instrumentation, picker, "internal storage root") { it.find("Internal storage") != null }
                 tap(instrumentation, drawer.find("Internal storage") ?: error("Internal shared storage is not listed"))
-                val documents = await(instrumentation, picker) { it.find("Documents") != null }
+                val documents = await(instrumentation, picker, "Documents folder") { it.find("Documents") != null }
                 tap(instrumentation, documents.find("Documents") ?: error("Documents is not listed"))
-                val parent = await(instrumentation, picker) { it.find(folder) != null }
+                val parent = await(instrumentation, picker, "fixture folder row") { it.find(folder) != null }
                 tap(instrumentation, parent.find(folder) ?: error("The exact synthetic directory is not listed"))
             }
             val labels = setOf("SELECT", "Select", "Use this folder", "USE THIS FOLDER", "Choose this folder")
-            val choice = await(instrumentation, picker) { it.hasText(folder) && (it.hasText("catalogs") || it.hasText("generations")) &&
+            val choice = await(instrumentation, picker, "exact fixture and affirmative action") { it.hasText(folder) && (it.hasText("catalogs") || it.hasText("generations")) &&
                 labels.any { name -> it.find(name) != null } }
             val button = labels.firstNotNullOfOrNull { choice.find(it) } ?: error("Files did not expose a folder confirmation")
             tap(instrumentation, button)
             if (!receipt.await(4, TimeUnit.SECONDS)) {
-                val confirm = await(instrumentation, picker) { it.hasText("Allow") && it.find("Allow") != null }
+                val confirm = await(instrumentation, picker, "optional Files confirmation") { it.hasText("Allow") && it.find("Allow") != null }
                 tap(instrumentation, confirm.find("Allow") ?: error("No Files confirmation"))
             }
             assertTrue("Files did not return a selection", receipt.await(10, TimeUnit.SECONDS))
@@ -113,16 +113,28 @@ class LibraryFolderFilesJourneyTest {
         }
     }
 
-    private fun await(instrumentation: Instrumentation, picker: String, predicate: (AccessibilityNodeInfo) -> Boolean): AccessibilityNodeInfo {
+    private fun await(instrumentation: Instrumentation, picker: String, stage: String, predicate: (AccessibilityNodeInfo) -> Boolean): AccessibilityNodeInfo {
         val deadline = SystemClock.uptimeMillis() + 12_000
+        var last: AccessibilityNodeInfo? = null
         while (SystemClock.uptimeMillis() < deadline) {
             val root = instrumentation.uiAutomation.rootInActiveWindow
+            if (root != null) last = root
             if (root?.packageName?.toString() == picker && predicate(root)) return root
             SystemClock.sleep(125)
         }
-        error("Files did not reach the expected verified screen")
+        val foreground = last?.packageName?.toString()
+        val observed = if (foreground == picker) buildList { last?.collectLabels(this) }.take(32) else emptyList()
+        error("Files did not reach $stage; foreground=$foreground; visible=$observed")
     }
 
+    private fun AccessibilityNodeInfo.collectLabels(output: MutableList<String>) {
+        if (output.size >= 32) return
+        if (isVisibleToUser && (text != null || contentDescription != null)) {
+            output += listOf(text, contentDescription, viewIdResourceName).filterNotNull()
+                .joinToString(" / ") { value -> value.take(100).toString().filterNot(Char::isISOControl) }
+        }
+        for (i in 0 until childCount) getChild(i)?.collectLabels(output)
+    }
     private fun AccessibilityNodeInfo.hasText(value: String) = find(value) != null
 
     private fun AccessibilityNodeInfo.find(value: String): AccessibilityNodeInfo? {

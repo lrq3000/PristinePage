@@ -1,0 +1,14 @@
+# Android library folder verification
+
+## Detached runtime boundary
+
+The Android adapter accepts only canonical primary shared-storage subdirectories from system Files. It persists the exact returned read grant, checks that grant separately from the document identity, and uses SimpleStorage only to obtain the Android root document URI. It does not use a raw shared-storage path or SimpleStorage's stock permission flow. The data reader independently checks the system provider, the matching document row, complete child listings, a closed catalog and its declared original objects. The same tree and full catalog-generation identity must be presented for a known reopen. Cancellation is sent to the provider where supported; the single in-process attempt does not admit repeated blocked work.
+
+The first pinned development pair passed offline app/data tests (264 and 950), both Android test compilations, and local APK identity, signer, alignment, merged permission and bundled-asset verification. The dedicated API 28 guest passed the two picker contract cases. The actual Files journey stopped before folder confirmation: its exact fixture/action predicate did not match the active system picker. No grant or library-open claim follows. The host compared the staged files after the run and verified both player and VM shutdown and exclusive usage release. The pinned local run evidence is kept outside publishable Git. The next diagnostic run reuses the retained guest and verifies its already installed predecessor.
+
+## Gates before activating or publishing
+
+- Matched Files folder, real returned modes, exact persisted readback, fresh catalog admission, Activity recreation, and refusal after revocation on the same approved emulator.
+- Durable private selection ties the owning graph to the verified root and its generation. An exact repeated document ID is not proof of physical directory identity. On grant loss or impossible readback, preserve the old pointer and show reconnect; never open a fallback graph as if it were the same library.
+- Qualify a distinct write capability. An AOSP document query does not prove create exclusivity, durable marker ordering, directory synchronization or free-space reporting. Measure these against the admitted provider before enabling selected-folder writes, and refuse where the evidence is insufficient. The proof may use a descriptor exposed by that provider, never a filesystem path derived from a tree URI. Retain the predecessor and do not retire a source on an uncertain outcome.
+- Existing source decoding authenticates app-private file handles. An opened external library needs bounded per-original materialization or an equivalent verified seekable read abstraction, not a permanent second copy of its scan tree. The ordinary app and background OCR also need to carry the issuing activation through consumers and reject a stale job before reaching the replacement store.
