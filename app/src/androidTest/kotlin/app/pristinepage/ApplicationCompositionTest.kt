@@ -54,6 +54,32 @@ import org.junit.runner.RunWith
 class ApplicationCompositionTest {
     private val output = OutputSpec(PixelSize(2, 2), RenderPurpose.PREVIEW)
 
+    @Test fun anObsoleteAlbumReviewCannotLoadSameIdsFromTheDefaultStore() = runBlocking {
+        Fixture().use { f ->
+            val services = ApplicationServices(f.context, f.budget, f.provider)
+            services.imports().useStore { graph ->
+                val album = graph.store.documents.createDocument("Synthetic album export")
+                val batch = graph.store.imports.beginImport(album, 1, null)
+                val scan = graph.photoImports.importProviderReferences(listOf(f.good), batch.parentId).single() as IngestResult.Committed
+                val review = checkNotNull(app.pristinepage.library.AlbumExportReview.prepare(graph.store.catalog.load(album), null))
+                val exact = services.loadDefaultAlbumExport(graph.activation, review).single()
+                assertEquals(scan.pageId, exact.page.pageId)
+                assertEquals(scan.sourceId, exact.page.sourceId)
+                assertEquals(1, exact.position)
+
+                val obsolete = graph.activation.copy(number = graph.activation.number + 1)
+                val failure = runCatching { services.loadDefaultAlbumExport(obsolete, review) }.exceptionOrNull() as RepositoryFailure
+                assertEquals("library_activation_changed", failure.error.safeMessageKey)
+                withContext(Dispatchers.IO) {
+                    services.requireDefaultAlbumWriteOnIo(graph.activation)
+                    val refusal = runCatching { services.requireDefaultAlbumWriteOnIo(obsolete) }.exceptionOrNull() as RepositoryFailure
+                    assertEquals("library_activation_changed", refusal.error.safeMessageKey)
+                }
+                assertEquals(listOf(f.good), f.opened)
+            }
+        }
+    }
+
     @Test fun aTextSaveResultFromAnObsoleteActivationNeverReachesItsTransfer() = runBlocking {
         Fixture().use { f ->
             val services = ApplicationServices(f.context, f.budget, f.provider)

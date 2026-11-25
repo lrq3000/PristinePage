@@ -42,7 +42,7 @@ import kotlin.math.roundToInt
 @OptIn(ExperimentalLayoutApi::class)
 @Composable internal fun BatchEditScreen(host: BatchHost, owner: BatchEditViewModel, services: ApplicationServices,
     onReconcile: (LibraryActivation, DocumentOverview) -> Unit,
-    onExport: (DocumentOverview, Set<PageId>) -> Unit = { _, _ -> }) {
+    onExport: (LibraryActivation, DocumentOverview, Set<PageId>) -> Unit = { _, _, _ -> }) {
     val draft = owner.draft
     val selected = draft?.selection.orEmpty()
     val recipes = draft?.recipes.orEmpty()
@@ -127,7 +127,7 @@ import kotlin.math.roundToInt
             }
         }
         FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-            OutlinedButton(onClick = { host.album?.let { onExport(it, selected) } },
+            OutlinedButton(onClick = { host.album?.let { album -> host.issuingActivation?.let { onExport(it, album, selected) } } },
                 enabled = enabled && selected.isNotEmpty() && draft?.dirty == false,
                 modifier = Modifier.heightIn(min = 48.dp).testTag("album-export-selected")) {
                 Text(stringResource(R.string.album_export_selected))

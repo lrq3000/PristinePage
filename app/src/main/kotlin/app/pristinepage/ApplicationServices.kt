@@ -28,6 +28,7 @@ import app.pristinepage.data.model.DocumentOverview
 import app.pristinepage.data.model.DocumentPage
 import app.pristinepage.data.model.DocumentSummary
 import app.pristinepage.data.model.EditablePage
+import app.pristinepage.data.model.ExportSettings
 import app.pristinepage.data.model.ImportSessionId
 import app.pristinepage.data.model.OperationError
 import app.pristinepage.data.model.OperationErrorCode
@@ -49,9 +50,12 @@ import app.pristinepage.data.repository.SourceInput
 import app.pristinepage.data.repository.SavedOcrWork
 import app.pristinepage.data.repository.SavedOcrWork.TextSaveOutcome
 import app.pristinepage.data.repository.ImportInitializationCleanup
+import app.pristinepage.data.repository.NamedAlbumExports
+import app.pristinepage.export.ExportPagePlan
 import app.pristinepage.image.decode.AndroidSourceInspector
 import app.pristinepage.image.decode.ImageAllocationBudget
 import app.pristinepage.image.decode.SourceDecoder
+import app.pristinepage.image.export.AlbumArtifactEncoder
 import app.pristinepage.core.pipeline.RenderCoordinator
 import app.pristinepage.core.pipeline.RenderStatus
 import app.pristinepage.image.render.DefaultRenderCoordinator
@@ -68,6 +72,7 @@ import app.pristinepage.library.LibraryBackupConfirmation
 import app.pristinepage.library.LibraryBackupPickerRegistration
 import app.pristinepage.library.LibraryFolderGrantHandoff
 import app.pristinepage.library.AtelierThumbnailLoader
+import app.pristinepage.library.AlbumExportReview
 import app.pristinepage.library.HomePageCursor
 import app.pristinepage.library.HomePageSearchHit
 import app.pristinepage.library.HomePageSearchPage
@@ -364,6 +369,40 @@ class ApplicationServices(context: Context, internal val budget: ImageAllocation
 
     internal suspend fun loadDefaultAlbum(issuedAt: LibraryActivation, album: DocumentId): DocumentOverview =
         readDefaultHome(issuedAt) { it.store.catalog.load(album) }
+
+    internal suspend fun loadDefaultAlbumExport(issuedAt: LibraryActivation, review: AlbumExportReview): List<ExportPagePlan> =
+        readDefaultHome(issuedAt) { graph ->
+            review.pages.map {
+                val page = graph.store.editablePages.load(review.documentId, it.page.pageId)
+                if (page.documentRevision != review.expectedDocumentRevision || page.recipeRevision != it.page.recipeRevision ||
+                    page.sourceId != it.page.sourceId || page.pageId != it.page.pageId) {
+                    throw RepositoryFailure(OperationError(OperationErrorCode.REVISION_CONFLICT, false, "named_export_review_changed", null))
+                }
+                ExportPagePlan(page, it.page.ordinal + 1)
+            }
+        }
+
+    internal suspend fun generateDefaultAlbumExport(issuedAt: LibraryActivation, review: AlbumExportReview,
+        settings: ExportSettings): NamedAlbumExports.Ready = readDefaultHome(issuedAt) { graph ->
+        // The renderer and original store stay paired for the entire private artifact transaction.
+        val encoder = AlbumArtifactEncoder(File(context.cacheDir.canonicalFile, "album-export-scratch"), graph.store.committedSources,
+            graph.renderer, graph.budget)
+        graph.store.albumExports.export(review.documentId, review.expectedDocumentRevision, settings, AlbumArtifactEncoder.PROFILE, encoder)
+    }
+
+    /** Borrow the issuing port through the actual external operation and its cleanup; nothing returns a live port. */
+    internal suspend fun <T : Any> useDefaultAlbumExport(issuedAt: LibraryActivation,
+        operation: suspend (NamedAlbumExports, suspend () -> Unit) -> T): T =
+        withDefaultLibrary(issuedAt) { graph -> operation(graph.store.albumExports) { requireSameDefault(issuedAt) } } ?: activationChanged()
+
+    internal fun requireDefaultAlbumWriteOnIo(issuedAt: LibraryActivation) {
+        if (libraryStartup.recordedDefaultActivationOnIo() != issuedAt) activationChanged()
+    }
+
+    internal suspend fun mayOpenDefaultAlbumShare(id: String, name: String, size: Long): Boolean {
+        val issuedAt = recordedDefaultActivation()?.takeIf { it.number == 1L } ?: return false
+        return useDefaultAlbumExport(issuedAt) { store, confirm -> store.canOpenShare(id, name, size).also { confirm() } }
+    }
 
     internal suspend fun readDefaultHomeAlbums(issuedAt: LibraryActivation?, query: AlbumSearchQuery?, order: AlbumOrder,
         locale: Locale, after: AlbumPosition?, limit: Int): AlbumPage = readDefaultHome(issuedAt) { graph ->

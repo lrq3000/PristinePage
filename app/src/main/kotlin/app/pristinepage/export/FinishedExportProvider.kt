@@ -41,7 +41,7 @@ class FinishedExportProvider : FileProvider() {
         val opened = super.openFile(uri, mode) ?: throw FileNotFoundException()
         // Check the lease after taking the descriptor too: revocation must not permit a later open to succeed.
         val allowed = try {
-            runBlocking(Dispatchers.IO) { app.services.imports().store.albumExports.canOpenShare(scope[1], scope[2], opened.statSize) }
+            runBlocking(Dispatchers.IO) { app.services.mayOpenDefaultAlbumShare(scope[1], scope[2], opened.statSize) }
         } catch (_: Exception) { false }
         if (allowed) return opened
         opened.close()

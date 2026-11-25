@@ -131,7 +131,7 @@ class MainActivity : ComponentActivity() {
         val exportOwner = ViewModelProvider(this, object : ViewModelProvider.Factory {
             @Suppress("UNCHECKED_CAST") override fun <T : ViewModel> create(modelClass: Class<T>): T {
                 require(modelClass == AlbumExportViewModel::class.java)
-                return AlbumExportViewModel(app, services::imports) as T
+                 return AlbumExportViewModel(app, services) as T
             }
         })[AlbumExportViewModel::class.java]
         val textSave = ViewModelProvider(this, object : ViewModelProvider.Factory {
@@ -184,6 +184,7 @@ class MainActivity : ComponentActivity() {
               LaunchedEffect(library.activation) {
                   backup.show(library.activation)
                   textSave.show(library.activation)
+                  exportOwner.show(library.activation)
               }
             val batch by batchOwner.state.collectAsStateWithLifecycle()
             val acquiring by acquisition.state.collectAsStateWithLifecycle()
@@ -223,8 +224,8 @@ class MainActivity : ComponentActivity() {
                     loadQueueTile = { source -> services.originalDefaultAtelier(issuing, checkNotNull(draft), source, 224) })
             }
             else if (batch.album != null) BatchEditScreen(batch, batchOwner, services,
-                onReconcile = { issuing, album -> refreshBatchAlbum(issuing, album.document.documentId) }) { album, pages ->
-                if (batch.issuingActivation == library.activation) exportOwner.review(album, pages)
+                 onReconcile = { issuing, album -> refreshBatchAlbum(issuing, album.document.documentId) }) { issuing, album, pages ->
+                 if (issuing == library.activation) exportOwner.review(issuing, album, pages)
             }
             else if (host.identity == null && camera != null) key(camera.batchId) {
                 CaptureScreen(camera, { retained.accept(LibraryEvent.CancelImport) }, settings.showCameraGrid) { still ->
@@ -253,7 +254,7 @@ class MainActivity : ComponentActivity() {
                      AtelierLibraryScreen(
                          retained, library, app.atelierPreferences, { services.loadDefaultAlbum(checkNotNull(issuing), it) }, loadThumbnail,
                          onBatch = { activation, album -> batchOwner.open(activation, album) }, onSelectPages = batchOwner::open,
-                         onExport = { exportOwner.review(it, null) },
+                         onExport = { album -> issuing?.let { exportOwner.review(it, album, null) } },
                          batchUndo = batch.undo?.takeIf { batch.savedDocument == library.selectedId && batch.issuingActivation == library.activation },
                          undoBatch = batchOwner::undoSaved, closeBatchNotice = batchOwner::clearNotice,
                          reconcileBatchUndo = {

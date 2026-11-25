@@ -39,6 +39,10 @@ class AndroidLibraryStartup(context: Context) {
     suspend fun recordedDefaultActivation(): LibraryActivation? =
         (readSelection(allowBootstrap = false)?.selected as? LocalSelectedLibraryAuthority.Selected.Default)?.activation()
 
+    /** For a synchronous byte handoff already running on IO. Never bootstrap or open Room. */
+    fun recordedDefaultActivationOnIo(): LibraryActivation? =
+        (readSelectionOnIo(allowBootstrap = false)?.selected as? LocalSelectedLibraryAuthority.Selected.Default)?.activation()
+
     /** Scoped metadata startup for a selected folder. No grant, selection change, provider write or original copy is made. */
     suspend fun <T : Any> useSelectedCatalog(
         scratchDirectory: File, block: suspend CoroutineScope.(LibraryActivation, DocumentCatalog) -> T,
@@ -74,15 +78,15 @@ class AndroidLibraryStartup(context: Context) {
 
     private suspend fun readSelection(allowBootstrap: Boolean): LoadedSelection? = withContext(Dispatchers.IO) {
         coroutineContext.ensureActive()
-        val selected = try {
-            val bootstrap = LocalLibrarySettingsBootstrap(app.filesDir.canonicalFile)
-            val authority = if (allowBootstrap) bootstrap.open() else bootstrap.openExisting() ?: return@withContext null
-            LoadedSelection(authority, authority.read() ?: throw IOException("The initial library selection disappeared"))
-        } catch (_: IOException) { selectionUnavailable() }
-        catch (_: DirectoryIteratorException) { selectionUnavailable() }
-        coroutineContext.ensureActive()
-        selected
+        readSelectionOnIo(allowBootstrap).also { coroutineContext.ensureActive() }
     }
+
+    private fun readSelectionOnIo(allowBootstrap: Boolean): LoadedSelection? = try {
+        val bootstrap = LocalLibrarySettingsBootstrap(app.filesDir.canonicalFile)
+        val authority = if (allowBootstrap) bootstrap.open() else bootstrap.openExisting()
+        authority?.let { LoadedSelection(it, it.read() ?: throw IOException("The initial library selection disappeared")) }
+    } catch (_: IOException) { selectionUnavailable() }
+    catch (_: DirectoryIteratorException) { selectionUnavailable() }
 
     private fun LocalSelectedLibraryAuthority.Selected.activation() =
         selection.identity.let { LibraryActivation(it.libraryId, it.activation) }
