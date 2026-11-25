@@ -69,7 +69,8 @@ import kotlinx.coroutines.launch
 
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
 @Composable internal fun AtelierLibraryScreen(
-    session: LibrarySession,
+     session: LibrarySession,
+    state: LibraryState,
     preferences: AtelierPreferences,
     loadOverview: suspend (DocumentId) -> DocumentOverview,
     loadThumbnail: suspend (DocumentSummary, DocumentPage) -> RenderedPreviewBitmap,
@@ -89,7 +90,6 @@ import kotlinx.coroutines.launch
     onSettings: () -> Unit,
     onEdit: (DocumentId, PageId) -> Unit,
 ) {
-    val state by session.state.collectAsStateWithLifecycle()
     val preferencesState by preferences.settings.collectAsStateWithLifecycle()
     val locale = ConfigurationCompat.getLocales(LocalConfiguration.current)[0] ?: Locale.getDefault()
     LaunchedEffect(session, preferencesState.order, locale) {

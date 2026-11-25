@@ -53,17 +53,17 @@ class ApplicationLibraryActions private constructor(
     }
 
     private suspend fun searchRecognizedText(query: String, cursor: SavedOcrWork.Continuation?): HomePageSearchPage {
-        val store = open().store
+        val (store, issuedAt) = open().let { it.store to it.activation }
         val page = store.savedOcr.find(query, cursor, 20)
-        return HomePageSearchPage(presentPageHits(page.hits, { it.document }, { it.page }, store.catalog, store.savedOcr::canOpen),
+        return HomePageSearchPage(presentPageHits(page.hits, { it.document }, { it.page }, store.catalog, store.savedOcr::canOpen, issuedAt = issuedAt),
             page.nextAfter?.let { next -> { searchRecognizedText(query, next) } })
     }
 
     private suspend fun searchMetadata(query: String, cursor: RoomSourceMetadataSearch.Continuation?): HomePageSearchPage {
-        val store = open().store
+        val (store, issuedAt) = open().let { it.store to it.activation }
         val page = store.sourceMetadata.find(query, cursor, 20)
         return HomePageSearchPage(presentPageHits(page.hits, { it.document }, { it.page }, store.catalog, store.sourceMetadata::canOpen,
-            skipMalformedAlbums = true),
+            skipMalformedAlbums = true, issuedAt = issuedAt),
             page.next?.let { next -> { searchMetadata(query, next) } })
     }
 
@@ -71,6 +71,11 @@ class ApplicationLibraryActions private constructor(
     override suspend fun load(id: DocumentId) = open().store.catalog.load(id)
     override suspend fun loadIssued(id: DocumentId, issuedAt: LibraryActivation) =
         scoped?.loadDefaultAlbum(issuedAt, id) ?: load(id)
+    override suspend fun openPageHit(hit: HomePageSearchHit, issuedAt: LibraryActivation?): DocumentOverview? {
+        val services = scoped ?: return super.openPageHit(hit, issuedAt)
+        if (issuedAt == null || hit.issuedAt != issuedAt) return null
+        return services.openDefaultPageHit(issuedAt, hit)
+    }
     override suspend fun activeImport(id: DocumentId) = open().store.catalog.activeImport(id)
     override suspend fun create(title: String) = open().store.documents.createDocument(title)
     override suspend fun activeImportRequest(id: DocumentId): PhotoImportRequest? {
@@ -172,6 +177,7 @@ class ApplicationLibraryActions private constructor(
 internal suspend fun <Hit> presentPageHits(
     candidates: List<Hit>, document: (Hit) -> DocumentId, page: (Hit) -> PageId,
     catalog: DocumentCatalog, revalidate: suspend (Hit) -> Boolean, skipMalformedAlbums: Boolean = false,
+    issuedAt: LibraryActivation? = null,
 ): List<HomePageSearchHit> {
     val albums = mutableMapOf<DocumentId, DocumentOverview?>()
     return candidates.mapNotNull { hit ->
@@ -189,6 +195,6 @@ internal suspend fun <Hit> presentPageHits(
         }
         val album = albums[documentId] ?: return@mapNotNull null
         val member = album.pages.firstOrNull { it.pageId == pageId } ?: return@mapNotNull null
-        HomePageSearchHit(documentId, pageId, album.document.title, member.ordinal + 1) { revalidate(hit) }
+        HomePageSearchHit(documentId, pageId, album.document.title, member.ordinal + 1, issuedAt) { revalidate(hit) }
     }
 }

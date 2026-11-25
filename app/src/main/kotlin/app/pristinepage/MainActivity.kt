@@ -64,7 +64,6 @@ import app.pristinepage.library.ApplicationLibraryActions
 import app.pristinepage.library.ImportLibraryViewModel
 import app.pristinepage.library.LibraryIdentity
 import app.pristinepage.library.AtelierLibraryScreen
-import app.pristinepage.library.AtelierThumbnailLoader
 import app.pristinepage.library.OriginalPagePreview
 import app.pristinepage.library.LibrarySession
 import app.pristinepage.library.ImportPhase
@@ -74,7 +73,6 @@ import app.pristinepage.ocr.OcrTextSaveHost
 import app.pristinepage.ocr.OcrTextSaveViewModel
 import app.pristinepage.image.preview.OriginalPreviewBitmap
 import app.pristinepage.image.preview.RenderedPreviewBitmap
-import app.pristinepage.image.preview.RenderedPreviewBitmapLoader
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.first
@@ -238,47 +236,51 @@ class MainActivity : ComponentActivity() {
                      settingsPage = it
                  }
             }
-            else if (host.identity == null) libraryState.SaveableStateProvider("atelier-library") {
-                val observeOcrPending = remember(app) { AlbumOcrPending.forSavedPage(app, services::imports) }
-                val loadThumbnail: suspend (DocumentSummary, DocumentPage) -> RenderedPreviewBitmap = { album, tile ->
-                    // Lazy tiles retain only their small displays. Serialize expensive full-source decoding; the existing process-owned budget still governs every allocation.
-                    thumbnailPermit.withPermit {
-                        val graph = services.imports()
-                        AtelierThumbnailLoader(graph.store.editablePages::load, graph.renderer, RenderedPreviewBitmapLoader(graph.budget))
-                            .load(album, tile)
-                    }
-                }
-                AtelierLibraryScreen(retained, app.atelierPreferences, { services.imports().store.catalog.load(it) }, loadThumbnail,
-                      onBatch = { issuing, album -> batchOwner.open(issuing, album) }, onSelectPages = batchOwner::open,
-                     onExport = { exportOwner.review(it, null) },
-                      batchUndo = batch.undo?.takeIf { batch.savedDocument == library.selectedId && batch.issuingActivation == library.activation },
-                      undoBatch = batchOwner::undoSaved, closeBatchNotice = batchOwner::clearNotice,
-                       reconcileBatchUndo = {
-                           val issuing = batch.issuingActivation
-                           val document = batch.savedDocument
-                           if (issuing != null && document != null) refreshBatchAlbum(issuing, document)
-                       },
-                       batchBusy = batch.saving && batch.issuingActivation == library.activation,
-                       batchError = batch.error?.takeIf { batch.savedDocument == library.selectedId && batch.issuingActivation == library.activation },
-                       batchUndoUnconfirmed = batch.undoUnconfirmed && batch.savedDocument == library.selectedId && batch.issuingActivation == library.activation,
-                      observeOcrPending = observeOcrPending,
-                     thumbnailsCurrent = { album ->
-                          batch.issuingActivation != library.activation || batch.savedDocument != album.documentId ||
-                             (!batch.saving && album.documentRevision >= (batch.savedRevision ?: 0L))
-                     },
-                       openAtelier = { title, target ->
-                           retained.accept(LibraryEvent.LeaveHomeSearch)
-                            library.activation?.let { acquisition.open(it, title, target) }
-                       }, onSettings = {
-                           retained.accept(LibraryEvent.LeaveHomeSearch)
-                           settingsPage = SettingsPage.ROOT
-                       }) { document, page ->
-                     library.activation?.let {
-                         editorOwner.open(EditorIdentity(document, page, it)) {
-                             retained.accept(LibraryEvent.SelectPage(page))
+             else if (host.identity == null) libraryState.SaveableStateProvider("atelier-library") {
+                 val issuing = library.activation
+                 val observeOcrPending = remember(app) { AlbumOcrPending.forSavedPage(app, services::imports) }
+                 val loadThumbnail: suspend (DocumentSummary, DocumentPage) -> RenderedPreviewBitmap = { album, tile ->
+                     // Lazy tiles retain only their small displays. Serialize expensive full-source decoding; the existing process-owned budget still governs every allocation.
+                     thumbnailPermit.withPermit {
+                         services.renderDefaultLibraryThumbnail(checkNotNull(issuing), album, tile)
+                     }
+                 }
+                 // Identical album/page IDs and revisions in a successor are not keys for an old display or in-flight effect.
+                 key(issuing) {
+                     AtelierLibraryScreen(
+                         retained, library, app.atelierPreferences, { services.loadDefaultAlbum(checkNotNull(issuing), it) }, loadThumbnail,
+                         onBatch = { activation, album -> batchOwner.open(activation, album) }, onSelectPages = batchOwner::open,
+                         onExport = { exportOwner.review(it, null) },
+                         batchUndo = batch.undo?.takeIf { batch.savedDocument == library.selectedId && batch.issuingActivation == library.activation },
+                         undoBatch = batchOwner::undoSaved, closeBatchNotice = batchOwner::clearNotice,
+                         reconcileBatchUndo = {
+                             val activation = batch.issuingActivation
+                             val document = batch.savedDocument
+                             if (activation != null && document != null) refreshBatchAlbum(activation, document)
+                         },
+                         batchBusy = batch.saving && batch.issuingActivation == library.activation,
+                         batchError = batch.error?.takeIf { batch.savedDocument == library.selectedId && batch.issuingActivation == library.activation },
+                         batchUndoUnconfirmed = batch.undoUnconfirmed && batch.savedDocument == library.selectedId && batch.issuingActivation == library.activation,
+                         observeOcrPending = observeOcrPending,
+                         thumbnailsCurrent = { album ->
+                             batch.issuingActivation != library.activation || batch.savedDocument != album.documentId ||
+                                 (!batch.saving && album.documentRevision >= (batch.savedRevision ?: 0L))
+                         },
+                         openAtelier = { title, target ->
+                             retained.accept(LibraryEvent.LeaveHomeSearch)
+                             issuing?.let { acquisition.open(it, title, target) }
+                         }, onSettings = {
+                             retained.accept(LibraryEvent.LeaveHomeSearch)
+                             settingsPage = SettingsPage.ROOT
+                         },
+                     ) { document, page ->
+                         issuing?.let {
+                             editorOwner.open(EditorIdentity(document, page, it)) {
+                                 retained.accept(LibraryEvent.SelectPage(page))
+                             }
                          }
                      }
-                }
+                 }
             }
             else {
                 val selected = editing

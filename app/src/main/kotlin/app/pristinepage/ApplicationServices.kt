@@ -62,6 +62,8 @@ import app.pristinepage.image.preview.RenderedPreviewBitmapLoader
 import app.pristinepage.library.LibraryBackupConfirmation
 import app.pristinepage.library.LibraryBackupPickerRegistration
 import app.pristinepage.library.LibraryFolderGrantHandoff
+import app.pristinepage.library.AtelierThumbnailLoader
+import app.pristinepage.library.HomePageSearchHit
 import app.pristinepage.library.LibraryFolderPickerContract
 import java.io.FileNotFoundException
 import java.io.File
@@ -355,6 +357,24 @@ class ApplicationServices(context: Context, internal val budget: ImageAllocation
             requireSameDefault(issuedAt)
             result
         } ?: activationChanged()
+
+    internal suspend fun openDefaultPageHit(issuedAt: LibraryActivation, hit: HomePageSearchHit): DocumentOverview? {
+        if (hit.issuedAt != issuedAt) return null
+        return (withDefaultLibrary(issuedAt) { graph ->
+            val album = graph.store.catalog.load(hit.document)
+            currentCoroutineContext().ensureActive()
+            val matched = hit.belongsTo(album) && hit.stillMatches()
+            requireSameDefault(issuedAt)
+            EditorValue(album.takeIf { matched })
+        } ?: activationChanged()).value
+    }
+
+    internal suspend fun renderDefaultLibraryThumbnail(
+        issuedAt: LibraryActivation, album: DocumentSummary, tile: DocumentPage,
+    ): RenderedPreviewBitmap = activationPixels(issuedAt) { graph ->
+        AtelierThumbnailLoader(graph.store.editablePages::load, graph.renderer, RenderedPreviewBitmapLoader(graph.budget))
+            .load(album, tile)
+    }
 
     internal suspend fun renderDefaultBatchPreview(issuedAt: LibraryActivation, page: EditablePage, request: RenderRequest): RenderedPreviewBitmap =
         activationPixels(issuedAt, revalidate = { graph ->

@@ -157,6 +157,32 @@ class LibraryPageSelectionTest {
         assertTrue(session.state.value.pageSearchUnavailable)
     }
 
+    @Test fun producerValidationCannotPublishAnAlbumAfterItsActivationIsRefused() = runTest {
+        val f = Fixture()
+        val reachedProducer = CompletableDeferred<Unit>()
+        val continueProducer = CompletableDeferred<Unit>()
+        val hit = HomePageSearchHit(f.doc, f.second, "Synthetic selection", 2) {
+            reachedProducer.complete(Unit)
+            continueProducer.await()
+            true
+        }
+        f.textMatches = { HomePageSearchPage(listOf(hit), null) }
+        val session = ImportLibrarySession(f, LibraryIdentity(), this)
+        session.accept(LibraryEvent.SetAlbumSearch("receipt", ZoneOffset.UTC))
+        advanceUntilIdle()
+        var opened = false
+        session.accept(LibraryEvent.OpenPageMatch(hit) { _, _ -> opened = true })
+        runCurrent()
+        assertTrue(reachedProducer.isCompleted)
+
+        f.refuseIssuedLoads = true
+        continueProducer.complete(Unit)
+        advanceUntilIdle()
+        assertFalse(opened)
+        assertNull(session.state.value.document)
+        assertNull(session.state.value.selectedId)
+    }
+
     @Test fun committedOcrRefreshPreservesTheLoadedPageWindowAndItsCursor() = runTest {
         val f = Fixture()
         var extra = false

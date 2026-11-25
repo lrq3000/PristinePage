@@ -171,10 +171,7 @@ class ImportLibrarySession(private val actions: LibraryActions, restored: Librar
         val opening = hitNavigation
         fun currentHit() = opening == hitNavigation && eligible()
         openingHit = run(onFailure = { if (currentHit()) current.value = current.value.copy(pageSearchUnavailable = true) }) {
-            // A hit can have the same IDs as an unrelated library. Check the issuing catalog before revalidating its producer.
-            val overview = if (issuedAt != null) actions.loadIssued(hit.document, issuedAt) else actions.load(hit.document)
-            if (overview.document.documentId != hit.document || overview.pages.none { it.pageId == hit.page } ||
-                !currentHit() || !hit.stillMatches()) return@run
+            val overview = actions.openPageHit(hit, issuedAt) ?: return@run
             currentCoroutineContext().ensureActive()
             if (!currentHit()) return@run
             ++navigation

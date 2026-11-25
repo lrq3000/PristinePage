@@ -8,6 +8,8 @@ import app.pristinepage.data.repository.AlbumSearchQuery
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.emptyFlow
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import java.time.ZoneId
 import java.util.Locale
 
@@ -20,6 +22,13 @@ interface LibraryActions {
     suspend fun list(after: DocumentId?, limit: Int): List<DocumentSummary>
     suspend fun load(id: DocumentId): DocumentOverview
     suspend fun loadIssued(id: DocumentId, issuedAt: LibraryActivation): DocumentOverview = load(id)
+    suspend fun openPageHit(hit: HomePageSearchHit, issuedAt: LibraryActivation?): DocumentOverview? {
+        val overview = if (issuedAt != null) loadIssued(hit.document, issuedAt) else load(hit.document)
+        currentCoroutineContext().ensureActive()
+        if (!hit.belongsTo(overview) || !hit.stillMatches()) return null
+        currentCoroutineContext().ensureActive()
+        return if (issuedAt == null) overview else loadIssued(hit.document, issuedAt).takeIf(hit::belongsTo)
+    }
     suspend fun activeImport(id: DocumentId): ImportSessionId?
     suspend fun activeImportRequest(id: DocumentId): PhotoImportRequest? = activeImport(id)?.let { PhotoImportRequest.abandonmentOnly(it) }
     suspend fun activeIssuedImport(id: DocumentId, issuedAt: LibraryActivation): PhotoImportRequest? = activeImportRequest(id)
@@ -48,8 +57,12 @@ internal interface SearchablePageActions {
 /** No recognized text or persistent search token. Revalidation belongs to the store that issued the hit. */
 class HomePageSearchHit internal constructor(
     val document: DocumentId, val page: PageId, val albumTitle: String, val pageNumber: Int,
+    internal val issuedAt: LibraryActivation? = null,
     internal val stillMatches: suspend () -> Boolean,
-)
+) {
+    internal fun belongsTo(overview: DocumentOverview): Boolean =
+        overview.document.documentId == document && overview.pages.any { it.pageId == page }
+}
 
 class HomePageSearchPage internal constructor(val hits: List<HomePageSearchHit>, internal val next: (suspend () -> HomePageSearchPage)?)
 

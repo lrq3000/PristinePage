@@ -62,6 +62,60 @@ class ApplicationCompositionTest {
         }
     }
 
+    @Test fun aThumbnailCannotDeliverPixelsAfterItsLibraryActivationChanges() = runBlocking {
+        Fixture().use { f ->
+            val services = ApplicationServices(f.context, f.budget, f.provider)
+            val cold = LibraryActivation("aaaaaaaa-aaaa-4aaa-8aaa-000000000041", 1)
+            val summary = DocumentSummary(DocumentId("aaaaaaaa-aaaa-4aaa-8aaa-000000000042"), "Thumbnail", 1, 1, false)
+            val page = DocumentPage(PageId("aaaaaaaa-aaaa-4aaa-8aaa-000000000043"),
+                SourceId("aaaaaaaa-aaaa-4aaa-8aaa-000000000044"), 1, 0)
+            val absent = runCatching { services.renderDefaultLibraryThumbnail(cold, summary, page).close() }.exceptionOrNull() as RepositoryFailure
+            assertEquals("library_activation_changed", absent.error.safeMessageKey)
+            assertFalse(File(f.context.filesDir, "library-settings").exists())
+            assertFalse(f.context.getDatabasePath("pristinepage.db").exists())
+
+            services.imports().useStore { graph ->
+                val album = graph.store.documents.createDocument("Synthetic thumbnail")
+                val batch = graph.store.imports.beginImport(album, 1, null)
+                val scan = graph.photoImports.importProviderReferences(listOf(f.good), batch.parentId).single() as IngestResult.Committed
+                val saved = graph.store.catalog.load(album)
+                val tile = saved.pages.single()
+                services.renderDefaultLibraryThumbnail(graph.activation, saved.document, tile).use {
+                    assertEquals(scan.pageId.value, it.request.pageId)
+                    assertEquals(scan.sourceId.value, it.request.sourceId)
+                    assertEquals(tile.recipeRevision, it.request.recipeRevision)
+                    assertTrue(f.budget.usedBytes > 0)
+                }
+                assertEquals(0L, f.budget.usedBytes)
+                val marker = File(f.context.filesDir, "library-settings/active-library")
+                val before = marker.readBytes()
+                val body = "pristinepage-active-library-v1\n${graph.activation.libraryId}\n${graph.activation.number + 1}\n-\n-\n"
+                val digest = MessageDigest.getInstance("SHA-256").digest(body.toByteArray(Charsets.US_ASCII))
+                    .joinToString("") { "%02x".format(it.toInt() and 255) }
+                var checks = 0
+                f.afterRoomOpen = {
+                    if (++checks == 2) {
+                        assertTrue("The provisional display must still own its image permit", f.budget.usedBytes > 0)
+                        marker.writeText("$body$digest\n", Charsets.US_ASCII)
+                    }
+                }
+                try {
+                    val refused = runCatching {
+                        services.renderDefaultLibraryThumbnail(graph.activation, saved.document, tile).close()
+                    }.exceptionOrNull() as RepositoryFailure
+                    assertEquals("library_activation_changed", refused.error.safeMessageKey)
+                    assertEquals(2, checks)
+                    assertEquals(0L, f.budget.usedBytes)
+                } finally {
+                    f.afterRoomOpen = {}
+                    marker.writeBytes(before)
+                }
+                assertEquals(saved, graph.store.catalog.load(album))
+                assertEquals(listOf(f.good), f.opened)
+            }
+        }
+    }
+
     @Test fun batchDonePreviewAndUndoCannotDeliverAfterTheirIssuingActivationChanges() = runBlocking {
         Fixture().use { f ->
             val services = ApplicationServices(f.context, f.budget, f.provider)
