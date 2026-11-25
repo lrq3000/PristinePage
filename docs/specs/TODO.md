@@ -400,6 +400,8 @@ Independent ancestry review found two Important evidence gaps. Run syncable-desc
 
 The [first ancestry run](../../validation/storage/library-folder-android.md#granted-descriptor-ancestry) reproduced effective write permission after recreation and explicitly refused to enter either descriptor stage. Finish the chooser-owning Activity instead and require the same before/after permission assertions on the persisted read grant. Verify only this corrected test on the unchanged app and exact released predecessor; leave the initial target intact. Recheck at the native result or within 30 active minutes; if the grant still cannot be isolated, do not weaken the witness or change product permissions to force a pass.
 
+The Activity finish was insufficient on `c458b00`; neither descriptor stage ran. Reuse the already qualified cold-process pattern: acquire exactly one persisted read grant on a fresh fixture, stop only the verified test app, verify process absence, and run both probes headlessly after confirming both URI spellings deny write. Release only the newly retained exact read mode in the cold test. Recheck both refused fixtures and all current fixture bytes; no VM restart between the two instrumentations, no provider writes and no change to application permissions. If a cold process also sees effective write, report that boundary and advance the independent capacity/interruption work rather than repeating the same trial.
+
 ### Current coordination: transition to `main`
 
 - [x] Operator approved the local fast-forward and `main`-based PR/handoff cadence; see [operational authority](OPERATIONAL_PLAN.md) and [queue rules](PARALLEL_EXECUTION_PLAN.md#coordination). Earlier branch/base references below describe their historical claims.

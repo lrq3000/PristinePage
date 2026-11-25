@@ -28,6 +28,8 @@ FILES_CASE = ("app.pristinepage.LibraryFolderFilesJourneyTest"
               "#actualFilesGrantReopensAfterActivityRecreationAndRevocationFailsClosed")
 DESCRIPTOR_CASE = "app.pristinepage.LibraryFolderFilesJourneyTest#exactFilesTreeExposesSyncableDirectoryDescriptors"
 ANCESTRY_CASE = "app.pristinepage.LibraryFolderFilesJourneyTest#exactFilesTreeProvesManagedDirectoryAncestry"
+ANCESTRY_GRANT_CASE = "app.pristinepage.LibraryFolderFilesJourneyTest#persistsExactFilesReadForColdAncestry"
+ANCESTRY_COLD_CASE = "app.pristinepage.LibraryProviderAncestryColdTest#provesManagedAncestryWithoutEffectiveWrite"
 WORKING_CASE = "app.pristinepage.LibraryFolderFilesJourneyTest#populatingAWorkingRoomCatalogDoesNotMaterializeTheOriginal"
 ACTIVATION_CASE = "app.pristinepage.LibraryFolderFilesJourneyTest#defaultAppGraphUsesItsDurableActivationBeforeAndAfterActivityRecreation"
 SELECTED_CATALOG_CASE = "app.pristinepage.LibraryFolderFilesJourneyTest#durableFolderSelectionReopensExactCatalogAndRefusesRevocation"
@@ -77,6 +79,7 @@ BACKUP_MANUAL_CONTROL_FAILURE = "08fe10503d488aa4ec3775157a7d8b2690be375908cb2c7
 BACKUP_DIRECT_CONTROL_PASS = "b2ac8b7795cb08629b3eb0cf888b1467a464ef8b36810afa76de07acae0d7e24"
 BACKUP_DEATH_RECEIPT_ONLY = "b6f9e9329f39c067cecdb1c1130b9f8f28bf65492e17709750c89d38bdfa86cd"
 ANCESTRY_GRANT_REFUSAL = "3271a4ebf9f4e0c55a25202fecfc160fef75626fe07ab027c767b7c2ce0b8fd1"
+ANCESTRY_FINISHED_GRANT_REFUSAL = "0a2fb4828173346ad9d01ff59d00449ce48c48827d38c1c1882e66dcc6f5083e"
 UUID_TEXT = r"[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}"
 BACKUP_ORIGINAL = "ebd602840377a3b3cf763cb6828fee67861ff77c444e8fe5894457ef6d99a24d"
 OCR_ACTIVATION_CASES = tuple(f"app.pristinepage.ocr.OcrWorkManagerIntegrationTest#{method}" for method in (
@@ -203,7 +206,7 @@ def select_tree_ancestry(enabled, mixed):
     if not enabled:
         return ()
     need(not mixed, "Actual Files ancestry requires a retained read-only standalone invocation")
-    return (ANCESTRY_CASE,)
+    return ANCESTRY_GRANT_CASE, ANCESTRY_COLD_CASE
 
 
 def settings_run_anchors(raw, expected_sha):
@@ -664,9 +667,11 @@ def run(args):
             parents = {Path(file).resolve().parent for file in args.previous}
             need(len(parents) == 1 and previous[APP] == hashes[APP] and previous[TEST] != hashes[TEST],
                  "Require the exact released app and changed instrumentation for the ancestry continuation")
-            old = settings_run_anchors(parents.pop(), ANCESTRY_GRANT_REFUSAL)
+            old = settings_run_anchors(parents.pop(), ANCESTRY_FINISHED_GRANT_REFUSAL)
             verify_ancestry_grant_refusal(old, args.guest, previous)
             refused_death_destinations.append(backup_death_control_destination(old, ANCESTRY_CASE))
+            first = settings_run_anchors(raw.parent / "picker-adapter-library-tree-62c66f5beb8e", ANCESTRY_GRANT_REFUSAL)
+            refused_death_destinations.append(backup_death_control_destination(first, ANCESTRY_CASE))
         if death_operation or death_receipt:
             parents = {Path(file).resolve().parent for file in args.previous}
             need(len(parents) == 1 and previous[APP] == hashes[APP], "Require the exact retained cold recovery pair")
@@ -900,12 +905,16 @@ def run(args):
                     need(refused_death_private not in adb("shell", "run-as", APP, "ls", "-A", "-1", "files").splitlines(),
                          "The failed death attempt gained unexpected private data")
         if death_picker_case or ancestry_cases:
-            # The ancestry witness runs both checks under one Files grant. The chooser-only control still precedes its separate descriptor case.
+            # Both ancestry probes use one exact Files read grant in the fresh process. Do not reboot the VM between stages.
             all_passed, all_failed = [], []
             try:
-                schedule = ((ancestry_cases[0], "tree-ancestry"),) if ancestry_cases else (
+                schedule = tuple(zip(ancestry_cases, ("tree-ancestry-grant", "tree-ancestry-cold"))) if ancestry_cases else (
                     (death_picker_case, "death-picker"), (DESCRIPTOR_CASE, "directory-probe"))
                 for case, name in schedule:
+                    if case == ANCESTRY_COLD_CASE:
+                        recheck_target(run, ns)
+                        adb("shell", "am", "force-stop", APP)
+                        require_cold_backup_app(adb)
                     output = adb("shell", "am", "instrument", "-w", "-r", "-e", "class", case,
                                  "-e", "libraryFixtureFolder", folder, "-e", "libraryFixtureOriginal", original, RUNNER, timeout=155)
                     run.path(f"{name}-instrumentation.txt").write_text(output, encoding="utf-8")

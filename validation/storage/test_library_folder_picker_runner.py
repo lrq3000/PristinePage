@@ -144,7 +144,8 @@ class LibraryFolderPickerRunnerTest(unittest.TestCase):
                 verify_backup_receipt_only(receipt, mixed)
 
     def test_actual_tree_ancestry_is_a_standalone_read_only_batch(self):
-        self.assertEqual(("app.pristinepage.LibraryFolderFilesJourneyTest#exactFilesTreeProvesManagedDirectoryAncestry",),
+        self.assertEqual(("app.pristinepage.LibraryFolderFilesJourneyTest#persistsExactFilesReadForColdAncestry",
+                          "app.pristinepage.LibraryProviderAncestryColdTest#provesManagedAncestryWithoutEffectiveWrite"),
                          select_tree_ancestry(True, False))
         self.assertEqual((), select_tree_ancestry(False, True))
         with self.assertRaisesRegex(RuntimeError, "read-only.*standalone"):

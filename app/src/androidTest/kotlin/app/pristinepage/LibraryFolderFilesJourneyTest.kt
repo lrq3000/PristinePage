@@ -557,10 +557,7 @@ class LibraryFolderFilesJourneyTest {
         LibraryProviderDirectoryProbe.verify(resolver, tree)
     }
 
-    @Test fun exactFilesTreeProvesManagedDirectoryAncestry() = verifyJourney(requireEffectiveReadOnly = true) { resolver, tree, _, _, _ ->
-        LibraryProviderDirectoryProbe.verify(resolver, tree)
-        LibraryProviderDirectoryProbe.verifyAncestry(resolver, tree)
-    }
+    @Test fun persistsExactFilesReadForColdAncestry() = verifyJourney(holdReadForColdAncestry = true)
 
     @Test fun grantedTreeCanStageAndPublishOneSyntheticFileWithoutOverwriting() = verifyJourney(probeWrite = true)
 
@@ -705,7 +702,7 @@ class LibraryFolderFilesJourneyTest {
         exportBackup: Boolean = false,
         backupDeath: String? = null,
         backupDeathPickerOnly: Boolean = false,
-        requireEffectiveReadOnly: Boolean = false,
+        holdReadForColdAncestry: Boolean = false,
         revokeAfterProbe: ((Uri) -> Unit)? = null,
         probe: ((ContentResolver, Uri, AndroidLibraryTreeRead, AndroidLibraryTreeRead.Verified, File) -> Unit)? = null,
     ) {
@@ -722,8 +719,7 @@ class LibraryFolderFilesJourneyTest {
         val existing = { app.contentResolver.persistedUriPermissions.associate { it.uri.toString() to (it.isReadPermission to it.isWritePermission) } }
         val before = existing()
         assertFalse(before.keys.any { it in exactFixtureTrees })
-        // API 28 may expose filesDir through /data/user/0 rather than the canonical app-owned storage path.
-        val scratch = File(app.filesDir.canonicalFile, "tree-read-${UUID.randomUUID()}").apply { check(mkdir()) }
+        if (holdReadForColdAncestry) assertTrue("The cold ancestry guest must start without retained URI grants", before.isEmpty())
         val isolatedWritableRoute = backupDeath != null || backupDeathPickerOnly
         val platform = LibraryFolderPickerContract(writable = isolatedWritableRoute)
         val result = AtomicReference<ActivityResult>()
@@ -739,6 +735,7 @@ class LibraryFolderFilesJourneyTest {
             launcher.launch(intent)
             (requireNotNull(intent.component).packageName) to launcher
         }
+        var readHandedOff = false
         try {
             val picker = registration.first
             if (isolatedWritableRoute) {
@@ -822,6 +819,13 @@ class LibraryFolderFilesJourneyTest {
             val handoff = LibraryFolderGrantHandoff(app)
             val uri = handoff.persistRead(picked)
             assertEquals(before + (uri.toString() to (true to false)), existing())
+            if (holdReadForColdAncestry) {
+                compose.runOnUiThread { registration.second.unregister() }
+                readHandedOff = true
+                return
+            }
+            // API 28 may expose filesDir through /data/user/0 rather than the canonical app-owned storage path.
+            val scratch = File(app.filesDir.canonicalFile, "tree-read-${UUID.randomUUID()}").apply { check(mkdir()) }
             val first = runBlocking { AndroidLibraryTreeRead(app, scratch).verify(uri) }
             assertEquals("9e940d7b-76c7-45ea-b5e4-0ad86f26ea13", first.libraryId)
             assertEquals("25c49d9b-02d8-418f-b982-154980d89cfb", first.generationId)
@@ -854,12 +858,7 @@ class LibraryFolderFilesJourneyTest {
              }
              assertEquals("The verified library belongs to a different selected folder", wrongRoot.message)
              compose.runOnUiThread { registration.second.unregister() }
-             if (requireEffectiveReadOnly) {
-                 // Recreation retains the activity's URI permission owner. End it before borrowing descriptors on the persisted read grant.
-                 compose.activityRule.scenario.close()
-             } else {
-                 compose.activityRule.scenario.recreate()
-             }
+            compose.activityRule.scenario.recreate()
             val again = runBlocking { AndroidLibraryTreeRead(app, scratch).verify(Uri.parse(uri.toString()), first) }
             assertEquals(first.generationId, again.generationId)
             val fixtureBlob = SourceBlobId("aaaaaaaa-aaaa-4aaa-8aaa-000000000003")
@@ -885,22 +884,7 @@ class LibraryFolderFilesJourneyTest {
                 }
             }
             assertEquals("Cancellation must prevent the next chunk from reaching the sink", 1, canceledWrites)
-            fun assertEffectiveReadOnly() {
-                assertEquals(before + (uri.toString() to (true to false)), existing())
-                assertEquals(PackageManager.PERMISSION_GRANTED,
-                    app.checkUriPermission(uri, Process.myPid(), Process.myUid(), Intent.FLAG_GRANT_READ_URI_PERMISSION))
-                for (tree in exactFixtureTrees) {
-                    assertEquals("Files retained effective write access during the read-only probe", PackageManager.PERMISSION_DENIED,
-                        app.checkUriPermission(Uri.parse(tree), Process.myPid(), Process.myUid(), Intent.FLAG_GRANT_WRITE_URI_PERMISSION))
-                }
-            }
-            val observation = probe?.let {
-                runCatching {
-                    if (requireEffectiveReadOnly) assertEffectiveReadOnly()
-                    it(app.contentResolver, uri, AndroidLibraryTreeRead(app, scratch), again, scratch)
-                    if (requireEffectiveReadOnly) assertEffectiveReadOnly()
-                }
-            }
+            val observation = probe?.let { runCatching { it(app.contentResolver, uri, AndroidLibraryTreeRead(app, scratch), again, scratch) } }
             if (revokeAfterProbe != null) {
                 observation?.getOrThrow()
                 revokeAfterProbe(uri)
@@ -927,7 +911,7 @@ class LibraryFolderFilesJourneyTest {
             writeObservation?.getOrThrow()
             observation?.getOrThrow()
         } finally {
-            for (fixtureTree in exactFixtureTrees) {
+            for (fixtureTree in exactFixtureTrees.takeUnless { readHandedOff }.orEmpty()) {
                 existing()[fixtureTree]?.let { (read, write) ->
                     val modes = (if (read) Intent.FLAG_GRANT_READ_URI_PERMISSION else 0) or
                         (if ((probeWrite || exportBackup) && write) Intent.FLAG_GRANT_WRITE_URI_PERMISSION else 0)
