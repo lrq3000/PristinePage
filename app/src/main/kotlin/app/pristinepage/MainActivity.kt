@@ -238,7 +238,7 @@ class MainActivity : ComponentActivity() {
             }
              else if (host.identity == null) libraryState.SaveableStateProvider("atelier-library") {
                  val issuing = library.activation
-                 val observeOcrPending = remember(app) { AlbumOcrPending.forSavedPage(app, services::imports) }
+                 val observeOcrPending = remember(app, issuing) { issuing?.let { AlbumOcrPending.forSavedPage(app, it, services) } }
                  val loadThumbnail: suspend (DocumentSummary, DocumentPage) -> RenderedPreviewBitmap = { album, tile ->
                      // Lazy tiles retain only their small displays. Serialize expensive full-source decoding; the existing process-owned budget still governs every allocation.
                      thumbnailPermit.withPermit {

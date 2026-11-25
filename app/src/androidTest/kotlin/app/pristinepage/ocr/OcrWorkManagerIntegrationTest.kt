@@ -115,6 +115,11 @@ class OcrWorkManagerIntegrationTest {
         try {
             manager.enqueueUniqueWork(wake.uniqueName(), ExistingWorkPolicy.KEEP, held).result.awaitBounded()
             assertEquals(AlbumOcrPending.State.QUEUED, withTimeout(5_000) { AlbumOcrPending.withWorkManager(context, observed, activation).first { it != null } })
+            // Both target IDs are identical. Only the issuing activation prevents the successor tile from inheriting the old overlay.
+            val successor = activation.copy(number = activation.number + 1)
+            assertNull(kotlinx.coroutines.withTimeoutOrNull(1_500) {
+                AlbumOcrPending.withWorkManager(context, observed, successor).first { it != null }
+            })
         } finally {
             cancelUnfinished(manager, held.id)
         }

@@ -3,7 +3,7 @@ package app.pristinepage.ocr
 import android.content.Context
 import androidx.work.WorkInfo
 import androidx.work.WorkManager
-import app.pristinepage.ApplicationImports
+import app.pristinepage.ApplicationServices
 import app.pristinepage.data.library.LibraryActivation
 import app.pristinepage.data.model.DocumentId
 import app.pristinepage.data.model.DocumentPage
@@ -15,8 +15,6 @@ import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.buffer
 import kotlinx.coroutines.flow.channelFlow
 import kotlinx.coroutines.flow.distinctUntilChanged
-import kotlinx.coroutines.flow.emitAll
-import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
 
@@ -24,7 +22,9 @@ import kotlinx.coroutines.launch
 internal object AlbumOcrPending {
     enum class State { QUEUED, ACTIVE_WAKE }
 
-    fun observe(targets: Flow<SavedOcrWork.Target?>, states: (SavedOcrWork.Target) -> Flow<List<WorkInfo.State>>): Flow<State?> =
+    fun observe(targets: Flow<SavedOcrWork.Target?>, isCurrent: suspend () -> Boolean = { true },
+        states: (SavedOcrWork.Target) -> Flow<List<WorkInfo.State>>,
+    ): Flow<State?> =
         channelFlow<State?> {
             var subscribed: SavedOcrWork.Target? = null
             var observer: Job? = null
@@ -37,8 +37,10 @@ internal object AlbumOcrPending {
                 observer = target?.let {
                     launch {
                         try {
+                            if (!isCurrent()) return@launch
                             states(it).collect { records ->
-                                send(when (records.filterNot { state -> state.isFinished }.singleOrNull()) {
+                                // The Room target may not change while a WorkManager delivery runs. Check the issuing activation again before updating the tile.
+                                send(when (if (isCurrent()) records.filterNot { state -> state.isFinished }.singleOrNull() else null) {
                                     WorkInfo.State.ENQUEUED -> State.QUEUED
                                     WorkInfo.State.RUNNING -> State.ACTIVE_WAKE
                                     else -> null
@@ -54,16 +56,19 @@ internal object AlbumOcrPending {
             }
         }.buffer(0).distinctUntilChanged()
 
-    fun withWorkManager(context: Context, targets: Flow<SavedOcrWork.Target?>, activation: LibraryActivation): Flow<State?> =
-        observe(targets) { target ->
+    fun withWorkManager(context: Context, targets: Flow<SavedOcrWork.Target?>, activation: LibraryActivation,
+        isCurrent: suspend () -> Boolean = { true },
+    ): Flow<State?> =
+        observe(targets, isCurrent) { target ->
             val name = ActivationBoundOcrWake(activation, target).uniqueName()
             WorkManager.getInstance(context.applicationContext).getWorkInfosForUniqueWorkFlow(name)
                 .map { records -> records.map { it.state } }
         }
 
-    fun forSavedPage(context: Context, open: suspend () -> ApplicationImports): (DocumentId, DocumentPage) -> Flow<State?> =
-        { document, page -> flow {
-            val graph = open()
-            emitAll(withWorkManager(context, graph.store.savedOcr.observePendingTarget(document, page.pageId, page.recipeRevision), graph.activation))
-        } }
+    fun forSavedPage(context: Context, issuedAt: LibraryActivation, services: ApplicationServices): (DocumentId, DocumentPage) -> Flow<State?> =
+        { document, page ->
+            withWorkManager(context, services.observeDefaultAlbumOcrTarget(issuedAt, document, page), issuedAt) {
+                services.recordedDefaultActivation() == issuedAt
+            }
+        }
 }

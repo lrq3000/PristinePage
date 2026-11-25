@@ -346,6 +346,10 @@ The producer-drift test reproduced one failing assertion in 25 selection cases, 
 
 The overlapping-ID successor regression failed once in the 26-case selection suite. The corrected strict-offline run passed all 295 app JVM cases with no failures or skips, and app Android test compilation passed. The application adapter reborrows the exact default graph for both OCR and metadata page continuations. Foreground invalidations are hints from the issuing subscription, not switch-blocking leases; cancel and drain them before any live cutover. No writable selected graph, process-death check, or Files permission evidence follows.
 
+`LIBRARY-PORTABILITY-01`, saved-album OCR status from `125ccf7`: resolve both the Room target and WorkManager wake under the tile's issuing activation, never by reopening the ordinary startup graph. A late wake update must clear rather than publish on lost admission. Reuse the existing invalidation/wake flows, without a long-lived switch-blocking graph lease. Scope: saved (not draft) tiles, typed default observation and focused app host fixture; no OCR scheduling, registry settings, app package, or provider change. Reserve one cached app JVM slot and at least 0.75 GiB above the 8 GiB floor. Recheck after RED/GREEN or within 30 active minutes.
+
+The missing tile guard reproduced at focused app test compilation. The corrected app suite passed 296/296, including three overlay tests; the native same-page/same-job/different-activation control compiled, but did not run. A held overlay now clears when a late wake update reports lost admission. The observer uses the issuing Room store and WorkManager name only, and it still needs explicit subscription cancellation/drain at cutover. No ordinary worker, provider, or pointer was changed.
+
 ### Current coordination: transition to `main`
 
 - [x] Operator approved the local fast-forward and `main`-based PR/handoff cadence; see [operational authority](OPERATIONAL_PLAN.md) and [queue rules](PARALLEL_EXECUTION_PLAN.md#coordination). Earlier branch/base references below describe their historical claims.

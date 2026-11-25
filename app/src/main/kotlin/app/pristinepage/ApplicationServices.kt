@@ -386,17 +386,23 @@ class ApplicationServices(context: Context, internal val budget: ImageAllocation
     }
 
     /** An idle observer is not a graph-change lease. Its Room subscription owns only the issuing store's read lifetime; a switch must drain the foreground collector. */
-    internal fun observeDefaultHomeSearch(issuedAt: LibraryActivation?): Flow<Unit> = flow {
+    private fun <T> observeDefaultOcr(issuedAt: LibraryActivation?, observe: (SavedOcrWork) -> Flow<T>): Flow<T> = flow {
         val expected = issuedAt ?: activationChanged()
         val issuingStore = initialization.withLock {
             requireSameDefault(expected)
             initialized?.takeIf { it.activation == expected }?.store?.savedOcr ?: activationChanged()
         }
-        issuingStore.observeSearchChanges().collect {
+        observe(issuingStore).collect {
             requireSameDefault(expected)
-            emit(Unit)
+            emit(it)
         }
     }
+
+    internal fun observeDefaultHomeSearch(issuedAt: LibraryActivation?): Flow<Unit> =
+        observeDefaultOcr(issuedAt, SavedOcrWork::observeSearchChanges)
+
+    internal fun observeDefaultAlbumOcrTarget(issuedAt: LibraryActivation, album: DocumentId, tile: DocumentPage): Flow<SavedOcrWork.Target?> =
+        observeDefaultOcr(issuedAt) { it.observePendingTarget(album, tile.pageId, tile.recipeRevision) }
 
     internal suspend fun openDefaultPageHit(issuedAt: LibraryActivation, hit: HomePageSearchHit): DocumentOverview? {
         if (hit.issuedAt != issuedAt) return null
