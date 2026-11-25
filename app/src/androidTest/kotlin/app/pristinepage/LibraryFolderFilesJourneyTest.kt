@@ -348,13 +348,21 @@ class LibraryFolderFilesJourneyTest {
             return matches.singleOrNull()
         }
         fun select(step: String, labels: Set<String>, parent: String? = null, guard: (AccessibilityNodeInfo) -> Boolean = { true }) {
-            val root = await(instrumentation, picker, step) { guard(it) && unique(it, labels, parent) != null }
-            val first = checkNotNull(unique(root, labels, parent))
-            val current = checkNotNull(instrumentation.uiAutomation.rootInActiveWindow)
-            check(current.packageName?.toString() == picker && guard(current))
-            val control = checkNotNull(unique(current, labels, parent))
-            check(control == first && control.refresh() && control.isEnabled && control.isVisibleToUser)
-            if (control.isClickable) check(control.performAction(AccessibilityNodeInfo.ACTION_CLICK))
+            var confirmed: AccessibilityNodeInfo? = null
+            await(instrumentation, picker, step) { root ->
+                if (!guard(root)) return@await false
+                val first = unique(root, labels, parent) ?: return@await false
+                val current = instrumentation.uiAutomation.rootInActiveWindow ?: return@await false
+                if (current.packageName?.toString() != picker || current.windowId != root.windowId || !guard(current)) return@await false
+                val control = unique(current, labels, parent) ?: return@await false
+                val expectedBounds = Rect().also(first::getBoundsInScreen)
+                if (expectedBounds.isEmpty || !control.refresh() || !control.isEnabled || !control.isVisibleToUser) return@await false
+                if (Rect().also(control::getBoundsInScreen) != expectedBounds || unique(current, labels, parent) != control) return@await false
+                confirmed = control
+                true
+            }
+            val control = checkNotNull(confirmed)
+            if (control.isClickable) check(control.performAction(AccessibilityNodeInfo.ACTION_CLICK)) { "Files did not acknowledge $step" }
             else {
                 check(parent == "dir_list")
                 tap(instrumentation, control)
