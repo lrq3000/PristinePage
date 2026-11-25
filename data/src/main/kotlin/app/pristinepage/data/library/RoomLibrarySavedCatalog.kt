@@ -39,7 +39,10 @@ internal class RoomLibrarySavedCatalog(private val database: PristineDatabase) {
         val days = owned(days)
     }
 
-    internal class Album(val row: DocumentRow, pages: List<Page>) { val pages = owned(pages) }
+    internal class Album(val row: DocumentRow, pages: List<Page>, undo: List<PortableUndoEntry> = emptyList()) {
+        val pages = owned(pages)
+        val undo = owned(undo)
+    }
     internal class Page(val row: PageRow, val filename: String, revisions: List<RecipeRevisionRow>, val savedOcr: LibrarySavedOcr?) {
         private val admitted = revisions.map { it.copy(canonicalRecipe = it.canonicalRecipe.copyOf()) }
         val revisions: List<RecipeRevisionRow> get() = admitted.map { it.copy(canonicalRecipe = it.canonicalRecipe.copyOf()) }
@@ -111,7 +114,16 @@ internal class RoomLibrarySavedCatalog(private val database: PristineDatabase) {
                     Page(page, logicalName, revisions, saved)
                 }
                 charge(192 + 4L * album.title.length)
-                Album(album, pages)
+                val owners by lazy { PortableUndoEntry.Owners(Album(album, pages)) }
+                val undo = ArrayList<PortableUndoEntry>()
+                try {
+                    LibraryUndoRows.read({ query, args -> sql.query(query, args) }, id, ::charge, checkpoint, ::invalid, ::limit) { row ->
+                        val entry = owners.admit(row)
+                        charge(128L * entry.pinnedSources.size)
+                        undo += entry
+                    }
+                } catch (_: IllegalArgumentException) { invalid() }
+                Album(album, pages, undo)
             }
             checkpoint()
             Snapshot(albums, sources.values.toList(), originals.values.toList(), days)
@@ -133,8 +145,9 @@ internal class RoomLibrarySavedCatalog(private val database: PristineDatabase) {
             }
             snapshot.days.forEach { ingest.insertCaptureDay(it) }
             val refCounts = HashMap<String, Long>()
-            for (album in snapshot.albums) for (page in album.pages) {
-                refCounts.merge(page.row.sourceId, 1L + page.revisionCount, Long::plus)
+            for (album in snapshot.albums) {
+                for (page in album.pages) refCounts.merge(page.row.sourceId, 1L + page.revisionCount, Long::plus)
+                for (entry in album.undo) for (source in entry.pinnedSources) refCounts.merge(source, 1L, Long::plus)
             }
             for (source in snapshot.sources) {
                 checkpoint()
@@ -160,6 +173,14 @@ internal class RoomLibrarySavedCatalog(private val database: PristineDatabase) {
                         if (catalog.insertReference(SourceReferenceRow("RECIPE_HISTORY", "recipe-v1/${row.pageId}/${revision.recipeRevision}", row.sourceId, revision.createdAt)) <= 0) invalid()
                     }
                     page.savedOcr?.let(savedOcr::restoreInTransaction)
+                }
+                for (entry in album.undo) {
+                    checkpoint()
+                    catalog.insertUndo(entry.row)
+                    for (source in entry.pinnedSources) {
+                        // Pins are rebuilt from the admitted pair, not copied from an input counter or unrelated owner.
+                        if (catalog.insertReference(SourceReferenceRow("UNDO", entry.id, source, 0)) <= 0) invalid()
+                    }
                 }
             }
             for ((source, count) in refCounts) if (catalog.countSourceReferences(source) != count) invalid()

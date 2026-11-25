@@ -17,15 +17,26 @@ import app.pristinepage.data.db.RecipeRevisionRow
 import app.pristinepage.data.db.SourceBlobRow
 import app.pristinepage.data.db.SourceCaptureDayRow
 import app.pristinepage.data.db.SourceRow
+import app.pristinepage.data.db.SourceReferenceRow
+import app.pristinepage.data.db.UndoEntryRow
 import app.pristinepage.data.library.LibraryCatalogMerge
 import app.pristinepage.data.library.LibrarySavedOcr
+import app.pristinepage.data.library.PortableUndoEntry
 import app.pristinepage.data.library.RoomLibrarySavedCatalog
 import app.pristinepage.data.model.DocumentId
+import app.pristinepage.data.model.DocumentMutationResult
 import app.pristinepage.data.model.JobId
 import app.pristinepage.data.model.SourceId
+import app.pristinepage.data.model.UndoId
 import app.pristinepage.data.repository.OcrJobInput
+import app.pristinepage.data.repository.LibraryUndoCodec
+import app.pristinepage.data.repository.LibraryUndoCodec.RecipePointer
+import app.pristinepage.data.repository.RecipeAdmission
+import app.pristinepage.data.repository.RoomDocumentRepository
 import java.io.IOException
 import java.util.UUID
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.test.runTest
 import org.junit.Assert.*
 import org.junit.Test
 
@@ -158,6 +169,76 @@ class LibraryCatalogMergeTest {
         val source = Fixture(1, "Statements", Scan(2, "two.jpg", 'b'))
         val albums = merge(target, source).catalog.albums
         assertEquals(listOf(id(1), id(2)), albums.map { it.row.documentId })
+    }
+
+    @Test fun incomingRecipeUndoFollowsTheMatchedSlotAndRemappedHistory() = runTest {
+        val target = Fixture(1, "Receipts", Scan(1, "one.jpg", 'a'))
+        val source = Fixture(1, "Receipts", Scan(2, "one.jpg", 'a', secondRevision = true))
+        val candidate = LibraryCatalogMerge.plan(id(99), target.catalog, withRecipeUndo(source, documentRevision = 7, appliedRevision = 5))
+        val undo = candidate.catalog.albums.single().undo.single()
+        assertEquals(id(1), undo.row.documentId)
+        assertEquals(listOf(RecipePointer(id(101), id(201), 2)), LibraryUndoCodec.decodeRecipe(undo.row.beforeState).pages)
+        assertEquals(listOf(RecipePointer(id(101), id(201), 3)), LibraryUndoCodec.decodeRecipe(undo.row.afterState).pages)
+        assertEquals(setOf(id(201)), undo.pinnedSources)
+        assertEquals(5L, undo.row.appliedDocumentRevision)
+        assertEquals(86_400_042L, undo.row.expiresAt)
+
+        // Use the ordinary repository to consume the candidate on the host. This exercises
+        // remapped pointer semantics, not Android SQLite writes or backup reopen.
+        val album = candidate.catalog.albums.single()
+        val page = album.pages.single()
+        val metadata = MemoryMetadata().apply {
+            insertDocument(album.row)
+            insertPage(page.row)
+            for (revision in page.revisions) insertRecipe(revision)
+            val blob = candidate.catalog.originals.single().copy(sourceCount = 1)
+            blobs[blob.sourceBlobId] = blob
+            val stored = candidate.catalog.sources.single().copy(refCount = 5)
+            sources[stored.sourceId] = stored
+            insertReference(SourceReferenceRow("PAGE", id(101), id(201), 0))
+            for (revision in 1..3) insertReference(SourceReferenceRow("RECIPE_HISTORY", "recipe-v1/${id(101)}/$revision", id(201), 0))
+            insertReference(SourceReferenceRow("UNDO", undo.id, id(201), 0))
+            insertUndo(undo.row)
+        }
+        val normalUndo = RoomDocumentRepository(metadata, RecipeAdmission { _, _ -> null }, { 43 }, Dispatchers.Unconfined)
+        assertEquals(1, RecipeCodec.decode(metadata.recipes.getValue(id(101) to 3L).canonicalRecipe).geometry.outputQuarterTurns)
+        // Revision 6 was once current on the incoming album but is already stale there.
+        val stale = normalUndo.undoDocumentEdit(UndoId(undo.id), 6)
+        assertEquals(DocumentMutationResult.Conflict(8), stale)
+        assertEquals("AVAILABLE", metadata.undos.getValue(undo.id).state)
+        val reverted = normalUndo.undoDocumentEdit(UndoId(undo.id), 8) as DocumentMutationResult.Applied
+        assertEquals(9L, reverted.documentRevision)
+        assertEquals(4L, metadata.pages.getValue(id(101)).currentRecipeRevision)
+        assertEquals(0, RecipeCodec.decode(metadata.recipes.getValue(id(101) to 4L).canonicalRecipe).geometry.outputQuarterTurns)
+        assertEquals("APPLIED", metadata.undos.getValue(undo.id).state)
+    }
+
+    @Test fun conflictingUpdatesKeepBothIndependentUndoHistoriesAndResolveTheirCollidingOwners() {
+        val local = withRecipeUndo(Fixture(1, "Receipts", Scan(1, "one.jpg", 'a', secondRevision = true)))
+        val incoming = withRecipeUndo(Fixture(1, "Receipts", Scan(1, "one.jpg", 'a', secondRevision = true, initialTurns = 1)))
+        val result = LibraryCatalogMerge.plan(id(99), local, incoming)
+        val (target, added) = result.catalog.albums
+        assertEquals("Receipts (imported)", added.row.title)
+        val preserved = target.undo.single()
+        val remapped = added.undo.single()
+        val copied = added.pages.single().row
+        assertNotEquals(preserved.row.undoId, remapped.row.undoId)
+        assertEquals(added.row.documentId, remapped.row.documentId)
+        assertEquals(setOf(copied.sourceId), remapped.pinnedSources)
+        assertEquals(listOf(RecipePointer(copied.pageId, copied.sourceId, 2)), LibraryUndoCodec.decodeRecipe(remapped.row.afterState).pages)
+    }
+
+    private fun withRecipeUndo(fixture: Fixture, documentRevision: Long = 4, appliedRevision: Long = 4): RoomLibrarySavedCatalog.Snapshot {
+        val snapshot = fixture.catalog
+        val album = snapshot.albums.single()
+        val page = album.pages.single()
+        val row = page.row
+        fun encode(rev: Long) = LibraryUndoCodec.encodeRecipe(listOf(RecipePointer(row.pageId, row.sourceId, rev)))
+        val document = album.row.copy(documentRevision = documentRevision)
+        val undo = PortableUndoEntry.admit(UndoEntryRow(id(999), document.documentId, encode(1), encode(2), "RECIPE_EDIT", appliedRevision, 86_400_042, "AVAILABLE"),
+            document, { row.takeIf { p -> p.pageId == it } }, { key, rev -> page.revisions.singleOrNull { it.pageId == key && it.recipeRevision == rev } })
+        return RoomLibrarySavedCatalog.Snapshot(listOf(RoomLibrarySavedCatalog.Album(document, album.pages, listOf(undo))),
+            snapshot.sources, snapshot.originals, snapshot.days)
     }
 
     private fun merge(target: Fixture, source: Fixture) = LibraryCatalogMerge.plan(id(99), target.catalog, source.catalog)

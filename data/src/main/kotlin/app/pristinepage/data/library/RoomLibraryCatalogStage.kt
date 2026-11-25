@@ -102,12 +102,16 @@ internal fun RoomLibraryCatalogReader.verifyStagedProjection(
 ) {
     read(file) { catalog ->
         val actual = LibraryPortableCatalogProjection(catalog, verifyDerivedOcr = true, checkpoint = checkpoint).snapshot()
-        // The portable reader already validated the rebuilt counters against actual rows. The live snapshot may also pin jobs or Undo, which are outside this projection.
+        // The portable reader validates rebuilt counters against actual rows. The live snapshot may also pin jobs outside this projection.
         if (actual.originals.toSet() != expected.originals.map { it.copy(sourceCount = 0) }.toSet() ||
             actual.sources.toSet() != expected.sources.map { it.copy(refCount = 0) }.toSet() ||
             actual.days.toSet() != expected.days.toSet() || actual.albums.map { it.row } != expected.albums.map { it.row }
         ) throw IOException("Staged library metadata changed")
         for ((album, other) in actual.albums.zip(expected.albums)) {
+            if (album.undo.size != other.undo.size || album.undo.zip(other.undo).any { (a, b) ->
+                    checkpoint()
+                    !a.sameRecord(b)
+                }) throw IOException("Staged library Undo history changed")
             if (album.pages.size != other.pages.size) throw IOException("Staged library page count changed")
             for ((page, prior) in album.pages.zip(other.pages)) {
                 checkpoint()

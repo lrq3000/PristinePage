@@ -52,8 +52,11 @@ class RoomLibraryLocalRestoreTest {
             val back = source.store.ingest(source.reference, second) as IngestResult.Committed
             val access = RoomMetadataAccess(source.database)
             val commands = RoomDocumentRepository(access, RecipeAdmission { _, _ -> null })
-            assertTrue(commands.reorderPages(source.document, back.documentRevision, listOf(back.pageId, front.pageId)) is DocumentMutationResult.Applied)
-            assertTrue(commands.rotatePage(back.pageId, 1, 1) is DocumentMutationResult.Applied)
+            val reordered = commands.reorderPages(source.document, back.documentRevision, listOf(back.pageId, front.pageId)) as DocumentMutationResult.Applied
+            val rotated = commands.rotatePage(back.pageId, 1, 1) as DocumentMutationResult.Applied
+            val reorderUndo = checkNotNull(reordered.undoId)
+            val rotateUndo = checkNotNull(rotated.undoId)
+            val originalUndo = listOf(reorderUndo, rotateUndo).map { checkNotNull(source.database.catalog().undo(it.value)) }
             val accepted = RoomEditablePages(access, source.database.catalog()).load(source.document, back.pageId)
             val producer = JobId(UUID.randomUUID().toString())
             val text = "  Verbatim café\r\nportable invoice\n"
@@ -111,6 +114,68 @@ class RoomLibraryLocalRestoreTest {
                 assertEquals(text, restored.text.value)
                 assertEquals(config, restored.configuration)
                 sql.query("PRAGMA foreign_key_check").use { assertFalse(it.moveToFirst()) }
+
+                for (expected in originalUndo) {
+                    val reopened = checkNotNull(database.catalog().undo(expected.undoId))
+                    assertArrayEquals(expected.beforeState, reopened.beforeState)
+                    assertArrayEquals(expected.afterState, reopened.afterState)
+                    assertEquals(expected.copy(beforeState = reopened.beforeState, afterState = reopened.afterState), reopened)
+                    sql.query("SELECT sourceId FROM SourceReference WHERE ownerType='UNDO' AND ownerId=?", arrayOf(expected.undoId)).use { pins ->
+                        val sources = buildSet { while (pins.moveToNext()) add(pins.getString(0)) }
+                        assertEquals(if (expected.undoId == reorderUndo.value) setOf(front.sourceId.value, back.sourceId.value) else setOf(back.sourceId.value), sources)
+                    }
+                }
+                val normalUndo = RoomDocumentRepository(RoomMetadataAccess(database), RecipeAdmission { _, _ -> null },
+                    clock = { originalUndo.minOf { it.expiresAt } - 1 })
+                val reverted = normalUndo.undoDocumentEdit(rotateUndo, rotated.documentRevision) as DocumentMutationResult.Applied
+                assertEquals(0, RecipeCodec.decode(checkNotNull(database.catalog().recipe(back.pageId.value, 3)).canonicalRecipe).geometry.outputQuarterTurns)
+                assertTrue(normalUndo.undoDocumentEdit(reorderUndo, reverted.documentRevision) is DocumentMutationResult.Applied)
+                assertEquals(listOf(front.pageId.value, back.pageId.value), database.catalog().activePages(source.document.value).map { it.pageId })
+                for (expected in originalUndo) assertEquals("AVAILABLE", source.database.catalog().undo(expected.undoId)?.state)
+                assertEquals(backupFiles, backup.walkTopDown().filter(File::isFile).associate { it.relativeTo(backup).path to it.readBytes().toList() })
+            } finally { database.close() }
+        }
+    }
+
+    @Test fun closedBackupDoesNotReviveRankEvictedOrExpiredUndo() = runBlocking<Unit> {
+        RoomSourceIngestIntegrationTest.Fixture().use { source ->
+            val context = InstrumentationRegistry.getInstrumentation().context
+            val root = File(context.filesDir.canonicalFile, "library-undo-rank-${UUID.randomUUID()}").apply { check(mkdir()) }
+            val scratch = File(root, "scratch").apply { check(mkdir()) }
+            val scan = source.store.ingest(source.reference, source.reserve().single()) as IngestResult.Committed
+            val admission = RecipeAdmission { _, _ -> null }
+            val commands = RoomDocumentRepository(RoomMetadataAccess(source.database), admission, clock = { 1_000 })
+            val entries = (1L..21L).map { revision ->
+                val applied = commands.rotatePage(scan.pageId, revision, 1) as DocumentMutationResult.Applied
+                checkNotNull(applied.undoId)
+            }
+            val original = source.database.catalog()
+            original.updateUndo(checkNotNull(original.undo(entries.first().value)).copy(state = "AVAILABLE"))
+            original.updateUndo(checkNotNull(original.undo(entries[1].value)).copy(state = "APPLIED"))
+            original.updateUndo(checkNotNull(original.undo(entries[2].value)).copy(state = "EXPIRED"))
+            val backup = File(root, "backup")
+            RoomLibraryLocalExport(context, source.database, source.root.canonicalFile, scratch).writeNewFolder(backup)
+            val destination = File(root, "restored")
+            RoomLibraryLocalRestore(context, scratch).restore(backup, destination)
+            val target = object : ContextWrapper(context) {
+                override fun getDatabasePath(name: String) = File(destination, name)
+            }
+            val database = Room.databaseBuilder(target, PristineDatabase::class.java, "catalog.sqlite").build()
+            try {
+                val reopened = database.catalog()
+                val expected = checkNotNull(reopened.document(source.document.value)).documentRevision
+                var now = 1_001L
+                val undo = RoomDocumentRepository(RoomMetadataAccess(database), admission, clock = { now })
+                assertEquals("AVAILABLE", reopened.undo(entries.first().value)?.state)
+                assertEquals("APPLIED", reopened.undo(entries[1].value)?.state)
+                assertEquals("EXPIRED", reopened.undo(entries[2].value)?.state)
+                val evicted = undo.undoDocumentEdit(entries.first(), expected) as DocumentMutationResult.Rejected
+                assertEquals("undo_unavailable", evicted.error.safeMessageKey)
+                now = 86_401_000L
+                val expired = undo.undoDocumentEdit(entries.last(), expected) as DocumentMutationResult.Rejected
+                assertEquals("undo_unavailable", expired.error.safeMessageKey)
+                assertEquals(expected, reopened.document(source.document.value)?.documentRevision)
+                assertEquals(22L, reopened.page(scan.pageId.value)?.currentRecipeRevision)
             } finally { database.close() }
         }
     }

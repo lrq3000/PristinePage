@@ -106,11 +106,39 @@ internal class LibraryPortableCatalogProjection(
                 RoomLibrarySavedCatalog.Page(page.row, page.filename, history, saved)
             })
         }
-        RoomLibrarySavedCatalog.Snapshot(projected, sources, blobs.values.toList(), days)
+        val byDocument = projected.associateBy { it.row.documentId }
+        val undo = HashMap<String, MutableList<PortableUndoEntry>>()
+        var lastOwner: String? = null
+        var owners: PortableUndoEntry.Owners? = null
+        LibraryUndoRows.read(sql::rawQuery, null, ::charge, checkpoint, ::invalid, ::invalid) { row ->
+            if (row.documentId != lastOwner) {
+                owners = PortableUndoEntry.Owners(byDocument.getValue(row.documentId))
+                lastOwner = row.documentId
+            }
+            val entry = checkNotNull(owners).admit(row)
+            charge(128L * entry.pinnedSources.size)
+            verifyUndoPins(entry)
+            undo.getOrPut(row.documentId) { ArrayList() }.add(entry)
+        }
+        RoomLibrarySavedCatalog.Snapshot(projected.map { album ->
+            RoomLibrarySavedCatalog.Album(album.row, album.pages, undo[album.row.documentId].orEmpty())
+        }, sources, blobs.values.toList(), days)
     } catch (_: IllegalArgumentException) {
         invalid()
     } catch (_: NoSuchElementException) {
         invalid()
+    }
+
+    private fun verifyUndoPins(entry: PortableUndoEntry) {
+        sql.rawQuery("""SELECT CASE WHEN typeof(sourceId)='text' AND length(CAST(sourceId AS BLOB))=36 THEN sourceId ELSE '' END
+            FROM SourceReference WHERE ownerType='UNDO' AND ownerId=? LIMIT 101""", arrayOf(entry.id)).use { pins ->
+            val remaining = entry.pinnedSources.toMutableSet()
+            while (pins.moveToNext()) {
+                checkpoint()
+                if (!remaining.remove(pins.getString(0))) invalid()
+            }
+            if (remaining.isNotEmpty()) invalid()
+        }
     }
 
     private fun revisions(bindings: Map<String, SourceBinding>): Map<String, List<RecipeRevisionRow>> {

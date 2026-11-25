@@ -12,8 +12,40 @@ import java.util.Collections
 internal class PortableUndoEntry private constructor(private val verified: UndoEntryRow, sources: Set<String>) {
     val row: UndoEntryRow get() = verified.copy(beforeState = verified.beforeState.copyOf(), afterState = verified.afterState.copyOf())
     val pinnedSources: Set<String> = Collections.unmodifiableSet(LinkedHashSet(sources))
+    val id get() = verified.undoId
+    val isMembership get() = !isRecipe(verified.action)
+    val metadataBytes get() = 128L + verified.beforeState.size + verified.afterState.size + 128L * pinnedSources.size
+    val recipePageIds: Set<String> get() =
+        if (isMembership) emptySet() else LibraryUndoCodec.decodeRecipe(verified.beforeState, requireCanonical = true).pages.mapTo(HashSet()) { it.pageId }
+
+    fun sameRecord(other: PortableUndoEntry): Boolean =
+        verified.copy(beforeState = other.verified.beforeState, afterState = other.verified.afterState) == other.verified &&
+            verified.beforeState.contentEquals(other.verified.beforeState) && verified.afterState.contentEquals(other.verified.afterState) &&
+            pinnedSources == other.pinnedSources
+
+    fun remap(id: String, destinationDocumentId: String,
+        translate: (String, String, Long) -> LibraryUndoCodec.RecipePointer?, membership: (String, String) -> Pair<String, String>?,
+    ): UndoEntryRow {
+        fun remap(bytes: ByteArray) = if (isMembership) {
+            LibraryUndoCodec.remapMembership(bytes, verified.documentId, destinationDocumentId, membership)
+        } else LibraryUndoCodec.remapRecipe(bytes, translate)
+        return verified.copy(undoId = id, documentId = destinationDocumentId,
+            beforeState = remap(verified.beforeState), afterState = remap(verified.afterState))
+    }
+
+    /** Index only the verified catalog, never IDs read from a claimed Undo payload. */
+    class Owners(album: RoomLibrarySavedCatalog.Album) {
+        private val document = album.row
+        private val pages = album.pages.associate { it.row.pageId to it.row }
+        private val revisions = album.pages.associate { page -> page.row.pageId to page.revisions.associateBy { it.recipeRevision } }
+        fun admit(candidate: UndoEntryRow): PortableUndoEntry =
+            admit(candidate, document, pages::get) { page, revision -> revisions[page]?.get(revision) }
+    }
 
     companion object {
+        const val MAX_STATE_BYTES = 524_288
+        private fun isRecipe(action: String) = action == "RECIPE_EDIT" || action == "BATCH_RECIPE_EDIT"
+
         /** Both halves refer only to retained pages in the same album. Recipe revisions must be the actual before-to-after transition. */
         fun admit(candidate: UndoEntryRow, album: DocumentRow, page: (String) -> PageRow?,
             revision: (String, Long) -> RecipeRevisionRow?): PortableUndoEntry {
@@ -23,7 +55,7 @@ internal class PortableUndoEntry private constructor(private val verified: UndoE
             require(candidate.appliedDocumentRevision in 1..album.documentRevision)
             require(candidate.state in setOf("AVAILABLE", "APPLIED", "EXPIRED"))
             // Detach only bounded bytes; validation and eventual write must see the same two immutable states.
-            require(candidate.beforeState.size in 1..524_288 && candidate.afterState.size in 1..524_288)
+            require(candidate.beforeState.size in 1..MAX_STATE_BYTES && candidate.afterState.size in 1..MAX_STATE_BYTES)
             val exact = candidate.copy(beforeState = candidate.beforeState.copyOf(), afterState = candidate.afterState.copyOf())
             fun requireOwner(pageId: String, sourceId: String) {
                 val row = requireNotNull(page(pageId))

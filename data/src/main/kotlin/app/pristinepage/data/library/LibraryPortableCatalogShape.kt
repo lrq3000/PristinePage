@@ -6,7 +6,7 @@ import java.io.IOException
 /** The portable shape is narrower than the Room schema. Never drop an unexpected app-private or unowned row on import. */
 internal object LibraryPortableCatalogShape {
     private const val REFUSED = """SELECT EXISTS (
-        SELECT 1 FROM AtelierDraft UNION ALL SELECT 1 FROM ImportSession UNION ALL SELECT 1 FROM UndoEntry
+        SELECT 1 FROM AtelierDraft UNION ALL SELECT 1 FROM ImportSession
         UNION ALL SELECT 1 FROM Confirmation UNION ALL SELECT 1 FROM Mask UNION ALL SELECT 1 FROM RecipeMask
         UNION ALL SELECT 1 FROM MaskReference UNION ALL SELECT 1 FROM AssetPin UNION ALL SELECT 1 FROM RenderReference
         UNION ALL SELECT 1 FROM FileTransaction UNION ALL SELECT 1 FROM RenderedPage UNION ALL SELECT 1 FROM ExportSnapshot
@@ -26,9 +26,10 @@ internal object LibraryPortableCatalogShape {
             SELECT 1 FROM SourceReference ref WHERE ref.ownerType='RECIPE_HISTORY'
                 AND ref.ownerId='recipe-v1/'||r.pageId||'/'||r.recipeRevision AND ref.sourceId=r.sourceId
         )
-        UNION ALL SELECT 1 FROM SourceReference WHERE ownerType NOT IN ('PAGE','RECIPE_HISTORY') OR typeof(createdAt)!='integer'
-        UNION ALL SELECT 1 FROM SourceReference WHERE (
-            SELECT count(*) FROM SourceReference
+        UNION ALL SELECT 1 FROM SourceReference ref WHERE ownerType NOT IN ('PAGE','RECIPE_HISTORY','UNDO') OR typeof(createdAt)!='integer'
+            OR (ownerType='UNDO' AND NOT EXISTS (SELECT 1 FROM UndoEntry u WHERE u.undoId=ref.ownerId))
+        UNION ALL SELECT 1 FROM SourceReference WHERE ownerType!='UNDO' AND (
+            SELECT count(*) FROM SourceReference WHERE ownerType!='UNDO'
         ) != (SELECT count(*) FROM Page) + (SELECT count(*) FROM RecipeRevision) LIMIT 1
     ) OR EXISTS (
         SELECT 1 FROM Source s WHERE length(s.conversionFingerprint) NOT BETWEEN 1 AND 128

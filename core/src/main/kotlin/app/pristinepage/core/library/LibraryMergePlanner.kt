@@ -28,6 +28,12 @@ object LibraryMergePlanner {
     /** Inputs are bounded, stable catalog snapshots for this call; storage admits actual IDs and source bindings before invoking the planner. */
     fun plan(destination: List<Album>, incoming: List<Album>,
         additionalConflict: (destination: Page, incoming: Page) -> Reason? = { _, _ -> null },
+    ): List<Decision> = plan(destination, incoming, additionalConflict) { null }
+
+    /** The storage layer can refuse a complete album proposal after all page matches are known. Name allocation is still centralized here. */
+    fun plan(destination: List<Album>, incoming: List<Album>,
+        additionalConflict: (destination: Page, incoming: Page) -> Reason?,
+        mergeConflict: (Decision.Merge) -> Reason?,
     ): List<Decision> {
         validate(destination)
         validate(incoming)
@@ -49,8 +55,12 @@ object LibraryMergePlanner {
                 matches.size != 1 || incomingTitleCounts.getValue(key) != 1 ||
                     targetAlbumTitles[album.key]?.let { it != key } == true ->
                     Decision.Add(album.key, alternateTitle(album.title, reserved, nextSuffix), Reason.AMBIGUOUS_ALBUM)
-                else -> match(matches.single(), album, targetPageOwners, additionalConflict) { reason ->
-                    Decision.Add(album.key, alternateTitle(album.title, reserved, nextSuffix), reason)
+                else -> {
+                    val proposed = match(matches.single(), album, targetPageOwners, additionalConflict) { reason ->
+                        Decision.Add(album.key, alternateTitle(album.title, reserved, nextSuffix), reason)
+                    }
+                    val refusal = (proposed as? Decision.Merge)?.let(mergeConflict)
+                    if (refusal == null) proposed else Decision.Add(album.key, alternateTitle(album.title, reserved, nextSuffix), refusal)
                 }
             }
         })

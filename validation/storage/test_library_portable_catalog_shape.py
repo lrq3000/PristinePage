@@ -52,6 +52,27 @@ class LibraryPortableCatalogShapeTest(unittest.TestCase):
         self.assertTrue(self.refused("UPDATE SourceReference SET ownerType='JOB' WHERE ownerType='PAGE'"))
         self.assertTrue(self.refused("UPDATE Source SET refCount=3"))
 
+    def test_undo_reference_shape_admits_a_known_owner_but_not_an_orphan(self):
+        undo = "aaaaaaaa-aaaa-4aaa-8aaa-000000000009"
+        entry = f"INSERT INTO UndoEntry VALUES ('{undo}','{DOC}',X'01',X'02','RECIPE_EDIT',1,86400000,'AVAILABLE')"
+        pin = f"INSERT INTO SourceReference VALUES ('UNDO','{undo}','{SOURCE}',0)"
+        count = "UPDATE Source SET refCount=3"
+        # Pair validation runs separately in Kotlin; these SQL assertions test only shape and known-owner admission.
+        self.assertFalse(self.refused(entry, pin, count))
+        self.assertTrue(self.refused(pin, count))
+
+    def test_undo_extent_query_counts_all_rank_occupants_without_returning_any_blob(self):
+        reader = catalog.ROOT / "data/src/main/kotlin/app/pristinepage/data/library/LibraryUndoRows.kt"
+        query = re.search(r'const val EXTENT_SQL = """(.*?)"""', reader.read_text(encoding="utf-8"), re.S)
+        self.assertIsNotNone(query, "The Undo table needs a scalar-only budget pass before its payload cursor")
+        history = tuple(
+            f"INSERT INTO UndoEntry VALUES ('aaaaaaaa-aaaa-4aaa-8aaa-{index:012d}','{DOC}',zeroblob(500000),zeroblob(500000),"
+            f"'RECIPE_EDIT',{index},86400000,'{state}')"
+            for index, state in enumerate(("AVAILABLE", "APPLIED", "EXPIRED"), 1)
+        )
+        self.assertEqual([{"rows": 3, "payloadBytes": 3_000_000}], catalog.LibraryCatalogReaderSqlTest().sqlite(
+            *self.CANONICAL_ROWS, *history, query.group(1)))
+
     def test_unowned_original_is_not_a_valid_extra_payload(self):
         self.assertTrue(self.refused(f"""INSERT INTO SourceBlob SELECT replace(sourceBlobId,'000003','000007'),
             byteSha256,byteCount,mime,encodedWidth,encodedHeight,replace(relativePath,'000003','000007'),

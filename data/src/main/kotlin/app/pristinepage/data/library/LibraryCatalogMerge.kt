@@ -14,6 +14,7 @@ import app.pristinepage.data.model.DocumentId
 import app.pristinepage.data.model.JobId
 import app.pristinepage.data.model.SourceId
 import app.pristinepage.data.model.TransactionId
+import app.pristinepage.data.repository.LibraryUndoCodec.RecipePointer
 import java.io.IOException
 import java.util.Collections
 import java.util.UUID
@@ -37,16 +38,35 @@ internal object LibraryCatalogMerge {
         val source = IndexedCatalog(incoming)
         val targetAlbums = target.plannerAlbums()
         val incomingAlbums = source.plannerAlbums()
-        fun decide(conflictingBlobs: Set<String>) = LibraryMergePlanner.plan(targetAlbums, incomingAlbums) { local, received ->
+        fun decide(conflictingBlobs: Set<String>) = LibraryMergePlanner.plan(targetAlbums, incomingAlbums, { local, received ->
             checkpoint()
             if (target.blobForPage(local.key).sourceBlobId in conflictingBlobs) Reason.INCOMPATIBLE_SAVED_STATE
             else compatibility(target, source, local.key, received.key)
-        }
+        }, { merge -> undoConflict(target, source, merge, checkpoint) })
         val firstPass = decide(emptySet())
         val conflictingBlobs = conflictingCaptureDays(firstPass, target, source, checkpoint)
         return Composition(operationId, target, source, checkpoint).apply(
             if (conflictingBlobs.isEmpty()) firstPass else decide(conflictingBlobs),
         )
+    }
+
+    private fun undoConflict(target: IndexedCatalog, incoming: IndexedCatalog, decision: Decision.Merge, checkpoint: () -> Unit): Reason? {
+        val local = target.albums.getValue(decision.destinationAlbumKey)
+        val received = incoming.albums.getValue(decision.incomingAlbumKey)
+        // Independent histories share one rank window in Room. Separating albums preserves both windows without reviving or evicting any command.
+        if (local.undo.isNotEmpty() && received.undo.isNotEmpty() || received.undo.any { it.isMembership }) return Reason.INCOMPATIBLE_SAVED_STATE
+        if (local.undo.isEmpty()) return null
+        if (local.undo.any { it.isMembership } && decision.appendPageKeys.any { incoming.pages.getValue(it).row.state == "ACTIVE" }) {
+            return Reason.INCOMPATIBLE_SAVED_STATE
+        }
+        val changed = decision.useIncomingState.filter { (a, b) ->
+            checkpoint()
+            !sameAcceptedRecipe(target.pages.getValue(a), incoming.pages.getValue(b))
+        }.mapTo(HashSet()) { it.destinationPageKey }
+        // A changed current recipe could invalidate an actionable local Undo or make a previously stale after-state match again.
+        return if (changed.isNotEmpty() && local.undo.any { entry -> checkpoint(); entry.recipePageIds.any(changed::contains) }) {
+            Reason.INCOMPATIBLE_SAVED_STATE
+        } else null
     }
 
     private fun conflictingCaptureDays(
@@ -104,6 +124,7 @@ internal object LibraryCatalogMerge {
         val originals = catalog.originals.associateBy(SourceBlobRow::sourceBlobId)
         val days = catalog.days.associateBy(SourceCaptureDayRow::sourceBlobId)
         val jobs = pages.values.mapNotNull { it.savedOcr?.producerId?.value }
+        val undo = catalog.albums.flatMap { album -> album.undo.map { it.id } }
 
         fun blobForPage(page: String) = originals.getValue(sources.getValue(pages.getValue(page).row.sourceId).sourceBlobId)
 
@@ -125,6 +146,7 @@ internal object LibraryCatalogMerge {
         private val sources = Ids(operation, "source", target.sources.keys, incoming.sources.keys)
         private val blobs = Ids(operation, "blob", target.originals.keys, incoming.originals.keys)
         private val jobs = Ids(operation, "ocr-job", target.jobs, incoming.jobs)
+        private val undoIds = Ids(operation, "undo", target.undo, incoming.undo)
         private val albums = LinkedHashMap(target.albums)
         private val originalRows = LinkedHashMap(target.originals)
         private val sourceRows = LinkedHashMap(target.sources)
@@ -139,8 +161,9 @@ internal object LibraryCatalogMerge {
                 when (decision) {
                     is Decision.Add -> {
                         val id = documents.resolve(source.row.documentId)
-                        albums[id] = Album(source.row.copy(documentId = id, title = decision.title),
-                            inPortableOrder(source.pages.map { copyPage(it, id, it.row.ordinal) }))
+                        val mapping = source.pages.associate { it.row.pageId to copyPage(it, id, it.row.ordinal) }
+                        val added = Album(source.row.copy(documentId = id, title = decision.title), inPortableOrder(mapping.values.toList()))
+                        albums[id] = withIncomingUndo(added, source, mapping)
                     }
                     is Decision.Merge -> mergeAlbum(albums.getValue(decision.destinationAlbumKey), source, decision)
                 }
@@ -154,16 +177,46 @@ internal object LibraryCatalogMerge {
             if (decision.appendPageKeys.isEmpty() && decision.useIncomingState.isEmpty()) return
             val id = local.row.documentId
             val matches = decision.useIncomingState.associate { it.destinationPageKey to it.incomingPageKey }
+            val mapping = HashMap<String, Page>()
             val retained = local.pages.map { page ->
-                matches[page.row.pageId]?.let { updatePage(page, incoming.pages.getValue(it)) } ?: page
+                matches[page.row.pageId]?.let { key -> updatePage(page, incoming.pages.getValue(key)).also { mapping[key] = it } } ?: page
             }
             var ordinal = retained.count { it.row.ordinal != null }
             val appended = decision.appendPageKeys.map {
                 val page = incoming.pages.getValue(it)
-                copyPage(page, id, if (page.row.ordinal == null) null else ordinal++)
+                copyPage(page, id, if (page.row.ordinal == null) null else ordinal++).also { copy -> mapping[it] = copy }
             }
-            albums[id] = Album(local.row.copy(documentRevision = advance(local.row.documentRevision, 1),
-                updatedAt = maxOf(local.row.updatedAt, received.row.updatedAt)), inPortableOrder(retained + appended))
+            // Incoming callbacks can carry any previously issued document revision, not just the last Undo's revision.
+            val base = if (received.undo.isEmpty()) local.row.documentRevision else maxOf(local.row.documentRevision, received.row.documentRevision)
+            val merged = Album(local.row.copy(documentRevision = advance(base, 1),
+                updatedAt = maxOf(local.row.updatedAt, received.row.updatedAt)), inPortableOrder(retained + appended), local.undo)
+            albums[id] = withIncomingUndo(merged, received, mapping)
+        }
+
+        private fun withIncomingUndo(album: Album, source: Album, mappedPages: Map<String, Page>): Album {
+            if (source.undo.isEmpty()) return album
+            check(album.undo.isEmpty())
+            val owners = PortableUndoEntry.Owners(album)
+            val revisions by lazy {
+                mappedPages.mapValues { (sourceId, destination) ->
+                    val prior = incoming.pages.getValue(sourceId).revisions
+                    prior.zip(destination.revisions.takeLast(prior.size)).associate { (old, new) -> old.recipeRevision to new.recipeRevision }
+                }
+            }
+            fun owner(page: String, sourceId: String): Pair<String, String>? {
+                if (incoming.pages[page]?.row?.sourceId != sourceId) return null
+                val row = mappedPages[page]?.row ?: return null
+                return row.pageId to row.sourceId
+            }
+            val undo = source.undo.map { entry ->
+                checkpoint()
+                val row = entry.remap(undoIds.resolve(entry.id), album.row.documentId, { page, sourceId, revision ->
+                    val (newPage, newSource) = owner(page, sourceId) ?: return@remap null
+                    revisions[page]?.get(revision)?.let { RecipePointer(newPage, newSource, it) }
+                }, ::owner)
+                owners.admit(row)
+            }
+            return Album(album.row, album.pages, undo)
         }
 
         private fun updatePage(local: Page, received: Page): Page {
@@ -228,6 +281,11 @@ internal object LibraryCatalogMerge {
             for (album in catalog.albums) {
                 checkpoint()
                 metadata += 192L + 4L * album.row.title.length
+                for (entry in album.undo) {
+                    checkpoint()
+                    metadata += entry.metadataBytes
+                    if (metadata > 16L * 1024 * 1024) limit()
+                }
                 if (metadata > 16L * 1024 * 1024) limit()
                 if (album.pages.count { it.row.ordinal != null } > 100) limit()
                 pages += album.pages.size
