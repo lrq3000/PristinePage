@@ -5,9 +5,11 @@ from hashlib import sha256
 import json
 from pathlib import Path
 import shutil
+from struct import pack
 import subprocess
+from zlib import compress, crc32
 
-from test_ocr_index import create_tables, sync_triggers
+from test_ocr_index import BLOB, DOC, DRAFT, PAGE, SOURCE, create_tables, sync_triggers
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -16,15 +18,54 @@ LIBRARY = "9e940d7b-76c7-45ea-b5e4-0ad86f26ea13"
 GENERATION = "25c49d9b-02d8-418f-b982-154980d89cfb"
 
 
-def make_fixture(destination: Path):
+def synthetic_scan():
+    """One 3×2 RGB image and two canonical revisions. The synthetic binding is not a mobile codec witness."""
+    width, height = 3, 2
+    rgb = bytes((19, 43, 71, 255, 250, 240, 211, 233, 191, 17, 90, 126, 50, 8, 200, 99, 123, 137))
+
+    def chunk(kind, data):
+        return pack(">I", len(data)) + kind + data + pack(">I", crc32(kind + data))
+
+    payload = b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0))
+    payload += chunk(b"IDAT", compress(b"\0" + rgb[:9] + b"\0" + rgb[9:])) + chunk(b"IEND", b"")
+    digest = sha256(payload).hexdigest()
+    fingerprint = b"srgb-v1"
+    pixel = sha256(b"pristinepage-source-pixels-v1\0" + pack(">I", len(fingerprint)) + fingerprint +
+                   pack(">IIQ", width, height, len(rgb)) + rgb).hexdigest()
+    rows = [
+        f"INSERT INTO SourceBlob VALUES ('{BLOB}','{digest}',{len(payload)},'image/png',3,2,'sources/{BLOB}/original.bin','READY',1,'{DRAFT}',0)",
+        f"INSERT INTO Source VALUES ('{SOURCE}','{BLOB}','{pixel}',3,2,1,'srgb-v1',NULL,3,'READY',0)",
+        f"INSERT INTO Page VALUES ('{PAGE}','{DOC}','{SOURCE}',2,'ACTIVE',0,NULL,0)",
+        f"INSERT INTO LibraryScanName VALUES ('{PAGE}','{DOC}','Synthetic.png','synthetic.png')",
+        f"INSERT INTO SourceReference VALUES ('PAGE','{PAGE}','{SOURCE}',0)",
+    ]
+    for turns in range(2):
+        recipe = json.dumps(
+            dict(appearance=dict(kind="none_v1"), binary=None, denoise=None, detail=None, schemaVersion=1,
+                 geometry=dict(kind="none_v1", outputQuarterTurns=turns, schemaVersion=1,
+                               source=dict(orientationColorConversionVersion=fingerprint.decode("ascii"),
+                                           sourcePixelHash=pixel, sourceSize=dict(height=height, width=width)))),
+            separators=(",", ":"), sort_keys=True,
+        ).encode("ascii")
+        revision = turns + 1
+        recipe_digest = sha256(b"pristinepage-recipe-json-v1\0" + pack(">I", len(recipe)) + recipe).hexdigest()
+        rows += [
+            f"INSERT INTO RecipeRevision VALUES ('{PAGE}',{revision},'{SOURCE}',1,X'{recipe.hex()}','{recipe_digest}',{'1' if turns else 'NULL'},0)",
+            f"INSERT INTO SourceReference VALUES ('RECIPE_HISTORY','recipe-v1/{PAGE}/{revision}','{SOURCE}',0)",
+        ]
+    return digest, payload, rows
+
+
+def make_fixture(destination: Path, *, with_scan=False):
     cli = shutil.which("sqlite3")
     if not cli:
         raise RuntimeError("The existing FTS4-capable SQLite CLI is required")
     schema = json.loads(SCHEMA.read_text(encoding="utf-8"))["database"]
+    scan = synthetic_scan() if with_scan else None
     commands = [*create_tables(schema["version"]), *sync_triggers(), *schema["setupQueries"],
-                "PRAGMA user_version=8",
-                "INSERT INTO Document VALUES ('4df08ec0-7f09-4a96-8cb1-1a6e675220da','Synthetic folder test',1,'ACTIVE',0,0,NULL)",
-                "PRAGMA integrity_check", "PRAGMA foreign_key_check"]
+                "PRAGMA user_version=8", "PRAGMA foreign_keys=ON", "BEGIN",
+                f"INSERT INTO Document VALUES ('{DOC}','Synthetic folder test',{2 if scan else 1},'ACTIVE',0,0,NULL)",
+                *(scan[2] if scan else []), "COMMIT", "PRAGMA integrity_check", "PRAGMA foreign_key_check"]
     destination.mkdir()
     catalogs = destination / "catalogs"
     generations = destination / "generations"
@@ -40,7 +81,14 @@ def make_fixture(destination: Path):
     digest = sha256(data).hexdigest()
     marker = generations / f"{GENERATION}.complete"
     marker.write_bytes(f"pristinepage-library-v1\n{LIBRARY}\n{GENERATION}\n-\n8\n{len(data)}\n{digest}\n".encode("ascii"))
-    return {f"catalogs/{catalog.name}": digest, f"generations/{marker.name}": sha256(marker.read_bytes()).hexdigest()}
+    hashes = {f"catalogs/{catalog.name}": digest, f"generations/{marker.name}": sha256(marker.read_bytes()).hexdigest()}
+    if scan:
+        objects = destination / "objects"
+        objects.mkdir()
+        object_digest, payload, _ = scan
+        (objects / object_digest).write_bytes(payload)
+        hashes[f"objects/{object_digest}"] = object_digest
+    return hashes
 
 
 if __name__ == "__main__":

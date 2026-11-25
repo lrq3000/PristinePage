@@ -29,6 +29,27 @@ class LibraryFolderPickerFixtureTest(unittest.TestCase):
             self.assertEqual((0,), db.execute("SELECT count(*) FROM Page").fetchone())
         self.assertFalse(Path(str(catalog) + "-wal").exists())
 
+    def test_populated_catalog_names_and_authenticates_an_exact_png_and_its_history(self):
+        parent = Path(mkdtemp(prefix="pristinepage-library-files-scan-test-"))
+        root = parent / "fixture"
+        hashes = make_fixture(root, with_scan=True)
+        catalog = root / f"catalogs/{GENERATION}.sqlite"
+        with closing(sqlite3.connect(catalog.as_uri() + "?mode=ro", uri=True)) as db:
+            name, digest, count, current = db.execute("""
+                SELECT n.filename, b.byteSha256, b.byteCount, p.currentRecipeRevision
+                FROM LibraryScanName n JOIN Page p USING(pageId)
+                JOIN Source s USING(sourceId) JOIN SourceBlob b USING(sourceBlobId)
+                """).fetchone()
+            self.assertEqual(("Synthetic.png", 2), (name, current))
+            self.assertEqual([(1, None), (2, 1)], db.execute(
+                "SELECT recipeRevision,parentRevision FROM RecipeRevision ORDER BY recipeRevision"
+            ).fetchall())
+        original = (root / "objects" / digest).read_bytes()
+        self.assertEqual(b"\x89PNG\r\n\x1a\n", original[:8])
+        self.assertEqual(count, len(original))
+        self.assertEqual(digest, sha256(original).hexdigest())
+        self.assertEqual(digest, hashes[f"objects/{digest}"])
+
     def test_existing_folder_is_left_untouched(self):
         root = Path(mkdtemp(prefix="pristinepage-library-files-refusal-"))
         other = root / "keep.txt"
