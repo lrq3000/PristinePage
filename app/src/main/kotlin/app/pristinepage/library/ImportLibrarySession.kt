@@ -399,7 +399,11 @@ class ImportLibrarySession(private val actions: LibraryActions, restored: Librar
         try {
             // Scoped callbacks enter the activation-checked adapter directly; only ordinary UI startup may bootstrap an unrecorded store.
             if (initialize) initialization.withLock {
-                if (!started) { val report = actions.startup(); current.value = current.value.copy(recovery = report); started = true }
+                if (!started) {
+                    val opened = actions.openLibrary()
+                    current.value = current.value.copy(recovery = opened.report, activation = opened.activation)
+                    started = true
+                }
             }
             action()
         } catch (canceled: CancellationException) { throw canceled }

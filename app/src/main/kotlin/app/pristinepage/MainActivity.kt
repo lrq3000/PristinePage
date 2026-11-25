@@ -92,7 +92,7 @@ class MainActivity : ComponentActivity() {
             isAppearanceLightStatusBars = true
             isAppearanceLightNavigationBars = true
         }
-        val restored = try { restoreLibraryIdentity(savedInstanceState) to restoreEditor(savedInstanceState) } catch (_: RuntimeException) {
+        val restored = try { restoreLibraryIdentity(savedInstanceState) to restoreEditorIdentity(savedInstanceState) } catch (_: RuntimeException) {
             // Invalid saved identity cannot invent a replacement request/destination. The explicit library action still discovers durable pending insertions without reopening temporary provider references.
             setContent { AppTheme { Column(Modifier.fillMaxSize().safeDrawingPadding().padding(24.dp)) {
                 Text(stringResource(R.string.error_session_expired))
@@ -116,7 +116,7 @@ class MainActivity : ComponentActivity() {
         val editorFactory = object : ViewModelProvider.Factory {
             @Suppress("UNCHECKED_CAST") override fun <T : ViewModel> create(modelClass: Class<T>): T {
                 require(modelClass == EditorViewModel::class.java)
-                return EditorViewModel(services::imports, app.savedOcrSignals::onPagesSaved) as T
+                return EditorViewModel(services, app.savedOcrSignals::onPagesSaved) as T
             }
         }
         val editorOwner = ViewModelProvider(this, editorFactory)[EditorViewModel::class.java]
@@ -145,7 +145,7 @@ class MainActivity : ComponentActivity() {
             }
         })[AtelierCaptureViewModel::class.java]
         editor = editorOwner
-        if (editorOwner.state.value.identity == null) restoredEditor?.let { editorOwner.open(it.documentId.value, it.pageId.value) }
+        if (editorOwner.state.value.identity == null) restoredEditor?.let { editorOwner.open(it) }
         session = retained
         observing?.cancel(); picker?.close()
         val binding = LibraryPickerBinding(activityResultRegistry, retained)
@@ -157,8 +157,7 @@ class MainActivity : ComponentActivity() {
                 launch {
                     try {
                         // Only the library owner initiates Room startup. The foreground OCR hint observes its verified default selection afterward.
-                        retained.state.first { it.recovery != null }
-                        services.recordedDefaultActivation()?.let(app.savedOcrSignals::onStartup)
+                        retained.state.first { it.recovery != null }.activation?.let(app.savedOcrSignals::onStartup)
                     }
                     catch (canceled: CancellationException) { throw canceled }
                     catch (_: Exception) { /* Library startup owns the unavailable state. */ }
@@ -232,49 +231,58 @@ class MainActivity : ComponentActivity() {
                            retained.accept(LibraryEvent.LeaveHomeSearch)
                            settingsPage = SettingsPage.ROOT
                        }) { document, page ->
-                    editorOwner.open(document.value, page.value)
+                     library.activation?.let {
+                         editorOwner.open(EditorIdentity(document, page, it)) {
+                             retained.accept(LibraryEvent.SelectPage(page))
+                         }
+                     }
                 }
             }
             else {
                 val selected = editing
-                val identity = host.identity
-                val album = library.document?.takeIf { it.document.documentId == identity?.documentId }
+                 val identity = host.identity
+                 val album = library.document?.takeIf { identity != null && it.document.documentId == identity.documentId && library.activation == identity.issuedAt }
+                 val loadEditorOriginal: suspend (String) -> OriginalPreviewBitmap = { source ->
+                     services.originalDefaultEditor(checkNotNull(identity), source)
+                 }
                 val orderedPages = album?.pages.orEmpty()
                 val index = orderedPages.indexOfFirst { it.pageId == identity?.pageId }
                 val fallback = orderedPages.getOrNull(index)
                 fun destination(offset: Int): (() -> Unit)? {
-                    val document = identity?.documentId ?: return null
+                     val issuing = identity ?: return null
                     if (index < 0) return null
                     val target = orderedPages.getOrNull(index + offset) ?: return null
                     return {
                         val current = editorOwner.session.value
                         if (current === selected && current != null && !current.state.value.let { it.dirty || it.saving || it.confirmExit || it.exitReady }) {
-                            retained.accept(LibraryEvent.SelectPage(target.pageId))
-                            editorOwner.open(document.value, target.pageId.value)
+                             editorOwner.open(issuing.copy(pageId = target.pageId)) {
+                                 retained.accept(LibraryEvent.SelectPage(target.pageId))
+                             }
                         }
                     }
                 }
                 if (selected != null) key(identity) {
-                    val savedOcr = remember(app) {
-                        SavedPageOcrReader(
-                            open = { services.imports().store.savedOcr },
+                     val issuing = checkNotNull(identity)
+                     val savedOcr = remember(app, issuing) {
+                         SavedPageOcrReader(
+                             readStatus = { page -> services.readDefaultEditorOcrStatus(issuing, page.recipeRevision) },
+                             readText = { page -> services.readDefaultEditorOcrText(issuing, page.recipeRevision) },
                             rerunInFlight = app.savedOcrSignals.rerunInFlight,
                             requestRerun = { observed, defaults ->
-                                val graph = services.imports()
-                                app.savedOcrSignals.onRerun(
-                                    qualify = { app.savedOcr.resolveRerunConfiguration(observed.configuration, defaults) },
-                                    activation = graph.activation,
-                                    commit = { graph.store.savedOcr.requestRerun(observed, it) },
+                                 app.savedOcrSignals.onRerun(
+                                     qualify = { app.savedOcr.resolveRerunConfiguration(observed.configuration, defaults) },
+                                     activation = issuing.issuedAt,
+                                     commit = { services.rerunDefaultEditorOcr(issuing, observed, it) },
                                 )
                             },
                             requestSave = textSave::save,
                         )
                     }
-                     PageEditorScreen(loadOriginal = loadOriginal, savedOcr = savedOcr, showOcrDiagnostics = settings.ocrDiagnostics,
+                      PageEditorScreen(loadOriginal = loadEditorOriginal, savedOcr = savedOcr, showOcrDiagnostics = settings.ocrDiagnostics,
                         pageNumber = fallback?.ordinal?.plus(1), albumPageCount = orderedPages.size,
                         previousPage = destination(-1), nextPage = destination(1), originalOnLoadFailure = {
                             if (fallback != null) key(fallback) {
-                                OriginalPagePreview(fallback, loadOriginal)
+                                 OriginalPagePreview(fallback, loadEditorOriginal)
                             }
                         }).Content(selected, ::leaveEditor)
                 }
@@ -284,10 +292,10 @@ class MainActivity : ComponentActivity() {
                         Text(stringResource(if (host.loading) R.string.editor_opening else R.string.editor_heading))
                         host.error?.let { Text(errorText(it.code)) }
                         if (host.error != null && fallback != null) key(fallback) {
-                            OriginalPagePreview(fallback, loadOriginal)
+                             OriginalPagePreview(fallback, loadEditorOriginal)
                         }
                         Button(onClick = ::leaveEditor) { Text(stringResource(R.string.editor_back)) }
-                        if (host.error != null) Button(onClick = { host.identity?.let { editorOwner.open(it.documentId.value, it.pageId.value) } }) { Text(stringResource(R.string.editor_retry_load)) }
+                         if (host.error != null) Button(onClick = { host.identity?.let { editorOwner.open(it) } }) { Text(stringResource(R.string.editor_retry_load)) }
                     }
                 }
             }
@@ -301,9 +309,7 @@ class MainActivity : ComponentActivity() {
         session?.let { owner ->
             saveLibraryIdentity(outState, owner.identity(), owner.state.value.request?.canDeliver == true)
         }
-        editor?.state?.value?.identity?.let { identity ->
-            outState.putBundle(EDITOR, Bundle().apply { putString(SELECTED, identity.documentId.value); putString(PAGE, identity.pageId.value) })
-        }
+        editor?.state?.value?.identity?.let { saveEditorIdentity(outState, it) }
     }
 
     override fun onDestroy() { picker?.close(); picker = null; super.onDestroy() }
@@ -313,14 +319,21 @@ class MainActivity : ComponentActivity() {
         private const val SELECTED = "document"
         private const val PENDING = "batch"
         private const val ACQUISITION = "acquisition"
-        private const val EDITOR = "pristinepage.editor.identity.v1"
+        private const val EDITOR = "pristinepage.editor.identity.v2"
         private const val PAGE = "page"
-        @Suppress("DEPRECATION") private fun restoreEditor(saved: Bundle?): EditorIdentity? {
+        fun saveEditorIdentity(out: Bundle, identity: EditorIdentity) {
+            out.putBundle(EDITOR, Bundle().apply {
+                putString(SELECTED, identity.documentId.value)
+                putString(PAGE, identity.pageId.value)
+                saveActivation(identity.issuedAt)
+            })
+        }
+        @Suppress("DEPRECATION") fun restoreEditorIdentity(saved: Bundle?): EditorIdentity? {
             val raw = saved?.get(EDITOR) ?: return null
             require(raw is Bundle)
             val document = raw.get(SELECTED) as? String ?: throw IllegalArgumentException("Invalid saved editor identity")
             val page = raw.get(PAGE) as? String ?: throw IllegalArgumentException("Invalid saved editor identity")
-            return EditorIdentity(DocumentId(document), PageId(page))
+            return EditorIdentity(DocumentId(document), PageId(page), requireNotNull(raw.restoreActivation()))
         }
         fun saveLibraryIdentity(out: Bundle, identity: LibraryIdentity, allowPendingResult: Boolean) {
             out.putBundle(SAVED, Bundle().apply {

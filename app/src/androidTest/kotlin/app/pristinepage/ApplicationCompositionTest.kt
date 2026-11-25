@@ -49,6 +49,70 @@ import org.junit.runner.RunWith
 class ApplicationCompositionTest {
     private val output = OutputSpec(PixelSize(2, 2), RenderPurpose.PREVIEW)
 
+    @Test fun anEditorContinuationCannotReadSaveOrRenderUnderAnotherActivation() = runBlocking {
+        Fixture().use { f ->
+            val services = ApplicationServices(f.context, f.budget, f.provider)
+            val cold = app.pristinepage.editor.EditorIdentity(DocumentId("aaaaaaaa-aaaa-4aaa-8aaa-000000000011"),
+                PageId("aaaaaaaa-aaaa-4aaa-8aaa-000000000012"), LibraryActivation("aaaaaaaa-aaaa-4aaa-8aaa-000000000010", 1))
+            suspend fun refused(key: String = "library_activation_changed", action: suspend () -> Any) {
+                val error = runCatching { action() }.exceptionOrNull() as RepositoryFailure
+                assertEquals(key, error.error.safeMessageKey)
+            }
+            refused { services.loadDefaultEditorPage(cold) }
+            assertFalse(File(f.context.filesDir, "library-settings").exists())
+            assertFalse(f.context.getDatabasePath("pristinepage.db").exists())
+            services.imports().useStore { graph ->
+                val album = graph.store.documents.createDocument("Current editor")
+                val batch = graph.store.imports.beginImport(album, 1, null)
+                val scan = graph.photoImports.importProviderReferences(listOf(f.good), batch.parentId).single() as IngestResult.Committed
+                val exact = app.pristinepage.editor.EditorIdentity(album, scan.pageId, graph.activation)
+                val stale = exact.copy(issuedAt = graph.activation.copy(number = graph.activation.number + 1))
+                val original = services.loadDefaultEditorPage(exact)
+                val rotated = original.recipe.copy(geometry = original.recipe.geometry.withOutputQuarterTurns(1))
+                val request = RenderRequest(scan.sourceId.value, scan.sourcePixelHash, scan.pageId.value, original.recipeRevision,
+                    original.recipe, output, 1, null, FallbackPolicy.FAIL)
+                refused { services.loadDefaultEditorPage(stale) }
+                refused { services.saveDefaultEditorPage(stale, original.recipeRevision, rotated) }
+                refused { services.renderDefaultEditor(stale, request).also { it.close() } }
+                assertEquals(0L, f.budget.usedBytes)
+                assertEquals(original, services.loadDefaultEditorPage(exact))
+                assertEquals(listOf(f.good), f.opened)
+                services.renderDefaultEditor(exact, request).use { assertEquals(RenderStatus.OK, it.status) }
+                val marker = File(f.context.filesDir, "library-settings/active-library")
+                val baseline = marker.readBytes()
+                val body = "pristinepage-active-library-v1\n${graph.activation.libraryId}\n${graph.activation.number + 1}\n-\n-\n"
+                val digest = MessageDigest.getInstance("SHA-256").digest(body.toByteArray(Charsets.US_ASCII))
+                    .joinToString("") { "%02x".format(it.toInt() and 255) }
+                suspend fun drift(pixels: Boolean = false, key: String = "library_activation_changed", action: suspend () -> Any) {
+                    var checks = 0
+                    f.afterRoomOpen = {
+                        if (++checks == 2) {
+                            if (pixels) assertTrue("The complete pixel owner exists before the late refusal", f.budget.usedBytes > 0)
+                            marker.writeText("$body$digest\n", Charsets.US_ASCII)
+                        }
+                    }
+                    try {
+                        refused(key, action)
+                        assertTrue(checks >= 2)
+                        assertEquals(0L, f.budget.usedBytes)
+                    } finally {
+                        f.afterRoomOpen = {}
+                        marker.writeBytes(baseline)
+                    }
+                }
+                drift { services.loadDefaultEditorPage(exact) }
+                drift { services.readDefaultEditorOcrStatus(exact, original.recipeRevision); Unit }
+                drift { services.readDefaultEditorOcrText(exact, original.recipeRevision); Unit }
+                drift(pixels = true) { services.renderDefaultEditor(exact, request).also { it.close() } }
+                drift(pixels = true) { services.originalDefaultEditor(exact, scan.sourceId.value).also { it.close() } }
+                drift(key = "editor_save_delivery_unconfirmed") { services.saveDefaultEditorPage(exact, original.recipeRevision, rotated) }
+                val committed = services.loadDefaultEditorPage(exact)
+                assertEquals("Refusing a late receipt does not roll back the old store", original.recipeRevision + 1, committed.recipeRevision)
+                assertEquals(1, committed.recipe.geometry.outputQuarterTurns)
+            }
+        }
+    }
+
     @Test fun aStalePhotoResultCannotBootstrapOrAccessTheDefaultGraph() = runBlocking {
         Fixture().use { f ->
             val services = ApplicationServices(f.context, f.budget, f.provider)

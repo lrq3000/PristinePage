@@ -38,6 +38,7 @@ class ApplicationLibraryActions private constructor(
         services: ApplicationServices) : this(context, onPagesSaved, services::imports, services)
 
     override suspend fun startup() = open().startupRecovery
+    override suspend fun openLibrary() = open().let { LibraryStartup(it.startupRecovery, it.activation) }
     override suspend fun list(after: DocumentId?, limit: Int) = open().store.catalog.list(after, limit)
     override suspend fun listAlbums(order: AlbumOrder, locale: Locale, after: AlbumPosition?, limit: Int) = open().store.albums.listAlbums(order, locale, after, limit)
     override suspend fun searchAlbums(query: AlbumSearchQuery, order: AlbumOrder, locale: Locale, after: AlbumPosition?, limit: Int) =

@@ -26,6 +26,26 @@ import org.junit.runner.RunWith
 /** Tests our Activity-owned binding against actual AndroidX queued raw results and Android Parcel. This is not an actual Activity recreation, external picker or platform URI-grant experiment. */
 @RunWith(AndroidJUnit4::class)
 class LibraryPickerBindingTest {
+
+    @Test fun savedEditorNeedsItsIssuingActivationAndLegacyIdsCannotReopen() {
+        val identity = app.pristinepage.editor.EditorIdentity(
+            app.pristinepage.data.model.DocumentId("aaaaaaaa-aaaa-4aaa-8aaa-000000000011"),
+            app.pristinepage.data.model.PageId("aaaaaaaa-aaaa-4aaa-8aaa-000000000012"),
+            LibraryActivation("aaaaaaaa-aaaa-4aaa-8aaa-000000000010", 2))
+        val stored = Bundle()
+        MainActivity.saveEditorIdentity(stored, identity)
+        assertEquals(identity, MainActivity.restoreEditorIdentity(parcel(stored)))
+        val key = stored.keySet().single()
+        checkNotNull(stored.getBundle(key)).remove("activation")
+        assertTrue(runCatching { MainActivity.restoreEditorIdentity(parcel(stored)) }.isFailure)
+        val legacy = Bundle().apply {
+            putBundle("pristinepage.editor.identity.v1", Bundle().apply {
+                putString("document", identity.documentId.value)
+                putString("page", identity.pageId.value)
+            })
+        }
+        assertNull(MainActivity.restoreEditorIdentity(parcel(legacy)))
+    }
     @Test fun parceledQueuedRawResultIsConsumedSynchronouslyDuringRestoredRegistrationWithoutRelaunch() {
         val batch = ImportSessionId("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa")
         val request = PhotoImportRequest(batch.value)

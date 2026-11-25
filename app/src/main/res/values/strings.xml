@@ -156,6 +156,7 @@
     <string name="error_unsupported_version">This image conversion or saved version is not supported by this build.</string>
     <string name="error_permission_lost">Access to the selected photo was lost. Select it again.</string>
     <string name="error_source_unavailable">The selected source or document is unavailable. Refresh or select another photo.</string>
+    <string name="editor_save_delivery_unconfirmed">This edit may already be saved in the previous library. Reopen that library to check before retrying.</string>
     <string name="error_session_expired">The previous request is unavailable or expired. Review saved pages and select photos again.</string>
     <string name="error_revision_conflict">The document changed. Refresh before trying again.</string>
     <string name="error_provider_unavailable">The requested picker or processing option is unavailable.</string>

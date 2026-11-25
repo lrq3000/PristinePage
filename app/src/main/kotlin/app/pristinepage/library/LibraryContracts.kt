@@ -11,9 +11,12 @@ import kotlinx.coroutines.flow.emptyFlow
 import java.time.ZoneId
 import java.util.Locale
 
+data class LibraryStartup(val report: RecoveryReport, val activation: LibraryActivation? = null)
+
 /** Immediate foreground commands against the existing Application-owned store. These ports carry no Activity, live bitmap, private path or persistable-grant promise. Real adapter delegates to the already tested repositories/controller. */
 interface LibraryActions {
     suspend fun startup(): RecoveryReport
+    suspend fun openLibrary(): LibraryStartup = LibraryStartup(startup())
     suspend fun list(after: DocumentId?, limit: Int): List<DocumentSummary>
     suspend fun load(id: DocumentId): DocumentOverview
     suspend fun activeImport(id: DocumentId): ImportSessionId?
@@ -78,6 +81,7 @@ data class LibraryState(
     val resultBatch: ImportSessionId? = null,
     val results: List<IngestResult> = emptyList(),
     val recovery: RecoveryReport? = null,
+    val activation: LibraryActivation? = null,
     val error: OperationError? = null,
     val selectedPage: PageId? = null,
     val albumOrder: AlbumOrder = AlbumOrder.MODIFIED,

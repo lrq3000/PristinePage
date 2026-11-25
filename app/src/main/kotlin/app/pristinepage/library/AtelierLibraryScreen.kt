@@ -244,10 +244,7 @@ import kotlinx.coroutines.launch
                                 .combinedClickable(enabled = canAcquire && overview != null, role = Role.Button,
                                     onLongClickLabel = stringResource(R.string.carnet_select_page),
                                     onLongClick = { overview?.let { onSelectPages(it, page.pageId) } }) {
-                                    overview?.let {
-                                        session.accept(LibraryEvent.SelectPage(page.pageId))
-                                        onEdit(it.document.documentId, page.pageId)
-                                    }
+                                    overview?.let { onEdit(it.document.documentId, page.pageId) }
                                 },
                             shape = RoundedCornerShape(AtelierStyle.surfaceRadius), color = MaterialTheme.colorScheme.surface,
                         ) {

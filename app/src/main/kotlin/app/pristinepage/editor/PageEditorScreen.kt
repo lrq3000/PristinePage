@@ -238,7 +238,8 @@ class PageEditorScreen(
             Column(Modifier.weight(1f).fillMaxWidth().verticalScroll(rememberScrollState()).padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             if (state.loading) CircularProgressIndicator()
             state.error?.let {
-                Text(errorText(it.code), color = MaterialTheme.colorScheme.error)
+                Text(if (it.safeMessageKey == "editor_save_delivery_unconfirmed") stringResource(R.string.editor_save_delivery_unconfirmed)
+                    else errorText(it.code), color = MaterialTheme.colorScheme.error)
                 if (state.page == null) Button(onClick = session::retryLoad, modifier = control("editor-retry-load")) { Text(stringResource(R.string.editor_retry_load)) }
             }
             // Loading the original is independent of recipe decoding. Unsupported recipes must not make an authentic page unreadable.

@@ -407,6 +407,9 @@ class EditorSession @JvmOverloads constructor(documentId: String, pageId: String
     }
 
     private fun saveFailed(error: OperationError) { if (!closed) current.value = current.value.copy(saving = false, error = error) }
+    internal fun showNavigationRefusal(error: OperationError) {
+        if (!closed && !current.value.saving) current.value = current.value.copy(error = error)
+    }
     fun requestBack() {
         if (closed || current.value.saving) return
         cancelGeometryAnalysis()

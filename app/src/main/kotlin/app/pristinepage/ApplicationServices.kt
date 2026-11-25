@@ -5,17 +5,23 @@ import android.content.Context
 import android.net.Uri
 import android.provider.OpenableColumns
 import app.pristinepage.core.ocr.OcrConfiguration
+import app.pristinepage.core.pipeline.Recipe
+import app.pristinepage.core.pipeline.RenderRequest
+import app.pristinepage.core.pipeline.RenderResult
 import app.pristinepage.capture.PhotoImportController
 import app.pristinepage.data.library.AndroidLibraryStartup
 import app.pristinepage.data.library.DefaultLibraryOperations
 import app.pristinepage.data.library.LibraryActivation
 import app.pristinepage.data.model.DocumentId
+import app.pristinepage.data.model.DocumentPage
 import app.pristinepage.data.model.ImportSessionId
 import app.pristinepage.data.model.OperationError
 import app.pristinepage.data.model.OperationErrorCode
 import app.pristinepage.data.model.PageId
 import app.pristinepage.data.model.RecoveryReport
 import app.pristinepage.data.model.RepositoryFailure
+import app.pristinepage.data.model.SaveRecipeResult
+import app.pristinepage.editor.EditorIdentity
 import app.pristinepage.data.files.SourceInspector
 import app.pristinepage.data.repository.PrivateImportStore
 import app.pristinepage.data.repository.ImportSessionLifecycle
@@ -120,6 +126,70 @@ class ApplicationServices(context: Context, internal val budget: ImageAllocation
 
     internal suspend fun findDefaultPhotoBatch(issuedAt: LibraryActivation, album: DocumentId): ImportSessionId? =
         (withDefaultLibrary(issuedAt) { ActiveImport(it.store.catalog.activeImport(album)) } ?: activationChanged()).batch
+
+    internal suspend fun loadDefaultEditorPage(identity: EditorIdentity) =
+        defaultEditorOperation(identity) { it.store.editablePages.load(identity.documentId, identity.pageId) }
+
+    internal suspend fun saveDefaultEditorPage(identity: EditorIdentity, revision: Long, recipe: Recipe) =
+        defaultEditorOperation(identity) { graph ->
+            editorPage(graph, identity)
+            graph.store.documents.saveRecipe(identity.pageId, revision, recipe)
+        }
+
+    internal suspend fun readDefaultEditorOcrStatus(identity: EditorIdentity, revision: Long): SavedOcrWork.PageStatus? =
+        defaultEditorOperation(identity) { it.store.savedOcr.readStatus(identity.documentId, identity.pageId, revision) }
+
+    internal suspend fun readDefaultEditorOcrText(identity: EditorIdentity, revision: Long): SavedOcrWork.ReadText? =
+        defaultEditorOperation(identity) { it.store.savedOcr.readText(identity.documentId, identity.pageId, revision) }
+
+    internal suspend fun rerunDefaultEditorOcr(identity: EditorIdentity, observed: SavedOcrWork.PageStatus, configuration: OcrConfiguration) =
+        defaultEditorOperation(identity) { it.store.savedOcr.requestRerun(observed, configuration) }
+
+    private data class EditorValue<out T>(val value: T)
+    private suspend fun <T> defaultEditorOperation(identity: EditorIdentity, operation: suspend (ApplicationImports) -> T): T {
+        val delivered = withDefaultLibrary(identity.issuedAt) { graph ->
+            val value = operation(graph)
+            // Withhold obsolete reads and receipts. A completed write remains in the issuing library even if the view cannot acknowledge it.
+            try {
+                if (libraryStartup.recordedDefaultActivation() != identity.issuedAt) activationChanged()
+            } catch (failure: RepositoryFailure) {
+                if (value !is SaveRecipeResult.Saved) throw failure
+                throw RepositoryFailure(OperationError(OperationErrorCode.STORAGE_FAILED, false, "editor_save_delivery_unconfirmed", identity.pageId.value))
+            }
+            EditorValue(value)
+        } ?: activationChanged()
+        return delivered.value
+    }
+
+    internal suspend fun renderDefaultEditor(identity: EditorIdentity, request: RenderRequest): RenderResult =
+        editorPixels(identity, request.sourceId) { graph ->
+            if (request.pageId != identity.pageId.value) editorPageUnavailable(identity)
+            graph.renderer.render(request)
+        }
+
+    internal suspend fun originalDefaultEditor(identity: EditorIdentity, sourceId: String): OriginalPreviewBitmap =
+        editorPixels(identity, sourceId) { it.originalPreview(sourceId) }
+
+    private suspend fun editorPage(graph: ApplicationImports, identity: EditorIdentity): DocumentPage =
+        graph.store.catalog.load(identity.documentId).pages.singleOrNull { it.pageId == identity.pageId }
+            ?: editorPageUnavailable(identity)
+
+    private fun editorPageUnavailable(identity: EditorIdentity): Nothing =
+        throw RepositoryFailure(OperationError(OperationErrorCode.SOURCE_UNAVAILABLE, false, "editor_page_unavailable", identity.pageId.value))
+
+    /** Capture the owned, detached pixels before leaving the lease so cancellation/late refusal cannot strand their allocation. */
+    private suspend fun <T : AutoCloseable> editorPixels(identity: EditorIdentity, sourceId: String, produce: suspend (ApplicationImports) -> T): T {
+        var provisional: T? = null
+        try {
+            withDefaultLibrary(identity.issuedAt) { graph ->
+                if (editorPage(graph, identity).sourceId.value != sourceId) editorPageUnavailable(identity)
+                provisional = produce(graph)
+                if (libraryStartup.recordedDefaultActivation() != identity.issuedAt) activationChanged()
+            } ?: activationChanged()
+            currentCoroutineContext().ensureActive()
+            return checkNotNull(provisional).also { provisional = null }
+        } finally { provisional?.close() }
+    }
 
     /** Only the photo adapter borrows these two ports, through ingest/cancellation and camera-file cleanup. Nothing graph-backed is returned. */
     internal suspend fun useDefaultPhotoRouting(

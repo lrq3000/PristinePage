@@ -135,10 +135,11 @@ class DocumentCatalogIntegrationTest {
         var providerOpens = 0; var forbid = false
         var beforeProvider: (String, Int) -> Unit = { _, _ -> }
         private var graph: ApplicationImports? = null
-        suspend fun open(): ApplicationImports = (if (realProvider) ApplicationServices(context) else ApplicationServices(context, ApplicationImageBudget.create(memoryClassMiB), SourceInput { reference ->
+        fun services(): ApplicationServices = if (realProvider) ApplicationServices(context) else ApplicationServices(context, ApplicationImageBudget.create(memoryClassMiB), SourceInput { reference ->
             check(!forbid); check(reference == good || reference == bad); providerOpens++; beforeProvider(reference, providerOpens)
             ByteArrayInputStream(if (reference == good) png else byteArrayOf(1, 2, 3, 4))
-        })).imports().also { graph = it }
+        })
+        suspend fun open(services: ApplicationServices = services()): ApplicationImports = services.imports().also { graph = it }
         suspend fun reopen(): ApplicationImports { close(); graph = null; return open() }
         fun write(sql: String, vararg args: Any) = SQLiteDatabase.openDatabase(context.getDatabasePath("pristinepage.db").path, null, SQLiteDatabase.OPEN_READWRITE).use { it.execSQL(sql, args) }
         fun scalars(sql: String, id: String): List<String> = SQLiteDatabase.openDatabase(context.getDatabasePath("pristinepage.db").path, null, SQLiteDatabase.OPEN_READONLY).use { db ->
