@@ -31,6 +31,72 @@ import org.junit.rules.TemporaryFolder
 class LocalLibraryFolderExportJournalTest {
     @get:Rule val temporary = TemporaryFolder()
 
+    @Test fun definiteCapacityRefusalsDoNotFillOutstandingSlotsOrAuthorizeUnlinkingUncertainEvidence() {
+        val (first, intent) = staged()
+        val files = checkNotNull(first.parentFile).toPath()
+        val bytes = first.resolve("catalog.sqlite").readBytes()
+        val sync = DirectorySync { true }
+        val attempts = LocalLibraryBackupAttempts(files, sync)
+        for (index in 1..4) {
+            val id = "10000000-0000-4000-8000-00000000000$index"
+            val root = if (index == 1) first else attempts.requireNew(id).toFile().apply {
+                check(mkdir())
+                resolve("catalog.sqlite").writeBytes(bytes)
+            }
+            val journal = LocalLibraryFolderExportJournal(root, sync)
+            journal.anchorClosedStage(id, intent.generation).discardCapacityRefusal()
+            assertFalse(root.exists())
+        }
+        val id = "10000000-0000-4000-8000-000000000005"
+        assertFalse(attempts.requireNew(id).toFile().exists())
+        val ambiguous = attempts.requireNew(intent.operationId).toFile().apply {
+            check(mkdir())
+            resolve("catalog.sqlite").writeBytes(bytes)
+        }
+        val journal = LocalLibraryFolderExportJournal(ambiguous, sync)
+        val prepared = journal.anchorClosedStage(intent.operationId, intent.generation)
+        prepared.start(intent)
+        assertFailsWith<IOException> { prepared.discardCapacityRefusal() }
+        assertEquals(Phase.INTENT_ONLY, journal.reopen(intent.operationId)?.phase)
+        assertContentEquals(bytes, ambiguous.resolve("catalog.sqlite").readBytes())
+    }
+
+    @Test fun capacityCleanupRetainsAByteIdenticalReplacementAndTheOriginalLinkedOwner() {
+        val (root, intent) = staged()
+        val journal = LocalLibraryFolderExportJournal(root, DirectorySync { true })
+        val prepared = journal.anchorClosedStage(intent.operationId, intent.generation)
+        val catalog = root.resolve("catalog.sqlite").toPath()
+        val bytes = Files.readAllBytes(catalog)
+        Files.delete(catalog)
+        Files.write(catalog, bytes)
+        assertFailsWith<IOException> { prepared.discardCapacityRefusal() }
+        assertContentEquals(bytes, Files.readAllBytes(catalog))
+        assertContentEquals(bytes, root.resolve("export.catalog.owner").readBytes())
+    }
+
+    @Test fun capacityCleanupRefusesEvenWhenBothNamesAreReplacedByHardLinksToTheSameBytes() {
+        val (root, intent) = staged()
+        val catalog = root.resolve("catalog.sqlite").toPath()
+        val owner = root.resolve("export.catalog.owner").toPath()
+        val original = checkNotNull(root.parentFile).resolve("original-inode").toPath()
+        Files.createLink(original, catalog)
+        val bytes = Files.readAllBytes(original)
+        val prepared = LocalLibraryFolderExportJournal(root, DirectorySync { true }).anchorClosedStage(
+            intent.operationId, intent.generation,
+        ) {
+            if (!Files.isSameFile(original, catalog)) throw IOException("The prepared catalog identity changed")
+        }
+        Files.delete(owner)
+        Files.delete(catalog)
+        Files.write(catalog, bytes)
+        Files.createLink(owner, catalog)
+        assertTrue(Files.isSameFile(catalog, owner))
+        assertFalse(Files.isSameFile(catalog, original))
+        assertFailsWith<IOException> { prepared.discardCapacityRefusal() }
+        assertContentEquals(bytes, Files.readAllBytes(catalog))
+        assertContentEquals(bytes, Files.readAllBytes(owner))
+    }
+
     @Test fun coldDiscoveryFindsAnExactReceiptAndDoesNotPromoteAnUnresolvedAttempt() {
         val (root, intent) = staged()
         val files = checkNotNull(root.parentFile).toPath()

@@ -94,14 +94,43 @@ internal class LocalLibraryDirectory(root: File, private val directorySync: Dire
         }
     }
 
+    fun requireOnlyAnchoredExportStage() {
+        requireExportStageOwner()
+        try {
+            Files.newDirectoryStream(rootPath).use { entries ->
+                val names = entries.asSequence().take(3).map { it.fileName.toString() }.toSet()
+                if (names != setOf("catalog.sqlite", "export.catalog.owner")) throw IOException("The backup stage retains other evidence")
+            }
+        } catch (_: DirectoryIteratorException) { throw IOException("The retained backup stage could not be read") }
+    }
+
+    /** No recovery caller may unlink an unstarted-looking attempt after process death. A live prepublication refusal is required. */
+    fun discardUnpublishedExportStage(generation: LibraryGeneration, checkpoint: () -> Unit,
+        requireOriginalAttempt: () -> Unit, requireOriginalStage: () -> Unit,
+    ) {
+        requireOriginalAttempt()
+        requireOriginalStage()
+        requireOnlyAnchoredExportStage()
+        reclaimExportStage(generation, checkpoint) {
+            requireOriginalAttempt()
+            requireOriginalStage()
+        }
+        // Nonrecursive; a new or unexplained entry makes removal fail. Never delete a pathname reported by SQLite or by Files.
+        requireOriginalAttempt()
+        if (rootPath.toRealPath() != rootPath) throw IOException("The private backup stage changed")
+        Files.delete(rootPath)
+        forceDirectory(checkNotNull(paths.root.parentFile))
+    }
+
     /** The caller has verified the acknowledgment and holds the private writer lane. Remove only the original closed stage. */
-    fun reclaimExportStage(generation: LibraryGeneration, checkpoint: () -> Unit) {
+    fun reclaimExportStage(generation: LibraryGeneration, checkpoint: () -> Unit, beforeUnlink: () -> Unit = {}) {
         val stage = readPath("catalog.sqlite")
         val owner = readPath("export.catalog.owner")
         if (presentRegularFile(stage) || presentRegularFile(owner)) {
             requireExportStageOwner()
             verifyExportStage(generation, checkpoint)
             checkpoint()
+            beforeUnlink()
             requireExportStageOwner()
             // If interruption leaves just one name, do not infer its identity from its bytes alone on the next attempt.
             Files.delete(owner)

@@ -6,6 +6,7 @@ import android.content.ContentResolver
 import android.content.Context
 import android.content.ContextWrapper
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.graphics.Rect
 import android.net.Uri
 import android.os.SystemClock
@@ -272,6 +273,28 @@ class LibraryFolderFilesJourneyTest {
             if (arguments.getString("libraryExpectHome") == "1") {
                 assertTrue("Files did not return the exact Documents namespace", picked.uri.toString() == home.toString())
             }
+            if (exportBackup) {
+                val temporary = AndroidLibraryWritableFolder(app)
+                val other = DocumentsContract.buildTreeDocumentUri(requireNotNull(picked.uri.authority), "home:${folder}-other")
+                assertTrue(runBlocking { temporary.availableFromFilesResult(picked.uri) } > 0)
+                val sibling = assertThrows(IOException::class.java) { runBlocking { temporary.availableFromFilesResult(other) } }
+                assertEquals("The exact library folder is not writable", sibling.message)
+                var checks = 0
+                val drift = object : ContextWrapper(app) {
+                    override fun getApplicationContext(): Context = this
+                    override fun checkUriPermission(uri: Uri, pid: Int, uid: Int, modeFlags: Int): Int {
+                        assertEquals(picked.uri, uri)
+                        // Checks 1–2 guard directory query; 3 guards open, and 4 must guard delivery of that descriptor.
+                        return if (++checks >= 4) PackageManager.PERMISSION_DENIED else super.checkUriPermission(uri, pid, uid, modeFlags)
+                    }
+                }
+                val revoked = assertThrows(IOException::class.java) {
+                    runBlocking { AndroidLibraryWritableFolder(drift).availableFromFilesResult(picked.uri) }
+                }
+                assertEquals("The exact library folder is not writable", revoked.message)
+                assertEquals(4, checks)
+                assertEquals("Checking temporary write access must not persist any permission", before, existing())
+            }
             val handoff = LibraryFolderGrantHandoff(app)
             val uri = handoff.persistRead(picked)
             assertEquals(before + (uri.toString() to (true to false)), existing())
@@ -295,7 +318,7 @@ class LibraryFolderFilesJourneyTest {
                 assertThrows(IOException::class.java) { runBlocking { destination.availableBytes(uri) } }
             } else if (exportBackup) runCatching {
                 val flag = Intent.FLAG_GRANT_WRITE_URI_PERMISSION
-                val backup = try { runBlocking { LibraryDefaultFolderExportProbe.verify(app, picked) { handoff.persistWrite(picked) } } } finally {
+                val backup = try { runBlocking { LibraryDefaultFolderExportProbe.verify(app, picked) } } finally {
                     if (existing()[uri.toString()]?.second == true) app.contentResolver.releasePersistableUriPermission(uri, flag)
                 }
                 try { reopenExportedChild(app, instrumentation, uri, backup, scratch) }

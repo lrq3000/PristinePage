@@ -21,6 +21,10 @@ internal class LocalLibraryFolderExportJournal(
         /** Call only after the live writer has verified the exact external result and its durability. */
         fun recordCompletion()
     }
+    sealed interface Prepared {
+        fun start(intent: Intent): LiveCompletion
+        fun discardCapacityRefusal()
+    }
 
     private inner class Started(private val intent: Intent) : LiveCompletion {
         private val spent = AtomicBoolean()
@@ -31,14 +35,45 @@ internal class LocalLibraryFolderExportJournal(
         }
     }
 
+    private inner class Anchored(
+        private val operationId: String, private val generation: LibraryGeneration,
+        private val requireOriginalAttempt: () -> Unit, private val requireOriginalStage: () -> Unit,
+    ) : Prepared {
+        private val consumed = AtomicBoolean()
+
+        override fun start(intent: Intent): LiveCompletion {
+            if (intent.operationId != operationId || intent.generation != generation || !consumed.compareAndSet(false, true)) {
+                throw IOException("The closed backup stage does not match a fresh attempt")
+            }
+            requireOriginalAttempt()
+            requireOriginalStage()
+            directory.requireOnlyAnchoredExportStage()
+            publish(ExportRecord.INTENT, intent, intent.encode(), Phase.INTENT_ONLY)
+            return Started(intent)
+        }
+
+        override fun discardCapacityRefusal() {
+            if (!consumed.compareAndSet(false, true)) throw IOException("The backup stage may have started publication")
+            directory.discardUnpublishedExportStage(generation, checkpoint, requireOriginalAttempt, requireOriginalStage)
+        }
+    }
+
     /** The caller must have allocated a fresh directory, prepared this catalog, and independently admitted the exact destination. */
-    fun start(intent: Intent): LiveCompletion {
-        requireAttempt(intent.operationId)
-        if (observe(intent.operationId) != null) throw IOException("The backup was already started")
-        directory.requireAndForceExportStage(intent.generation, checkpoint)
+    fun start(intent: Intent): LiveCompletion = anchorClosedStage(intent.operationId, intent.generation).start(intent)
+
+    /** Before capacity admission, create live evidence of which app-private file is disposable. Only this token can retire a definite refusal. */
+    fun anchorClosedStage(operationId: String, generation: LibraryGeneration,
+        requireOriginalAttempt: () -> Unit = {}, requireOriginalStage: () -> Unit = {},
+    ): Prepared {
+        requireAttempt(operationId)
+        requireOriginalAttempt()
+        requireOriginalStage()
+        if (observe(operationId) != null) throw IOException("The backup was already started")
+        directory.requireAndForceExportStage(generation, checkpoint)
         directory.anchorExportStage()
-        publish(ExportRecord.INTENT, intent, intent.encode(), Phase.INTENT_ONLY)
-        return Started(intent)
+        requireOriginalAttempt()
+        requireOriginalStage()
+        return Anchored(operationId, generation, requireOriginalAttempt, requireOriginalStage)
     }
 
     private fun complete(intent: Intent) {

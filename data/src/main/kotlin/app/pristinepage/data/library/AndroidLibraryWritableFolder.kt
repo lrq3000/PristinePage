@@ -1,10 +1,13 @@
 package app.pristinepage.data.library
 
 import android.content.Context
+import android.content.Intent
+import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.CancellationSignal
 import android.os.OperationCanceledException
 import android.os.ParcelFileDescriptor
+import android.os.Process
 import android.provider.DocumentsContract
 import android.system.ErrnoException
 import android.system.Os
@@ -19,20 +22,27 @@ import kotlinx.coroutines.withContext
 class AndroidLibraryWritableFolder(context: Context) {
     private val app = context.applicationContext
 
-    suspend fun availableBytes(tree: Uri): Long = useTree(tree) { it.capacity() }
+    internal enum class Access { PERSISTED, LIVE_FILES_RESULT }
+
+    suspend fun availableBytes(tree: Uri): Long = availableBytes(tree, Access.PERSISTED)
+
+    /** Advisory probe only for the exact URI of a live Files result. No permission is persisted or released. */
+    suspend fun availableFromFilesResult(tree: Uri): Long = availableBytes(tree, Access.LIVE_FILES_RESULT)
+
+    internal suspend fun availableBytes(tree: Uri, access: Access): Long = useTree(tree, access) { it.capacity() }
 
     /** Keep provider calls and every returned descriptor in the same bounded, non-escaping I/O scope. */
-    internal suspend fun <T> useTree(tree: Uri, block: (WritableTree) -> T): T = withContext(Dispatchers.IO) {
+    internal suspend fun <T> useTree(tree: Uri, access: Access, block: (WritableTree) -> T): T = withContext(Dispatchers.IO) {
         val checkpoint = { coroutineContext.ensureActive() }
         val root = AndroidLibraryTreeRead.localTreeDocumentId(tree) ?: throw IOException("Unsupported writable library folder")
         LibraryProviderAttempt.run {
-            withLibraryProviderSignal { signal -> WritableTree(app, tree, root, signal, checkpoint).guarded(block) }
+            withLibraryProviderSignal { signal -> WritableTree(app, tree, root, signal, checkpoint, access).guarded(block) }
         }
     }
 
     internal class WritableTree(
         private val app: Context, val tree: Uri, val root: String,
-        private val signal: CancellationSignal, val checkpoint: () -> Unit,
+        private val signal: CancellationSignal, val checkpoint: () -> Unit, private val access: Access,
     ) {
         private val resolver = app.contentResolver
 
@@ -85,8 +95,15 @@ class AndroidLibraryWritableFolder(context: Context) {
 
         fun open(id: String, mode: String): ParcelFileDescriptor {
             requireExactAccess()
-            return resolverCall { resolver.openFileDescriptor(document(id), mode, signal) }
+            val descriptor = resolverCall { resolver.openFileDescriptor(document(id), mode, signal) }
                 ?: throw IOException("The writable library document is unavailable")
+            try {
+                requireExactAccess()
+                return descriptor
+            } catch (failure: Throwable) {
+                try { descriptor.close() } catch (closeFailure: Exception) { failure.addSuppressed(closeFailure) }
+                throw failure
+            }
         }
 
         private fun document(id: String): Uri = DocumentsContract.buildDocumentUriUsingTree(tree, id)
@@ -120,10 +137,16 @@ class AndroidLibraryWritableFolder(context: Context) {
 
         fun requireExactAccess() {
             checkpoint()
-            if (!AndroidLibraryTreeRead.hasTrustedLocalProvider(app) || resolver.persistedUriPermissions.none {
+            if (!AndroidLibraryTreeRead.hasTrustedLocalProvider(app)) throw IOException("The exact library folder is not writable")
+            val granted = when (access) {
+                Access.PERSISTED -> resolver.persistedUriPermissions.any {
                     it.isReadPermission && it.isWritePermission && it.uri.toString() == tree.toString()
                 }
-            ) throw IOException("The exact library folder is not writable")
+                // The app admitted the exact URI and flags from its one-shot result. Android alone decides whether its grant is still usable.
+                Access.LIVE_FILES_RESULT -> app.checkUriPermission(tree, Process.myPid(), Process.myUid(),
+                    Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION) == PackageManager.PERMISSION_GRANTED
+            }
+            if (!granted) throw IOException("The exact library folder is not writable")
             checkpoint()
         }
 

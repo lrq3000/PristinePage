@@ -205,7 +205,7 @@ internal class AndroidNewLibraryBackup private constructor(
             }
             return directory(provider.root) { selected ->
                 val available = provider.capacity(selected.id, selected.descriptor)
-                if (available < required) throw IOException("Not enough space for the library backup")
+                if (available < required) throw BackupCapacityBeforePublication()
                 recordIntent(selected.identity)
                 directory(child(selected, name, 2_048)) { root ->
                     directory(child(root, "objects", 4)) { objects ->
@@ -233,6 +233,9 @@ internal class AndroidNewLibraryBackup private constructor(
         }
     }
 }
+
+/** Internal marker emitted only before the backup child and its private intent. */
+internal class BackupCapacityBeforePublication : IOException("Not enough space for the library backup")
 
 internal fun backupSha256(bytes: ByteArray): String =
     MessageDigest.getInstance("SHA-256").digest(bytes).joinToString("") { "%02x".format(it.toInt() and 255) }

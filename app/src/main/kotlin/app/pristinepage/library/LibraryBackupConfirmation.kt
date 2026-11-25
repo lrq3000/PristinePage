@@ -54,4 +54,6 @@ internal class LibraryBackupConfirmation(private val newId: () -> String, recove
     }
 
     @Synchronized fun hasBoundResult(ticket: Ticket): Boolean = pending?.let { it.ticket === ticket && it.resultBound } == true
+
+    @Synchronized fun awaitsLaunch(ticket: Ticket): Boolean = pending?.let { it.ticket === ticket && !it.launched } == true
 }

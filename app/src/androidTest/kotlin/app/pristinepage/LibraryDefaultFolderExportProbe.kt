@@ -59,7 +59,7 @@ internal object LibraryDefaultFolderExportProbe {
         }
     }
 
-    suspend fun verify(app: Context, picked: LibraryFolderPickerContract.Picked, persistWrite: () -> Uri): Backup {
+    suspend fun verify(app: Context, picked: LibraryFolderPickerContract.Picked): Backup {
         val tree = picked.uri
         val isolated = File(app.filesDir.canonicalFile, "library-export-source-${UUID.randomUUID()}").apply { check(mkdir()) }
         val files = File(isolated, "files").apply { check(mkdir()) }
@@ -106,21 +106,21 @@ internal object LibraryDefaultFolderExportProbe {
             fun noAttempt() = assertTrue(files.listFiles()!!.none { it.name.startsWith("library-out-") })
             val namesBefore = destinationNames()
             val readGrants = grants()
-            val bindResult = { LibraryFolderExportRequest.bind(operation, graph.activation, tree, modes) }
+            val bindResult = { LibraryFolderExportRequest.bindLiveFilesResult(operation, graph.activation, tree, modes) }
             refused("The selected backup folder did not return writable local access") {
                 LibraryFolderExportRequest.bind(operation, graph.activation, tree, Intent.FLAG_GRANT_READ_URI_PERMISSION)
             }
-            refused("The exact library folder is not writable") { store.exportLibraryTo(bindResult()) }
+            refused("The exact library folder is not writable") {
+                store.exportLibraryTo(LibraryFolderExportRequest.bind(operation, graph.activation, tree, modes))
+            }
             assertEquals(readGrants, grants())
             assertEquals(namesBefore, destinationNames())
             noAttempt()
-            assertEquals(tree, persistWrite())
-            val writeGrants = grants()
-            val stale = LibraryFolderExportRequest.bind(operation, graph.activation.copy(number = graph.activation.number + 1), tree, modes)
+            val stale = LibraryFolderExportRequest.bindLiveFilesResult(operation, graph.activation.copy(number = graph.activation.number + 1), tree, modes)
             forbidProvider.set(true)
             try { refused("The backup no longer belongs to the selected default library") { store.exportLibraryTo(stale) } }
             finally { forbidProvider.set(false) }
-            assertEquals(writeGrants, grants())
+            assertEquals(readGrants, grants())
             assertEquals(namesBefore, destinationNames())
             noAttempt()
 
@@ -218,8 +218,7 @@ internal object LibraryDefaultFolderExportProbe {
                 refused("This backup operation cannot be repeated") { store.exportLibraryTo(bindResult()) }
             } finally { forbidProvider.set(false) }
             assertEquals(namesBefore + backup.folderName, destinationNames())
-            assertEquals(writeGrants, grants())
-            app.contentResolver.releasePersistableUriPermission(tree, Intent.FLAG_GRANT_WRITE_URI_PERMISSION)
+            assertEquals(readGrants, grants())
             assertFalse(app.contentResolver.persistedUriPermissions.any { it.uri == tree && it.isWritePermission })
             forbidProvider.set(true)
             try {

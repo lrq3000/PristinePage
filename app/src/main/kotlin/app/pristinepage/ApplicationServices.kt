@@ -110,15 +110,15 @@ class ApplicationServices(context: Context, internal val budget: ImageAllocation
         try {
             return withDefaultLibrary(issue) { graph ->
                 if (!delivery.consume(libraryStartup.recordedDefaultActivation())) return@withDefaultLibrary EditorValue(null)
-                // Spending this result precedes even taking a grant; neither failure nor cancellation makes it reusable.
-                val request = LibraryFolderExportRequest.bind(ticket.operationId, issue, selection.uri, returnedModes = 3)
+                // Spend authority before checking the destination. The live backup never acquires a persistent grant.
                 AndroidLibraryBackupHistory(context).preflightNew(ticket.operationId, issue)
                 val exact = withContext(Dispatchers.IO) {
-                    val operation = currentCoroutineContext()
-                    LibraryFolderGrantHandoff(context).persistWrite(selection) { operation.ensureActive() }
+                    currentCoroutineContext().ensureActive()
+                    LibraryFolderGrantHandoff(context).resolveLiveWrite(selection)
                 }
                 if (exact.toString() != selection.uri.toString()) throw IOException("The export destination identity changed")
                 requireSameDefault(issue)
+                val request = LibraryFolderExportRequest.bindLiveFilesResult(ticket.operationId, issue, exact, returnedModes = 3)
                 val receipt = graph.store.exportLibraryTo(request)
                 requireSameDefault(issue)
                 EditorValue(receipt)
@@ -128,6 +128,9 @@ class ApplicationServices(context: Context, internal val budget: ImageAllocation
 
     internal suspend fun inspectConfirmedDefaultBackup(ticket: LibraryBackupConfirmation.Ticket): LibraryFolderExportState =
         AndroidLibraryBackupHistory(context).inspect(ticket.operationId, ticket.issuedAt)
+
+    internal suspend fun discoverDefaultBackups(issuedAt: LibraryActivation) =
+        AndroidLibraryBackupHistory(context).discoverActive(issuedAt)
 
     internal suspend fun acknowledgeConfirmedDefaultBackup(ticket: LibraryBackupConfirmation.Ticket, receipt: LibraryFolderExportReceipt) {
         if (ticket.operationId != receipt.operationId) throw IOException("This backup does not match the retained confirmation")

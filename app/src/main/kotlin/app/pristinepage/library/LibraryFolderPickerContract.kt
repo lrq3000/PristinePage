@@ -63,6 +63,14 @@ internal class LibraryFolderGrantHandoff(context: Context) {
     fun persistWrite(picked: LibraryFolderPickerContract.Picked, checkpoint: () -> Unit = {}): Uri =
         persist(picked, write = true, checkpoint)
 
+    /** One-shot export uses only the live picker capability. The provider writer verifies actual platform access at each boundary. */
+    fun resolveLiveWrite(picked: LibraryFolderPickerContract.Picked): Uri {
+        if (!picked.grant.returnedWrite || picked.uri.toString() != picked.grant.exactUri) {
+            throw IOException("The selected folder did not return writable access")
+        }
+        return picked.uri.also(::resolveRoot)
+    }
+
     private fun persist(picked: LibraryFolderPickerContract.Picked, write: Boolean, checkpoint: () -> Unit): Uri {
         val tree = picked.uri
         if (tree.toString() != picked.grant.exactUri) throw IOException("The selected folder capability changed")

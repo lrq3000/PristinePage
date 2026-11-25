@@ -51,6 +51,9 @@ import app.pristinepage.editor.EditorIdentity
 import app.pristinepage.editor.EditorViewModel
 import app.pristinepage.editor.PageEditorScreen
 import app.pristinepage.library.LibraryEvent
+import app.pristinepage.library.LibraryBackupPickerHost
+import app.pristinepage.library.LibraryBackupSettings
+import app.pristinepage.library.LibraryBackupViewModel
 import app.pristinepage.library.errorText
 import app.pristinepage.editor.BatchEditScreen
 import app.pristinepage.editor.BatchEditViewModel
@@ -139,6 +142,12 @@ class MainActivity : ComponentActivity() {
                 return OcrTextSaveViewModel(app) { services.imports().store.savedOcr } as T
             }
         })[OcrTextSaveViewModel::class.java]
+        val backup = ViewModelProvider(this, object : ViewModelProvider.Factory {
+            @Suppress("UNCHECKED_CAST") override fun <T : ViewModel> create(modelClass: Class<T>): T {
+                require(modelClass == LibraryBackupViewModel::class.java)
+                return LibraryBackupViewModel(services) as T
+            }
+        })[LibraryBackupViewModel::class.java].session
         val acquisition = ViewModelProvider(this, object : ViewModelProvider.Factory {
             @Suppress("UNCHECKED_CAST") override fun <T : ViewModel> create(modelClass: Class<T>): T {
                 require(modelClass == AtelierCaptureViewModel::class.java)
@@ -173,7 +182,8 @@ class MainActivity : ComponentActivity() {
             val settings by app.atelierPreferences.settings.collectAsStateWithLifecycle()
             val host by editorOwner.state.collectAsStateWithLifecycle()
             val editing by editorOwner.session.collectAsStateWithLifecycle()
-            val library by retained.state.collectAsStateWithLifecycle()
+             val library by retained.state.collectAsStateWithLifecycle()
+             LaunchedEffect(library.activation) { backup.show(library.activation) }
             val batch by batchOwner.state.collectAsStateWithLifecycle()
             val acquiring by acquisition.state.collectAsStateWithLifecycle()
              val camera = library.request?.takeIf { it.kind == PhotoImportKind.CAMERA && library.phase == ImportPhase.WAITING_PICKER }
@@ -181,7 +191,12 @@ class MainActivity : ComponentActivity() {
              BackHandler(enabled = atHome && settingsPage == null && library.restoringSelection) {
                  retained.accept(LibraryEvent.LeaveHomeSearch)
              }
-            LaunchedEffect(atHome) { if (!atHome) settingsPage = null }
+             LaunchedEffect(atHome) {
+                 if (!atHome) {
+                     backup.leaveSettings()
+                     settingsPage = null
+                 }
+             }
             fun leaveEditor() { editorOwner.closeEditor(); retained.accept(LibraryEvent.RefreshAlbum) }
             fun refreshBatchAlbum(issuing: LibraryActivation, document: DocumentId) {
                 retained.refreshIssuedAlbum(issuing, document) { services.loadDefaultAlbum(issuing, document) }
@@ -216,8 +231,12 @@ class MainActivity : ComponentActivity() {
                 }
             }
             else if (atHome && settingsPage != null) {
-                val ocrReady by app.ocrRuntimeReady.collectAsStateWithLifecycle()
-                AtelierSettingsScreen(checkNotNull(settingsPage), app.atelierPreferences, ocrReady) { settingsPage = it }
+                 val ocrReady by app.ocrRuntimeReady.collectAsStateWithLifecycle()
+                 AtelierSettingsScreen(checkNotNull(settingsPage), app.atelierPreferences, ocrReady,
+                     libraryStorage = { LibraryBackupSettings(backup) }) {
+                     if (settingsPage == SettingsPage.LIBRARY_STORAGE && it != SettingsPage.LIBRARY_STORAGE) backup.leaveSettings()
+                     settingsPage = it
+                 }
             }
             else if (host.identity == null) libraryState.SaveableStateProvider("atelier-library") {
                 val observeOcrPending = remember(app) { AlbumOcrPending.forSavedPage(app, services::imports) }
@@ -323,7 +342,8 @@ class MainActivity : ComponentActivity() {
                 }
             }
             AlbumExportDialog(exportOwner)
-            OcrTextSaveHost(textSave, activityResultRegistry)
+             OcrTextSaveHost(textSave, activityResultRegistry)
+             LibraryBackupPickerHost(backup, activityResultRegistry, allowLaunch = atHome && settingsPage == SettingsPage.LIBRARY_STORAGE)
         } }
     }
 
