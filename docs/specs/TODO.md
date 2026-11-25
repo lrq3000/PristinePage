@@ -122,6 +122,8 @@ Tree lookup review found two Important gaps, both reproduced: an object ID could
 
 Next actionable gate: implement the Android document-tree backend and exact grant handoff, then demonstrate Files → exact persisted tree → verified catalog and reconnect on loss. The current released guest is data-only and cannot receive that app/test pair. A new test run needs an exact permitted artifact/guest combination and adequate live disk; final host check left 8.49 GiB (about 504 MiB above the 8 GiB floor), too little unreserved headroom for another app packaging and guest run. Preserve all retained artifacts and guests, and do not bypass the disk guard or perform cleanup without authorization. Current host witnesses are not a reason to enable Settings operations or selected-folder writes.
 
+The operator [authorized integration after portability acceptance](OPERATIONAL_PLAN.md#library-portability-integration-after-acceptance): classic merge with a self-contained intention, separate SemVer commit, and guarded push of `main` only. It does not clear the open feature or device gates. The next live check measured 7.43 GiB free, below the host build floor; resume gated implementation/build verification once the supported workspace has enough space for the next bounded run above that floor.
+
 ### Current coordination: transition to `main`
 
 - [x] Operator approved the local fast-forward and `main`-based PR/handoff cadence; see [operational authority](OPERATIONAL_PLAN.md) and [queue rules](PARALLEL_EXECUTION_PLAN.md#coordination). Earlier branch/base references below describe their historical claims.
