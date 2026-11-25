@@ -151,9 +151,7 @@ class AndroidLibraryTreeRead(context: Context, private val scratchDirectory: Fil
         tree: Uri, scratchLocation: File = scratchDirectory, block: (LibraryBackupRead, () -> Unit) -> T,
     ): T = withContext(Dispatchers.IO) {
         val checkpoint = { coroutineContext.ensureActive() }
-        // An uncooperative provider can delay unwinding. Do not let repeated taps accumulate further blocked opens.
-        if (!ATTEMPT.tryLock()) throw IOException("A library folder verification is already in progress")
-        try {
+        LibraryProviderAttempt.run {
             withLibraryProviderSignal { signal ->
                 val root = localTreeDocumentId(tree) ?: throw LibraryTreeUnavailable("This folder provider is not supported")
                 val scratch = canonicalLibraryDirectory(scratchLocation, app.filesDir.toPath().toRealPath())
@@ -164,8 +162,6 @@ class AndroidLibraryTreeRead(context: Context, private val scratchDirectory: Fil
                 backend.requireRoot()
                 result
             }
-        } finally {
-            ATTEMPT.unlock()
         }
     }
 
@@ -259,7 +255,6 @@ class AndroidLibraryTreeRead(context: Context, private val scratchDirectory: Fil
         private const val PACKAGE = "com.android.externalstorage"
         // This caps one detached admission's cumulative provider I/O, not storage capacity or single-scan size.
         private const val MAX_TREE_ORIGINAL_BYTES = 8L * 1024 * 1024 * 1024
-        private val ATTEMPT = Mutex()
         private val WORKING = Mutex()
 
         private fun hasExactReadGrant(app: Context, tree: Uri): Boolean =

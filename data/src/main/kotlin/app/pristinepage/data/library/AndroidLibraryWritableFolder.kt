@@ -9,6 +9,7 @@ import android.provider.DocumentsContract
 import android.system.ErrnoException
 import android.system.Os
 import android.system.OsConstants
+import java.io.FileNotFoundException
 import java.io.IOException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ensureActive
@@ -21,7 +22,9 @@ class AndroidLibraryWritableFolder(context: Context) {
     suspend fun availableBytes(tree: Uri): Long = withContext(Dispatchers.IO) {
         val checkpoint = { coroutineContext.ensureActive() }
         val root = AndroidLibraryTreeRead.localTreeDocumentId(tree) ?: throw IOException("Unsupported writable library folder")
-        withLibraryProviderSignal { signal -> WritableTree(app, tree, root, signal, checkpoint).capacity() }
+        LibraryProviderAttempt.run {
+            withLibraryProviderSignal { signal -> WritableTree(app, tree, root, signal, checkpoint).capacity() }
+        }
     }
 
     private class WritableTree(
@@ -50,13 +53,24 @@ class AndroidLibraryWritableFolder(context: Context) {
 
         private fun openDirectory(): ParcelFileDescriptor {
             requireExactAccess()
-            val row = resolver.query(document, LibraryTreeProviderRows.projection, null, null, null, signal).use {
-                LibraryTreeProviderRows.read(it, 1, checkpoint).singleOrNull()
+            val row = resolverCall {
+                resolver.query(document, LibraryTreeProviderRows.projection, null, null, null, signal).use {
+                    LibraryTreeProviderRows.read(it, 1, checkpoint).singleOrNull()
+                }
             }
             if (row == null || row.id != root || !row.directory) throw IOException("The writable library directory could not be identified")
             requireExactAccess()
-            return resolver.openFileDescriptor(document, "r", signal)
+            return resolverCall { resolver.openFileDescriptor(document, "r", signal) }
                 ?: throw IOException("The writable library directory is unavailable")
+        }
+
+        private inline fun <T> resolverCall(call: () -> T): T = try { call() }
+        catch (_: IllegalArgumentException) {
+            checkpoint()
+            throw IOException("The writable library directory is unavailable")
+        } catch (_: FileNotFoundException) {
+            checkpoint()
+            throw IOException("The writable library directory is unavailable")
         }
 
         private fun identity(directory: ParcelFileDescriptor): Pair<Long, Long> {
