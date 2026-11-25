@@ -41,6 +41,7 @@ import app.pristinepage.data.library.AndroidLibraryTreeRead
 import app.pristinepage.data.library.AndroidLibraryStartup
 import app.pristinepage.data.library.AndroidLibraryWritableFolder
 import app.pristinepage.data.library.LibraryActivation
+import app.pristinepage.data.library.LibraryBackupCapacityWitness
 import app.pristinepage.data.library.LibraryFolderExportState
 import app.pristinepage.data.model.DocumentId
 import app.pristinepage.data.model.IngestResult
@@ -559,6 +560,8 @@ class LibraryFolderFilesJourneyTest {
 
     @Test fun persistsExactFilesReadForColdAncestry() = verifyJourney(holdReadForColdAncestry = true)
 
+    @Test fun actualFilesCapacityRefusesBeforePublication() = verifyJourney(probeCapacityOnly = true)
+
     @Test fun grantedTreeCanStageAndPublishOneSyntheticFileWithoutOverwriting() = verifyJourney(probeWrite = true)
 
     @Test fun defaultLibraryExportsItsOriginalAndAcceptedEditIntoANewFilesBackup() = verifyJourney(exportBackup = true)
@@ -703,6 +706,7 @@ class LibraryFolderFilesJourneyTest {
         backupDeath: String? = null,
         backupDeathPickerOnly: Boolean = false,
         holdReadForColdAncestry: Boolean = false,
+        probeCapacityOnly: Boolean = false,
         revokeAfterProbe: ((Uri) -> Unit)? = null,
         probe: ((ContentResolver, Uri, AndroidLibraryTreeRead, AndroidLibraryTreeRead.Verified, File) -> Unit)? = null,
     ) {
@@ -719,7 +723,13 @@ class LibraryFolderFilesJourneyTest {
         val existing = { app.contentResolver.persistedUriPermissions.associate { it.uri.toString() to (it.isReadPermission to it.isWritePermission) } }
         val before = existing()
         assertFalse(before.keys.any { it in exactFixtureTrees })
-        val isolatedWritableRoute = backupDeath != null || backupDeathPickerOnly
+        if (probeCapacityOnly) {
+            for (fixtureTree in listOf(expected, home)) {
+                assertEquals("The capacity fixture already has effective write access", PackageManager.PERMISSION_DENIED,
+                    app.checkUriPermission(fixtureTree, Process.myPid(), Process.myUid(), Intent.FLAG_GRANT_WRITE_URI_PERMISSION))
+            }
+        }
+        val isolatedWritableRoute = backupDeath != null || backupDeathPickerOnly || probeCapacityOnly
         val platform = LibraryFolderPickerContract(writable = isolatedWritableRoute)
         val result = AtomicReference<ActivityResult>()
         val receipt = CountDownLatch(1)
@@ -773,6 +783,13 @@ class LibraryFolderFilesJourneyTest {
             assertTrue("Files returned a tree other than the exact synthetic directory", picked.uri.toString() in exactFixtureTrees)
             if (arguments.getString("libraryExpectHome") == "1") {
                 assertTrue("Files did not return the exact Documents namespace", picked.uri.toString() == home.toString())
+            }
+            if (probeCapacityOnly) {
+                assertTrue("Files did not return write permission for the synthetic capacity probe", picked.grant.returnedWrite)
+                assertEquals(before, existing())
+                runBlocking { LibraryBackupCapacityWitness.verifyRealProviderRefusal(app, picked.uri) }
+                assertEquals(before, existing())
+                return
             }
             if (backupDeath != null) {
                 assertTrue(before.isEmpty())

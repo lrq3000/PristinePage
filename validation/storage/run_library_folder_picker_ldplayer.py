@@ -82,6 +82,8 @@ ANCESTRY_GRANT_REFUSAL = "3271a4ebf9f4e0c55a25202fecfc160fef75626fe07ab027c767b7
 ANCESTRY_FINISHED_GRANT_REFUSAL = "0a2fb4828173346ad9d01ff59d00449ce48c48827d38c1c1882e66dcc6f5083e"
 ANCESTRY_EXISTING_GRANT_REFUSAL = "3e3e68c579d04a3dd6c69627b8d30ea0ac151ac9096519c5d0d626b748486076"
 ANCESTRY_RETAINED_HANDOFF = "9775b7bb50d47222094d4db81e5cc81ccc40958d1e53d803a938a0b886ccb958"
+ANCESTRY_COLD_PASSED = "fdc2edc0be9d2ae93fbbb73900dec9d7952df5f5850a8637ded399782fcec705"
+CAPACITY_CASE = "app.pristinepage.LibraryFolderFilesJourneyTest#actualFilesCapacityRefusesBeforePublication"
 UUID_TEXT = r"[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}"
 BACKUP_ORIGINAL = "ebd602840377a3b3cf763cb6828fee67861ff77c444e8fe5894457ef6d99a24d"
 OCR_ACTIVATION_CASES = tuple(f"app.pristinepage.ocr.OcrWorkManagerIntegrationTest#{method}" for method in (
@@ -209,6 +211,13 @@ def select_tree_ancestry(enabled, mixed):
         return ()
     need(not mixed, "Actual Files ancestry requires a retained read-only standalone invocation")
     return ANCESTRY_GRANT_CASE, ANCESTRY_COLD_CASE
+
+
+def select_provider_capacity(enabled, mixed):
+    if not enabled:
+        return None
+    need(not mixed, "Actual provider capacity requires a retained standalone invocation")
+    return CAPACITY_CASE
 
 
 def settings_run_anchors(raw, expected_sha):
@@ -639,6 +648,11 @@ def run(args):
     ancestry_resume = args.tree_ancestry_handoff
     need(ancestry_resume is None or (ancestry_cases and ancestry_resume == ANCESTRY_RETAINED_HANDOFF),
          "An ancestry handoff requires the exact stopped run and standalone ancestry mode")
+    capacity_case = select_provider_capacity(args.provider_capacity,
+        any((args.fresh, args.backup_delivery_death, args.backup_death_retry, death_receipt, death_picker_case,
+             ancestry_cases, picker_case, recovery_case, backup_case, args.probe_write, args.ocr_activation,
+             args.working_catalog, args.probe_directory, args.activation, args.selected_catalog,
+             args.activation_compatibility, args.expect_home, args.settings_retry, args.settings_prior_failure)))
     if args.backup_delivery_death:
         need(not any((args.fresh, args.settings_picker_only, args.settings_recover, backup_case, args.probe_write,
                       args.ocr_activation, args.working_catalog, args.probe_directory, args.activation, args.selected_catalog,
@@ -667,6 +681,7 @@ def run(args):
     prior_navigation_only = False
     completed = None
     publication_claim = None
+    capacity_claim = None
     pinned_cold_baseline = None
     refused_death_destinations = []
     refused_death_private = None
@@ -688,6 +703,16 @@ def run(args):
             need(len(parents) == 1 and previous[APP] == hashes[APP] and args.settings_recover == SETTINGS_COMPLETED_MANIFEST,
                  "Require the independently pinned successful backup receipt and exact prior app")
             completed, publication_claim = settings_completed_destination(parents.pop(), args.settings_recover, args.guest, previous)
+        if capacity_case:
+            parents = {Path(file).resolve().parent for file in args.previous}
+            need(len(parents) == 1, "Require the exact released pair from the cold ancestry run")
+            old = settings_run_anchors(parents.pop(), ANCESTRY_COLD_PASSED)
+            need(json.loads(old("artifacts.json"))["guest"] == args.guest and
+                 json.loads(old("outcomes.json")) == {"passed": [ANCESTRY_COLD_CASE], "failed": [], "installedSha256": previous} and
+                 read_results(old("tree-ancestry-cold-instrumentation.txt"), (ANCESTRY_COLD_CASE,)) == ([ANCESTRY_COLD_CASE], []),
+                 "The capacity probe must use the exact released app guest and predecessor pair")
+            capacity_claim = json.loads(old("claim.json"))
+            refused_death_destinations.append(backup_death_control_destination(old, ANCESTRY_COLD_CASE))
         if ancestry_cases:
             parents = {Path(file).resolve().parent for file in args.previous}
             need(len(parents) == 1 and previous[APP] == hashes[APP],
@@ -833,6 +858,8 @@ def run(args):
     try:
         wait_for_allocator(run, lambda: run.prepare(args.fresh, None, args.fresh), before_claim=True)
         recheck_target(run, ns)
+        if capacity_case:
+            verify_completed_guest(capacity_claim, run.owned())
         target = [ns["ADB"], "-s", run.serial]
 
         def adb(*argv, **options):
@@ -948,12 +975,16 @@ def run(args):
                 if refused_death_private:
                     need(refused_death_private not in adb("shell", "run-as", APP, "ls", "-A", "-1", "files").splitlines(),
                          "The failed death attempt gained unexpected private data")
-        if death_picker_case or ancestry_cases:
+        if death_picker_case or ancestry_cases or capacity_case:
             # Both ancestry probes use one exact Files read grant in the fresh process. Do not reboot the VM between stages.
             all_passed, all_failed = [], []
             try:
+                if capacity_case:
+                    verify_unchanged_settings_destination(adb, guest_root, files)
                 schedule = tuple(zip(ancestry_cases, ("tree-ancestry-grant", "tree-ancestry-cold"))) if ancestry_cases else (
                     (death_picker_case, "death-picker"), (DESCRIPTOR_CASE, "directory-probe"))
+                if capacity_case:
+                    schedule = ((capacity_case, "provider-capacity"),)
                 if ancestry_resume:
                     schedule = schedule[1:]
                 for case, name in schedule:
@@ -976,7 +1007,7 @@ def run(args):
                 for refused in refused_death_destinations:
                     verify_unchanged_settings_destination(adb, *refused)
             run.save(run.path("outcomes.json"), {"passed": all_passed, "failed": all_failed, "installedSha256": hashes}, durable=True)
-            label = "descriptor/ancestry" if ancestry_cases else "picker/descriptor"
+            label = "provider capacity" if capacity_case else "descriptor/ancestry" if ancestry_cases else "picker/descriptor"
             print(f"LDPlayer no-write {label} batch: {len(all_passed)} passed, {len(all_failed)} failed.", flush=True)
             return bool(all_failed)
         if prior_destinations:
@@ -1087,6 +1118,8 @@ if __name__ == "__main__":
                         help="Observe read-only physical ancestry for two children of one verified Files tree")
     parser.add_argument("--tree-ancestry-handoff", metavar="GRANT_MANIFEST_SHA",
                         help="Use only the exact retained Files read grant; skip fixture staging and the chooser")
+    parser.add_argument("--provider-capacity", action="store_true",
+                        help="Verify the real Files capacity gate with an unattainable synthetic requirement and no publication")
     parser.add_argument("--settings-retry", metavar="CANCEL_MANIFEST_SHA", help="Permit one new confirmation on the exact retained, independently canceled fixture")
     parser.add_argument("--settings-prior-failure", nargs=2, metavar=("RUN_ID", "MANIFEST_SHA"), help="Verify the exact first pre-selection failure and its unchanged destination")
     parser.add_argument("--ocr-activation", action="store_true", help="Test scoped WorkManager wakes and ordinary synthetic save/edit; no Files fixture")

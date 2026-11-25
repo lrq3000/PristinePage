@@ -11,7 +11,7 @@ import unittest
 from unittest.mock import patch
 
 from run_library_folder_picker_ldplayer import (
-    check_fixture_root, read_backup_delivery_death, recheck_target, select_backup_case, select_backup_death_picker_case, select_settings_picker_case, select_settings_recovery_case, select_tree_ancestry, settings_completed_destination, spend_settings_retry,
+    check_fixture_root, read_backup_delivery_death, recheck_target, select_backup_case, select_backup_death_picker_case, select_provider_capacity, select_settings_picker_case, select_settings_recovery_case, select_tree_ancestry, settings_completed_destination, spend_settings_retry,
     verify_ancestry_cold_handoff, verify_ancestry_grant_refusal, verify_backup_death_control, verify_backup_death_intent, verify_backup_receipt_only, verify_settings_catalog, verify_settings_ocr, verify_settings_retry_evidence,
 )
 from run_local_ocr_guest import read_boot_serial
@@ -150,6 +150,13 @@ class LibraryFolderPickerRunnerTest(unittest.TestCase):
         self.assertEqual((), select_tree_ancestry(False, True))
         with self.assertRaisesRegex(RuntimeError, "read-only.*standalone"):
             select_tree_ancestry(True, True)
+
+    def test_actual_provider_capacity_refusal_is_a_single_nonpublication_case(self):
+        self.assertIsNone(select_provider_capacity(False, True))
+        self.assertEqual("app.pristinepage.LibraryFolderFilesJourneyTest#actualFilesCapacityRefusesBeforePublication",
+                         select_provider_capacity(True, False))
+        with self.assertRaisesRegex(RuntimeError, "capacity.*standalone"):
+            select_provider_capacity(True, True)
 
     def test_ancestry_continuation_requires_the_exact_grant_boundary_refusal(self):
         cls, method = "app.pristinepage.LibraryFolderFilesJourneyTest", "exactFilesTreeProvesManagedDirectoryAncestry"
