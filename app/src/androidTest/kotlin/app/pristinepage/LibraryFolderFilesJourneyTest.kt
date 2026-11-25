@@ -3,6 +3,8 @@ package app.pristinepage
 import android.accessibilityservice.AccessibilityService
 import android.app.Instrumentation
 import android.content.ContentResolver
+import android.content.Context
+import android.content.ContextWrapper
 import android.content.Intent
 import android.graphics.Rect
 import android.net.Uri
@@ -18,7 +20,9 @@ import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import app.pristinepage.data.library.AndroidLibraryTreeRead
 import app.pristinepage.data.library.AndroidLibraryStartup
+import app.pristinepage.data.library.LibraryActivation
 import app.pristinepage.data.model.DocumentId
+import app.pristinepage.data.model.RepositoryFailure
 import app.pristinepage.data.model.SourceBlobId
 import app.pristinepage.library.LibraryFolderGrantHandoff
 import app.pristinepage.library.LibraryFolderPickerContract
@@ -67,6 +71,85 @@ class LibraryFolderFilesJourneyTest {
     }
 
     @Test fun grantedTreeCanStageAndPublishOneSyntheticFileWithoutOverwriting() = verifyJourney(probeWrite = true)
+
+    @Test fun durableFolderSelectionReopensExactCatalogAndRefusesRevocation() {
+        lateinit var context: Context
+        lateinit var spool: File
+        lateinit var pointer: File
+        verifyJourney { resolver, tree, _, selected, scratch ->
+            val files = File(scratch, "selection-fixture").apply { check(mkdir()) }
+            val app = InstrumentationRegistry.getInstrumentation().targetContext.applicationContext
+            context = object : ContextWrapper(app) {
+                override fun getApplicationContext(): Context = this
+                override fun getFilesDir(): File = files
+            }
+            spool = File(files, "verify").apply { check(mkdir()) }
+            val settings = File(files, "library-settings").apply { check(mkdir()) }
+            val markerDir = File(settings, "folder-verifications").apply { check(mkdir()) }
+            val grantDir = File(settings, "folder-grants").apply { check(mkdir()) }
+            val grantId = "aaaaaaaa-aaaa-4aaa-8aaa-000000000011"
+            val generation = selected.generationId
+            val grant = checksummed("pristinepage-library-grant-v1\n$grantId\n1\n$tree\n")
+            File(grantDir, grantId).writeBytes(grant)
+            val rootId = DocumentsContract.getTreeDocumentId(tree)
+            val markerUri = DocumentsContract.buildDocumentUriUsingTree(tree, "$rootId/generations/$generation.complete")
+            val marker = checkNotNull(resolver.openInputStream(markerUri)).use { input ->
+                val result = ByteArrayOutputStream()
+                repeat(256) {
+                    val next = input.read()
+                    if (next == -1) return@use result.toByteArray()
+                    result.write(next)
+                }
+                error("Expected a bounded generation marker")
+            }
+            pointer = File(settings, "active-library")
+            val support = File(markerDir, "$grantId-$generation")
+            fun selectWith(markerBytes: ByteArray) {
+                support.writeBytes(markerBytes)
+                pointer.writeBytes(checksummed("pristinepage-active-library-v2\n${selected.libraryId}\n2\n$grantId\n$generation\n${sha256(grant + markerBytes)}\n"))
+            }
+            selectWith(marker)
+            runBlocking {
+                val album = DocumentId("aaaaaaaa-aaaa-4aaa-8aaa-000000000001")
+                repeat(2) {
+                    AndroidLibraryStartup(context).useSelectedCatalog(spool) { activation, catalog ->
+                        assertEquals(LibraryActivation(selected.libraryId, 2), activation)
+                        assertEquals(2L, catalog.load(album).pages.single().recipeRevision)
+                        assertFalse(files.walkTopDown().any { it.name == "original.bin" })
+                    }
+                }
+                AndroidLibraryStartup(context).useSelectedCatalog(spool) { _, catalog ->
+                    pointer.writeBytes(checksummed("pristinepage-active-library-v1\n${selected.libraryId}\n3\n-\n-\n"))
+                    try {
+                        val obsolete = runCatching { catalog.load(album) }.exceptionOrNull() as RepositoryFailure
+                        assertEquals("library_reconnect_required", obsolete.error.safeMessageKey)
+                    } finally { selectWith(marker) }
+                }
+                val wrong = marker.copyOf()
+                wrong[wrong.lastIndex - 1] = if (wrong[wrong.lastIndex - 1] == '0'.code.toByte()) '1'.code.toByte() else '0'.code.toByte()
+                selectWith(wrong)
+                val refused = runCatching {
+                    AndroidLibraryStartup(context).useSelectedCatalog(spool) { _, _ -> error("Changed recorded catalog crossed admission") }
+                }.exceptionOrNull() as RepositoryFailure
+                assertEquals("library_reconnect_required", refused.error.safeMessageKey)
+                selectWith(marker)
+            }
+        }
+        val retained = pointer.readBytes()
+        val lost = assertThrows(RepositoryFailure::class.java) {
+            runBlocking { AndroidLibraryStartup(context).useSelectedCatalog(spool) { _, _ -> error("Revoked folder returned a catalog") } }
+        }
+        assertEquals("library_reconnect_required", lost.error.safeMessageKey)
+        assertTrue(retained.contentEquals(pointer.readBytes()))
+    }
+
+    private fun checksummed(body: String): ByteArray {
+        val bytes = body.toByteArray(Charsets.US_ASCII)
+        return bytes + "${sha256(bytes)}\n".toByteArray(Charsets.US_ASCII)
+    }
+
+    private fun sha256(bytes: ByteArray): String = MessageDigest.getInstance("SHA-256").digest(bytes)
+        .joinToString("") { "%02x".format(it.toInt() and 255) }
 
     @Test fun populatingAWorkingRoomCatalogDoesNotMaterializeTheOriginal() = verifyJourney { _, _, reader, selected, scratch ->
         runBlocking {

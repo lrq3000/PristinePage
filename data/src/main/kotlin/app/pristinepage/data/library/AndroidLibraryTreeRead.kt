@@ -49,8 +49,13 @@ class AndroidLibraryTreeRead(context: Context, private val scratchDirectory: Fil
     suspend fun verify(tree: Uri, expected: Verified? = null): Verified {
         val previous = expected?.let(::requireVerifiedTree)
         if (previous != null && previous.tree != tree.toString()) throw IOException("The verified library belongs to a different selected folder")
-        return readTree(tree) { read, checkpoint ->
-            read.read(reader.schemaVersion, previous?.generation, previous?.generation, MAX_TREE_ORIGINAL_BYTES) { generation, file ->
+        return verifyExact(tree, previous?.generation)
+    }
+
+    /** A durable private selection supplies the full expected marker; reject a different tip before projecting rows or opening originals. */
+    internal suspend fun verifyExact(tree: Uri, expected: LibraryGeneration?): Verified =
+        readTree(tree) { read, checkpoint ->
+            read.read(reader.schemaVersion, expected, expected, MAX_TREE_ORIGINAL_BYTES) { generation, file ->
                 reader.read(file) { sql ->
                     val catalog = LibraryPortableCatalogProjection(sql, checkpoint = checkpoint).snapshot()
                     val originals = catalog.originals.associate { it.sourceBlobId to ObjectId(it.byteSha256, it.byteCount) }
@@ -61,7 +66,6 @@ class AndroidLibraryTreeRead(context: Context, private val scratchDirectory: Fil
                 }
             }.value
         }
-    }
 
     /** Stream one original into caller-owned disposable output. The caller must discard that output on any failure and verify closure before using it. */
     suspend fun copyOriginal(verified: Verified, blob: SourceBlobId, output: OutputStream) {
@@ -76,6 +80,10 @@ class AndroidLibraryTreeRead(context: Context, private val scratchDirectory: Fil
     /** Rebuild a private Room catalog without importing original bytes. This detached read cannot activate a library or commit an edit. */
     suspend fun <T : Any> openWorkingCatalog(
         verified: Verified, block: suspend CoroutineScope.(DocumentCatalog) -> T,
+    ): T = useWorkingCatalog(verified, {}, block)
+
+    internal suspend fun <T : Any> useWorkingCatalog(
+        verified: Verified, confirmSelection: suspend () -> Unit, block: suspend CoroutineScope.(DocumentCatalog) -> T,
     ): T = withContext(Dispatchers.IO) {
         val selected = requireVerifiedTree(verified)
         if (!WORKING.tryLock()) throw IOException("A library working catalog is already open")
@@ -105,7 +113,10 @@ class AndroidLibraryTreeRead(context: Context, private val scratchDirectory: Fil
                 stage.write(snapshot, file)
                 mayRetire = true
                 reader.verifyStagedProjection(file, snapshot, checkpoint)
-                suspend fun requireCurrent() = readTree(tree, attempt.toFile()) { read, _ -> read.requireCurrent(selected.generation) }
+                suspend fun requireCurrent() {
+                    readTree(tree, attempt.toFile()) { read, _ -> read.requireCurrent(selected.generation) }
+                    confirmSelection()
+                }
                 requireCurrent()
                 mayRetire = false
                 val result = stage.useCatalog(file, ::requireCurrent, acknowledgeClose = { mayRetire = true }, block)

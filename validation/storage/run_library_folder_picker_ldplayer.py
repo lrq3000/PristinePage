@@ -25,6 +25,7 @@ FILES_CASE = ("app.pristinepage.LibraryFolderFilesJourneyTest"
 DESCRIPTOR_CASE = "app.pristinepage.LibraryFolderFilesJourneyTest#exactFilesTreeExposesSyncableDirectoryDescriptors"
 WORKING_CASE = "app.pristinepage.LibraryFolderFilesJourneyTest#populatingAWorkingRoomCatalogDoesNotMaterializeTheOriginal"
 ACTIVATION_CASE = "app.pristinepage.LibraryFolderFilesJourneyTest#defaultAppGraphUsesItsDurableActivationBeforeAndAfterActivityRecreation"
+SELECTED_CATALOG_CASE = "app.pristinepage.LibraryFolderFilesJourneyTest#durableFolderSelectionReopensExactCatalogAndRefusesRevocation"
 ACTIVATION_COMPATIBILITY = (
     "app.pristinepage.ApplicationCompositionTest#firstActivationPreservesAPopulatedStoreOpenedByThePreviousComposition",
     "app.pristinepage.ApplicationCompositionTest#corruptSelectionRefusesBeforeCreatingTheDefaultStore",
@@ -149,6 +150,7 @@ def run(args):
         scenarios = (*CASES, *((DESCRIPTOR_CASE,) if args.probe_directory else ()),
                      *((WORKING_CASE,) if args.working_catalog else ()),
                      *((ACTIVATION_CASE,) if args.activation else ()),
+                     *((SELECTED_CATALOG_CASE,) if args.selected_catalog else ()),
                      *(ACTIVATION_COMPATIBILITY if args.activation_compatibility else ()),
                      *((WRITE_PROBE_CASE,) if args.probe_write else ()))
         output = adb("shell", "am", "instrument", "-w", "-r", "-e", "class", ",".join(scenarios),
@@ -185,6 +187,7 @@ if __name__ == "__main__":
     parser.add_argument("--probe-directory", action="store_true")
     parser.add_argument("--working-catalog", action="store_true")
     parser.add_argument("--activation", action="store_true")
+    parser.add_argument("--selected-catalog", action="store_true")
     parser.add_argument("--activation-compatibility", action="store_true")
     parser.add_argument("--probe-write", action="store_true", help="Write only in a fresh synthetic probe subdirectory")
     parser.add_argument("--previous", nargs=2, metavar=("APP_APK", "TEST_APK"))
