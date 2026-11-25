@@ -12,12 +12,23 @@ from unittest.mock import patch
 
 from run_library_folder_picker_ldplayer import (
     check_fixture_root, read_backup_delivery_death, recheck_target, select_backup_case, select_backup_death_picker_case, select_provider_capacity, select_settings_picker_case, select_settings_recovery_case, select_tree_ancestry, settings_completed_destination, spend_settings_retry,
-    verify_ancestry_cold_handoff, verify_ancestry_grant_refusal, verify_backup_death_control, verify_backup_death_intent, verify_backup_receipt_only, verify_settings_catalog, verify_settings_ocr, verify_settings_retry_evidence,
+    finish_pre_marker_outcome, verify_ancestry_cold_handoff, verify_ancestry_grant_refusal, verify_backup_death_control, verify_backup_death_intent, verify_backup_receipt_only, verify_pre_marker_handoff, verify_settings_catalog, verify_settings_ocr, verify_settings_retry_evidence,
 )
 from run_local_ocr_guest import read_boot_serial
 
 
 class LibraryFolderPickerRunnerTest(unittest.TestCase):
+    def test_interruption_outcome_requires_both_independent_preservation_checks(self):
+        calls = []
+        def fail():
+            calls.append("ordinary")
+            raise RuntimeError("ordinary backup changed")
+        with self.assertRaisesRegex(ExceptionGroup, "preservation"):
+            finish_pre_marker_outcome({"passed": ["cold"]}, (fail, lambda: calls.append("earlier death")), calls.append)
+        self.assertEqual(["ordinary", "earlier death"], calls)
+        finish_pre_marker_outcome({"passed": ["cold"]}, (lambda: calls.append("first"), lambda: calls.append("second")), calls.append)
+        self.assertEqual(["first", "second", {"passed": ["cold"]}], calls[-3:])
+
     @patch("run_library_folder_picker_ldplayer.verify_target")
     def test_once_only_read_retry_for_a_timeout(self, verify):
         verify.side_effect = [TimeoutExpired("get-serialno", 12), None]
@@ -332,6 +343,31 @@ class LibraryFolderPickerRunnerTest(unittest.TestCase):
             "INSTRUMENTATION_CODE: 0\n"
         )
         self.assertEqual(("3021", receipt.split(":"), bindings.split(":")), read_backup_delivery_death(trace, operation))
+        prior_marker = trace.replace("endsProcessAfterBackupCommitBeforeDelivery", "endsProcessAfterPayloadBeforeTheCompletionMarker").replace(
+            "INSTRUMENTATION_STATUS_CODE: 71", f"INSTRUMENTATION_STATUS: backupDeathGrantInventory={'d'*64}\nINSTRUMENTATION_STATUS_CODE: 72")
+        self.assertEqual(("3021", receipt.split(":"), bindings.split(":"), "d"*64),
+                         read_backup_delivery_death(prior_marker, operation, before_marker=True))
+        for wrong, before_marker in ((trace, True), (prior_marker, False), (prior_marker.replace("STATUS_CODE: 72", "STATUS_CODE: 71"), True),
+                                     (prior_marker.replace(f"INSTRUMENTATION_STATUS: backupDeathGrantInventory={'d'*64}\n", ""), True)):
+            with self.assertRaisesRegex(RuntimeError, "checkpoint"):
+                read_backup_delivery_death(wrong, operation, before_marker=before_marker)
+        folder = "PristinePage-tree-012345abcdef"
+        pair = {"app.pristinepage.debug": "e"*64, "app.pristinepage.debug.test": "f"*64}
+        case = "app.pristinepage.LibraryFolderFilesJourneyTest#endsProcessAfterPayloadBeforeTheCompletionMarker"
+        evidence = {"artifacts.json": json.dumps({"guest": "assigned", "backupPreMarker": True, "fixture": {},
+                    "backupDeliveryDeath": operation, "proof": {package: {"sha256": sha} for package, sha in pair.items()}}),
+                    "backup-death-attempt.json": json.dumps({"operation": operation, "destination": folder, "kind": "single-pre-marker-death"}),
+                    "backup-death-instrumentation.txt": prior_marker}
+        spent = {"operation": operation, "destination": f"/sdcard/Documents/{folder}", "kind": "single-pre-marker-death"}
+        calls = [dict(argv=["shell", "am", "instrument", case, "libraryFixtureFolder", folder], exit=0)]
+        def anchor(log):
+            return (evidence | {"commands.jsonl": "\n".join(map(json.dumps, log))}).__getitem__
+        self.assertEqual((spent["destination"], {}, operation, ("3021", receipt.split(":"), bindings.split(":"), "d"*64)),
+                         verify_pre_marker_handoff(anchor(calls), spent, "assigned", pair))
+        with self.assertRaisesRegex(RuntimeError, "prior cold launch"):
+            verify_pre_marker_handoff(anchor(calls + [dict(argv=["shell", "am", "instrument", "other"])]), spent, "assigned", pair)
+        with self.assertRaisesRegex(RuntimeError, "spent"):
+            verify_pre_marker_handoff(anchor(calls), spent | {"operation": uuid}, "assigned", pair)
         for bad in (trace.replace("Process crashed.", "Test failed."), trace.replace(operation, operation[:-1] + "2"),
                     trace.replace("backupDeathPid=3021", "backupDeathPid=3021\nINSTRUMENTATION_STATUS: backupDeathPid=501"),
                     trace.replace("backupDeathPid=3021", "backupDeathPid=3021\nINSTRUMENTATION_STATUS: backupDeathPid=malformed"),

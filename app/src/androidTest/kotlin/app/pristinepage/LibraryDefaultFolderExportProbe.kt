@@ -22,6 +22,7 @@ import app.pristinepage.data.model.SourceBlobId
 import app.pristinepage.data.model.SourceId
 import app.pristinepage.data.model.SourceInspection
 import app.pristinepage.data.library.LibraryFolderExportReceipt
+import app.pristinepage.data.library.LibraryBackupInterruptionWitness
 import app.pristinepage.data.library.AndroidLibraryBackupHistory
 import app.pristinepage.data.library.AndroidLibraryStartup
 import app.pristinepage.data.library.LibraryFolderExportRequest
@@ -65,6 +66,7 @@ internal object LibraryDefaultFolderExportProbe {
     suspend fun verify(app: Context, picked: LibraryFolderPickerContract.Picked,
         beforeDelivery: (suspend (LibraryFolderExportReceipt, List<String>) -> Nothing)? = null,
         operation: String = UUID.randomUUID().toString(),
+        beforeMarker: ((String, String, List<String>) -> Nothing)? = null,
     ): Backup {
         val tree = picked.uri
         val isolated = File(app.filesDir.canonicalFile, "library-export-source-$operation").apply { check(mkdir()) }
@@ -130,6 +132,23 @@ internal object LibraryDefaultFolderExportProbe {
             assertEquals(namesBefore, destinationNames())
             noAttempt()
 
+            fun recipeDigest(value: Recipe) = MessageDigest.getInstance("SHA-256").digest(RecipeCodec.encode(value))
+                .joinToString("") { "%02x".format(it.toInt() and 255) }
+            fun bindings() = listOf(album.value, ingest.pageId.value, ingest.sourceId.value,
+                inspection.sourcePixelHash, recipeDigest(originalRecipe), recipeDigest(recipe))
+            if (beforeMarker != null) {
+                check(beforeDelivery == null)
+                LibraryBackupInterruptionWitness.stopBeforeMarker(store, bindResult()) { library, generation ->
+                    assertEquals(2L, saved.recipeRevision)
+                    assertArrayEquals(activeBefore, defaultPointer.readBytes())
+                    assertArrayEquals(png, source.file.readBytes())
+                    assertTrue(File(attempt, "export.intent").isFile)
+                    assertFalse(completion.exists())
+                    assertFalse(File(attempt, "export.ack").exists())
+                    assertEquals(readGrants, grants())
+                    beforeMarker(library, generation, bindings())
+                }
+            }
             if (beforeDelivery != null) {
                 // Receive a successful return in the test relay, not merely a visible completion file on either success or failure.
                 val completed = store.exportLibraryTo(bindResult())
@@ -140,10 +159,7 @@ internal object LibraryDefaultFolderExportProbe {
                 assertTrue(File(attempt, "export.intent").isFile && completion.isFile)
                 assertFalse(File(attempt, "export.ack").exists())
                 assertEquals(readGrants, grants())
-                fun recipeDigest(value: Recipe) = MessageDigest.getInstance("SHA-256").digest(RecipeCodec.encode(value))
-                    .joinToString("") { "%02x".format(it.toInt() and 255) }
-                beforeDelivery(completed, listOf(album.value, ingest.pageId.value, ingest.sourceId.value,
-                    inspection.sourcePixelHash, recipeDigest(originalRecipe), recipeDigest(recipe)))
+                beforeDelivery(completed, bindings())
             }
             // The independent legacy canceled-delivery case still intercepts the publisher's dispatcher.
             val withheld = AtomicBoolean()

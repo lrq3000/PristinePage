@@ -61,7 +61,17 @@ class PrivateImportStore private constructor(
 
     /** Caller must have obtained the exact writable Files capability for an explicit backup. Does not change the active location. */
     suspend fun exportLibraryTo(request: LibraryFolderExportRequest): LibraryFolderExportReceipt =
-        exportLifetime.retainLibraryBackup { RoomLibraryFolderExport(context, database, root).write(request) }
+        exportLibraryTo(request, null)
+
+    /** Internal per-call observation; ordinary exports cannot select a checkpoint from their URI, journal, or preferences. */
+    @JvmSynthetic
+    internal suspend fun exportLibraryTo(request: LibraryFolderExportRequest,
+        beforeMarker: ((String, String) -> Nothing)?,
+    ): LibraryFolderExportReceipt = exportLifetime.retainLibraryBackup {
+        RoomLibraryFolderExport(context, database, root).write(request, beforeMarker?.let { observer ->
+            { generation -> observer(generation.libraryId, generation.id) }
+        })
+    }
 
     /** Recovery observes only the private result of the exact operation; never reopens the provider for a write. */
     suspend fun inspectLibraryExport(operationId: String, issuedAt: LibraryActivation): LibraryFolderExportState =

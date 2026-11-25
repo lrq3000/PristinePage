@@ -26,7 +26,7 @@ internal class RoomLibraryFolderExport(
     private val history = AndroidLibraryBackupHistory(app)
     private val maxCatalogBytes = RoomLibraryCatalogReader.MAX_PORTABLE_BYTES
 
-    suspend fun write(request: LibraryFolderExportRequest): LibraryFolderExportReceipt = history.withLane { files ->
+    suspend fun write(request: LibraryFolderExportRequest, beforeMarker: ((LibraryGeneration) -> Nothing)? = null): LibraryFolderExportReceipt = history.withLane { files ->
             val tree = Uri.parse(request.selected.exactUri)
             val checkpoint = { coroutineContext.ensureActive() }
             fun checkSelection() {
@@ -49,7 +49,7 @@ internal class RoomLibraryFolderExport(
                 val input = RoomLibraryExportInput.prepare(app, snapshot, source.toFile(), closed.toFile(), checkpoint)
                 pinnedPrivatePath(closed, directory = false) { requireCatalog ->
                     publish(request, tree, destination, files, source, attempt, input, observed, checkpoint, ::checkSelection,
-                        requireAttempt, requireCatalog)
+                        requireAttempt, requireCatalog, beforeMarker)
                 }
             }
     }
@@ -57,6 +57,7 @@ internal class RoomLibraryFolderExport(
     private suspend fun publish(request: LibraryFolderExportRequest, tree: Uri, destination: AndroidLibraryWritableFolder,
         files: Path, source: Path, attempt: Path, input: RoomLibraryExportInput, observed: Long,
         checkpoint: () -> Unit, checkSelection: () -> Unit, requireAttempt: () -> Unit, requireCatalog: () -> Unit,
+        beforeMarker: ((LibraryGeneration) -> Nothing)?,
     ): LibraryFolderExportReceipt {
             val generation = input.generation
             val folder = "PristinePage-backup-${generation.id}"
@@ -85,6 +86,7 @@ internal class RoomLibraryFolderExport(
                         transfer.prepare(input.requirements, input.metadataBytes(scratchCopies = 1), capacity).copyAndVerify()
                         LibraryCatalogPublication(target, attempt, checkpoint).publish(
                             generation, maxCatalogBytes, input::openCatalog, requiresObjects = input.requirements.isNotEmpty(),
+                            beforeNewMarker = beforeMarker,
                         ) { candidate ->
                             input.verifyCatalog(candidate)
                             transfer.prepare(input.requirements.map { LibraryObjectTransfer.Requirement(it.id, null) }, 0L, 0L)

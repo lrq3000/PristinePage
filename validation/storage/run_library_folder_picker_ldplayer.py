@@ -70,6 +70,8 @@ SETTINGS_PICKER_CASE = "app.pristinepage.LibraryFolderFilesJourneyTest#settingsO
 SETTINGS_RECOVERY_CASE = "app.pristinepage.LibraryFolderFilesJourneyTest#coldSettingsRecoversTheExactCompletedBackupWithoutWriting"
 BACKUP_DEATH_CASE = "app.pristinepage.LibraryFolderFilesJourneyTest#endsProcessAfterBackupCommitBeforeDelivery"
 BACKUP_DEATH_RECOVERY_CASE = "app.pristinepage.LibraryBackupDeathRecoveryTest#coldProcessInspectsInterruptedDeliveryWithoutReplay"
+BACKUP_PRE_MARKER_CASE = "app.pristinepage.LibraryFolderFilesJourneyTest#endsProcessAfterPayloadBeforeTheCompletionMarker"
+BACKUP_PRE_MARKER_RECOVERY_CASE = "app.pristinepage.LibraryBackupDeathRecoveryTest#coldProcessKeepsInterruptedPublicationUnresolvedWithoutReplay"
 BACKUP_DEATH_PICKER_CASE = "app.pristinepage.LibraryFolderFilesJourneyTest#checksTheBackupDeathPickerRouteWithoutSelection"
 SETTINGS_WITNESS_FILE = "files/library-settings-native-witness"
 SETTINGS_COMPLETED_MANIFEST = "cee6ac3fd210d2b36c64dff1b534830368b2677e5ea5b36b1555dc2a15c0029a"
@@ -84,6 +86,8 @@ ANCESTRY_EXISTING_GRANT_REFUSAL = "3e3e68c579d04a3dd6c69627b8d30ea0ac151ac909651
 ANCESTRY_RETAINED_HANDOFF = "9775b7bb50d47222094d4db81e5cc81ccc40958d1e53d803a938a0b886ccb958"
 ANCESTRY_COLD_PASSED = "fdc2edc0be9d2ae93fbbb73900dec9d7952df5f5850a8637ded399782fcec705"
 CAPACITY_CASE = "app.pristinepage.LibraryFolderFilesJourneyTest#actualFilesCapacityRefusesBeforePublication"
+CAPACITY_PASSED = "1e113e46b58e2926ef74e36f4b1e72e32ba38b453602b6a4051b21ac9e5cc665"
+BACKUP_DELIVERY_RECOVERY_PASSED = "94965983c698ea277722e113dfd130d7d1df1cf9ee0cdf2dc40ce62bbf626981"
 UUID_TEXT = r"[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}"
 BACKUP_ORIGINAL = "ebd602840377a3b3cf763cb6828fee67861ff77c444e8fe5894457ef6d99a24d"
 OCR_ACTIVATION_CASES = tuple(f"app.pristinepage.ocr.OcrWorkManagerIntegrationTest#{method}" for method in (
@@ -114,11 +118,11 @@ def recheck_target(run, ns):
         verify_target(run, ns)
 
 
-def read_backup_delivery_death(output, operation):
+def read_backup_delivery_death(output, operation, *, before_marker=False):
     """Reject an ordinary assertion failure, an early crash or anything other than the one armed boundary."""
-    target, method = BACKUP_DEATH_CASE.split("#")
+    target, method = (BACKUP_PRE_MARKER_CASE if before_marker else BACKUP_DEATH_CASE).split("#")
     lines = output.rstrip(" \r\n").splitlines()
-    error = "Missing exact backup delivery checkpoint and ensuing Android process crash"
+    error = "Missing exact backup checkpoint and ensuing Android process crash"
     need(lines[-2:] == ["INSTRUMENTATION_RESULT: shortMsg=Process crashed.", "INSTRUMENTATION_CODE: 0"], error)
     blocks, fields = [], {}
     for line in lines[:-2]:
@@ -131,15 +135,20 @@ def read_backup_delivery_death(output, operation):
             fields = {}
         else:
             need(not line.strip() or ("stream" in fields and not line.startswith("INSTRUMENTATION_")), error)
-    need(not fields and [code for code, _ in blocks] == ["1", "71"], error)
+    need(not fields and [code for code, _ in blocks] == ["1", "72" if before_marker else "71"], error)
     start, checkpoint = blocks[0][1], blocks[1][1]
+    keys = {"backupDeathOperation", "backupDeathPid", "backupDeathReceipt", "backupDeathBindings"}
+    if before_marker:
+        keys.add("backupDeathGrantInventory")
     need(start.get("class") == target and start.get("test") == method and
          set(start) <= {"class", "test", "current", "id", "numtests", "stream"} and
-         set(checkpoint) == {"backupDeathOperation", "backupDeathPid", "backupDeathReceipt", "backupDeathBindings"} and
+         set(checkpoint) == keys and
          checkpoint["backupDeathOperation"] == operation and re.fullmatch(r"[1-9][0-9]{0,8}", checkpoint["backupDeathPid"]) and
          re.fullmatch(rf"{UUID_TEXT}:{UUID_TEXT}", checkpoint["backupDeathReceipt"]) and
-         re.fullmatch(rf"{UUID_TEXT}:{UUID_TEXT}:{UUID_TEXT}(?::[a-f0-9]{{64}}){{3}}", checkpoint["backupDeathBindings"]), error)
-    return checkpoint["backupDeathPid"], checkpoint["backupDeathReceipt"].split(":"), checkpoint["backupDeathBindings"].split(":")
+         re.fullmatch(rf"{UUID_TEXT}:{UUID_TEXT}:{UUID_TEXT}(?::[a-f0-9]{{64}}){{3}}", checkpoint["backupDeathBindings"]) and
+         (not before_marker or re.fullmatch(r"[a-f0-9]{64}", checkpoint["backupDeathGrantInventory"])), error)
+    identity = checkpoint["backupDeathPid"], checkpoint["backupDeathReceipt"].split(":"), checkpoint["backupDeathBindings"].split(":")
+    return (*identity, checkpoint["backupDeathGrantInventory"]) if before_marker else identity
 
 
 def check_fixture_root(namespaces, after, probe_write, probe_passed, backup_export, backup_passed):
@@ -271,6 +280,24 @@ def verify_ancestry_cold_handoff(anchor, guest, pair):
          read_results(anchor("tree-ancestry-grant-instrumentation.txt"), (ANCESTRY_GRANT_CASE,)) == ([ANCESTRY_GRANT_CASE], []),
          "Require the exact cold ancestry handoff with no prior cold launch")
     return backup_death_control_destination(anchor, ANCESTRY_GRANT_CASE)
+
+
+def verify_pre_marker_handoff(anchor, spent, guest, pair):
+    artifacts = json.loads(anchor("artifacts.json"))
+    attempt = json.loads(anchor("backup-death-attempt.json"))
+    operation = attempt["operation"]
+    destination, fixture = backup_death_control_destination(anchor, BACKUP_PRE_MARKER_CASE)
+    kind = "single-pre-marker-death"
+    need(artifacts["guest"] == guest and artifacts["backupPreMarker"] is True and artifacts["backupDeliveryDeath"] == operation and
+         re.fullmatch(UUID_TEXT, operation) and {p: artifacts["proof"][p]["sha256"] for p in pair} == pair and
+         attempt == {"operation": operation, "destination": destination.rsplit("/", 1)[1], "kind": kind} and
+         spent == {"operation": operation, "destination": destination, "kind": kind},
+         "The interrupted result is not the exact spent pre-marker attempt")
+    launches = [json.loads(line)["argv"] for line in anchor("commands.jsonl").splitlines()]
+    need(len([call for call in launches if "instrument" in call]) == 1,
+         "An interrupted backup can resume only if it had no prior cold launch")
+    checkpoint = read_backup_delivery_death(anchor("backup-death-instrumentation.txt"), operation, before_marker=True)
+    return destination, fixture, operation, checkpoint
 
 
 def verify_backup_death_control(anchor, guest, pair):
@@ -439,7 +466,7 @@ def verify_completed_guest(original, current):
              for entry in current["ownership_history"]), "The current allocator claim is not the retained publication guest")
 
 
-def settings_private_baseline(adb, root="files"):
+def settings_private_baseline(adb, root="files", *, before_marker=False):
     """Observe bounded evidence without starting the app or deriving authority from a prior record."""
     def private(*arguments):
         return adb("shell", "run-as", APP, *arguments)
@@ -452,8 +479,9 @@ def settings_private_baseline(adb, root="files"):
     need(private("stat", "-c", "%F", attempt).strip() == "directory", "The backup attempt is not an exact directory")
     need(private("stat", "-c", "%F", f"{root}/library-settings").strip() == "directory", "The active pointer parent changed")
     records = private("ls", "-A", "-1", attempt).splitlines()
-    need(2 <= len(records) <= 16 and len(set(records)) == len(records) and
-         {"export.intent", "export.complete"} <= set(records) and "export.ack" not in records and
+    required = {"export.intent", "catalog.sqlite", "export.catalog.owner"} if before_marker else {"export.intent", "export.complete"}
+    need(2 <= len(records) <= 16 and len(set(records)) == len(records) and required <= set(records) and
+         (not before_marker or "export.complete" not in records) and "export.ack" not in records and
          all(re.fullmatch(r"[a-zA-Z0-9_.-]{1,128}", leaf) and leaf not in (".", "..") for leaf in records),
          "The retained backup journal inventory is not an unacknowledged completion")
     fingerprints = {}
@@ -470,6 +498,19 @@ def settings_private_baseline(adb, root="files"):
 
 def require_cold_backup_app(adb):
     need(not adb("shell", "pidof", APP, TEST, allowed=(0, 1)).strip(), "The app and test process must be absent")
+
+
+def finish_pre_marker_outcome(outcome, preservation_checks, record):
+    failures = []
+    for check in preservation_checks:
+        try:
+            check()
+        except Exception as failure:
+            failures.append(failure)
+    if failures:
+        raise ExceptionGroup("Pre-marker backup preservation checks failed", failures)
+    if outcome is not None:
+        record(outcome)
 
 
 def inspect_abnormal_backup_death(run, adb, fixture_root, isolated, operation):
@@ -489,10 +530,10 @@ def inspect_abnormal_backup_death(run, adb, fixture_root, isolated, operation):
     run.save(run.path("death-abnormal-inventory.json"), observations, durable=True)
 
 
-def verify_backup_death_intent(adb, isolated, operation, parent, marker, baseline):
+def verify_backup_death_intent(adb, isolated, operation, parent, marker, baseline, *, before_marker=False):
     attempt = f"{isolated}/files/library-out-{operation}"
     leaves = {}
-    for leaf in ("export.intent", "export.complete"):
+    for leaf in (("export.intent",) if before_marker else ("export.intent", "export.complete")):
         path = f"{attempt}/{leaf}"
         extent, digest = baseline["files"][path]
         need(extent <= 5000, "The retained private export record exceeds its limit")
@@ -504,15 +545,18 @@ def verify_backup_death_intent(adb, isolated, operation, parent, marker, baselin
     fields = text.splitlines()
     trees = {"content://com.android.externalstorage.documents/tree/" + quote(value, safe="")
              for value in (f"primary:Documents/{parent}", f"home:{parent}")}
+    retained_marker = "\n".join(fields[11:18]) + "\n"
     need(len(fields) == 19 and fields[:2] == ["pristinepage-library-export-intent-v2", operation] and
          fields[6:9] == ["pristinepage-library-grant-v1", operation, "3"] and fields[9] in trees and
-         "\n".join(fields[11:18]) + "\n" == marker and text == "\n".join(fields) + "\n" and
+         (marker is None if before_marker else retained_marker == marker) and text == "\n".join(fields) + "\n" and
          sha256(text[:-(len(fields[-1]) + 1)].encode("ascii")).hexdigest() == fields[-1] and
-         leaves["export.complete"] == f'pristinepage-library-export-complete-v2\n{operation}\n{sha256(text.encode("ascii")).hexdigest()}\n',
-         "The external marker does not match the exact completed private intent")
+         (before_marker or leaves["export.complete"] == f'pristinepage-library-export-complete-v2\n{operation}\n{sha256(text.encode("ascii")).hexdigest()}\n'),
+         "The external marker does not match the exact completed private intent" if not before_marker else
+         "The interrupted publication does not match its exact private intent")
+    return retained_marker
 
 
-def exercise_backup_delivery_death(run, adb, ns, raw, fixture_root, fixture, fixture_digest, operation, hashes, authorization):
+def exercise_backup_delivery_death(run, adb, ns, raw, fixture_root, fixture, fixture_digest, operation, hashes, authorization, *, before_marker=False):
     """Spend a new isolated synthetic attempt once; no retry or cleanup even if the test loses its result."""
     require_cold_backup_app(adb)
     folder = fixture_root.rsplit("/", 1)[1]
@@ -521,23 +565,103 @@ def exercise_backup_delivery_death(run, adb, ns, raw, fixture_root, fixture, fix
          "The isolated test source is not new")
     verify_unchanged_settings_destination(adb, fixture_root, fixture)
     extras = ("-e", "libraryBackupDeathOperation", operation)
-    # The passed clean-restart witness can authorize one isolated publication/death, not repeated writes after uncertainty.
-    spend_settings_retry(raw.parent, authorization, dict(operation=operation, destination=fixture_root, kind="single-delivery-death"))
-    run.save(run.path("backup-death-attempt.json"), {"operation": operation, "destination": folder, "kind": "single-delivery-death"},
-             durable=True)
+    # Spend one exact test admission, never replay a writer after an uncertain result.
+    kind = "single-pre-marker-death" if before_marker else "single-delivery-death"
+    spend_settings_retry(raw.parent, authorization, dict(operation=operation, destination=fixture_root, kind=kind))
+    run.save(run.path("backup-death-attempt.json"), {"operation": operation, "destination": folder, "kind": kind}, durable=True)
     try:
-        output = adb("shell", "am", "instrument", "-w", "-r", "-e", "class", BACKUP_DEATH_CASE,
+        output = adb("shell", "am", "instrument", "-w", "-r", "-e", "class", BACKUP_PRE_MARKER_CASE if before_marker else BACKUP_DEATH_CASE,
                      "-e", "libraryFixtureFolder", folder, "-e", "libraryFixtureOriginal", fixture_digest,
                      *extras, RUNNER, timeout=150, allowed=(0, 1))
         run.path("backup-death-instrumentation.txt").write_text(output, encoding="utf-8")
-        old_pid, (library, generation), bindings = read_backup_delivery_death(output, operation)
+        observed = read_backup_delivery_death(output, operation, before_marker=before_marker)
     except (RuntimeError, subprocess.SubprocessError):
         recheck_target(run, ns)
         inspect_abnormal_backup_death(run, adb, fixture_root, isolated, operation)
         raise
     recheck_target(run, ns)
-    return complete_backup_delivery_death(run, adb, ns, raw, fixture_root, fixture, operation, hashes,
-                                          (old_pid, (library, generation), bindings))
+    if before_marker:
+        return complete_pre_marker_death(run, adb, ns, raw, fixture_root, fixture, operation, hashes, observed)
+    return complete_backup_delivery_death(run, adb, ns, raw, fixture_root, fixture, operation, hashes, observed)
+
+
+def complete_pre_marker_death(run, adb, ns, raw, fixture_root, fixture, operation, hashes, checkpoint):
+    old_pid, (library, generation), bindings, grants = checkpoint
+    require_cold_backup_app(adb)
+    isolated = f"files/library-export-source-{operation}"
+    folder = fixture_root.rsplit("/", 1)[1]
+    backup_name = f"PristinePage-backup-{generation}"
+    backup = f"{fixture_root}/{backup_name}"
+    before = settings_private_baseline(adb, f"{isolated}/files", before_marker=True)
+    need(before["operation"] == operation, "The interrupted private attempt does not match the terminated operation")
+    marker = verify_backup_death_intent(adb, isolated, operation, folder, None, before, before_marker=True).splitlines()
+    need(len(marker) == 7 and marker[:5] == ["pristinepage-library-v1", library, generation, "-", "8"] and
+         re.fullmatch(r"[1-9][0-9]{0,6}", marker[5]) and int(marker[5]) <= 2 * 1024 * 1024 and
+         re.fullmatch(r"[a-f0-9]{64}", marker[6]), "The private intent does not bind the stopped generation and catalog")
+    catalog_name = f"{generation}.sqlite"
+    payloads = {f"objects/{BACKUP_ORIGINAL}": (81, BACKUP_ORIGINAL), f"catalogs/{catalog_name}": (int(marker[5]), marker[6])}
+    spends = {sha256(leaf.encode("ascii")).hexdigest(): proof for leaf, proof in payloads.items()}
+    attempt = f"{isolated}/files/library-out-{operation}"
+    need({Path(name).name for name in before["files"] if name.startswith(attempt + "/")} ==
+         {"export.intent", "catalog.sqlite", "export.catalog.owner", *(f"{key}.spent" for key in spends)},
+         "The interrupted attempt does not hold exactly the two closed payload move spends and no completion")
+    for name in ("catalog.sqlite", "export.catalog.owner"):
+        need(before["files"][f"{attempt}/{name}"] == [int(marker[5]), marker[6]],
+             "The private catalog stage differs from the interrupted intent")
+    def stage_owner():
+        paths = [f"{attempt}/{name}" for name in ("catalog.sqlite", "export.catalog.owner")]
+        ids = [adb("shell", "run-as", APP, "stat", "-c", "%d:%i:%h", path).strip() for path in paths]
+        need(ids[0] == ids[1] and re.fullmatch(r"[0-9]+:[1-9][0-9]*:2", ids[0]),
+             "The interrupted catalog no longer has its exact second hard-link name")
+        return ids[0]
+    before_owner = stage_owner()
+    for key, (size, digest) in spends.items():
+        path = f"{attempt}/{key}.spent"
+        extent, recorded = before["files"][path]
+        need(extent <= 512, "The interrupted move spend exceeds its bound")
+        text = adb("shell", "run-as", APP, "cat", path)
+        fields = text.splitlines()
+        need(len(text) == extent and sha256(text.encode("ascii")).hexdigest() == recorded and
+             text == "\n".join(fields) + "\n" and len(fields) == 6 and fields[:2] == ["pristinepage-library-move-spent-v1", key] and
+             re.fullmatch(r"[a-f0-9]{64}", fields[2]) and re.fullmatch(r"[0-9]+:[1-9][0-9]*", fields[3]) and
+             fields[4:] == [digest, str(size)], "The interrupted move spend does not bind its exact payload")
+
+    def verify_external():
+        verify_unchanged_settings_destination(adb, fixture_root, fixture, backup_name=backup_name)
+        for namespace in ("generations", "staging", "catalogs", "objects"):
+            expected = sorted(key.split("/", 1)[1] for key in payloads if key.startswith(namespace + "/"))
+            need(adb("shell", "ls", "-A", "-1", f"{backup}/{namespace}").splitlines() == expected,
+                 "Interrupted backup has an unexpected marker, stage or payload")
+        need(set(adb("shell", "ls", "-A", "-1", backup).splitlines()) == {"generations", "staging", "catalogs", "objects"},
+             "Interrupted backup namespaces changed")
+        for leaf, (size, digest) in payloads.items():
+            path = f"{backup}/{leaf}"
+            need(adb("shell", "stat", "-c", "%F:%s", path).strip() == f"regular file:{size}" and
+                 adb("shell", "sha256sum", path).split() == [digest, path], "Interrupted backup payload changed")
+
+    verify_external()
+    catalog = raw / "interrupted-publication-catalog.sqlite"
+    adb("pull", f"{backup}/catalogs/{catalog_name}", catalog, timeout=20)
+    need(catalog.stat().st_size == int(marker[5]) and sha(catalog) == marker[6], "Interrupted catalog differs from the private intent")
+    verify_settings_catalog(catalog, BACKUP_ORIGINAL, 81, bindings, title="Synthetic default backup")
+    run.save(run.path("death-before-reopen.json"), before, durable=True)
+    try:
+        recheck_target(run, ns)
+        require_cold_backup_app(adb)
+        output = adb("shell", "am", "instrument", "-w", "-r", "-e", "class", BACKUP_PRE_MARKER_RECOVERY_CASE,
+                     "-e", "libraryBackupDeathOperation", operation, "-e", "libraryBackupDeathGeneration", generation,
+                     "-e", "libraryBackupDeathLibrary", library, "-e", "libraryBackupDeathPreviousPid", old_pid,
+                     "-e", "libraryFixtureFolder", folder, "-e", "libraryBackupDeathGrantInventory", grants, RUNNER, timeout=120)
+        run.path("backup-death-recovery-instrumentation.txt").write_text(output, encoding="utf-8")
+    finally:
+        recheck_target(run, ns)
+        verify_external()
+        after = settings_private_baseline(adb, f"{isolated}/files", before_marker=True)
+        run.save(run.path("death-after-reopen.json"), after, durable=True)
+        need(after == before and stage_owner() == before_owner,
+             "Cold interruption inspection changed the private intent, payload spends, catalog owner or pointer")
+    passed, failed = read_results(output, (BACKUP_PRE_MARKER_RECOVERY_CASE,))
+    return {"passed": passed, "failed": failed, "installedSha256": hashes, "preMarkerDeathPid": old_pid}
 
 
 def complete_backup_delivery_death(run, adb, ns, raw, fixture_root, fixture, operation, hashes, checkpoint):
@@ -658,6 +782,16 @@ def run(args):
                       args.ocr_activation, args.working_catalog, args.probe_directory, args.activation, args.selected_catalog,
                       args.activation_compatibility, args.expect_home, args.settings_retry, args.settings_prior_failure)),
              "Backup delivery death needs the exact retained guest and a standalone invocation")
+    before_marker = args.backup_pre_marker
+    pre_marker_handoff = args.backup_pre_marker_handoff
+    need(pre_marker_handoff is None or before_marker, "A pre-marker handoff is only admitted in pre-marker mode")
+    if before_marker:
+        need(not any((args.fresh, args.backup_delivery_death, args.backup_death_retry, death_receipt, death_picker_case,
+                      ancestry_cases, capacity_case, picker_case, recovery_case, backup_case, args.probe_write,
+                      args.ocr_activation, args.working_catalog, args.probe_directory, args.activation,
+                      args.selected_catalog, args.activation_compatibility, args.expect_home, args.settings_retry,
+                      args.settings_prior_failure)),
+             "Pre-marker death needs an exact retained guest and a standalone invocation")
     need(bool(args.settings_retry) == bool(args.settings_prior_failure), "A retained retry requires the exact first failure receipt")
     if args.ocr_activation:
         need(not any((args.fresh, args.expect_home, args.probe_directory, args.working_catalog, args.activation, args.selected_catalog,
@@ -683,12 +817,15 @@ def run(args):
     publication_claim = None
     capacity_claim = None
     pinned_cold_baseline = None
+    protected_death_backup = None
     refused_death_destinations = []
     refused_death_private = None
     retained_death = None
     retained_ancestry = None
-    death_authority = args.backup_death_retry or SETTINGS_COLD_MANIFEST
-    death_operation = str(uuid.uuid4()) if args.backup_delivery_death else None
+    retained_pre_marker = None
+    pre_marker_claim = None
+    death_authority = CAPACITY_PASSED if before_marker else args.backup_death_retry or SETTINGS_COLD_MANIFEST
+    death_operation = str(uuid.uuid4()) if args.backup_delivery_death or before_marker else None
     need(args.backup_death_retry is None or (death_operation and args.backup_death_retry == BACKUP_DIRECT_CONTROL_PASS),
          "Retry requires the exact new no-write batch receipt")
     if args.previous:
@@ -703,6 +840,48 @@ def run(args):
             need(len(parents) == 1 and previous[APP] == hashes[APP] and args.settings_recover == SETTINGS_COMPLETED_MANIFEST,
                  "Require the independently pinned successful backup receipt and exact prior app")
             completed, publication_claim = settings_completed_destination(parents.pop(), args.settings_recover, args.guest, previous)
+        if before_marker:
+            parents = {Path(file).resolve().parent for file in args.previous}
+            spend_path = raw.parent / f"settings-retry-spent-{death_authority}.json"
+            need(len(parents) == 1, "Missing exact released pre-marker predecessor")
+            predecessor = parents.pop()
+            if pre_marker_handoff:
+                need(re.fullmatch(r"[a-f0-9]{64}", pre_marker_handoff) and previous == hashes,
+                     "The pre-marker handoff is read-only and cannot replace either APK")
+                handoff = settings_run_anchors(predecessor, pre_marker_handoff)
+                retained_pre_marker = verify_pre_marker_handoff(handoff, json.loads(spend_path.read_bytes()), args.guest, previous)
+                pre_marker_claim = json.loads(handoff("claim.json"))
+                death_operation = retained_pre_marker[2]
+                old_path = raw.parent / "picker-adapter-library-tree-417110df4323"
+                capacity_pair = json.loads(handoff("artifacts.json"))["previous"]
+            else:
+                need(not spend_path.exists(), "Pre-marker admission is already spent")
+                old_path = predecessor
+                capacity_pair = previous
+            old = settings_run_anchors(old_path, CAPACITY_PASSED)
+            need(json.loads(old("artifacts.json"))["guest"] == args.guest and
+                 json.loads(old("outcomes.json")) == {"passed": [CAPACITY_CASE], "failed": [], "installedSha256": capacity_pair} and
+                 read_results(old("provider-capacity-instrumentation.txt"), (CAPACITY_CASE,)) == ([CAPACITY_CASE], []),
+                 "The exact native capacity predecessor did not pass")
+            capacity_claim = json.loads(old("claim.json"))
+            refused_death_destinations.append(backup_death_control_destination(old, CAPACITY_CASE))
+            cold = settings_run_anchors(raw.parent / "picker-adapter-library-tree-bb9159f6e027", SETTINGS_COLD_MANIFEST)
+            pinned_cold_baseline = json.loads(cold("recovery-after.json"))
+            need(json.loads(cold("recovery-before.json")) == pinned_cold_baseline, "The original cold backup baseline drifted")
+            original_run = raw.parent / "picker-adapter-library-tree-e3a9881e2bdd"
+            original_anchor = settings_run_anchors(original_run, SETTINGS_COMPLETED_MANIFEST)
+            pub_pair = json.loads(original_anchor("outcomes.json"))["installedSha256"]
+            completed, publication_claim = settings_completed_destination(original_run, SETTINGS_COMPLETED_MANIFEST, args.guest, pub_pair)
+            prior_death = settings_run_anchors(raw.parent / "picker-adapter-library-tree-329ddeb38f65", BACKUP_DEATH_RECEIPT_ONLY)
+            prior_attempt = json.loads(prior_death("backup-death-attempt.json"))
+            prior_target, prior_fixture = backup_death_control_destination(prior_death, BACKUP_DEATH_CASE)
+            prior_op = prior_attempt["operation"]
+            _, (_, prior_generation), _ = read_backup_delivery_death(prior_death("backup-death-instrumentation.txt"), prior_op)
+            recovered = settings_run_anchors(raw.parent / "picker-adapter-library-tree-d0a368cd0ec6", BACKUP_DELIVERY_RECOVERY_PASSED)
+            prior_baseline = json.loads(recovered("death-after-reopen.json"))
+            need(prior_baseline == json.loads(recovered("death-before-reopen.json")) and prior_baseline["operation"] == prior_op and
+                 prior_attempt["destination"] == prior_target.rsplit("/", 1)[1], "The earlier death recovery lost its exact baseline")
+            protected_death_backup = prior_target, prior_fixture, prior_generation, prior_op, prior_baseline
         if capacity_case:
             parents = {Path(file).resolve().parent for file in args.previous}
             need(len(parents) == 1, "Require the exact released pair from the cold ancestry run")
@@ -734,7 +913,7 @@ def run(args):
             refused_death_destinations.append(backup_death_control_destination(finished, ANCESTRY_CASE))
             first = settings_run_anchors(raw.parent / "picker-adapter-library-tree-62c66f5beb8e", ANCESTRY_GRANT_REFUSAL)
             refused_death_destinations.append(backup_death_control_destination(first, ANCESTRY_CASE))
-        if death_operation or death_receipt:
+        if (death_operation and not before_marker) or death_receipt:
             parents = {Path(file).resolve().parent for file in args.previous}
             need(len(parents) == 1 and previous[APP] == hashes[APP], "Require the exact retained cold recovery pair")
             predecessor = parents.pop()
@@ -833,7 +1012,7 @@ def run(args):
         need(sha(saved) == hashes[package], "Retained candidate APK changed")
         retained[package] = saved
     fixture = raw / "synthetic-library"
-    files = (retained_ancestry[1] if ancestry_resume else {} if args.ocr_activation or recovery_case or death_receipt
+    files = (retained_pre_marker[1] if pre_marker_handoff else retained_ancestry[1] if ancestry_resume else {} if args.ocr_activation or recovery_case or death_receipt
              else make_fixture(fixture, with_scan=True))
     original = None if args.ocr_activation or recovery_case or death_receipt else synthetic_scan()[0]
     if original:
@@ -843,7 +1022,8 @@ def run(args):
                         settingsCancel=args.settings_retry, settingsPriorFailure=args.settings_prior_failure,
                         settingsCompleted=args.settings_recover, backupDeliveryDeath=death_operation,
                         backupDeathRetry=args.backup_death_retry, backupDeathReceiptOnly=death_receipt,
-                        treeAncestryHandoff=ancestry_resume)),
+                        treeAncestryHandoff=ancestry_resume, backupPreMarker=before_marker,
+                        backupPreMarkerHandoff=pre_marker_handoff)),
         encoding="utf-8",
     )
     ns = load_allocator(ROOT, args.guest, raw, "pristinepage-tree-" + os.environ["OPENCODE_SESSION_ID"])
@@ -854,16 +1034,35 @@ def run(args):
             return inspect_prior_pid(super().process, pid)
 
     run = FolderRun(prefix, None, 0)
+    pre_marker_outcome = None
+    pre_marker_preservation = ()
     print(f"Runtime evidence: {raw.relative_to(ROOT)}", flush=True)
     try:
         wait_for_allocator(run, lambda: run.prepare(args.fresh, None, args.fresh), before_claim=True)
         recheck_target(run, ns)
-        if capacity_case:
+        if capacity_claim:
             verify_completed_guest(capacity_claim, run.owned())
+        if pre_marker_claim:
+            current = run.owned()
+            verify_completed_guest(pre_marker_claim, current)
+            need(current["ownership_history"][-1]["generation"] == pre_marker_claim["generation"],
+                 "Read-only pre-marker handoff is no longer the immediately preceding run; refusing another cold launch")
         target = [ns["ADB"], "-s", run.serial]
 
         def adb(*argv, **options):
             return run.command([*target, *argv], **options)
+
+        def check_protected_death_backup():
+            prior_target, prior_fixture, prior_generation, prior_op, prior_baseline = protected_death_backup
+            name = f"PristinePage-backup-{prior_generation}"
+            path = f"{prior_target}/{name}"
+            marker = adb("shell", "cat", f"{path}/generations/{prior_generation}.complete")
+            isolated = f"files/library-export-source-{prior_op}"
+            current = settings_private_baseline(adb, f"{isolated}/files")
+            need(current == prior_baseline, "The earlier interrupted-delivery private backup changed")
+            verify_backup_death_intent(adb, isolated, prior_op, prior_target.rsplit("/", 1)[1], marker, current)
+            verify_unchanged_settings_destination(adb, prior_target, prior_fixture, backup_name=name)
+            verify_closed_backup(adb, path, prior_generation, marker)
 
         present = set(adb("shell", "pm", "list", "packages", APP).splitlines())
         expected = set() if args.fresh else {f"package:{p}" for p in built}
@@ -880,11 +1079,30 @@ def run(args):
             need(not (death_operation or death_receipt) or baseline == pinned_cold_baseline,
                  "The retained ordinary private backup no longer matches its pinned cold baseline")
             run.save(run.path("recovery-before.json"), baseline, durable=True)
+        if protected_death_backup:
+            check_protected_death_backup()
         for refused in refused_death_destinations:
             verify_unchanged_settings_destination(adb, *refused)
         if refused_death_private:
             need(refused_death_private not in adb("shell", "run-as", APP, "ls", "-A", "-1", "files").splitlines(),
                  "A prior death attempt has private data; no new publication")
+        if before_marker:
+            def check_ordinary():
+                recheck_target(run, ns)
+                verify_completed_destination(adb, *completed)
+                need(settings_private_baseline(adb) == baseline, "The retained ordinary backup attempt changed")
+
+            def check_prior_death():
+                recheck_target(run, ns)
+                check_protected_death_backup()
+
+            def check_capacity_fixture():
+                recheck_target(run, ns)
+                for refused in refused_death_destinations:
+                    verify_unchanged_settings_destination(adb, *refused)
+
+            # Cover APK replacement and fixture staging as well as the writer and the cold reader.
+            pre_marker_preservation = (check_ordinary, check_prior_death, check_capacity_fixture)
         for p, path in retained.items():
             flags = install_flags(p, installed[p], hashes[p], previous.get(TEST), previous.get(APP))
             if flags is not None:
@@ -941,13 +1159,14 @@ def run(args):
                 print(f"LDPlayer OCR {result['batch']}: {len(result['passed'])} passed, {len(result['failed'])} failed.", flush=True)
             return any(result["failed"] for result in outcomes)
 
-        if death_operation:
+        if death_operation and not pre_marker_handoff:
             need(not (raw.parent / f"settings-retry-spent-{death_authority}.json").exists(),
                  "This isolated backup death authorization became spent before fixture staging")
-        if ancestry_resume:
-            guest_root = retained_ancestry[0]
+        if ancestry_resume or pre_marker_handoff:
+            guest_root = retained_pre_marker[0] if pre_marker_handoff else retained_ancestry[0]
             folder = guest_root.rsplit("/", 1)[1]
-            verify_unchanged_settings_destination(adb, guest_root, files)
+            if not pre_marker_handoff:
+                verify_unchanged_settings_destination(adb, guest_root, files)
         else:
             folder = "PristinePage-tree-" + uuid.uuid4().hex[:12]
             guest_root = f"/sdcard/Documents/{folder}"
@@ -964,6 +1183,14 @@ def run(args):
                  "The fresh fixture contains an unexpected root entry before instrumentation")
         recheck_target(run, ns)
         if death_operation:
+            if before_marker:
+                if pre_marker_handoff:
+                    pre_marker_outcome = complete_pre_marker_death(run, adb, ns, raw, guest_root, files, death_operation,
+                                                                   hashes, retained_pre_marker[3])
+                else:
+                    pre_marker_outcome = exercise_backup_delivery_death(run, adb, ns, raw, guest_root, files, original,
+                                                                        death_operation, hashes, death_authority, before_marker=True)
+                return bool(pre_marker_outcome["failed"])
             try:
                 return exercise_backup_delivery_death(run, adb, ns, raw, guest_root, files, original, death_operation, hashes, death_authority)
             finally:
@@ -1087,8 +1314,16 @@ def run(args):
         print(f"LDPlayer Files grant: {len(passed)} passed, {len(failed)} failed. " + ", ".join(failed), flush=True)
         return bool(failed)
     finally:
-        if run.claimed:
-            close_owned(run)
+        try:
+            if pre_marker_preservation:
+                finish_pre_marker_outcome(pre_marker_outcome, pre_marker_preservation,
+                                          lambda value: run.save(run.path("outcomes.json"), value, durable=True))
+                if pre_marker_outcome:
+                    print(f"Cold recovery of interrupted publication: {len(pre_marker_outcome['passed'])} passed, "
+                          f"{len(pre_marker_outcome['failed'])} failed; predecessor preservation verified.", flush=True)
+        finally:
+            if run.claimed:
+                close_owned(run)
 
 
 if __name__ == "__main__":
@@ -1108,6 +1343,10 @@ if __name__ == "__main__":
     parser.add_argument("--settings-picker-only", action="store_true", help="Open and cancel Files from Settings on the retained synthetic guest; never select a destination")
     parser.add_argument("--settings-recover", metavar="COMPLETED_MANIFEST_SHA", help="Read the existing Settings receipt after a cold launch; never open a picker")
     parser.add_argument("--backup-delivery-death", action="store_true", help="One isolated native process death after commit but before delivery; never replay")
+    parser.add_argument("--backup-pre-marker", action="store_true",
+                        help="One isolated publication interrupted after payload verification and before its marker; never replay")
+    parser.add_argument("--backup-pre-marker-handoff", metavar="INTERRUPTED_MANIFEST_SHA",
+                        help="Read-only completion of an exact spent pre-marker witness whose cold test never started")
     parser.add_argument("--backup-death-retry", metavar="NO_WRITE_MANIFEST_SHA",
                         help="Spend the new exact direct no-write controls after verifying the safe previous refusal")
     parser.add_argument("--backup-death-receipt-only", metavar="DEATH_MANIFEST_SHA",

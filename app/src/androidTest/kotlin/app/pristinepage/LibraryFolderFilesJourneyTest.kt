@@ -57,6 +57,7 @@ import app.pristinepage.library.LibraryBackupConfirmation
 import app.pristinepage.library.LibraryBackupViewModel
 import app.pristinepage.library.LibraryFolderGrantHandoff
 import app.pristinepage.library.LibraryFolderPickerContract
+import app.pristinepage.testing.LibraryInterruptionPickerActivity
 import java.io.ByteArrayOutputStream
 import java.io.File
 import java.io.IOException
@@ -92,6 +93,7 @@ import org.junit.runners.model.Statement
 @RunWith(AndroidJUnit4::class)
 class LibraryFolderFilesJourneyTest {
     private val compose = createAndroidComposeRule<MainActivity>()
+    private val interruptionCompose = createAndroidComposeRule<LibraryInterruptionPickerActivity>()
     private val noColdRecoveryPicker = TestRule { next, description ->
         if (description.methodName != "coldSettingsRecoversTheExactCompletedBackupWithoutWriting") next else
             object : Statement() {
@@ -109,7 +111,11 @@ class LibraryFolderFilesJourneyTest {
                 }
             }
     }
-    @get:Rule val rules: RuleChain = RuleChain.outerRule(noColdRecoveryPicker).around(compose)
+    private val chooseHost = TestRule { next, description ->
+        val rule = if (description.methodName == "endsProcessAfterPayloadBeforeTheCompletionMarker") interruptionCompose else compose
+        rule.apply(next, description)
+    }
+    @get:Rule val rules: RuleChain = RuleChain.outerRule(noColdRecoveryPicker).around(chooseHost)
 
     @Test fun actualFilesGrantReopensAfterActivityRecreationAndRevocationFailsClosed() = verifyJourney()
 
@@ -568,6 +574,60 @@ class LibraryFolderFilesJourneyTest {
 
     @Test fun endsProcessAfterBackupCommitBeforeDelivery() = verifyJourney(backupDeath = backupDeathOperation())
 
+    @Test fun endsProcessAfterPayloadBeforeTheCompletionMarker() {
+        val instrumentation = InstrumentationRegistry.getInstrumentation()
+        val app = instrumentation.targetContext.applicationContext
+        val folder = requireNotNull(InstrumentationRegistry.getArguments().getString("libraryFixtureFolder"))
+        check(folder.matches(Regex("PristinePage-tree-[0-9a-f]{12}")))
+        val operation = backupDeathOperation()
+        val authority = "com.android.externalstorage.documents"
+        val expectedId = "primary:Documents/$folder"
+        val exactTrees = listOf(expectedId, "home:$folder").map { DocumentsContract.buildTreeDocumentUri(authority, it) }
+        fun grants() = app.contentResolver.persistedUriPermissions.associate { it.uri.toString() to (it.isReadPermission to it.isWritePermission) }
+        val before = grants()
+        check(exactTrees.none { it.toString() in before })
+        for (tree in exactTrees) {
+            assertEquals(PackageManager.PERMISSION_DENIED,
+                app.checkUriPermission(tree, Process.myPid(), Process.myUid(), Intent.FLAG_GRANT_WRITE_URI_PERMISSION))
+        }
+        val result = AtomicReference<ActivityResult>()
+        val platform = LibraryFolderPickerContract(writable = true)
+        val picker = interruptionCompose.runOnUiThread {
+            val host = interruptionCompose.activity
+            val intent = platform.createIntent(host, Unit).putExtra(DocumentsContract.EXTRA_INITIAL_URI,
+                DocumentsContract.buildDocumentUri(authority, expectedId))
+            host.activityResultRegistry.register("library-pre-marker-witness", ActivityResultContracts.StartActivityForResult()) {
+                result.set(it)
+            }.launch(intent)
+            requireNotNull(intent.component).packageName
+        }
+        interruptionCompose.waitUntil(12_000) { instrumentation.uiAutomation.rootInActiveWindow?.packageName?.toString() == picker }
+        selectSettingsDestination(instrumentation, picker, folder, navigateFromRoot = false)
+        interruptionCompose.waitUntil(10_000) { result.get() != null }
+        val raw = requireNotNull(result.get())
+        val picked = platform.parseResult(raw.resultCode, raw.data) as? LibraryFolderPickerContract.Picked
+            ?: error("Files did not return a writable synthetic folder")
+        assertTrue(picked.uri in exactTrees && picked.grant.returnedWrite)
+        assertEquals(before, grants())
+        runBlocking {
+            LibraryDefaultFolderExportProbe.verify(app, picked, operation = operation, beforeMarker = { library, generation, bindings ->
+                assertEquals(before, grants())
+                instrumentation.sendStatus(72, Bundle().apply {
+                    putString("backupDeathOperation", operation)
+                    putInt("backupDeathPid", Process.myPid())
+                    putString("backupDeathReceipt", "$library:$generation")
+                    putString("backupDeathBindings", bindings.joinToString(":"))
+                    putString("backupDeathGrantInventory", LibraryAncestryGrantWitness.fingerprint(before))
+                })
+                Process.killProcess(Process.myPid())
+                // Never return from this boundary and create a marker if termination is unexpectedly delayed.
+                CountDownLatch(1).await(10, TimeUnit.SECONDS)
+                error("The process did not terminate at the pre-marker checkpoint")
+            })
+        }
+        error("The publication did not stop before creating its marker")
+    }
+
     @Test fun checksTheBackupDeathPickerRouteWithoutSelection() = verifyJourney(backupDeathPickerOnly = true)
 
     private fun backupDeathOperation() =
@@ -725,7 +785,7 @@ class LibraryFolderFilesJourneyTest {
         assertFalse(before.keys.any { it in exactFixtureTrees })
         if (probeCapacityOnly) {
             for (fixtureTree in listOf(expected, home)) {
-                assertEquals("The capacity fixture already has effective write access", PackageManager.PERMISSION_DENIED,
+                assertEquals("The synthetic fixture already has effective write access", PackageManager.PERMISSION_DENIED,
                     app.checkUriPermission(fixtureTree, Process.myPid(), Process.myUid(), Intent.FLAG_GRANT_WRITE_URI_PERMISSION))
             }
         }

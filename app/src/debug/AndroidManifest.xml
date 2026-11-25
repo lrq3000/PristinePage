@@ -2,5 +2,6 @@
     <application>
         <!-- Internal synthetic test input only: never exported, never granted and never included by the release source set. It is not an import picker or export/share provider. -->
         <provider android:name="app.pristinepage.testing.PrivateEditorFixtureProvider" android:authorities="${applicationId}.editor-fixtures" android:exported="false" android:grantUriPermissions="false" />
+        <activity android:name="app.pristinepage.testing.LibraryInterruptionPickerActivity" android:exported="false" />
     </application>
 </manifest>
