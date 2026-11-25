@@ -14,6 +14,38 @@ import org.junit.runner.RunWith
 /** Real Android directories and descriptors, but no Files provider grant or mutation. */
 @RunWith(AndroidJUnit4::class)
 class LibraryDescriptorAncestryTest {
+    @Test fun exactRootDescriptorsAcquireTheirSharedAnchorWithoutAParentLocator() {
+        val context = InstrumentationRegistry.getInstrumentation().targetContext
+        val anchor = File(context.cacheDir, "library-ancestry-${UUID.randomUUID()}").apply { check(mkdir()) }
+        val left = File(anchor, "left").apply { check(mkdir()) }
+        val branch = File(anchor, "branch").apply { check(mkdir()) }
+        val right = File(branch, "right").apply { check(mkdir()) }
+        val separate = File(anchor, "separate").apply { check(mkdir()) }
+        ParcelFileDescriptor.open(left, ParcelFileDescriptor.MODE_READ_ONLY).use { a ->
+            ParcelFileDescriptor.open(right, ParcelFileDescriptor.MODE_READ_ONLY).use { b ->
+                assertThrows(IOException::class.java) {
+                    AndroidLibraryDescriptorAncestry.withDerivedAnchor(a, b, 1 to 1) { error("Different parents were admitted") }
+                }
+                assertThrows(IOException::class.java) {
+                    AndroidLibraryDescriptorAncestry.withDerivedAnchor(a, b, 2 to 2) { error("Only one of two different ancestors was used") }
+                }
+                var checker: (() -> Unit)? = null
+                AndroidLibraryDescriptorAncestry.withDerivedAnchor(a, b, 1 to 2) { current ->
+                    current()
+                    checker = current
+                }
+                assertThrows(IOException::class.java) { checkNotNull(checker).invoke() }
+                val moved = assertThrows(IOException::class.java) { AndroidLibraryDescriptorAncestry.withDerivedAnchor(a, b, 1 to 2) { checkCurrent ->
+                    checkCurrent()
+                    // Move an owned empty synthetic directory while the same leaf inode still exists.
+                    check(right.renameTo(File(separate, "right")))
+                    assertThrows(IOException::class.java) { checkCurrent() }
+                } }
+                check(moved.message == "Library folder ancestry changed")
+            }
+        }
+    }
+
     @Test fun borrowedDescriptorsSeparateSiblingsButRefuseAliasesAndNestedRoots() {
         val context = InstrumentationRegistry.getInstrumentation().targetContext
         val anchor = File(context.cacheDir, "library-ancestry-${UUID.randomUUID()}").apply { check(mkdir()) }

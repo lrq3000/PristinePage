@@ -54,4 +54,15 @@ class LibraryRootSeparationTest {
         val commonAncestorOnly = LibraryRootSeparation.admit({ listOf(first, user) }, { right })
         assertThrows(IOException::class.java) { commonAncestorOnly.requireCurrentSiblings() }
     }
+
+    @Test fun independentlyObservedAncestryCannotBeReplacedWithAFreshDisjointPathAtAdmission() {
+        val left = listOf(first, user, fs)
+        val right = listOf(second, user, fs)
+        val changed = listOf(second, Identity(11, 9), fs)
+        LibraryRootSeparation.admit({ left }, { changed }).requireCurrent()
+        assertThrows(IOException::class.java) {
+            LibraryRootSeparation.admitObserved(left, right, { left }, { changed })
+        }
+        LibraryRootSeparation.admitObserved(left, right, { left }, { right }).requireCurrent()
+    }
 }

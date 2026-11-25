@@ -5,12 +5,12 @@ import android.system.ErrnoException
 import android.system.Os
 import android.system.OsConstants
 import app.pristinepage.data.library.LibraryRootSeparation.Identity
+import app.pristinepage.data.library.LibraryRootSeparation.Companion.MAX_CHAIN
 import java.io.File
 import java.io.IOException
 
 /** Read-only observation, not a write permit. Callers keep all three descriptors open and undetached and separately bind provider locators to them. Sequential walks do not exclude a concurrent rename; a writer must also hold stable, cooperative topology ownership through its operation. */
 internal object AndroidLibraryDescriptorAncestry {
-    private const val MAX_CHAIN = 128
     private const val MAX_FD_INFO_BYTES = 1_024
 
     fun admit(left: ParcelFileDescriptor, right: ParcelFileDescriptor, anchor: ParcelFileDescriptor,
@@ -18,31 +18,93 @@ internal object AndroidLibraryDescriptorAncestry {
     ): LibraryRootSeparation {
         checkpoint()
         val expected = observe(anchor)
-        fun chain(leaf: ParcelFileDescriptor): List<Identity> {
+        return LibraryRootSeparation.admit({ chain(left, anchor, expected, checkpoint) }, { chain(right, anchor, expected, checkpoint) })
+    }
+
+    private fun chain(leaf: ParcelFileDescriptor, anchor: ParcelFileDescriptor, expected: Observation,
+        checkpoint: () -> Unit,
+    ): List<Identity> {
+        checkpoint()
+        if (observe(anchor) != expected) unavailable()
+        val result = ArrayList<Identity>()
+        val seen = HashSet<Identity>()
+        fun visit(current: ParcelFileDescriptor) {
             checkpoint()
-            if (observe(anchor) != expected) unavailable()
-            val result = ArrayList<Identity>()
-            val seen = HashSet<Identity>()
-            fun visit(current: ParcelFileDescriptor) {
-                checkpoint()
-                val at = observe(current)
-                if (at.mount != expected.mount || at.identity.device != expected.identity.device || !seen.add(at.identity)) unavailable()
-                result += at.identity
-                if (at == expected) return
-                if (result.size == MAX_CHAIN) unavailable()
-                // Follow the live kernel-held directory, not the printed link target or a path decoded from a document ID.
-                descriptorIo {
-                    ParcelFileDescriptor.open(File("/proc/self/fd/${current.fd}/.."), ParcelFileDescriptor.MODE_READ_ONLY)
-                }.use(::visit)
-            }
-            visit(leaf)
-            checkpoint()
-            return result
+            val at = observe(current)
+            if (!expected.sameFilesystem(at) || !seen.add(at.identity)) unavailable()
+            result += at.identity
+            if (at == expected) return
+            if (result.size == MAX_CHAIN) unavailable()
+            withParent(current, ::visit)
         }
-        return LibraryRootSeparation.admit({ chain(left) }, { chain(right) })
+        visit(leaf)
+        checkpoint()
+        return result
+    }
+
+    /** Both walks must independently arrive at the same directory. The descriptors support metadata proof only and never escape this callback. */
+    fun withDerivedAnchor(left: ParcelFileDescriptor, right: ParcelFileDescriptor, hops: Pair<Int, Int>,
+        checkpoint: () -> Unit = {}, block: (requireCurrent: () -> Unit) -> Unit,
+    ) {
+        if (hops.first !in 1 until MAX_CHAIN || hops.second !in 1 until MAX_CHAIN) unavailable()
+        checkpoint()
+        val a = observe(left)
+        val b = observe(right)
+        if (a == b || !a.sameFilesystem(b)) unavailable()
+
+        fun walk(leaf: ParcelFileDescriptor, steps: Int, start: Observation,
+            use: (ParcelFileDescriptor, Observation, List<Identity>) -> Unit,
+        ) {
+            val seen = hashSetOf(start.identity)
+            val first = arrayListOf(start.identity)
+            var owner: ParcelFileDescriptor? = null
+            var observed = start
+            try {
+                repeat(steps) {
+                    checkpoint()
+                    val old = owner
+                    val parent = openParent(old ?: leaf)
+                    owner = parent
+                    old?.close()
+                    observed = observe(parent)
+                    if (!start.sameFilesystem(observed) || !seen.add(observed.identity)) unavailable()
+                    first += observed.identity
+                }
+                use(checkNotNull(owner), observed, first)
+            } finally {
+                owner?.close()
+            }
+        }
+
+        walk(left, hops.first, a) { leftAnchor, anchor, leftBefore ->
+            walk(right, hops.second, b) { rightAnchor, rightObserved, rightBefore ->
+                if (anchor != rightObserved) unavailable()
+                val proof = LibraryRootSeparation.admitObserved(leftBefore, rightBefore,
+                    { chain(left, leftAnchor, anchor, checkpoint) }, { chain(right, rightAnchor, anchor, checkpoint) })
+                var live = true
+                fun requireCurrent() {
+                    if (!live) unavailable()
+                    proof.requireCurrent()
+                }
+                try {
+                    requireCurrent()
+                    block(::requireCurrent)
+                    requireCurrent()
+                } finally { live = false }
+            }
+        }
     }
 
     data class Observation(val mount: Long, val identity: Identity)
+
+    private fun Observation.sameFilesystem(other: Observation) = mount == other.mount && identity.device == other.identity.device
+
+    // Follow only the live directory descriptor, subject to normal OS permissions; never resolve a URI or enumerate the observed ancestor.
+    private fun openParent(directory: ParcelFileDescriptor): ParcelFileDescriptor = descriptorIo {
+        ParcelFileDescriptor.open(File("/proc/self/fd/${directory.fd}/.."), ParcelFileDescriptor.MODE_READ_ONLY)
+    }
+
+    private fun <T> withParent(directory: ParcelFileDescriptor, use: (ParcelFileDescriptor) -> T): T = openParent(directory).use(use)
 
     fun observe(descriptor: ParcelFileDescriptor): Observation = descriptorIo {
         val stat = Os.fstat(descriptor.fileDescriptor)
