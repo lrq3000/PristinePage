@@ -27,7 +27,11 @@ import kotlinx.coroutines.sync.withLock
 
 /** Main-confined state owned by a lifecycle-retained scope, not by one Activity registration. IO is delegated to the existing Application graph; only opaque IDs are restorable. No selected provider reference enters StateFlow, a saved identity or an error. */
 class ImportLibrarySession(private val actions: LibraryActions, restored: LibraryIdentity, private val scope: CoroutineScope) : LibrarySession {
-    private val current = MutableStateFlow(LibraryState(selectedId = restored.selected, selectedPage = restored.selectedPage, request = restored.pending?.let { PhotoImportRequest(it.value, restored.kind, restored.issuedAt) }, phase = restored.pending?.let { ImportPhase.INTERRUPTED }, canSearchAlbums = actions is SearchableLibraryActions, canSearchPages = actions is SearchablePageActions))
+    private var pendingSelection = restored.takeIf { it.selectedAt != null }
+    private val current = MutableStateFlow(LibraryState(selectedId = restored.selected.takeIf { restored.selectedAt == null },
+        selectedPage = restored.selectedPage.takeIf { restored.selectedAt == null }, request = restored.pending?.let { PhotoImportRequest(it.value, restored.kind, restored.issuedAt) },
+        phase = restored.pending?.let { ImportPhase.INTERRUPTED }, canSearchAlbums = actions is SearchableLibraryActions,
+        canSearchPages = actions is SearchablePageActions, restoringSelection = pendingSelection != null))
     override val state: StateFlow<LibraryState> = current.asStateFlow()
     private val initialization = Mutex()
     private var started = false
@@ -46,7 +50,12 @@ class ImportLibrarySession(private val actions: LibraryActions, restored: Librar
 
     init { refresh(true) }
 
-    override fun identity() = current.value.let { value -> LibraryIdentity(value.selectedId, value.request?.session, value.selectedPage, value.request?.kind ?: PhotoImportKind.GALLERY, value.request?.issuedAt) }
+    override fun identity() = current.value.let { value ->
+        val waiting = pendingSelection.takeIf { navigation == 0L }
+        LibraryIdentity(waiting?.selected ?: value.selectedId, value.request?.session, waiting?.selectedPage ?: value.selectedPage,
+            value.request?.kind ?: PhotoImportKind.GALLERY, value.request?.issuedAt,
+            waiting?.selectedAt ?: value.activation.takeIf { value.selectedId != null })
+    }
 
     override suspend fun observePageSearch(query: String) {
         val search = actions as? SearchablePageActions ?: return
@@ -79,6 +88,7 @@ class ImportLibrarySession(private val actions: LibraryActions, restored: Librar
         when (event) {
             is LibraryEvent.Open -> {
                 ++navigation
+                discardSelectionRestore()
                 val same = current.value.selectedId == event.id
                 current.value = current.value.copy(selectedId = event.id, selectedPage = current.value.selectedPage.takeIf { same }, document = null, loading = true, error = null,
                     results = if (same) current.value.results else emptyList(), resultBatch = current.value.resultBatch.takeIf { same })
@@ -91,6 +101,7 @@ class ImportLibrarySession(private val actions: LibraryActions, restored: Librar
             LibraryEvent.CloseAlbum -> {
                 if (current.value.request != null || current.value.preparingImport || current.value.renaming) return
                 ++navigation
+                discardSelectionRestore()
                 current.value = current.value.copy(selectedId = null, selectedPage = null, document = null, error = null, renameResult = null)
                 refresh(true)
             }
@@ -114,7 +125,10 @@ class ImportLibrarySession(private val actions: LibraryActions, restored: Librar
                 refresh(true, debounceSearch = text.isNotBlank())
             }
             is LibraryEvent.OpenPageMatch -> openPageMatch(event)
-            LibraryEvent.LeaveHomeSearch -> cancelOpeningHit()
+            LibraryEvent.LeaveHomeSearch -> {
+                cancelOpeningHit()
+                discardSelectionRestore()
+            }
             is LibraryEvent.RenameAlbum -> rename(event)
             LibraryEvent.ClearRenameResult -> if (!current.value.renaming) current.value = current.value.copy(renameResult = null)
             is LibraryEvent.NewDocument -> if (!current.value.loading && (!event.importAfterCreate || (!current.value.preparingImport && current.value.request == null))) {
@@ -171,6 +185,13 @@ class ImportLibrarySession(private val actions: LibraryActions, restored: Librar
         ++hitNavigation
         openingHit?.cancel()
         openingHit = null
+    }
+
+    /** Home is usable while a cold restore waits. A newer navigation decision must not dismiss Settings or take Back away from the user. */
+    private fun discardSelectionRestore() {
+        if (pendingSelection == null) return
+        pendingSelection = null
+        current.value = current.value.copy(restoringSelection = false)
     }
 
     private fun rename(event: LibraryEvent.RenameAlbum) {
@@ -303,13 +324,12 @@ class ImportLibrarySession(private val actions: LibraryActions, restored: Librar
         cancelOpeningHit()
         val token = ++metadataGeneration
         metadataRead?.cancel()
-        val selected = current.value.selectedId
         val nav = navigation
         current.value = current.value.copy(loading = true)
         return run(onFailure = { error -> if (token == metadataGeneration && nav == navigation) failed(error) }) {
             if (debounceSearch) delay(220)
             if (includeList) reload(reset, token)
-            loadSelected(selected, nav, token)
+            if (token == metadataGeneration && nav == navigation) loadSelected(current.value.selectedId, nav, token)
         }.also { metadataRead = it }
     }
 
@@ -406,11 +426,17 @@ class ImportLibrarySession(private val actions: LibraryActions, restored: Librar
     }
 
     private suspend fun loadSelected(id: DocumentId?, nav: Long, token: Long) {
-        val document = id?.let { actions.load(it) }
-        if (token != metadataGeneration || nav != navigation || current.value.selectedId != id) return
+        val issuedAt = current.value.activation
+        fun stillCurrent() = token == metadataGeneration && nav == navigation &&
+            current.value.let { it.selectedId == id && it.activation == issuedAt }
+        val document = id?.let { if (issuedAt != null) actions.loadIssued(it, issuedAt) else actions.load(it) }
+        if (!stillCurrent()) return
         val discover = id != null && document?.document?.hasPendingImport == true && current.value.request == null && !current.value.preparingImport
-        val pending = if (discover) actions.activeImportRequest(id) ?: throw RepositoryFailure(OperationError(OperationErrorCode.INTEGRITY_FAILED, false, "pending_import_identity_missing", id.value)) else null
-        if (token == metadataGeneration && nav == navigation && current.value.selectedId == id) {
+        val pending = if (discover) {
+            (if (issuedAt != null) actions.activeIssuedImport(id, issuedAt) else actions.activeImportRequest(id))
+                ?: throw RepositoryFailure(OperationError(OperationErrorCode.INTEGRITY_FAILED, false, "pending_import_identity_missing", id.value))
+        } else null
+        if (stillCurrent()) {
             // Read the newest Main-confined choice after IO. A refresh started before a tap must not restore its older captured selection; membership is still revalidated against this returned overview.
             val value = current.value.copy(selectedPage = current.value.selectedPage?.takeIf { page -> document?.pages?.any { it.pageId == page } == true })
             current.value = if (pending != null && value.request == null) value.copy(document = document, loading = false, request = pending, launchPending = false, phase = ImportPhase.INTERRUPTED)
@@ -425,7 +451,17 @@ class ImportLibrarySession(private val actions: LibraryActions, restored: Librar
             if (initialize) initialization.withLock {
                 if (!started) {
                     val opened = actions.openLibrary()
-                    current.value = current.value.copy(recovery = opened.report, activation = opened.activation)
+                    currentCoroutineContext().ensureActive()
+                    var value = current.value.copy(recovery = opened.report, activation = opened.activation, restoringSelection = false)
+                    pendingSelection?.takeIf { navigation == 0L && it.selectedAt == opened.activation }?.let {
+                        value = value.copy(selectedId = it.selected, selectedPage = it.selectedPage)
+                    }
+                    pendingSelection = null
+                    val picker = value.request
+                    if (opened.activation != null && picker?.issuedAt != null && picker.issuedAt != opened.activation && value.phase == ImportPhase.INTERRUPTED) {
+                        value = value.copy(request = null, phase = null, launchPending = false)
+                    }
+                    current.value = value
                     started = true
                 }
             }

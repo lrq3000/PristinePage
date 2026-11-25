@@ -69,6 +69,8 @@ class ApplicationLibraryActions private constructor(
 
     override suspend fun rename(document: DocumentId, revision: Long, title: String) = open().store.documents.renameDocument(document, revision, title)
     override suspend fun load(id: DocumentId) = open().store.catalog.load(id)
+    override suspend fun loadIssued(id: DocumentId, issuedAt: LibraryActivation) =
+        scoped?.loadDefaultAlbum(issuedAt, id) ?: load(id)
     override suspend fun activeImport(id: DocumentId) = open().store.catalog.activeImport(id)
     override suspend fun create(title: String) = open().store.documents.createDocument(title)
     override suspend fun activeImportRequest(id: DocumentId): PhotoImportRequest? {
@@ -76,6 +78,11 @@ class ApplicationLibraryActions private constructor(
         val services = scoped
         if (services == null) return graph.store.catalog.activeImport(id)?.let { PhotoImportRequest.abandonmentOnly(it) }
         return services.findDefaultPhotoBatch(graph.activation, id)?.let { PhotoImportRequest.abandonmentOnly(it, graph.activation) }
+    }
+
+    override suspend fun activeIssuedImport(id: DocumentId, issuedAt: LibraryActivation): PhotoImportRequest? {
+        val services = scoped ?: return activeImportRequest(id)
+        return services.findDefaultPhotoBatch(issuedAt, id)?.let { PhotoImportRequest.abandonmentOnly(it, issuedAt) }
     }
 
     override suspend fun begin(document: DocumentSummary): PhotoImportRequest {

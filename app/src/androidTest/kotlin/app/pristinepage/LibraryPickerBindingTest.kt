@@ -26,6 +26,36 @@ import org.junit.runner.RunWith
 /** Tests our Activity-owned binding against actual AndroidX queued raw results and Android Parcel. This is not an actual Activity recreation, external picker or platform URI-grant experiment. */
 @RunWith(AndroidJUnit4::class)
 class LibraryPickerBindingTest {
+    @Test fun savedHomeNavigationRequiresAnExactActivationButLegacyChooserIdentityRemainsSeparate() {
+        val album = app.pristinepage.data.model.DocumentId("aaaaaaaa-aaaa-4aaa-8aaa-000000000033")
+        val page = app.pristinepage.data.model.PageId("aaaaaaaa-aaaa-4aaa-8aaa-000000000034")
+        val activation = LibraryActivation("aaaaaaaa-aaaa-4aaa-8aaa-000000000035", 3)
+        val identity = LibraryIdentity(selected = album, selectedPage = page, selectedAt = activation)
+        val saved = Bundle()
+        MainActivity.saveLibraryIdentity(saved, identity, allowPendingResult = false)
+        assertEquals(identity, MainActivity.restoreLibraryIdentity(parcel(saved)))
+        val legacy = Bundle().apply {
+            putBundle("pristinepage.library.identity.v1", Bundle().apply {
+                putString("document", album.value)
+                putString("page", page.value)
+            })
+        }
+        assertEquals(LibraryIdentity(), MainActivity.restoreLibraryIdentity(parcel(legacy)))
+    }
+
+    @Test fun malformedHomeNavigationDoesNotDiscardAnExactQueuedFilesIdentity() {
+        val activation = LibraryActivation("aaaaaaaa-aaaa-4aaa-8aaa-000000000035", 3)
+        val chooser = LibraryIdentity(pending = ImportSessionId("aaaaaaaa-aaaa-4aaa-8aaa-000000000032"),
+            kind = PhotoImportKind.FILES, issuedAt = activation)
+        val saved = Bundle()
+        MainActivity.saveLibraryIdentity(saved, chooser, allowPendingResult = true)
+        saved.putBundle("pristinepage.library.navigation.v2", Bundle().apply {
+            putString("document", "aaaaaaaa-aaaa-4aaa-8aaa-000000000033")
+            putString("page", "not-a-page-id")
+        })
+        assertEquals(chooser, MainActivity.restoreLibraryIdentity(parcel(saved)))
+    }
+
     @Test fun libraryBackupRegistryDeliversOnlyTheLaunchedWritableSelection() {
         val activation = LibraryActivation("aaaaaaaa-aaaa-4aaa-8aaa-000000000021", 2)
         val owner = app.pristinepage.library.LibraryBackupConfirmation()

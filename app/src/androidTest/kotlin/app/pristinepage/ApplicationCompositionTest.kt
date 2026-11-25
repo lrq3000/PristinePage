@@ -67,7 +67,7 @@ class ApplicationCompositionTest {
             val services = ApplicationServices(f.context, f.budget, f.provider)
             val cold = LibraryActivation("aaaaaaaa-aaaa-4aaa-8aaa-000000000021", 1)
             val coldAlbum = DocumentId("aaaaaaaa-aaaa-4aaa-8aaa-000000000022")
-            val coldFailure = runCatching { services.loadDefaultBatchAlbum(cold, coldAlbum) }.exceptionOrNull() as RepositoryFailure
+            val coldFailure = runCatching { services.loadDefaultAlbum(cold, coldAlbum) }.exceptionOrNull() as RepositoryFailure
             assertEquals("library_activation_changed", coldFailure.error.safeMessageKey)
             assertFalse(File(f.context.filesDir, "library-settings").exists())
             assertFalse(f.context.getDatabasePath("pristinepage.db").exists())
@@ -147,7 +147,7 @@ class ApplicationCompositionTest {
                     val refused = runCatching { services.renderDefaultBatchPreview(activation, undone, removedPreview).close() }.exceptionOrNull() as RepositoryFailure
                     assertEquals(OperationErrorCode.REVISION_CONFLICT, refused.error.code)
                 }
-                assertEquals(emptyList<DocumentPage>(), services.loadDefaultBatchAlbum(activation, document).pages)
+                assertEquals(emptyList<DocumentPage>(), services.loadDefaultAlbum(activation, document).pages)
                 assertEquals(listOf(f.good), f.opened)
             }
         }

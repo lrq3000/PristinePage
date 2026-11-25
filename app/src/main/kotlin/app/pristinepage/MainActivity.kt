@@ -176,12 +176,15 @@ class MainActivity : ComponentActivity() {
             val library by retained.state.collectAsStateWithLifecycle()
             val batch by batchOwner.state.collectAsStateWithLifecycle()
             val acquiring by acquisition.state.collectAsStateWithLifecycle()
-            val camera = library.request?.takeIf { it.kind == PhotoImportKind.CAMERA && library.phase == ImportPhase.WAITING_PICKER }
-            val atHome = !acquiring.open && batch.album == null && host.identity == null && camera == null && library.selectedId == null
+             val camera = library.request?.takeIf { it.kind == PhotoImportKind.CAMERA && library.phase == ImportPhase.WAITING_PICKER }
+             val atHome = !acquiring.open && batch.album == null && host.identity == null && camera == null && library.selectedId == null
+             BackHandler(enabled = atHome && settingsPage == null && library.restoringSelection) {
+                 retained.accept(LibraryEvent.LeaveHomeSearch)
+             }
             LaunchedEffect(atHome) { if (!atHome) settingsPage = null }
             fun leaveEditor() { editorOwner.closeEditor(); retained.accept(LibraryEvent.RefreshAlbum) }
             fun refreshBatchAlbum(issuing: LibraryActivation, document: DocumentId) {
-                retained.refreshIssuedAlbum(issuing, document) { services.loadDefaultBatchAlbum(issuing, document) }
+                retained.refreshIssuedAlbum(issuing, document) { services.loadDefaultAlbum(issuing, document) }
             }
             LaunchedEffect(batch.savedDocument, batch.savedRevision, batch.issuingActivation) {
                 val issuing = batch.issuingActivation
@@ -336,6 +339,7 @@ class MainActivity : ComponentActivity() {
 
     internal companion object {
         private const val SAVED = "pristinepage.library.identity.v1"
+        private const val NAVIGATION = "pristinepage.library.navigation.v2"
         private const val SELECTED = "document"
         private const val PENDING = "batch"
         private const val ACQUISITION = "acquisition"
@@ -356,9 +360,14 @@ class MainActivity : ComponentActivity() {
             return EditorIdentity(DocumentId(document), PageId(page), requireNotNull(raw.restoreActivation()))
         }
         fun saveLibraryIdentity(out: Bundle, identity: LibraryIdentity, allowPendingResult: Boolean) {
-            out.putBundle(SAVED, Bundle().apply {
-                identity.selected?.let { putString(SELECTED, it.value) }
+            val at = identity.selectedAt
+            val album = identity.selected
+            if (album != null && at != null) out.putBundle(NAVIGATION, Bundle().apply {
+                putString(SELECTED, album.value)
                 identity.selectedPage?.let { putString(PAGE, it.value) }
+                saveActivation(at)
+            })
+            out.putBundle(SAVED, Bundle().apply {
                 val pending = identity.pending
                 val issuedAt = identity.issuedAt
                 if (allowPendingResult && pending != null && issuedAt != null) {
@@ -370,16 +379,27 @@ class MainActivity : ComponentActivity() {
         }
 
         @Suppress("DEPRECATION") fun restoreLibraryIdentity(saved: Bundle?): LibraryIdentity {
-            val raw = saved?.get(SAVED) ?: return LibraryIdentity()
-            require(raw is Bundle)
-            fun id(key: String): String? = if (raw.containsKey(key)) (raw.get(key) as? String ?: throw IllegalArgumentException("Invalid saved identity")) else null
-            val pending = id(PENDING)?.let(::ImportSessionId)
-            val issuedAt = raw.restoreActivation()
-            val route = id(ACQUISITION)?.let(PhotoImportKind::valueOf)
+            fun record(key: String): Bundle? {
+                val raw = saved?.get(key) ?: return null
+                require(raw is Bundle)
+                return raw
+            }
+            fun Bundle.id(key: String): String? =
+                if (containsKey(key)) (get(key) as? String ?: throw IllegalArgumentException("Invalid saved identity")) else null
+            val pendingState = record(SAVED)
+            val pending = pendingState?.id(PENDING)?.let(::ImportSessionId)
+            val issuedAt = pendingState?.restoreActivation()
+            val route = pendingState?.id(ACQUISITION)?.let(PhotoImportKind::valueOf)
             require(issuedAt == null || (pending != null && route != null))
             // Legacy unscoped result registrations are not restored. Room may still discover the exact pending batch for explicit abandonment.
-            return LibraryIdentity(id(SELECTED)?.let(::DocumentId), pending.takeIf { issuedAt != null }, id(PAGE)?.let(::PageId),
-                route ?: PhotoImportKind.GALLERY, issuedAt)
+            val chooser = LibraryIdentity(pending = pending.takeIf { issuedAt != null },
+                kind = route ?: PhotoImportKind.GALLERY, issuedAt = issuedAt)
+            // Album navigation is optional. Its corruption cannot consume a valid independent Files registration.
+            return try {
+                val navigation = record(NAVIGATION) ?: return chooser
+                chooser.copy(selected = DocumentId(requireNotNull(navigation.id(SELECTED))),
+                    selectedPage = navigation.id(PAGE)?.let(::PageId), selectedAt = requireNotNull(navigation.restoreActivation()))
+            } catch (_: RuntimeException) { chooser }
         }
     }
 }

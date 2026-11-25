@@ -195,7 +195,11 @@ class ApplicationServices(context: Context, internal val budget: ImageAllocation
         withDefaultLibrary(issuedAt) { it.store.imports.beginImport(album, revision, null).parentId } ?: activationChanged()
 
     internal suspend fun findDefaultPhotoBatch(issuedAt: LibraryActivation, album: DocumentId): ImportSessionId? =
-        (withDefaultLibrary(issuedAt) { ActiveImport(it.store.catalog.activeImport(album)) } ?: activationChanged()).batch
+        (withDefaultLibrary(issuedAt) {
+            val batch = it.store.catalog.activeImport(album)
+            requireSameDefault(issuedAt)
+            ActiveImport(batch)
+        } ?: activationChanged()).batch
 
     internal data class AtelierOpening(val draft: AtelierDraftView, val needsResume: Boolean)
 
@@ -342,7 +346,7 @@ class ApplicationServices(context: Context, internal val budget: ImageAllocation
             pages
         } ?: activationChanged()
 
-    internal suspend fun loadDefaultBatchAlbum(issuedAt: LibraryActivation, album: DocumentId): DocumentOverview =
+    internal suspend fun loadDefaultAlbum(issuedAt: LibraryActivation, album: DocumentId): DocumentOverview =
         withDefaultLibrary(issuedAt) {
             val result = it.store.catalog.load(album)
             requireSameDefault(issuedAt)

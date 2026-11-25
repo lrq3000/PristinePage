@@ -19,8 +19,10 @@ interface LibraryActions {
     suspend fun openLibrary(): LibraryStartup = LibraryStartup(startup())
     suspend fun list(after: DocumentId?, limit: Int): List<DocumentSummary>
     suspend fun load(id: DocumentId): DocumentOverview
+    suspend fun loadIssued(id: DocumentId, issuedAt: LibraryActivation): DocumentOverview = load(id)
     suspend fun activeImport(id: DocumentId): ImportSessionId?
     suspend fun activeImportRequest(id: DocumentId): PhotoImportRequest? = activeImport(id)?.let { PhotoImportRequest.abandonmentOnly(it) }
+    suspend fun activeIssuedImport(id: DocumentId, issuedAt: LibraryActivation): PhotoImportRequest? = activeImportRequest(id)
     suspend fun create(title: String): DocumentId
     suspend fun begin(document: DocumentSummary): PhotoImportRequest
     suspend fun deliver(request: PhotoImportRequest, selection: LibraryPhotoResult): List<IngestResult>
@@ -55,10 +57,12 @@ class HomePageSearchPage internal constructor(val hits: List<HomePageSearchHit>,
 data class LibraryIdentity @JvmOverloads constructor(
     val selected: DocumentId? = null, val pending: ImportSessionId? = null, val selectedPage: PageId? = null,
     val kind: PhotoImportKind = PhotoImportKind.GALLERY, val issuedAt: LibraryActivation? = null,
+    val selectedAt: LibraryActivation? = null,
 ) {
     init {
         require(selected != null || selectedPage == null) { "A selected page needs its document identity" }
         require(pending != null || issuedAt == null) { "A batch activation needs its batch identity" }
+        require(selected != null || selectedAt == null) { "A selection activation needs its document identity" }
     }
 }
 /** Transient process-private handoff, never saved UI state or scheduler data. URI-specific parsing/grants stay at the Activity/Android adapter; the session owns only immediate consumption lifetime. */
@@ -93,6 +97,7 @@ data class LibraryState(
     val pageMatches: List<HomePageSearchHit> = emptyList(),
     val pageSearchUnavailable: Boolean = false,
     val albumSearchUnavailable: Boolean = false,
+    val restoringSelection: Boolean = false,
 ) {
     // Keep transient search input (which can contain a private quote) out of incidental diagnostics.
     override fun toString() = "LibraryState(loading=$loading, albumCount=${documents.size}, hasMore=$hasMore, phase=$phase)"

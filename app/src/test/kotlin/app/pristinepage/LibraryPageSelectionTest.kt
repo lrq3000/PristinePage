@@ -1,5 +1,6 @@
 package app.pristinepage
 
+import app.pristinepage.capture.PhotoImportKind
 import app.pristinepage.capture.PhotoImportRequest
 import app.pristinepage.data.library.LibraryActivation
 import app.pristinepage.data.model.*
@@ -21,6 +22,55 @@ import org.junit.Test
 /** Real retained library reducer; only metadata IO is controlled. Selection is an opaque page identity validated against the open document, never an index, provider or bitmap. */
 @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
 class LibraryPageSelectionTest {
+    @Test fun aSavedAlbumAndPageOnlyReopenInTheActivationThatIssuedThem() = runTest {
+        val f = Fixture()
+        val older = f.activation.copy(number = 2)
+        val obsolete = ImportLibrarySession(f, LibraryIdentity(selected = f.doc, selectedPage = f.second, selectedAt = older), this)
+        advanceUntilIdle()
+        assertNull(obsolete.state.value.selectedId)
+        assertNull(obsolete.state.value.document)
+        assertTrue(f.loaded.isEmpty())
+        val exact = ImportLibrarySession(f, LibraryIdentity(selected = f.doc, selectedPage = f.second, selectedAt = f.activation), this)
+        advanceUntilIdle()
+        assertEquals(f.doc, exact.state.value.document?.document?.documentId)
+        assertEquals(f.second, exact.state.value.selectedPage)
+        assertEquals(f.activation, exact.identity().selectedAt)
+        assertEquals(listOf(f.doc), f.loaded)
+        assertEquals(listOf(f.doc to f.activation), f.scopedLoads)
+    }
+
+    @Test fun leavingHomeWhileStartupIsPendingCancelsAlbumRestoreButNotTheExactFilesRequest() = runTest {
+        val f = Fixture()
+        val startup = CompletableDeferred<Unit>()
+        f.startupGate = startup
+        val batch = ImportSessionId("00000000-0000-0000-0000-000000000008")
+        val saved = LibraryIdentity(f.doc, batch, f.second, PhotoImportKind.FILES, f.activation, f.activation)
+        val session = ImportLibrarySession(f, saved, this)
+        runCurrent()
+        assertNull(session.state.value.selectedId)
+        val waiting = checkNotNull(session.state.value.request)
+        session.accept(LibraryEvent.LeaveHomeSearch)
+        startup.complete(Unit)
+        advanceUntilIdle()
+        assertNull(session.state.value.selectedId)
+        assertTrue(f.loaded.isEmpty())
+        assertSame(waiting, session.state.value.request)
+        assertTrue(waiting.matches(PhotoImportRequest(batch.value, PhotoImportKind.FILES, f.activation)))
+    }
+
+    @Test fun exactRestorationFindsAPendingBatchOnlyForAbandonmentUnderTheIssuingActivation() = runTest {
+        val f = Fixture()
+        val batch = ImportSessionId("00000000-0000-0000-0000-000000000008")
+        f.pendingBatch = batch
+        val session = ImportLibrarySession(f, LibraryIdentity(f.doc, selectedAt = f.activation), this)
+        advanceUntilIdle()
+        assertEquals(listOf(f.doc to f.activation), f.scopedImportLookups)
+        val request = checkNotNull(session.state.value.request)
+        assertEquals(batch, request.session)
+        assertEquals(f.activation, request.issuedAt)
+        assertFalse(request.canDeliver)
+    }
+
     @Test fun aRetainedRefreshUsesOnlyTheIssuingAlbumAndCannotReplaceLaterNavigation() = runTest {
         val f = Fixture()
         val session = ImportLibrarySession(f, LibraryIdentity(f.doc), this)
@@ -382,7 +432,15 @@ class LibraryPageSelectionTest {
         private val source = SourceId("00000000-0000-0000-0000-000000000006")
         var pages = listOf(DocumentPage(first,source,1,0),DocumentPage(second,source,1,1))
         var gate: CompletableDeferred<Unit>? = null
-        override suspend fun startup() = RecoveryReport(0,0,0,0,0,emptyList())
+        var startupGate: CompletableDeferred<Unit>? = null
+        val loaded = mutableListOf<DocumentId>()
+        val scopedLoads = mutableListOf<Pair<DocumentId, LibraryActivation>>()
+        val scopedImportLookups = mutableListOf<Pair<DocumentId, LibraryActivation>>()
+        var pendingBatch: ImportSessionId? = null
+        override suspend fun startup(): RecoveryReport {
+            startupGate?.await()
+            return RecoveryReport(0, 0, 0, 0, 0, emptyList())
+        }
         override suspend fun openLibrary() = LibraryStartup(startup(), activation)
         var catalogUnavailable = false
         var revision = 1L
@@ -409,8 +467,24 @@ class LibraryPageSelectionTest {
         fun page(id: DocumentId, next: AlbumPosition? = null) = AlbumPage(listOf(summary(id)), next)
         override suspend fun searchPages(query: String) = textMatches(query)
         override fun pageSearchChanges(query: String) = searchChanges.onStart { if (initialSearchSignal) emit(Unit) }
-        override suspend fun load(id: DocumentId): DocumentOverview { val snapshot = DocumentOverview(summary(id),if (id == doc) pages.toList() else emptyList()); gate?.await(); return snapshot }
-        private fun summary(id: DocumentId) = DocumentSummary(id,"Synthetic selection",revision,if (id == doc) pages.size else 0,false)
+        override suspend fun load(id: DocumentId): DocumentOverview {
+            loaded += id
+            val snapshot = DocumentOverview(summary(id), if (id == doc) pages.toList() else emptyList())
+            gate?.await()
+            return snapshot
+        }
+        override suspend fun loadIssued(id: DocumentId, issuedAt: LibraryActivation): DocumentOverview {
+            assertEquals(activation, issuedAt)
+            scopedLoads += id to issuedAt
+            return load(id)
+        }
+        override suspend fun activeIssuedImport(id: DocumentId, issuedAt: LibraryActivation): PhotoImportRequest? {
+            assertEquals(activation, issuedAt)
+            scopedImportLookups += id to issuedAt
+            return pendingBatch?.let { PhotoImportRequest.abandonmentOnly(it, issuedAt) }
+        }
+        private fun summary(id: DocumentId) = DocumentSummary(id, "Synthetic selection", revision,
+            if (id == doc) pages.size else 0, id == doc && pendingBatch != null)
         override suspend fun activeImport(id: DocumentId): ImportSessionId? = null
         override suspend fun create(title: String): DocumentId = error("Selection does not create documents")
         override suspend fun begin(document: DocumentSummary): PhotoImportRequest = error("Selection does not reserve imports")
