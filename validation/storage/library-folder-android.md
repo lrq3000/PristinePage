@@ -8,6 +8,8 @@ The first pinned development pair passed offline app/data tests (264 and 950), b
 
 The first restart for diagnostics booted and answered targeted ADB and package manager readiness, then timed out on the immediate LDPlayer serial identity recheck before replacing either installed package. Shutdown and release passed. The runner now retries only a timed-out read of the exact owned identity once, never a positive mismatch or an uncertain install. A private grant locator is separately checksummed and bound to an opaque ID. Publication reuses an exclusive link plus directory sync and exact readback; a visible binding after failed sync cannot supply acknowledgement until a separately verified reopen. It is not yet consumed by the active selection pointer.
 
+On the next run, the exact synthetic folder and both fixed namespaces were visible; the system action was `SÉLECTIONNER` rather than the test's English label. No selection was acknowledged. The test now accepts the equivalent observed French system action in the same verified folder and does not change the locale. App-owned labels and errors stay English.
+
 ## Gates before activating or publishing
 
 - Matched Files folder, real returned modes, exact persisted readback, fresh catalog admission, Activity recreation, and refusal after revocation on the same approved emulator.

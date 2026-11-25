@@ -75,6 +75,17 @@ internal class LocalLibraryDirectory(root: File, private val directorySync: Dire
         forceDirectory(paths.root)
     }
 
+    fun createFolderVerification(grantId: String, generation: LibraryGeneration) =
+        create(folderVerificationPath(grantId, generation.id)) { it.write(generation.encode()) }
+
+    fun readFolderVerification(grantId: String, generationId: String): LibraryGeneration? =
+        open(folderVerificationPath(grantId, generationId))?.use(LibraryGeneration::read)
+
+    fun forceFolderVerification(grantId: String, generationId: String) {
+        forceParentOf(folderVerificationPath(grantId, generationId))
+        forceDirectory(paths.root)
+    }
+
     fun forceMergeStage(generation: String, durableAncestor: Path) {
         val directory = mergeStagePath(generation)
         val stage = readPath("$directory/catalog.sqlite")
@@ -225,6 +236,12 @@ internal class LocalLibraryDirectory(root: File, private val directorySync: Dire
     private fun folderGrantPath(grantId: String): String {
         requireOpaqueId(grantId)
         return "folder-grants/$grantId"
+    }
+
+    private fun folderVerificationPath(grantId: String, generationId: String): String {
+        requireOpaqueId(grantId)
+        requireOpaqueId(generationId)
+        return "folder-verifications/$grantId-$generationId"
     }
     private fun mergeStagePath(generation: String): String {
         requireOpaqueId(generation)

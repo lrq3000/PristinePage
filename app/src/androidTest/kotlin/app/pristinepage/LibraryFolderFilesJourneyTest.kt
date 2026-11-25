@@ -63,24 +63,24 @@ class LibraryFolderFilesJourneyTest {
         }
         try {
             val picker = registration.first
-            val root = await(instrumentation, picker, "initial folder view") { it.hasText(folder) || it.find("Show roots") != null }
+            val root = await(instrumentation, picker, "initial folder view") { it.hasText(folder) || it.rootsButton() != null }
             if (!root.hasText(folder)) {
-                tap(instrumentation, root.find("Show roots") ?: error("Files did not show its roots"))
-                val drawer = await(instrumentation, picker, "internal storage root") { it.find("Internal storage") != null }
-                tap(instrumentation, drawer.find("Internal storage") ?: error("Internal shared storage is not listed"))
+                tap(instrumentation, root.rootsButton() ?: error("Files did not show its roots"))
+                val drawer = await(instrumentation, picker, "internal storage root") { it.internalStorage() != null }
+                tap(instrumentation, drawer.internalStorage() ?: error("Internal shared storage is not listed"))
                 val documents = await(instrumentation, picker, "Documents folder") { it.find("Documents") != null }
                 tap(instrumentation, documents.find("Documents") ?: error("Documents is not listed"))
                 val parent = await(instrumentation, picker, "fixture folder row") { it.find(folder) != null }
                 tap(instrumentation, parent.find(folder) ?: error("The exact synthetic directory is not listed"))
             }
-            val labels = setOf("SELECT", "Select", "Use this folder", "USE THIS FOLDER", "Choose this folder")
+            val labels = setOf("SELECT", "Select", "SÉLECTIONNER", "Sélectionner", "Use this folder", "USE THIS FOLDER", "Choose this folder")
             val choice = await(instrumentation, picker, "exact fixture and affirmative action") { it.hasText(folder) && (it.hasText("catalogs") || it.hasText("generations")) &&
                 labels.any { name -> it.find(name) != null } }
             val button = labels.firstNotNullOfOrNull { choice.find(it) } ?: error("Files did not expose a folder confirmation")
             tap(instrumentation, button)
             if (!receipt.await(4, TimeUnit.SECONDS)) {
-                val confirm = await(instrumentation, picker, "optional Files confirmation") { it.hasText("Allow") && it.find("Allow") != null }
-                tap(instrumentation, confirm.find("Allow") ?: error("No Files confirmation"))
+                val confirm = await(instrumentation, picker, "optional Files confirmation") { it.allowButton() != null }
+                tap(instrumentation, confirm.allowButton() ?: error("No Files confirmation"))
             }
             assertTrue("Files did not return a selection", receipt.await(10, TimeUnit.SECONDS))
             val picked = requireNotNull(result.get())
@@ -136,6 +136,9 @@ class LibraryFolderFilesJourneyTest {
         for (i in 0 until childCount) getChild(i)?.collectLabels(output)
     }
     private fun AccessibilityNodeInfo.hasText(value: String) = find(value) != null
+    private fun AccessibilityNodeInfo.rootsButton() = find("Show roots") ?: find("Afficher les répertoires racines")
+    private fun AccessibilityNodeInfo.internalStorage() = find("Internal storage") ?: find("Stockage interne")
+    private fun AccessibilityNodeInfo.allowButton() = find("Allow") ?: find("ALLOW") ?: find("Autoriser") ?: find("AUTORISER")
 
     private fun AccessibilityNodeInfo.find(value: String): AccessibilityNodeInfo? {
         if (isVisibleToUser && (text?.toString() == value || contentDescription?.toString() == value)) return this
