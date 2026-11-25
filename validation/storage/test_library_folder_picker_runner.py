@@ -13,11 +13,26 @@ from unittest.mock import patch
 from run_library_folder_picker_ldplayer import (
     check_fixture_root, read_backup_delivery_death, recheck_target, require_independent_manifests, select_backup_case, select_backup_death_picker_case, select_independent_roots, select_provider_capacity, select_settings_picker_case, select_settings_recovery_case, select_tree_ancestry, settings_completed_destination, spend_settings_retry, verify_released_independent_guest,
     finish_pre_marker_outcome, independent_fixture_children, read_independent_grant_record, retry_pre_marker_checksum, verify_ancestry_cold_handoff, verify_ancestry_grant_refusal, verify_backup_death_control, verify_backup_death_intent, verify_backup_receipt_only, verify_pre_marker_handoff, verify_pre_marker_read_refusal, verify_settings_catalog, verify_settings_ocr, verify_settings_retry_evidence,
+    verify_independent_derived_installed,
 )
 from run_local_ocr_guest import read_boot_serial
 
 
 class LibraryFolderPickerRunnerTest(unittest.TestCase):
+    def test_derived_roots_admits_only_the_two_selection_witness(self):
+        case = "app.pristinepage.LibraryFolderFilesJourneyTest#separatesIndependentlySelectedRootsWithoutAParentGrant"
+        self.assertEqual((case,), select_independent_roots(True, False, derived=True))
+        for enabled, mixed in ((False, False), (True, True)):
+            with self.assertRaisesRegex(RuntimeError, "standalone"):
+                select_independent_roots(enabled, mixed, derived=True)
+
+    def test_derived_roots_refuses_even_the_candidate_as_preinstalled_baseline(self):
+        predecessor = {"app": "a", "test": "b"}
+        verify_independent_derived_installed(predecessor.copy(), predecessor)
+        for installed in ({"app": "c", "test": "d"}, {"app": "a", "test": "d"}, {}):
+            with self.assertRaisesRegex(RuntimeError, "installed predecessor"):
+                verify_independent_derived_installed(installed, predecessor)
+
     def test_independent_cold_handoff_binds_exact_order_and_both_nested_paths(self):
         folder = "PristinePage-tree-0123456789ab"
         prefix = "content://com.android.externalstorage.documents/tree/"

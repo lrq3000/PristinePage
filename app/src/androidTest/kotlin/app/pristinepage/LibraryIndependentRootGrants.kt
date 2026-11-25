@@ -71,14 +71,34 @@ internal class LibraryIndependentRootGrants private constructor(
             }
         }
 
-        fun refuseEffectiveWrite(app: Context, trees: Iterable<Uri>) {
+        fun refuseEffectiveWrite(app: Context, trees: Iterable<Uri>) = refuseEffectiveMode(app, trees, Intent.FLAG_GRANT_WRITE_URI_PERMISSION)
+
+        fun refuseParentAccess(app: Context, folder: String) {
+            paths(folder)
+            val coveringTrees = listOf("primary:", "primary:Documents", "home:").map {
+                DocumentsContract.buildTreeDocumentUri(AUTHORITY, it)
+            }
+            val parentUris = spellings(folder).flatMap { tree ->
+                val id = DocumentsContract.getTreeDocumentId(tree)
+                listOf(tree, DocumentsContract.buildDocumentUri(AUTHORITY, id),
+                    DocumentsContract.buildDocumentUriUsingTree(tree, id)) +
+                    coveringTrees.map { DocumentsContract.buildDocumentUriUsingTree(it, id) }
+            }
+            for (mode in listOf(Intent.FLAG_GRANT_READ_URI_PERMISSION, Intent.FLAG_GRANT_WRITE_URI_PERMISSION)) {
+                for (uri in coveringTrees + parentUris) refuseUriMode(app, uri, mode)
+            }
+        }
+
+        private fun refuseEffectiveMode(app: Context, trees: Iterable<Uri>, mode: Int) {
             for (tree in trees) {
                 val document = DocumentsContract.buildDocumentUriUsingTree(tree, DocumentsContract.getTreeDocumentId(tree))
-                for (uri in listOf(tree, document)) {
-                    assertEquals(PackageManager.PERMISSION_DENIED,
-                        app.checkUriPermission(uri, Process.myPid(), Process.myUid(), Intent.FLAG_GRANT_WRITE_URI_PERMISSION))
-                }
+                for (uri in listOf(tree, document)) refuseUriMode(app, uri, mode)
             }
+        }
+
+        private fun refuseUriMode(app: Context, uri: Uri, mode: Int) {
+            assertEquals("Unexpected effective permission for the synthetic witness or its parent", PackageManager.PERMISSION_DENIED,
+                app.checkUriPermission(uri, Process.myPid(), Process.myUid(), mode))
         }
 
         private fun record(app: Context, folder: String): File {

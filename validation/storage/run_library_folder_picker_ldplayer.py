@@ -31,6 +31,7 @@ ANCESTRY_CASE = "app.pristinepage.LibraryFolderFilesJourneyTest#exactFilesTreePr
 ANCESTRY_GRANT_CASE = "app.pristinepage.LibraryFolderFilesJourneyTest#persistsExactFilesReadForColdAncestry"
 ANCESTRY_COLD_CASE = "app.pristinepage.LibraryProviderAncestryColdTest#provesManagedAncestryWithoutEffectiveWrite"
 INDEPENDENT_GRANT_CASE = "app.pristinepage.LibraryFolderFilesJourneyTest#persistsIndependentFilesRootsAndAnchor"
+INDEPENDENT_DERIVED_CASE = "app.pristinepage.LibraryFolderFilesJourneyTest#separatesIndependentlySelectedRootsWithoutAParentGrant"
 INDEPENDENT_COLD_CASE = "app.pristinepage.LibraryProviderAncestryColdTest#twoIndependentFilesRootsRequireDisjointPhysicalAncestry"
 INDEPENDENT_CHILDREN = ("Library-Left", "Library-Right")
 WORKING_CASE = "app.pristinepage.LibraryFolderFilesJourneyTest#populatingAWorkingRoomCatalogDoesNotMaterializeTheOriginal"
@@ -96,6 +97,7 @@ PRE_MARKER_WRITER_STOPPED = "b03c132101aeb5f3f7169230c81533675c3fc5901176d79a6b3
 PRE_MARKER_RECOVERY_PASSED = "c5919cf91cda1c7222554f32fc7d339b0870458922dc2279090840eb16101535"
 INDEPENDENT_FIRST_PICKER_REFUSAL = "2bf9bd0595719b47826ce3f9d0460791599ddbdaf11aef0666a04a3e7bde0f7e"
 INDEPENDENT_GRANTS_RETAINED = "f8d8e889ef209c4aaba178c9737d16881ee3afb362cd67ec621ce59793886084"
+INDEPENDENT_COLD_PASSED = "10354effa50ebdf210c7d4d8b5d1fd2709a9388b779414518c2674ffc309095b"
 UUID_TEXT = r"[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}"
 BACKUP_ORIGINAL = "ebd602840377a3b3cf763cb6828fee67861ff77c444e8fe5894457ef6d99a24d"
 OCR_ACTIVATION_CASES = tuple(f"app.pristinepage.ocr.OcrWorkManagerIntegrationTest#{method}" for method in (
@@ -237,10 +239,13 @@ def select_provider_capacity(enabled, mixed):
     return CAPACITY_CASE
 
 
-def select_independent_roots(enabled, mixed):
+def select_independent_roots(enabled, mixed, *, derived=False):
+    need(not derived or (enabled and not mixed), "Derived Files roots require a retained read-only standalone invocation")
     if not enabled:
         return ()
     need(not mixed, "Actual independent Files roots require a retained read-only standalone invocation")
+    if derived:
+        return (INDEPENDENT_DERIVED_CASE,)
     return INDEPENDENT_GRANT_CASE, INDEPENDENT_COLD_CASE
 
 
@@ -315,6 +320,10 @@ def verify_released_independent_guest(original, stopped):
          stopped["owner"] is None and stopped["state"] == "stopped-released" and stopped["shutdown_verified"] is True and
          len(original["runtime_processes"]) == 2 and stopped["shutdown_processes"] == original["runtime_processes"],
          "The released guest does not match the exact independent-root predecessor")
+
+
+def verify_independent_derived_installed(installed, previous):
+    need(installed == previous, "The exact installed predecessor is required for the derived-root witness")
 
 
 def settings_run_anchors(raw, expected_sha):
@@ -508,7 +517,7 @@ def stage_synthetic_files(adb, fixture, destination, files):
     verify_unchanged_settings_destination(adb, destination, files)
 
 
-def exercise_independent_roots(run, adb, ns, guest_root, folder, files, hashes, prior_folder, retained_record=None):
+def exercise_independent_roots(run, adb, ns, guest_root, folder, files, hashes, prior_folder, retained_record=None, *, derived=False):
     children = independent_fixture_children(folder)
     def verify_fixtures():
         recheck_target(run, ns)
@@ -523,7 +532,8 @@ def exercise_independent_roots(run, adb, ns, guest_root, folder, files, hashes, 
     status_path = run.path("independent-roots-grants.json")
     run.save(status_path, {"fixture": folder, "state": "cleanup-unconfirmed"}, durable=True)
     try:
-        schedule = ((INDEPENDENT_GRANT_CASE, "grant"), (INDEPENDENT_COLD_CASE, "cold"))
+        schedule = ((INDEPENDENT_DERIVED_CASE, "derived"),) if derived else (
+            (INDEPENDENT_GRANT_CASE, "grant"), (INDEPENDENT_COLD_CASE, "cold"))
         for case, phase in schedule if retained_record is None else schedule[1:]:
             recheck_target(run, ns)
             if phase == "cold":
@@ -541,7 +551,7 @@ def exercise_independent_roots(run, adb, ns, guest_root, folder, files, hashes, 
                          "A different process blocks the cold read; read-grant cleanup is unconfirmed")
                     adb("shell", "am", "force-stop", APP)
                 require_cold_backup_app(adb)
-            prior = ("-e", "libraryPriorIndependentFolder", prior_folder) if prior_folder and phase == "grant" else ()
+            prior = ("-e", "libraryPriorIndependentFolder", prior_folder) if prior_folder and phase in ("grant", "derived") else ()
             output = adb("shell", "am", "instrument", "-w", "-r", "-e", "class", case,
                          "-e", "libraryFixtureFolder", folder, *prior, RUNNER, timeout=155)
             run.path(f"independent-roots-{phase}-instrumentation.txt").write_text(output, encoding="utf-8")
@@ -550,7 +560,7 @@ def exercise_independent_roots(run, adb, ns, guest_root, folder, files, hashes, 
             failed.extend(failures)
             if failures:
                 break
-            if phase == "cold":
+            if phase in ("cold", "derived"):
                 run.save(status_path, {"fixture": folder, "state": "prior-inventory-restored"}, durable=True)
     finally:
         verify_fixtures()
@@ -1011,16 +1021,20 @@ def run(args):
                       args.selected_catalog, args.activation_compatibility, args.expect_home, args.settings_retry,
                       args.settings_prior_failure)),
              "Pre-marker death needs an exact retained guest and a standalone invocation")
+    independent_derived = args.independent_roots_derived
     independent_cases = select_independent_roots(args.independent_roots,
         any((args.fresh, args.backup_delivery_death, args.backup_death_retry, death_receipt, death_picker_case,
              ancestry_cases, before_marker, capacity_case, picker_case, recovery_case, backup_case, args.probe_write,
              args.ocr_activation, args.working_catalog, args.probe_directory, args.activation, args.selected_catalog,
-             args.activation_compatibility, args.expect_home, args.settings_retry, args.settings_prior_failure)))
+              args.activation_compatibility, args.expect_home, args.settings_retry, args.settings_prior_failure)),
+        derived=independent_derived)
     need(args.independent_roots_retry is None or (independent_cases and args.independent_roots_retry == INDEPENDENT_FIRST_PICKER_REFUSAL),
          "Only the exact first independent-root chooser refusal can be retried")
     independent_handoff = args.independent_roots_handoff
     need(independent_handoff is None or (independent_cases and not args.independent_roots_retry and independent_handoff == INDEPENDENT_GRANTS_RETAINED),
          "The independent-roots handoff requires the exact standalone grant receipt")
+    need(not independent_derived or not (args.independent_roots_retry or independent_handoff),
+         "Derived independent roots may not repeat or continue a previous selection")
     need(bool(args.settings_retry) == bool(args.settings_prior_failure), "A retained retry requires the exact first failure receipt")
     if args.ocr_activation:
         need(not any((args.fresh, args.expect_home, args.probe_directory, args.working_catalog, args.activation, args.selected_catalog,
@@ -1059,6 +1073,7 @@ def run(args):
     independent_claim = None
     independent_prior = None
     independent_retained = None
+    independent_protected = None
     protect_interrupted = None
     death_authority = CAPACITY_PASSED if before_marker else args.backup_death_retry or SETTINGS_COLD_MANIFEST
     death_operation = str(uuid.uuid4()) if args.backup_delivery_death or before_marker else None
@@ -1081,8 +1096,23 @@ def run(args):
             need(len(parents) == 1, "Independent roots require one exact predecessor receipt")
             root = parents.pop()
             recovery_pair = previous
-            if args.independent_roots_retry or independent_handoff:
-                if independent_handoff:
+            if args.independent_roots_retry or independent_handoff or independent_derived:
+                if independent_derived:
+                    cold = settings_run_anchors(root, INDEPENDENT_COLD_PASSED)
+                    granted = settings_run_anchors(raw.parent / "picker-adapter-library-tree-185be1bd3f81",
+                                                  INDEPENDENT_GRANTS_RETAINED)
+                    folder, contents, record, refused_pair = verify_independent_cold_handoff(granted, args.guest, previous)
+                    cold_artifact = json.loads(cold("artifacts.json"))
+                    need(cold_artifact["guest"] == args.guest and cold_artifact["fixture"] == contents and
+                         cold_artifact["independentRootsHandoff"] == INDEPENDENT_GRANTS_RETAINED and
+                         json.loads(cold("outcomes.json")) == {"passed": [INDEPENDENT_COLD_CASE], "failed": [], "installedSha256": previous} and
+                         json.loads(cold("independent-roots-grants.json")) == {"fixture": folder, "state": "prior-inventory-restored"} and
+                         read_results(cold("independent-roots-cold-instrumentation.txt"), (INDEPENDENT_COLD_CASE,)) ==
+                         ([INDEPENDENT_COLD_CASE], []), "The exact predecessor did not prove cold read and grant restoration")
+                    independent_protected = folder, contents, record
+                    independent_claim = json.loads(cold("claim.json"))
+                    root = raw.parent / "picker-adapter-library-tree-ec1a12a0878f"
+                elif independent_handoff:
                     need(previous == hashes, "Cold independent-root readback must not replace either APK")
                     granted = settings_run_anchors(root, INDEPENDENT_GRANTS_RETAINED)
                     folder, contents, record, refused_pair = verify_independent_cold_handoff(granted, args.guest, previous)
@@ -1289,7 +1319,8 @@ def run(args):
                         backupDeathRetry=args.backup_death_retry, backupDeathReceiptOnly=death_receipt,
                         treeAncestryHandoff=ancestry_resume, backupPreMarker=before_marker,
                         backupPreMarkerHandoff=pre_marker_handoff, independentRoots=bool(independent_cases),
-                        independentRootsRetry=args.independent_roots_retry, independentRootsHandoff=independent_handoff)),
+                        independentRootsRetry=args.independent_roots_retry, independentRootsHandoff=independent_handoff,
+                        independentRootsDerived=independent_derived)),
         encoding="utf-8",
     )
     ns = load_allocator(ROOT, args.guest, raw, "pristinepage-tree-" + os.environ["OPENCODE_SESSION_ID"])
@@ -1349,7 +1380,9 @@ def run(args):
         expected = set() if args.fresh else {f"package:{p}" for p in built}
         need(present == expected, "The exact expected package set did not match; nothing was replaced")
         installed = {p: run.installed_hash(p) if f"package:{p}" in present else None for p in built}
-        if not args.fresh:
+        if independent_derived:
+            verify_independent_derived_installed(installed, previous)
+        elif not args.fresh:
             check_installed_pair(installed, previous, hashes)
         run.save(run.path("installed-before.json"), installed, durable=True)
         if independent_cases:
@@ -1406,6 +1439,20 @@ def run(args):
                              "The refused earlier chooser unexpectedly created a grant handoff")
                     check_prior_picker()
                     independent_preservation = (*independent_preservation, check_prior_picker)
+                if independent_protected:
+                    def check_prior_cold():
+                        recheck_target(run, ns)
+                        prior_folder, inventory, record = independent_protected
+                        root = f"/sdcard/Documents/{prior_folder}"
+                        children = independent_fixture_children(prior_folder)
+                        need(adb("shell", "ls", "-A", "-1", root).splitlines() == sorted(children),
+                             "The verified earlier independent fixture changed")
+                        for name in children:
+                            verify_unchanged_settings_destination(adb, f"{root}/{name}", inventory)
+                        need(adb("shell", "run-as", APP, "cat", f"files/independent-ancestry-grants-{prior_folder}") == record,
+                             "The earlier independent fixture record changed")
+                    check_prior_cold()
+                    independent_preservation = (*independent_preservation, check_prior_cold)
             else:
                 pre_marker_preservation = checks
         for p, path in retained.items():
@@ -1476,7 +1523,8 @@ def run(args):
                     stage_synthetic_files(adb, fixture, f"{guest_root}/{name}", files)
             independent_outcome = exercise_independent_roots(run, adb, ns, guest_root, folder, files, hashes,
                                                             independent_prior[0] if independent_prior else None,
-                                                            independent_retained[2] if independent_retained else None)
+                                                            independent_retained[2] if independent_retained else None,
+                                                            derived=independent_derived)
             return bool(independent_outcome["failed"])
         if ancestry_resume or pre_marker_handoff:
             guest_root = retained_pre_marker[0] if pre_marker_handoff else retained_ancestry[0]
@@ -1686,6 +1734,8 @@ if __name__ == "__main__":
                         help="Use the exact first pre-selection refusal as predecessor, preserving its fixture")
     parser.add_argument("--independent-roots-handoff", metavar="GRANTED_MANIFEST_SHA",
                         help="Continue only the first cold read of the exact retained Files selections")
+    parser.add_argument("--independent-roots-derived", action="store_true",
+                        help="With --independent-roots, select only two roots and verify ancestry without a parent grant")
     parser.add_argument("--provider-capacity", action="store_true",
                         help="Verify the real Files capacity gate with an unattainable synthetic requirement and no publication")
     parser.add_argument("--settings-retry", metavar="CANCEL_MANIFEST_SHA", help="Permit one new confirmation on the exact retained, independently canceled fixture")

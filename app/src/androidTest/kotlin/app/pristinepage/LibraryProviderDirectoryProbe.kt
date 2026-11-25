@@ -77,10 +77,7 @@ internal object LibraryProviderDirectoryProbe {
     }
 
     suspend fun verifyIndependentRoots(resolver: ContentResolver, anchor: Uri, left: Uri, right: Uri, read: suspend () -> Unit) {
-        fun open(tree: Uri): ParcelFileDescriptor {
-            val document = DocumentsContract.buildDocumentUriUsingTree(tree, DocumentsContract.getTreeDocumentId(tree))
-            return resolver.openFileDescriptor(document, "r") ?: throw IOException("Files returned no directory descriptor")
-        }
+        fun open(tree: Uri) = openRoot(resolver, tree)
         open(anchor).use { parent ->
             open(left).use { a ->
                 open(right).use { b ->
@@ -93,6 +90,24 @@ internal object LibraryProviderDirectoryProbe {
                 }
             }
         }
+    }
+
+    fun verifyDerivedRoots(resolver: ContentResolver, left: Uri, right: Uri, read: () -> Unit) {
+        openRoot(resolver, left).use { a ->
+            openRoot(resolver, right).use { b ->
+                LibraryDescriptorAncestryWitness.withDerivedAnchor(a, b, DocumentsContract.getTreeDocumentId(left),
+                    DocumentsContract.getTreeDocumentId(right), rebind = {
+                        for ((tree, held) in listOf(left to a, right to b)) {
+                            openRoot(resolver, tree).use { LibraryDescriptorAncestryWitness.requireSameIdentity(held, it) }
+                        }
+                    }, read = read)
+            }
+        }
+    }
+
+    private fun openRoot(resolver: ContentResolver, tree: Uri): ParcelFileDescriptor {
+        val document = DocumentsContract.buildDocumentUriUsingTree(tree, DocumentsContract.getTreeDocumentId(tree))
+        return resolver.openFileDescriptor(document, "r") ?: throw IOException("Files returned no directory descriptor")
     }
 
     private fun statAndSync(resolver: ContentResolver, document: Uri, kind: String): StructStat {

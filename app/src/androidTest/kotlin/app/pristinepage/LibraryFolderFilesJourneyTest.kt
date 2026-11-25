@@ -112,7 +112,8 @@ class LibraryFolderFilesJourneyTest {
             }
     }
     private val chooseHost = TestRule { next, description ->
-        val rule = if (description.methodName in setOf("endsProcessAfterPayloadBeforeTheCompletionMarker", "persistsIndependentFilesRootsAndAnchor"))
+        val rule = if (description.methodName in setOf("endsProcessAfterPayloadBeforeTheCompletionMarker", "persistsIndependentFilesRootsAndAnchor",
+                "separatesIndependentlySelectedRootsWithoutAParentGrant"))
             interruptionCompose else compose
         rule.apply(next, description)
     }
@@ -577,6 +578,40 @@ class LibraryFolderFilesJourneyTest {
     @Test fun persistsExactFilesReadForColdAncestry() = verifyJourney(holdReadForColdAncestry = true)
 
     @Test fun persistsIndependentFilesRootsAndAnchor() {
+        withIndependentFilesSelections(chooseAnchor = true) { app, folder, selected, before ->
+            LibraryIndependentRootGrants.save(app, folder, selected, before)
+        }
+    }
+
+    @Test fun separatesIndependentlySelectedRootsWithoutAParentGrant() {
+        withIndependentFilesSelections(chooseAnchor = false) { app, folder, selected, before ->
+            val witness = LibraryIndependentRootGrants
+            fun requireNoParentAccess() {
+                check(witness.inventory(app) == before + selected.associate { it.toString() to (true to false) }) {
+                    "The persisted grant inventory changed unexpectedly"
+                }
+                witness.refuseParentAccess(app, folder)
+            }
+            requireNoParentAccess()
+            val scratch = File(app.filesDir.canonicalFile, "tree-read-${UUID.randomUUID()}").apply { check(mkdir()) }
+            val reader = AndroidLibraryTreeRead(app, scratch)
+            LibraryProviderDirectoryProbe.verifyDerivedRoots(app.contentResolver, selected[0], selected[1]) {
+                for (tree in selected) {
+                    requireNoParentAccess()
+                    val catalog = runBlocking { reader.verify(tree) }
+                    assertEquals("9e940d7b-76c7-45ea-b5e4-0ad86f26ea13", catalog.libraryId)
+                    assertEquals("25c49d9b-02d8-418f-b982-154980d89cfb", catalog.generationId)
+                    assertEquals(1, catalog.albums)
+                    assertEquals(1, catalog.scans)
+                }
+            }
+            requireNoParentAccess()
+        }
+    }
+
+    private fun withIndependentFilesSelections(chooseAnchor: Boolean,
+        use: (Context, String, List<Uri>, Map<String, Pair<Boolean, Boolean>>) -> Unit,
+    ) {
         val instrumentation = InstrumentationRegistry.getInstrumentation()
         val app = instrumentation.targetContext.applicationContext
         val folder = requireNotNull(InstrumentationRegistry.getArguments().getString("libraryFixtureFolder"))
@@ -584,6 +619,11 @@ class LibraryFolderFilesJourneyTest {
         val paths = witness.paths(folder)
         val all = paths.flatMap(witness::spellings)
         val before = witness.inventory(app)
+        if (!chooseAnchor) {
+            // This witness is pinned to the API 28 guest. Admit only a sparse starting inventory; never ask Android to prune someone else's grant to make room.
+            check(Build.VERSION.SDK_INT == 28 && before.size <= 8) { "Synthetic selections need a sparse API 28 grant inventory" }
+            witness.refuseParentAccess(app, folder)
+        }
         check(all.none { it.toString() in before })
         InstrumentationRegistry.getArguments().getString("libraryPriorIndependentFolder")?.let { old ->
             witness.paths(old) // Reuse the same exact fixture-folder syntax guard.
@@ -597,7 +637,7 @@ class LibraryFolderFilesJourneyTest {
         val selected = ArrayList<Uri>(paths.size)
         var handedOff = false
         try {
-            for ((index, path) in paths.withIndex()) {
+            for ((index, path) in (if (chooseAnchor) paths else paths.take(2)).withIndex()) {
                 val result = AtomicReference<ActivityResult>()
                 val platform = LibraryFolderPickerContract()
                 val (picker, launcher) = interruptionCompose.runOnUiThread {
@@ -645,8 +685,8 @@ class LibraryFolderFilesJourneyTest {
                     interruptionCompose.runOnUiThread { launcher.unregister() }
                 }
             }
-            witness.save(app, folder, selected, before)
-            handedOff = true
+            use(app, folder, selected, before)
+            handedOff = chooseAnchor
         } finally {
             if (!handedOff) {
                 witness.releaseReadDelta(app, selected) { assertEquals(before, witness.inventory(app)) }
