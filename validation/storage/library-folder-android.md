@@ -12,6 +12,8 @@ On the next run, the exact synthetic folder and both fixed namespaces were visib
 
 The localized run pressed the expected action and received a callback, but the old witness discarded the reason its parser did not return a `Picked` value. The next diagnostic retains the typed result, result code, flag bits and exact-identity comparisons without printing URI strings or changing grant admission.
 
+That diagnostic exposed a separate timing issue before the callback: Files showed the navigation button before completing the initial-URI transition. Opening its drawer at that point hid the action over the correctly loaded fixture. The witness now waits for the exact folder and both managed namespaces before tapping; it never navigates during initial loading or retries a confirmation.
+
 ## Gates before activating or publishing
 
 - Matched Files folder, real returned modes, exact persisted readback, fresh catalog admission, Activity recreation, and refusal after revocation on the same approved emulator.
