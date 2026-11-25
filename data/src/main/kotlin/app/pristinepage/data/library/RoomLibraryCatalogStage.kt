@@ -102,7 +102,9 @@ internal fun RoomLibraryCatalogReader.verifyStagedProjection(
 ) {
     read(file) { catalog ->
         val actual = LibraryPortableCatalogProjection(catalog, verifyDerivedOcr = true, checkpoint = checkpoint).snapshot()
-        if (actual.originals.toSet() != expected.originals.toSet() || actual.sources.toSet() != expected.sources.toSet() ||
+        // The portable reader already validated the rebuilt counters against actual rows. The live snapshot may also pin jobs or Undo, which are outside this projection.
+        if (actual.originals.toSet() != expected.originals.map { it.copy(sourceCount = 0) }.toSet() ||
+            actual.sources.toSet() != expected.sources.map { it.copy(refCount = 0) }.toSet() ||
             actual.days.toSet() != expected.days.toSet() || actual.albums.map { it.row } != expected.albums.map { it.row }
         ) throw IOException("Staged library metadata changed")
         for ((album, other) in actual.albums.zip(expected.albums)) {

@@ -254,7 +254,7 @@ class AndroidLibraryTreeRead(context: Context, private val scratchDirectory: Fil
         private const val AUTHORITY = "com.android.externalstorage.documents"
         private const val PACKAGE = "com.android.externalstorage"
         // This caps one detached admission's cumulative provider I/O, not storage capacity or single-scan size.
-        private const val MAX_TREE_ORIGINAL_BYTES = 8L * 1024 * 1024 * 1024
+        internal const val MAX_TREE_ORIGINAL_BYTES = 8L * 1024 * 1024 * 1024
         private val WORKING = Mutex()
 
         private fun hasExactReadGrant(app: Context, tree: Uri): Boolean =

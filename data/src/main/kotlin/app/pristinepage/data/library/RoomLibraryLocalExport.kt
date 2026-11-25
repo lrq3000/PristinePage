@@ -1,20 +1,14 @@
 package app.pristinepage.data.library
 
 import android.content.Context
-import android.database.sqlite.SQLiteDatabase
 import app.pristinepage.data.library.RoomLibraryCatalogReader.Companion.MAX_PORTABLE_BYTES
 import app.pristinepage.data.db.PristineDatabase
-import app.pristinepage.data.db.SourceBlobRow
 import app.pristinepage.data.files.PlatformDirectorySync
-import app.pristinepage.data.files.SourceFiles
 import java.io.File
 import java.io.IOException
-import java.io.InputStream
 import java.nio.file.Files
 import java.nio.file.LinkOption.NOFOLLOW_LINKS
 import java.nio.file.Path
-import java.nio.file.StandardOpenOption.READ
-import java.util.UUID
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.withContext
@@ -27,9 +21,6 @@ internal class RoomLibraryLocalExport(
     private val scratchDirectory: File,
 ) {
     private val application = context.applicationContext
-    private val source = SourceFiles(originalRoot)
-    private val reader = RoomLibraryCatalogReader(application, MAX_PORTABLE_BYTES)
-
     suspend fun writeNewFolder(destination: File): LibraryGeneration = withContext(Dispatchers.IO) {
         val checkpoint = { coroutineContext.ensureActive() }
         val privateFiles = application.filesDir.toPath().toRealPath()
@@ -49,22 +40,13 @@ internal class RoomLibraryLocalExport(
         checkpoint()
         val stage = newStage(scratch)
         val closed = File(stage, "catalog.sqlite")
-        val version = RoomLibraryCatalogStage(application).write(snapshot, closed)
-        reader.read(closed) { catalog -> verifyOriginalReferences(catalog, snapshot.originals, checkpoint) }
-        val generation = LibraryGeneration(UUID.randomUUID().toString(), UUID.randomUUID().toString(), null, version,
-            fingerprintClosedLibraryCatalog(closed, checkpoint))
-        val requirements = snapshot.originals.map { blob ->
-            LibraryObjectTransfer.Requirement(objectId(blob)) { readRegular(source.finalFile(blob.sourceBlobId)) }
-        }
+        val input = RoomLibraryExportInput.prepare(application, snapshot, originals.toFile(), closed, checkpoint)
+        val generation = input.generation
+        val requirements = input.requirements
         // This estimate deliberately assumes a shared volume; read usable space after staging, then reserve both remaining catalog copies plus filesystem headroom. Runtime IO still can fail.
         val capacity = minOf(parent.toFile().usableSpace, scratch.toFile().usableSpace)
-        val metadataReservation = 2 * generation.catalog.byteCount + 16L * 1024 * (requirements.size + 4L)
-        val uniqueSizes = HashMap<String, Long>()
-        for (requirement in requirements) {
-            val previouslySeen = uniqueSizes.putIfAbsent(requirement.id.sha256, requirement.id.byteCount)
-            if (previouslySeen != null && previouslySeen != requirement.id.byteCount) throw IOException("Conflicting original lengths")
-        }
-        if (metadataReservation + uniqueSizes.values.sum() > capacity) throw IOException("Not enough space for library export")
+        val metadataReservation = input.metadataBytes(scratchCopies = 1)
+        if (input.requiredSpace(scratchCopies = 1) > capacity) throw IOException("Not enough space for library export")
         checkpoint()
         forceAncestry(parent, privateFiles, checkpoint)
         // The directory create, not the earlier absence check, wins ownership. A competing export must not adopt this folder.
@@ -74,14 +56,12 @@ internal class RoomLibraryLocalExport(
         checkpoint()
         transfer.copyAndVerify()
         val published = LibraryCatalogPublication(adapter, scratch, checkpoint).publish(
-            generation, MAX_PORTABLE_BYTES, { readRegular(closed) }, requiresObjects = requirements.isNotEmpty(),
+            generation, MAX_PORTABLE_BYTES, input::openCatalog, requiresObjects = requirements.isNotEmpty(),
         ) { verification ->
-            reader.read(verification) { catalog ->
-                verifyOriginalReferences(catalog, snapshot.originals, checkpoint)
-                LibraryObjectTransfer(adapter, checkpoint).prepare(
-                    requirements.distinctBy { it.id }.map { LibraryObjectTransfer.Requirement(it.id, null) }, 0L, 0L,
-                )
-            }
+            input.verifyCatalog(verification)
+            LibraryObjectTransfer(adapter, checkpoint).prepare(
+                requirements.distinctBy { it.id }.map { LibraryObjectTransfer.Requirement(it.id, null) }, 0L, 0L,
+            )
         }
         // Only this attempt's immutable, verified duplicate can go away. Cleanup failure must not hide a valid export.
         try {
@@ -89,17 +69,6 @@ internal class RoomLibraryLocalExport(
             Files.deleteIfExists(stage.toPath())
         } catch (_: IOException) { /* Keep the owned stage for explicit maintenance, not an automatic export replay. */ }
         published
-    }
-
-    private fun verifyOriginalReferences(catalog: SQLiteDatabase, expected: List<SourceBlobRow>, checkpoint: () -> Unit) {
-        if (LibraryPortableOriginals.read(catalog, checkpoint) != expected.associate { it.sourceBlobId to objectId(it) }) {
-            throw IOException("Original references changed in the staged catalog")
-        }
-    }
-
-    private fun readRegular(file: File): InputStream {
-        if (!Files.isRegularFile(file.toPath(), NOFOLLOW_LINKS)) throw IOException("Library input is not a regular file")
-        return Files.newInputStream(file.toPath(), READ, NOFOLLOW_LINKS)
     }
 
     private fun newStage(scratch: Path): File = synchronized(STAGE_ADMISSION) {
@@ -120,7 +89,6 @@ internal class RoomLibraryLocalExport(
     }
 
     private fun overlap(a: Path, b: Path) = a.startsWith(b) || b.startsWith(a) || Files.isSameFile(a, b)
-    private fun objectId(blob: SourceBlobRow) = LibraryObjectTransfer.ObjectId(blob.byteSha256, blob.byteCount)
 
     private companion object {
         val STAGE_ADMISSION = Any()

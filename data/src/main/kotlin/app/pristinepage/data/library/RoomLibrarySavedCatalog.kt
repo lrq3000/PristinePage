@@ -230,9 +230,9 @@ internal class RoomLibrarySavedCatalog(private val database: PristineDatabase) {
     private fun limit(): Nothing = fail(OperationErrorCode.RESOURCE_LIMIT, "library_saved_catalog_limit")
     private fun fail(code: OperationErrorCode, key: String): Nothing = throw RepositoryFailure(OperationError(code, false, key, null))
 
-    private companion object {
+    companion object {
         // Include independent transaction/pin/index tables: neither foreign keys nor a zero album count establishes a clean stage.
-        const val NONEMPTY_STAGE = """SELECT 1 FROM Document UNION ALL SELECT 1 FROM Page
+        private const val NONEMPTY_STAGE = """SELECT 1 FROM Document UNION ALL SELECT 1 FROM Page
             UNION ALL SELECT 1 FROM Source UNION ALL SELECT 1 FROM SourceBlob UNION ALL SELECT 1 FROM LibraryScanName
             UNION ALL SELECT 1 FROM RecipeRevision UNION ALL SELECT 1 FROM RecipeMask UNION ALL SELECT 1 FROM Mask
             UNION ALL SELECT 1 FROM ImportSession UNION ALL SELECT 1 FROM UndoEntry UNION ALL SELECT 1 FROM Confirmation
@@ -245,9 +245,9 @@ internal class RoomLibrarySavedCatalog(private val database: PristineDatabase) {
             UNION ALL SELECT 1 FROM OcrResultFts_docsize UNION ALL SELECT 1 FROM OcrResultFts_segdir
             UNION ALL SELECT 1 FROM OcrResultFts_segments UNION ALL SELECT 1 FROM OcrResultFts_stat
             UNION ALL SELECT 1 FROM sqlite_sequence LIMIT 1"""
-        const val MAX_ALBUMS = 2_000
+        private const val MAX_ALBUMS = 2_000
         const val MAX_PAGES = 4_096
-        const val MAX_REVISIONS = 1_024
-        fun <T> owned(values: List<T>): List<T> = Collections.unmodifiableList(ArrayList(values))
+        private const val MAX_REVISIONS = 1_024
+        private fun <T> owned(values: List<T>): List<T> = Collections.unmodifiableList(ArrayList(values))
     }
 }

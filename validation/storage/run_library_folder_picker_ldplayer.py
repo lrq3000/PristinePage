@@ -38,6 +38,7 @@ ACTIVATION_COMPATIBILITY = (
     "app.pristinepage.RenderCoordinatorIntegrationTest#realPrivateSourceRendersThenReopensWithoutProviderAccessOrSourceMutation",
 )
 WRITE_PROBE_CASE = "app.pristinepage.LibraryFolderFilesJourneyTest#grantedTreeCanStageAndPublishOneSyntheticFileWithoutOverwriting"
+BACKUP_CASE = "app.pristinepage.LibraryFolderFilesJourneyTest#defaultLibraryExportsItsOriginalAndAcceptedEditIntoANewFilesBackup"
 CASES = (
     "app.pristinepage.LibraryFolderPickerContractTest#retainsTheActualEncodedTreeAndBothReturnedModes",
     "app.pristinepage.LibraryFolderPickerContractTest#rejectsDocumentUrisAndCancelledOrNonpersistentSelections",
@@ -54,6 +55,20 @@ def recheck_target(run, ns):
         verify_target(run, ns)
     except subprocess.TimeoutExpired:
         verify_target(run, ns)
+
+
+def check_fixture_root(namespaces, after, probe_write, probe_passed, backup_export, backup_passed):
+    allowed = set(namespaces)
+    required = set(namespaces)
+    if probe_write:
+        allowed.add("isolated-write-probe")
+    if probe_passed:
+        required.add("isolated-write-probe")
+    backups = {name for name in after if re.fullmatch(r"PristinePage-backup-[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}", name)}
+    need(len(backups) <= int(backup_export) and (not backup_passed or len(backups) == 1),
+         "Instrumentation made an unexpected number of backup folders")
+    need(required <= after <= (allowed | backups), "Instrumentation changed entries outside its synthetic write destinations")
+    return next(iter(backups), None)
 
 
 def run(args):
@@ -152,7 +167,8 @@ def run(args):
                      *((ACTIVATION_CASE,) if args.activation else ()),
                      *((SELECTED_CATALOG_CASE,) if args.selected_catalog else ()),
                      *(ACTIVATION_COMPATIBILITY if args.activation_compatibility else ()),
-                     *((WRITE_PROBE_CASE,) if args.probe_write else ()))
+                     *((WRITE_PROBE_CASE,) if args.probe_write else ()),
+                     *((BACKUP_CASE,) if args.backup_export else ()))
         output = adb("shell", "am", "instrument", "-w", "-r", "-e", "class", ",".join(scenarios),
                      "-e", "libraryFixtureFolder", folder, *original_args, RUNNER, timeout=150)
         run.path("instrumentation.txt").write_text(output, encoding="utf-8")
@@ -160,12 +176,27 @@ def run(args):
         for relative, digest in files.items():
             need(adb("shell", "sha256sum", f"{guest_root}/{relative}").split()[0] == digest,
                  "Instrumentation changed an existing library fixture file")
-        expected_root = set(namespaces)
-        if args.probe_write and WRITE_PROBE_CASE in passed:
-            expected_root.add("isolated-write-probe")
         after = set(adb("shell", "ls", "-A", "-1", guest_root).splitlines())
-        need(expected_root <= after <= (expected_root | ({"isolated-write-probe"} if args.probe_write else set())),
-             "Instrumentation changed entries outside the isolated write probe")
+        backup_name = check_fixture_root(namespaces, after, args.probe_write, WRITE_PROBE_CASE in passed,
+                                         args.backup_export, BACKUP_CASE in passed)
+        if BACKUP_CASE in passed:
+            backup = f"{guest_root}/{backup_name}"
+            need(set(adb("shell", "ls", "-A", "-1", backup).splitlines()) == {*namespaces, "staging"},
+                 "The backup does not contain only its expected namespaces")
+            need(not adb("shell", "ls", "-A", "-1", f"{backup}/staging").strip(), "A complete backup retained a staged file")
+            generation = backup_name.removeprefix("PristinePage-backup-")
+            for namespace, leaf in (("catalogs", f"{generation}.sqlite"), ("generations", f"{generation}.complete")):
+                need(adb("shell", "ls", "-A", "-1", f"{backup}/{namespace}").splitlines() == [leaf],
+                     "The backup has an unexpected catalog or marker")
+            marker = adb("shell", "cat", f"{backup}/generations/{generation}.complete").splitlines()
+            need(len(marker) == 7 and marker[0] == "pristinepage-library-v1" and marker[2:4] == [generation, "-"],
+                 "The guest backup has the wrong completion record")
+            # Independently calculated from the exact encoded PNG in LibraryDefaultFolderExportProbe.
+            digest = "ebd602840377a3b3cf763cb6828fee67861ff77c444e8fe5894457ef6d99a24d"
+            need(adb("shell", "ls", "-A", "-1", f"{backup}/objects").splitlines() == [digest],
+                 "The backup has an unexpected original locator")
+            for leaf, digest in ((f"objects/{digest}", digest), (f"catalogs/{generation}.sqlite", marker[6])):
+                need(adb("shell", "sha256sum", f"{backup}/{leaf}").split()[0] == digest, "Backup bytes do not match their recorded digest")
         for namespace in namespaces:
             expected_leaves = {relative.split("/", 1)[1] for relative in files if relative.startswith(f"{namespace}/")}
             need(set(adb("shell", "ls", "-A", "-1", f"{guest_root}/{namespace}").splitlines()) == expected_leaves,
@@ -190,5 +221,6 @@ if __name__ == "__main__":
     parser.add_argument("--selected-catalog", action="store_true")
     parser.add_argument("--activation-compatibility", action="store_true")
     parser.add_argument("--probe-write", action="store_true", help="Write only in a fresh synthetic probe subdirectory")
+    parser.add_argument("--backup-export", action="store_true", help="Export an isolated default library into a separately named backup child")
     parser.add_argument("--previous", nargs=2, metavar=("APP_APK", "TEST_APK"))
     raise SystemExit(run(parser.parse_args()))

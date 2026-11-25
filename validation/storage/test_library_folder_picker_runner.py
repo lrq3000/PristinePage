@@ -2,7 +2,7 @@ from subprocess import TimeoutExpired
 import unittest
 from unittest.mock import patch
 
-from run_library_folder_picker_ldplayer import recheck_target
+from run_library_folder_picker_ldplayer import check_fixture_root, recheck_target
 from run_local_ocr_guest import read_boot_serial
 
 
@@ -27,3 +27,15 @@ class LibraryFolderPickerRunnerTest(unittest.TestCase):
         self.assertIsNone(read_boot_serial(deadline))
         self.assertEqual("emulator-5558", read_boot_serial(lambda: " emulator-5558\n"))
         self.assertIsNone(read_boot_serial(lambda: "error: device not found"))
+
+    def test_complete_backup_allows_only_one_new_canonical_child(self):
+        original = {"catalogs", "generations", "objects"}
+        backup = "PristinePage-backup-10000000-aaaa-4aaa-8aaa-000000000001"
+        result = original | {backup}
+        self.assertEqual(backup, check_fixture_root(original, result, False, False, True, True))
+        for wrong in (original, result | {"unrelated"}, result | {backup[:-1] + "2"}, result - {"objects"}):
+            with self.assertRaises(RuntimeError):
+                check_fixture_root(original, wrong, False, False, True, True)
+        with self.assertRaises(RuntimeError):
+            check_fixture_root(original, result, False, False, False, False)
+        self.assertEqual(backup, check_fixture_root(original, result, False, False, True, False))

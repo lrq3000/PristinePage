@@ -1,6 +1,7 @@
 package app.pristinepage.data.repository
 
 import android.content.Context
+import android.net.Uri
 import androidx.room.Room
 import app.pristinepage.data.db.PristineDatabase
 import app.pristinepage.data.db.AtelierDraftMigration
@@ -13,6 +14,8 @@ import app.pristinepage.data.db.LibraryScanNameMigration
 import app.pristinepage.data.files.DerivedFiles
 import app.pristinepage.data.files.SourceFiles
 import app.pristinepage.data.files.SourceInspector
+import app.pristinepage.data.library.LibraryFolderExportReceipt
+import app.pristinepage.data.library.RoomLibraryFolderExport
 import app.pristinepage.data.model.ExportSnapshot
 import app.pristinepage.data.model.JobId
 import app.pristinepage.data.model.OperationError
@@ -27,6 +30,7 @@ import kotlinx.coroutines.withContext
 
 /** Owns one private database and its import participants. The application retains this scope; Activities receive ports, never construct Room or close a store still used by another consumer. Closing this database does not release process-lifetime ownership locks or delete retained files. */
 class PrivateImportStore private constructor(
+    private val context: Context,
     private val database: PristineDatabase,
     private val root: File,
     private val owners: FileOperationOwners,
@@ -50,6 +54,10 @@ class PrivateImportStore private constructor(
     val sourceMetadata: RoomSourceMetadataSearch by lazy { SourceMetadataComposition.bind(this) }
 
     override fun close() = exportLifetime.close()
+
+    /** Caller must have obtained the exact writable Files capability for an explicit backup. Does not change the active location. */
+    suspend fun exportLibraryTo(destination: Uri): LibraryFolderExportReceipt =
+        exportLifetime.retainLibraryBackup { RoomLibraryFolderExport(context, database, root).write(destination) }
 
     /** Pair the readonly metadata reader with the issuing store's exact database and retirement boundary. */
     internal class SourceMetadataComposition private constructor(store: PrivateImportStore) {
@@ -151,7 +159,7 @@ class PrivateImportStore private constructor(
                     val drafts = database.atelierDrafts()
                     val draftOwner = RoomAtelierDrafts(metadata, drafts, sessions)
                     val editable = RoomEditablePages(metadata, database.catalog())
-                    PrivateImportStore(database, root, owners, verification, documents, sessions, sessions, sessions, sources,
+                     PrivateImportStore(context.applicationContext, database, root, owners, verification, documents, sessions, sessions, sessions, sources,
                         RoomCommittedSources(metadata, database.catalog(), files),
                         RoomDocumentCatalog(metadata, database.catalog()),
                         editable, draftOwner, AtelierAcquisition(draftOwner, drafts, editable, documents))

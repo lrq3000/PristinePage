@@ -73,6 +73,8 @@ class LibraryFolderFilesJourneyTest {
 
     @Test fun grantedTreeCanStageAndPublishOneSyntheticFileWithoutOverwriting() = verifyJourney(probeWrite = true)
 
+    @Test fun defaultLibraryExportsItsOriginalAndAcceptedEditIntoANewFilesBackup() = verifyJourney(exportBackup = true)
+
     @Test fun durableFolderSelectionReopensExactCatalogAndRefusesRevocation() {
         lateinit var context: Context
         lateinit var spool: File
@@ -200,6 +202,7 @@ class LibraryFolderFilesJourneyTest {
 
     private fun verifyJourney(
         probeWrite: Boolean = false,
+        exportBackup: Boolean = false,
         revokeAfterProbe: ((Uri) -> Unit)? = null,
         probe: ((ContentResolver, Uri, AndroidLibraryTreeRead, AndroidLibraryTreeRead.Verified, File) -> Unit)? = null,
     ) {
@@ -275,9 +278,16 @@ class LibraryFolderFilesJourneyTest {
                         assertTrue(runBlocking { destination.availableBytes(it) } > 0)
                         val alias = if (it == home) expected else home
                         assertThrows(IOException::class.java) { runBlocking { destination.availableBytes(alias) } }
+                        assertTrue(runBlocking { destination.availableBytes(it) } > 0)
                     }
                 }
                 assertThrows(IOException::class.java) { runBlocking { destination.availableBytes(uri) } }
+            } else if (exportBackup) runCatching {
+                val flag = Intent.FLAG_GRANT_WRITE_URI_PERMISSION
+                try { runBlocking { LibraryDefaultFolderExportProbe.verify(app, uri) { handoff.persistWrite(picked) } } }
+                finally {
+                    if (existing()[uri.toString()]?.second == true) app.contentResolver.releasePersistableUriPermission(uri, flag)
+                }
             } else null
             val different = DocumentsContract.buildTreeDocumentUri(requireNotNull(uri.authority), "primary:Documents/${folder}-different")
             val wrongRoot = assertThrows(IOException::class.java) {
@@ -341,7 +351,7 @@ class LibraryFolderFilesJourneyTest {
             for (fixtureTree in exactFixtureTrees) {
                 existing()[fixtureTree]?.let { (read, write) ->
                     val modes = (if (read) Intent.FLAG_GRANT_READ_URI_PERMISSION else 0) or
-                        (if (probeWrite && write) Intent.FLAG_GRANT_WRITE_URI_PERMISSION else 0)
+                        (if ((probeWrite || exportBackup) && write) Intent.FLAG_GRANT_WRITE_URI_PERMISSION else 0)
                     if (modes != 0) app.contentResolver.releasePersistableUriPermission(Uri.parse(fixtureTree), modes)
                 }
             }
