@@ -1,5 +1,6 @@
 package app.pristinepage.ocr
 
+import android.annotation.SuppressLint
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
@@ -11,7 +12,8 @@ import android.view.MenuItem
 import android.view.textclassifier.TextClassifier
 import android.widget.TextView
 
-/** Use native selection handles and Copy without sending the result to Android's smart selection classifier. */
+/** Use native selection handles and Copy without sending the result to Android's smart selection classifier. Compose constructs this view directly under the platform theme; the folder adapter's AppCompat dependency does not provide its inflater or selection controller. */
+@SuppressLint("AppCompatCustomView")
 internal class ReadOnlyOcrTextView @JvmOverloads constructor(
     context: Context,
     private val writeClipboard: (ClipData) -> Unit = { context.getSystemService(ClipboardManager::class.java)?.setPrimaryClip(it) },

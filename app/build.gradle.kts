@@ -87,6 +87,11 @@ tasks.withType<Test>().configureEach {
 }
 
 dependencies {
+    constraints {
+        // Activity 1.13.0 requests 1.0.0; retain the already verified 1.0.2 used by the previous app.
+        implementation(libs.androidx.navigationevent)
+        implementation(libs.androidx.navigationevent.compose)
+    }
     implementation(project(":core"))
     implementation(project(":data"))
     implementation(project(":image-android"))
@@ -102,8 +107,10 @@ dependencies {
     implementation(libs.compose.foundation)
     implementation(libs.compose.material3)
     implementation(libs.compose.ui.tooling.preview)
-    implementation(libs.kotlinx.coroutines.android)
+    // SimpleStorage needs this version in the app; standalone module graphs keep the original pin.
+    implementation(libs.kotlinx.coroutines.android.app)
     implementation(libs.work.runtime.ktx)
+    implementation(libs.simple.storage)
     implementation(libs.camera.core)
     implementation(libs.camera.camera2)
     implementation(libs.camera.lifecycle)
