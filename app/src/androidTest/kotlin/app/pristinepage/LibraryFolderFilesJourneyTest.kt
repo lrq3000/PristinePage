@@ -417,6 +417,16 @@ class LibraryFolderFilesJourneyTest {
                 }
             }
         }
+        // Android 9 can move back to Documents when its hidden-root preference changes. This is a new
+        // navigation action on the positively observed parent, never another folder confirmation.
+        val settled = await(instrumentation, picker, "settled exact fixture or its Documents parent") {
+            atTarget(it) || (containsUnder(it, "Documents", "dropdown_breadcrumb") && unique(it, setOf(folder), "dir_list") != null)
+        }
+        if (!atTarget(settled)) {
+            select("synthetic folder after Files preference restoration", setOf(folder), "dir_list") {
+                containsUnder(it, "Documents", "dropdown_breadcrumb")
+            }
+        }
         if (!selectFolder) {
             await(instrumentation, picker, "exact destination before cancellation", ::atTarget)
             // Back from nested directories can pop one level; callers must verify and cancel the entire chooser.
