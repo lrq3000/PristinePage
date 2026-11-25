@@ -31,9 +31,9 @@ class LocalSelectedLibraryAuthorityTest {
         val writer = LocalSelectedLibraryAuthority(root, sync)
         writer.initializeDefault(initial)
         val next = Selection(Location.Folder(grant.grantId, generation.id), Identity(generation.libraryId, 2))
-        writer.chooseFolder(initial, next, grant, generation)
+        val published = writer.chooseFolder(initial, next, grant, generation)
         val reopened = assertIs<LocalSelectedLibraryAuthority.Selected.Folder>(LocalSelectedLibraryAuthority(root, sync).read())
-        assertEquals(next, reopened.selection)
+        assertEquals(published, reopened.selection)
         assertEquals(uri, reopened.grant.exactUri)
         assertEquals(generation, reopened.expectedGeneration)
         assertFailsWith<IOException> { reopened.requireExact(uri, generation.copy(catalog = ObjectId("b".repeat(64), 512))) }
@@ -55,9 +55,32 @@ class LocalSelectedLibraryAuthorityTest {
         val writer = LocalSelectedLibraryAuthority(root, sync)
         writer.initializeDefault(initial)
         val next = Selection(Location.Folder(grant.grantId, generation.id), Identity(generation.libraryId, 2))
-        writer.chooseFolder(initial, next, grant, generation)
+        val published = writer.chooseFolder(initial, next, grant, generation)
         check(root.resolve("folder-grants").resolve(grant.grantId).delete())
         val refused = assertIs<LocalSelectedLibraryAuthority.Selected.Reconnect>(LocalSelectedLibraryAuthority(root, sync).read())
-        assertEquals(next, refused.selection)
+        assertEquals(published, refused.selection)
+    }
+
+    @Test fun aCanonicalButChangedPrivateGenerationRecordCannotSupplyANewExpectedDigest() {
+        val root = roots.newFolder().canonicalFile
+        val writer = LocalSelectedLibraryAuthority(root, sync)
+        writer.initializeDefault(initial)
+        val next = Selection(Location.Folder(grant.grantId, generation.id), Identity(generation.libraryId, 2))
+        writer.chooseFolder(initial, next, grant, generation)
+        val marker = root.resolve("folder-verifications").resolve("${grant.grantId}-${generation.id}")
+        marker.writeBytes(generation.copy(catalog = ObjectId("b" + "a".repeat(63), 512)).encode())
+        val refused = assertIs<LocalSelectedLibraryAuthority.Selected.Reconnect>(LocalSelectedLibraryAuthority(root, sync).read())
+        assertEquals(next.identity, refused.selection.identity)
+    }
+
+    @Test fun failedGenerationDirectorySyncDoesNotPublishTheFolderPointer() {
+        val root = roots.newFolder().canonicalFile
+        val good = LocalSelectedLibraryAuthority(root, sync)
+        good.initializeDefault(initial)
+        val support = root.resolve("folder-verifications").resolve("${grant.grantId}-${generation.id}")
+        val failing = LocalSelectedLibraryAuthority(root, DirectorySync { !support.exists() })
+        val next = Selection(Location.Folder(grant.grantId, generation.id), Identity(generation.libraryId, 2))
+        assertFailsWith<IOException> { failing.chooseFolder(initial, next, grant, generation) }
+        assertEquals(LocalSelectedLibraryAuthority.Selected.Default(initial), good.read())
     }
 }

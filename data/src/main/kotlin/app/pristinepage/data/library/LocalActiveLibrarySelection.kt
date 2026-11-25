@@ -34,7 +34,7 @@ internal class LocalActiveLibrarySelection(root: File, private val directorySync
     }
 
     /** False does not change an authoritative expected selection. A missing or different non-null predecessor must be reconciled, not treated as a refused switch. */
-    fun replace(expected: Selection?, next: Selection): Boolean {
+    fun replace(expected: Selection?, next: Selection, checkpoint: () -> Unit = {}): Boolean {
         val previous = readVerified()
         if (previous != expected) {
             if (expected == null) return false
@@ -57,6 +57,7 @@ internal class LocalActiveLibrarySelection(root: File, private val directorySync
             channel.force(true)
         }
         // No in-place rewrite and no copy/delete fallback. The old pointer remains until the atomic replacement.
+        checkpoint()
         Files.move(stage, pointer, ATOMIC_MOVE, REPLACE_EXISTING)
         if (readVerified() != next) throw IOException("Published active library selection changed")
         return true
@@ -82,9 +83,11 @@ internal class LocalActiveLibrarySelection(root: File, private val directorySync
         if (extent.toLong() != attributes.size()) invalid()
         val bytes = data.array().copyOf(extent)
         val fields = bytes.toString(Charsets.US_ASCII).split('\n')
-        if (fields.size != 7 || fields[0] != HEADER || fields[6].isNotEmpty()) invalid()
+        val v2 = fields.firstOrNull() == BOUND_HEADER
+        if ((v2 && fields.size != 8) || (!v2 && (fields.size != 7 || fields[0] != HEADER)) || fields.last().isNotEmpty()) invalid()
         val selection = try {
-            val location = if (fields[3] == "-" && fields[4] == "-") Location.Default else Location.Folder(fields[3], fields[4])
+            val location = if (!v2 && fields[3] == "-" && fields[4] == "-") Location.Default
+                else Location.Folder(fields[3], fields[4], if (v2) fields[5] else null)
             Selection(location, Identity(fields[1], fields[2].toLongOrNull() ?: invalid()))
         } catch (_: IllegalArgumentException) { invalid() }
         if (!bytes.contentEquals(encode(selection))) invalid()
@@ -97,7 +100,10 @@ internal class LocalActiveLibrarySelection(root: File, private val directorySync
 
     private fun encode(selection: Selection): ByteArray {
         val location = selection.location as? Location.Folder
-        val body = "$HEADER\n${selection.identity.libraryId}\n${selection.identity.activation}\n${location?.grantId ?: "-"}\n${location?.admittedGenerationId ?: "-"}\n"
+        val verification = location?.verificationSha256
+        val version = if (verification == null) HEADER else BOUND_HEADER
+        val body = ("$version\n${selection.identity.libraryId}\n${selection.identity.activation}\n${location?.grantId ?: "-"}\n${location?.admittedGenerationId ?: "-"}\n" +
+            (verification?.let { "$it\n" } ?: ""))
             .toByteArray(Charsets.US_ASCII)
         // Detect accidental corruption of valid-looking fields; this cannot establish authenticity or rule out replay of an entire prior record.
         val checksum = MessageDigest.getInstance("SHA-256").digest(body).joinToString("") { "%02x".format(it.toInt() and 255) }
@@ -108,6 +114,7 @@ internal class LocalActiveLibrarySelection(root: File, private val directorySync
 
     private companion object {
         const val HEADER = "pristinepage-active-library-v1"
-        const val MAX_BYTES = 256
+        const val BOUND_HEADER = "pristinepage-active-library-v2"
+        const val MAX_BYTES = 320 // v2 adds a 64-character digest of the exact grant and generation.
     }
 }

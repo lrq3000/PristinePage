@@ -1,6 +1,7 @@
 package app.pristinepage.data.library
 
 import app.pristinepage.data.model.requireOpaqueId
+import app.pristinepage.core.pipeline.requireSha256
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.currentCoroutineContext
@@ -10,10 +11,11 @@ import kotlinx.coroutines.ensureActive
 internal class ActiveLibraryFence(initial: Selection) {
     sealed interface Location {
         data object Default : Location
-        data class Folder(val grantId: String, val admittedGenerationId: String) : Location {
+        data class Folder(val grantId: String, val admittedGenerationId: String, val verificationSha256: String? = null) : Location {
             init {
                 requireOpaqueId(grantId)
                 requireOpaqueId(admittedGenerationId)
+                verificationSha256?.let(::requireSha256)
             }
         }
     }

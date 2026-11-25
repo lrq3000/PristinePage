@@ -7,6 +7,7 @@ import app.pristinepage.data.library.ActiveLibraryFence.Selection
 import java.io.File
 import java.io.IOException
 import java.nio.file.FileAlreadyExistsException
+import java.security.MessageDigest
 
 /** Verify the private pointer and its supporting immutable records. The caller owns the cooperative settings lane and must admit the real graph independently. */
 internal class LocalSelectedLibraryAuthority(root: File, sync: DirectorySync = PlatformDirectorySync) {
@@ -34,7 +35,9 @@ internal class LocalSelectedLibraryAuthority(root: File, sync: DirectorySync = P
         val selected = try {
             val grant = grants.readVerified(location.grantId)
             val generation = readVerifiedGeneration(location)
-            if (grant != null && generation != null && generation.libraryId == current.identity.libraryId) {
+            if (grant != null && generation != null && generation.libraryId == current.identity.libraryId &&
+                location.verificationSha256 == digest(grant, generation)
+            ) {
                 Selected.Folder(current, grant, generation)
             } else Selected.Reconnect(current)
         } catch (_: IOException) {
@@ -47,20 +50,25 @@ internal class LocalSelectedLibraryAuthority(root: File, sync: DirectorySync = P
     fun initializeDefault(next: Selection): Boolean = pointer.replace(null, next)
 
     /** Called only after verifying the exact next folder and candidate graph. Stage records before publishing the pointer; never delete an old binding on refusal. */
-    fun chooseFolder(expected: Selection, next: Selection, grant: LibraryFolderGrantRecord, generation: LibraryGeneration): Boolean {
+    fun chooseFolder(expected: Selection, next: Selection, grant: LibraryFolderGrantRecord, generation: LibraryGeneration,
+        checkpoint: () -> Unit = {},
+    ): Selection {
         val location = next.location as? Location.Folder ?: throw IOException("Expected a verified folder selection")
         if (location.grantId != grant.grantId || location.admittedGenerationId != generation.id ||
             next.identity.libraryId != generation.libraryId || expected.identity.activation == Long.MAX_VALUE ||
             next.identity.activation != expected.identity.activation + 1
         ) throw IOException("The grant, generation and selection disagree")
+        val bound = boundSelection(next, grant, generation)
         if (pointer.readVerified() != expected) throw IOException("The expected selection is no longer active")
+        checkpoint()
         grants.writeVerified(grant)
         if (readVerifiedGeneration(location) == null) {
             try { verifications.createFolderVerification(grant.grantId, generation) }
             catch (_: FileAlreadyExistsException) { /* Require an exact durable immutable match below. */ }
         }
         if (readVerifiedGeneration(location) != generation) throw IOException("The folder generation verification conflicts")
-        return pointer.replace(expected, next)
+        if (!pointer.replace(expected, bound, checkpoint)) throw IOException("The selected folder was not published")
+        return bound
     }
 
     private fun readVerifiedGeneration(location: Location.Folder): LibraryGeneration? {
@@ -71,5 +79,18 @@ internal class LocalSelectedLibraryAuthority(root: File, sync: DirectorySync = P
             throw IOException("The folder generation verification changed")
         }
         return first
+    }
+
+    companion object {
+        fun boundSelection(selection: Selection, grant: LibraryFolderGrantRecord, generation: LibraryGeneration): Selection {
+            val location = selection.location as? Location.Folder ?: throw IOException("Expected a folder selection")
+            val digest = digest(grant, generation)
+            if (location.verificationSha256?.let { it != digest } == true) throw IOException("The folder verification binding disagrees")
+            return selection.copy(location = location.copy(verificationSha256 = digest))
+        }
+
+        private fun digest(grant: LibraryFolderGrantRecord, generation: LibraryGeneration): String =
+            MessageDigest.getInstance("SHA-256").digest(grant.encode() + generation.encode())
+                .joinToString("") { "%02x".format(it.toInt() and 255) }
     }
 }
