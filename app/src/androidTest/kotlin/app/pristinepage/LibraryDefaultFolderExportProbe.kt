@@ -47,6 +47,9 @@ import org.junit.Assert.*
 
 /** The ordinary ingest and edit services, a real Files grant, and an independent read of the completed backup. */
 internal object LibraryDefaultFolderExportProbe {
+    fun originalPng(): ByteArray =
+        Base64.decode("iVBORw0KGgoAAAANSUhEUgAAAAMAAAACCAIAAAASFvFNAAAAGElEQVR4nGP4z8DAAME2NjYVFRX///8HAD+JCBdips5AAAAAAElFTkSuQmCC", Base64.NO_WRAP)
+
     class Backup(
         val receipt: LibraryFolderExportReceipt, val album: DocumentId, val page: PageId, val source: SourceId, val blob: SourceBlobId,
         val original: ByteArray, val digest: String, val inspection: SourceInspection, val revision: Long,
@@ -74,7 +77,7 @@ internal object LibraryDefaultFolderExportProbe {
                 return app.contentResolver
             }
         }
-        val png = Base64.decode("iVBORw0KGgoAAAANSUhEUgAAAAMAAAACCAIAAAASFvFNAAAAGElEQVR4nGP4z8DAAME2NjYVFRX///8HAD+JCBdips5AAAAAAElFTkSuQmCC", Base64.NO_WRAP)
+        val png = originalPng()
         val reference = "content://fixture.documents/library-export-original"
         var reads = 0
         val graph = ApplicationServices(context, ApplicationImageBudget.create(64), SourceInput {

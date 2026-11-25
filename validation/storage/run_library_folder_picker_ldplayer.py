@@ -1,11 +1,14 @@
 """Verify the real Files folder handoff on one allocator-owned PristinePage app guest."""
 
 from argparse import ArgumentParser
+from contextlib import closing
+from hashlib import sha256
 import json
 import os
 from pathlib import Path
 import re
 import shutil
+import sqlite3
 import subprocess
 import sys
 import uuid
@@ -58,6 +61,9 @@ ACTIVATION_COMPATIBILITY = (
 )
 WRITE_PROBE_CASE = "app.pristinepage.LibraryFolderFilesJourneyTest#grantedTreeCanStageAndPublishOneSyntheticFileWithoutOverwriting"
 BACKUP_CASE = "app.pristinepage.LibraryFolderFilesJourneyTest#defaultLibraryExportsItsOriginalAndAcceptedEditIntoANewFilesBackup"
+SETTINGS_BACKUP_CASE = "app.pristinepage.LibraryFolderFilesJourneyTest#settingsPublishesOneBackupOfTheSyntheticDefaultLibrary"
+SETTINGS_WITNESS_FILE = "files/library-settings-native-witness"
+BACKUP_ORIGINAL = "ebd602840377a3b3cf763cb6828fee67861ff77c444e8fe5894457ef6d99a24d"
 OCR_ACTIVATION_CASES = tuple(f"app.pristinepage.ocr.OcrWorkManagerIntegrationTest#{method}" for method in (
     "sameActivationKeepsTheLiveWakeButAnotherActivationDoesNotShareIt",
     "invalidInputFailsBeforeExecutingTheStandardOcrWorker",
@@ -100,6 +106,45 @@ def check_fixture_root(namespaces, after, probe_write, probe_passed, backup_expo
     return next(iter(backups), None)
 
 
+def select_backup_case(args):
+    if args.settings_backup:
+        need(args.fresh and not any((args.backup_export, args.probe_write, args.ocr_activation, args.working_catalog,
+                                     args.probe_directory, args.activation, args.selected_catalog, args.activation_compatibility,
+                                     args.expect_home)),
+             "Settings backup requires a fresh standalone app witness")
+        return SETTINGS_BACKUP_CASE
+    return BACKUP_CASE if args.backup_export else None
+
+
+def verify_settings_catalog(path, digest, extent, expected):
+    album, page, source, pixels, revision1, revision2 = expected
+    cli = shutil.which("sqlite3")
+    need(cli is not None, "The existing FTS4-capable SQLite CLI is required")
+    checks = subprocess.run([cli, "-batch", "-bail", "-readonly", str(path), "PRAGMA integrity_check; PRAGMA foreign_key_check;"],
+                            capture_output=True, text=True, timeout=15, check=True)
+    need(checks.stdout.splitlines() == ["ok"], "Settings backup catalog failed independent integrity or foreign-key readback")
+    with closing(sqlite3.connect(path.as_uri() + "?mode=ro&immutable=1", uri=True)) as db:
+        for table in ("Document", "Page", "SourceBlob", "Source", "LibraryScanName"):
+            need(db.execute(f"SELECT COUNT(*) FROM {table}").fetchone() == (1,), "Settings backup included or omitted unrelated records")
+        rows = db.execute("""
+            SELECT d.documentId,d.title,d.documentRevision,p.pageId,p.currentRecipeRevision,p.ordinal,s.sourceId,
+                   s.pixelSha256,b.byteSha256,b.byteCount,n.filename,n.documentId
+              FROM Document d JOIN Page p ON p.documentId=d.documentId JOIN Source s ON s.sourceId=p.sourceId
+              JOIN SourceBlob b ON b.sourceBlobId=s.sourceBlobId JOIN LibraryScanName n ON n.pageId=p.pageId LIMIT 2
+        """).fetchall()
+        need(rows == [(album, "Synthetic Settings backup", 3, page, 2, 0, source, pixels, digest, extent, f"Scan {page}.png", album)],
+             "Settings backup scan binding differed from the exact synthetic album, original or logical name")
+        revisions = db.execute("""
+            SELECT pageId,sourceId,recipeRevision,parentRevision,canonicalRecipe FROM RecipeRevision ORDER BY recipeRevision LIMIT 3
+        """).fetchall()
+        need([(p, s, rev, parent, sha256(recipe).hexdigest(), json.loads(recipe)["geometry"]["outputQuarterTurns"])
+              for p, s, rev, parent, recipe in revisions] == [
+                  (page, source, 1, None, revision1, 0), (page, source, 2, 1, revision2, 1)
+              ], "Settings backup lost the exact revision sequence or saved rotation")
+        need(db.execute("SELECT documentId,action,appliedDocumentRevision,state FROM UndoEntry LIMIT 2").fetchall() ==
+             [(album, "RECIPE_EDIT", 3, "AVAILABLE")], "Settings backup lost the retained Undo")
+
+
 def run(args):
     need(__debug__ and ROOT == Path.cwd().resolve() and not any(os.environ.get(k) for k in LOCAL_ADB_OVERRIDES),
          "Require the exact build worktree and default scoped ADB transport")
@@ -110,6 +155,7 @@ def run(args):
          "The checked-out production/test build inputs do not match the admitted source")
     need(re.fullmatch(r"agent-pristinepage-tree-[a-f0-9]{12}", args.guest), "Require a dedicated library app-test guest name")
     need(args.fresh != bool(args.previous), "Choose first admission or an exact retained predecessor pair")
+    backup_case = select_backup_case(args)
     if args.ocr_activation:
         need(not any((args.fresh, args.expect_home, args.probe_directory, args.working_catalog, args.activation, args.selected_catalog,
                       args.activation_compatibility, args.probe_write, args.backup_export)),
@@ -122,6 +168,9 @@ def run(args):
         APP: ROOT / "app/build/outputs/apk/debug/app-debug.apk",
         TEST: ROOT / "app/build/outputs/apk/androidTest/debug/app-debug-androidTest.apk",
     }
+    disk_floor = 16 if args.fresh else 12
+    need(shutil.disk_usage(ROOT).free >= disk_floor * 1024**3 + sum(path.stat().st_size for path in built.values()),
+         "Not enough disk for the exact retained APK pair and the guest floor")
     hashes = dict(zip(built, [args.app_sha, args.test_sha]))
     proof = {package: exact_apk(path, hashes[package], stage, package == TEST) for package, path in built.items()}
     previous = {}
@@ -202,7 +251,9 @@ def run(args):
         guest_root = f"/sdcard/Documents/{folder}"
         adb("shell", "mkdir", "-p", "/sdcard/Documents")
         namespaces = sorted({relative.split("/", 1)[0] for relative in files})
-        adb("shell", "mkdir", guest_root, *(f"{guest_root}/{namespace}" for namespace in namespaces))
+        # The root reservation must succeed before touching any child, even if a colliding folder already exists.
+        adb("shell", "mkdir", guest_root)
+        adb("shell", "mkdir", *(f"{guest_root}/{namespace}" for namespace in namespaces))
         for relative, digest in files.items():
             adb("push", fixture / relative, f"{guest_root}/{relative}")
             need(adb("shell", "sha256sum", f"{guest_root}/{relative}").split()[0] == digest,
@@ -213,7 +264,7 @@ def run(args):
         original_args = ["-e", "libraryFixtureOriginal", original]
         if args.expect_home:
             original_args += ["-e", "libraryExpectHome", "1"]
-        scenarios = (*CASES, *((DESCRIPTOR_CASE,) if args.probe_directory else ()),
+        scenarios = (SETTINGS_BACKUP_CASE,) if args.settings_backup else (*CASES, *((DESCRIPTOR_CASE,) if args.probe_directory else ()),
                      *((WORKING_CASE,) if args.working_catalog else ()),
                      *((ACTIVATION_CASE,) if args.activation else ()),
                      *((SELECTED_CATALOG_CASE,) if args.selected_catalog else ()),
@@ -221,16 +272,18 @@ def run(args):
                      *((WRITE_PROBE_CASE,) if args.probe_write else ()),
                      *((BACKUP_CASE,) if args.backup_export else ()))
         output = adb("shell", "am", "instrument", "-w", "-r", "-e", "class", ",".join(scenarios),
-                     "-e", "libraryFixtureFolder", folder, *original_args, RUNNER, timeout=150)
+                     "-e", "libraryFixtureFolder", folder, *original_args,
+                     *(("-e", "librarySettingsFresh", "1") if args.settings_backup else ()), RUNNER, timeout=150)
         run.path("instrumentation.txt").write_text(output, encoding="utf-8")
         passed, failed = read_results(output, scenarios)
         for relative, digest in files.items():
             need(adb("shell", "sha256sum", f"{guest_root}/{relative}").split()[0] == digest,
                  "Instrumentation changed an existing library fixture file")
         after = set(adb("shell", "ls", "-A", "-1", guest_root).splitlines())
+        backup_passed = backup_case is not None and backup_case in passed
         backup_name = check_fixture_root(namespaces, after, args.probe_write, WRITE_PROBE_CASE in passed,
-                                         args.backup_export, BACKUP_CASE in passed)
-        if BACKUP_CASE in passed:
+                                         backup_case is not None, backup_passed)
+        if backup_passed:
             backup = f"{guest_root}/{backup_name}"
             need(set(adb("shell", "ls", "-A", "-1", backup).splitlines()) == {*namespaces, "staging"},
                  "The backup does not contain only its expected namespaces")
@@ -243,11 +296,26 @@ def run(args):
             need(len(marker) == 7 and marker[0] == "pristinepage-library-v1" and marker[2:4] == [generation, "-"],
                  "The guest backup has the wrong completion record")
             # Independently calculated from the exact encoded PNG in LibraryDefaultFolderExportProbe.
-            digest = "ebd602840377a3b3cf763cb6828fee67861ff77c444e8fe5894457ef6d99a24d"
+            digest = BACKUP_ORIGINAL
             need(adb("shell", "ls", "-A", "-1", f"{backup}/objects").splitlines() == [digest],
                  "The backup has an unexpected original locator")
             for leaf, digest in ((f"objects/{digest}", digest), (f"catalogs/{generation}.sqlite", marker[6])):
                 need(adb("shell", "sha256sum", f"{backup}/{leaf}").split()[0] == digest, "Backup bytes do not match their recorded digest")
+            if args.settings_backup:
+                witness = adb("shell", "run-as", APP, "cat", SETTINGS_WITNESS_FILE).splitlines()
+                uuid_text = r"[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}"
+                need(len(witness) == 9 and all(re.fullmatch(uuid_text, x) for x in witness[:3] + witness[6:8])
+                     and all(re.fullmatch(r"[0-9a-f]{64}", x) for x in witness[3:6])
+                     and witness[6:9] == [marker[1], marker[2], backup_name], "Settings receipt did not match the closed folder")
+                need(adb("shell", "stat", "-c", "%s", f"{backup}/objects/{BACKUP_ORIGINAL}").strip() == "81",
+                     "Settings fixture original extent differs")
+                catalog = raw / "settings-closed-catalog.sqlite"
+                need(marker[5].isdigit() and 0 < int(marker[5]) <= 2 * 1024 * 1024, "Settings fixture catalog extent is unexpected")
+                need(adb("shell", "stat", "-c", "%s", f"{backup}/catalogs/{generation}.sqlite").strip() == marker[5],
+                     "Settings fixture catalog extent differs from its marker")
+                adb("pull", f"{backup}/catalogs/{generation}.sqlite", catalog, timeout=20)
+                need(catalog.stat().st_size == int(marker[5]) and sha(catalog) == marker[6], "Pulled Settings catalog changed")
+                verify_settings_catalog(catalog, BACKUP_ORIGINAL, 81, witness[:6])
         for namespace in namespaces:
             expected_leaves = {relative.split("/", 1)[1] for relative in files if relative.startswith(f"{namespace}/")}
             need(set(adb("shell", "ls", "-A", "-1", f"{guest_root}/{namespace}").splitlines()) == expected_leaves,
@@ -273,6 +341,7 @@ if __name__ == "__main__":
     parser.add_argument("--activation-compatibility", action="store_true")
     parser.add_argument("--probe-write", action="store_true", help="Write only in a fresh synthetic probe subdirectory")
     parser.add_argument("--backup-export", action="store_true", help="Export an isolated default library into a separately named backup child")
+    parser.add_argument("--settings-backup", action="store_true", help="Exercise real Settings publication only on a verified fresh guest")
     parser.add_argument("--ocr-activation", action="store_true", help="Test scoped WorkManager wakes and ordinary synthetic save/edit; no Files fixture")
     parser.add_argument("--previous", nargs=2, metavar=("APP_APK", "TEST_APK"))
     raise SystemExit(run(parser.parse_args()))

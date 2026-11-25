@@ -9,6 +9,7 @@ import android.content.Intent
 import android.content.pm.PackageManager
 import android.graphics.Rect
 import android.net.Uri
+import android.os.Build
 import android.os.SystemClock
 import android.provider.DocumentsContract
 import android.view.InputDevice
@@ -16,18 +17,27 @@ import android.view.MotionEvent
 import android.view.accessibility.AccessibilityNodeInfo
 import androidx.activity.result.ActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.ui.test.hasTestTag
+import androidx.compose.ui.test.isEnabled
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
+import androidx.compose.ui.test.onNodeWithTag
+import androidx.compose.ui.test.performClick
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import app.pristinepage.core.pipeline.OutputSpec
 import app.pristinepage.core.pipeline.RenderPurpose
+import app.pristinepage.core.recipe.GeometryRecipe
+import app.pristinepage.core.recipe.RecipeCodec
 import app.pristinepage.data.library.AndroidLibraryTreeRead
 import app.pristinepage.data.library.AndroidLibraryStartup
 import app.pristinepage.data.library.AndroidLibraryWritableFolder
 import app.pristinepage.data.library.LibraryActivation
+import app.pristinepage.data.library.LibraryFolderExportState
 import app.pristinepage.data.model.DocumentId
+import app.pristinepage.data.model.IngestResult
 import app.pristinepage.data.model.OperationErrorCode
 import app.pristinepage.data.model.RepositoryFailure
+import app.pristinepage.data.model.SaveRecipeResult
 import app.pristinepage.data.model.SourceBlobId
 import app.pristinepage.data.repository.ScopedCommittedOriginals
 import app.pristinepage.image.decode.AndroidSourceInspector
@@ -67,6 +77,139 @@ class LibraryFolderFilesJourneyTest {
     @get:Rule val compose = createAndroidComposeRule<MainActivity>()
 
     @Test fun actualFilesGrantReopensAfterActivityRecreationAndRevocationFailsClosed() = verifyJourney()
+
+    @Test fun settingsPublishesOneBackupOfTheSyntheticDefaultLibrary() {
+        val instrumentation = InstrumentationRegistry.getInstrumentation()
+        val args = InstrumentationRegistry.getArguments()
+        check(args.getString("librarySettingsFresh") == "1") { "The witness requires a verified fresh guest" }
+        val folder = args.getString("libraryFixtureFolder")?.takeIf { it.matches(Regex("PristinePage-tree-[0-9a-f]{12}")) }
+            ?: error("No exact synthetic folder was staged")
+        val app = instrumentation.targetContext.applicationContext as PristinePageApplication
+        fun grants() = app.contentResolver.persistedUriPermissions.associate { it.uri.toString() to (it.isReadPermission to it.isWritePermission) }
+        val before = grants()
+        assertTrue("The fresh app may not hold any persisted picker grant", before.isEmpty())
+        val graph = runBlocking { app.services.imports() }
+        assertEquals(1L, graph.activation.number)
+        assertTrue("Refuse an existing default album before any synthetic ingest", runBlocking { graph.store.catalog.list(null, 1).isEmpty() })
+        val pointer = File(app.filesDir.canonicalFile, "library-settings/active-library")
+        val pointerBefore = pointer.readBytes()
+        val png = LibraryDefaultFolderExportProbe.originalPng()
+        val file = File(app.cacheDir, "editor-journey-fixtures/${UUID.randomUUID()}.png")
+        check(file.parentFile!!.isDirectory || file.parentFile!!.mkdirs())
+        check(file.createNewFile())
+        file.writeBytes(png)
+        val authority = "${app.packageName}.editor-fixtures"
+        var revision1 = ""
+        var revision2 = ""
+        val page = runBlocking {
+            val album = graph.store.documents.createDocument("Synthetic Settings backup")
+            val batch = graph.store.imports.beginImport(album, 1, null)
+            val committed = graph.photoImports.importProviderReferences(listOf("content://$authority/${file.nameWithoutExtension}"), batch.parentId)
+                .single() as IngestResult.Committed
+            val edit = graph.store.editablePages.load(album, committed.pageId)
+            val geometry = edit.recipe.geometry as GeometryRecipe.None
+            val changed = edit.recipe.copy(geometry = geometry.copy(outputQuarterTurns = 1))
+            revision1 = sha256(RecipeCodec.encode(edit.recipe))
+            revision2 = sha256(RecipeCodec.encode(changed))
+            val saved = graph.store.documents.saveRecipe(committed.pageId, 1,
+                changed) as SaveRecipeResult.Saved
+            assertEquals(2L, saved.recipeRevision)
+            assertEquals(3L, saved.documentRevision)
+            committed
+        }
+        assertEquals(sha256(png), page.sourceByteHash)
+        assertEquals(listOf(page.documentId), runBlocking { graph.store.catalog.list(null, 2).map { it.documentId } })
+        compose.onNodeWithTag("atelier-settings").performClick()
+        compose.onNodeWithTag("settings-open-library_storage").performClick()
+        compose.waitUntil(10_000) {
+            compose.onAllNodes(hasTestTag("library-backup-export") and isEnabled()).fetchSemanticsNodes().size == 1
+        }
+        compose.onNodeWithTag("library-backup-export").performClick()
+        val picker = checkNotNull(LibraryFolderPickerContract(writable = true).createIntent(app, Unit).component).packageName
+        compose.onNodeWithTag("library-backup-choose-folder").performClick()
+        selectSettingsDestination(instrumentation, picker, folder)
+        compose.waitUntil(40_000) {
+            compose.onAllNodes(hasTestTag("library-backup-completed")).fetchSemanticsNodes().size == 1
+        }
+        val history = runBlocking { app.services.discoverDefaultBackups(graph.activation) }
+        assertEquals(0, history.unresolvedCount)
+        val receipt = (history.receipts.single() as LibraryFolderExportState.Completed).receipt
+        assertEquals(before, grants())
+        assertArrayEquals(pointerBefore, pointer.readBytes())
+        assertArrayEquals(png, runBlocking { graph.store.committedSources.load(page.sourceId).file.readBytes() })
+        val evidence = File(app.filesDir, "library-settings-native-witness")
+        check(evidence.createNewFile())
+        evidence.writeText(listOf(page.documentId.value, page.pageId.value, page.sourceId.value, page.sourcePixelHash,
+            revision1, revision2, receipt.libraryId, receipt.generationId, receipt.folderName).joinToString("\n", postfix = "\n"))
+    }
+
+    private fun selectSettingsDestination(instrumentation: Instrumentation, picker: String, folder: String) {
+        val affirmative = setOf("SELECT", "Select", "SÉLECTIONNER", "Sélectionner", "Use this folder", "USE THIS FOLDER", "Choose this folder")
+        fun containsUnder(root: AccessibilityNodeInfo, text: String, within: String) =
+            root.findByTextInFixture(text).any { node ->
+                node.isVisibleToUser && node.packageName?.toString() == picker &&
+                    generateSequence(node) { it.parent }.any { it.viewIdResourceName?.substringAfterLast('/') == within }
+            }
+        fun atTarget(root: AccessibilityNodeInfo) =
+            containsUnder(root, folder, "dropdown_breadcrumb") &&
+                listOf("catalogs", "generations", "objects").all { containsUnder(root, it, "dir_list") }
+        fun unique(root: AccessibilityNodeInfo, labels: Set<String>, parentId: String? = null): AccessibilityNodeInfo? {
+            val matches = linkedSetOf<AccessibilityNodeInfo>()
+            val pending = ArrayDeque<AccessibilityNodeInfo>().apply { add(root) }
+            var visits = 0
+            while (pending.isNotEmpty()) {
+                check(++visits <= 1_000)
+                val label = pending.removeFirst()
+                repeat(label.childCount) { index -> label.getChild(index)?.let(pending::addLast) }
+                if (!label.isEnabled || !label.isVisibleToUser || label.packageName?.toString() != picker ||
+                    (label.text?.toString() !in labels && label.contentDescription?.toString() !in labels)) continue
+                if (parentId != null && generateSequence(label) { it.parent }
+                        .none { it.viewIdResourceName?.substringAfterLast('/') == parentId }) continue
+                val action = if (parentId == "dir_list") {
+                    if (label.viewIdResourceName != "android:id/title") continue
+                    generateSequence(label) { it.parent }.firstOrNull {
+                        it.isFocusable && it.parent?.viewIdResourceName?.substringAfterLast('/') == parentId
+                    }
+                } else generateSequence(label) { it.parent }.firstOrNull { it.isClickable }
+                action?.takeIf { it.isEnabled && it.isVisibleToUser && it.packageName?.toString() == picker }?.let(matches::add)
+            }
+            check(matches.size <= 1) { "The synthetic Settings destination did not expose a unique Files control" }
+            return matches.singleOrNull()
+        }
+        fun select(step: String, labels: Set<String>, parent: String? = null, guard: (AccessibilityNodeInfo) -> Boolean = { true }) {
+            val root = await(instrumentation, picker, step) { guard(it) && unique(it, labels, parent) != null }
+            val first = checkNotNull(unique(root, labels, parent))
+            val current = checkNotNull(instrumentation.uiAutomation.rootInActiveWindow)
+            check(current.packageName?.toString() == picker && guard(current))
+            val control = checkNotNull(unique(current, labels, parent))
+            check(control == first && control.refresh() && control.isEnabled && control.isVisibleToUser)
+            if (control.isClickable) check(control.performAction(AccessibilityNodeInfo.ACTION_CLICK))
+            else {
+                check(parent == "dir_list")
+                tap(instrumentation, control)
+            }
+        }
+        val drawer = setOf("Show roots", "Afficher les répertoires racines")
+        select("root drawer", drawer)
+        select("primary storage", setOf(Build.MODEL, "Internal storage", "Stockage interne", "Stockage interne partagé"), "roots_list")
+        select("Documents", setOf("Documents"), "dir_list")
+        select("synthetic folder", setOf(folder), "dir_list") { containsUnder(it, "Documents", "dropdown_breadcrumb") }
+        select("exact synthetic destination", affirmative, guard = ::atTarget)
+        // API 28's direct return was qualified separately. Do not authorize an additional prompt without a separately verified destination binding.
+        val appPackage = instrumentation.targetContext.packageName
+        val deadline = SystemClock.uptimeMillis() + 12_000
+        while (SystemClock.uptimeMillis() < deadline) {
+            val root = instrumentation.uiAutomation.rootInActiveWindow
+            if (root?.packageName?.toString() == appPackage) return
+            if (root?.packageName?.toString() == picker &&
+                unique(root, setOf("Allow", "ALLOW", "Autoriser", "AUTORISER")) != null) error("Unqualified additional Files confirmation")
+            SystemClock.sleep(125)
+        }
+        error("Files did not return to Settings after the one exact selection")
+    }
+
+    private fun AccessibilityNodeInfo.findByTextInFixture(text: String): List<AccessibilityNodeInfo> =
+        findAccessibilityNodeInfosByText(text).filter { it.text?.toString() == text || it.contentDescription?.toString() == text }
 
     @Test fun defaultAppGraphUsesItsDurableActivationBeforeAndAfterActivityRecreation() {
         val app = InstrumentationRegistry.getInstrumentation().targetContext.applicationContext as PristinePageApplication
