@@ -39,9 +39,9 @@ internal class LocalLibraryDirectory(root: File, private val directorySync: Dire
     }
 
     override fun open(id: LibraryObjectTransfer.ObjectId) = open(objectPath(id))
-    override fun create(id: LibraryObjectTransfer.ObjectId, write: (OutputStream) -> Unit) = create(objectPath(id), write)
+    override fun create(id: LibraryObjectTransfer.ObjectId, write: (OutputStream) -> Unit) = create(objectPath(id), write = write)
     override fun openCatalog(generation: LibraryGeneration) = open(generation.catalogPath)
-    override fun createCatalog(generation: LibraryGeneration, write: (OutputStream) -> Unit) = create(generation.catalogPath, write)
+    override fun createCatalog(generation: LibraryGeneration, write: (OutputStream) -> Unit) = create(generation.catalogPath, write = write)
     override fun openMarker(generation: LibraryGeneration) = open(markerPath(generation))
 
     /** Private merge-journal use only. An operation ID is never supplied by SQLite rows or a display label. */
@@ -54,7 +54,7 @@ internal class LocalLibraryDirectory(root: File, private val directorySync: Dire
 
     /** Private grant records never cross a library export or accept a destination path from a provider. */
     fun createFolderGrant(record: LibraryFolderGrantRecord) =
-        create(folderGrantPath(record.grantId)) { it.write(record.encode()) }
+        create(folderGrantPath(record.grantId), privateSupport = true) { it.write(record.encode()) }
 
     fun readFolderGrant(grantId: String): LibraryFolderGrantRecord? =
         open(folderGrantPath(grantId))?.use { input ->
@@ -76,7 +76,7 @@ internal class LocalLibraryDirectory(root: File, private val directorySync: Dire
     }
 
     fun createFolderVerification(grantId: String, generation: LibraryGeneration) =
-        create(folderVerificationPath(grantId, generation.id)) { it.write(generation.encode()) }
+        create(folderVerificationPath(grantId, generation.id), privateSupport = true) { it.write(generation.encode()) }
 
     fun readFolderVerification(grantId: String, generationId: String): LibraryGeneration? =
         open(folderVerificationPath(grantId, generationId))?.use(LibraryGeneration::read)
@@ -105,7 +105,7 @@ internal class LocalLibraryDirectory(root: File, private val directorySync: Dire
     /** Only for a fresh private restore: opaque blob IDs, never source-row paths or logical filenames. */
     fun openPrivateOriginal(blob: String): InputStream? = open(privateOriginalPath(blob))
 
-    fun createPrivateOriginal(blob: String, write: (OutputStream) -> Unit) = create(privateOriginalPath(blob), write)
+    fun createPrivateOriginal(blob: String, write: (OutputStream) -> Unit) = create(privateOriginalPath(blob), write = write)
 
     fun publishRestoreReceipt(expected: ByteArray) {
         val path = "catalog.ready"
@@ -201,12 +201,13 @@ internal class LocalLibraryDirectory(root: File, private val directorySync: Dire
         throw IOException("Library path redirects outside its owned location")
     }
 
-    private fun create(relativePath: String, write: (OutputStream) -> Unit) {
+    private fun create(relativePath: String, privateSupport: Boolean = false, write: (OutputStream) -> Unit) {
         val file = paths.beneath(relativePath)
         val destination = file.toPath()
         if (presentRegularFile(destination)) throw FileAlreadyExistsException(file.name)
         val parent = checkNotNull(file.parentFile)
         paths.createDirectories(parent, ::forceDirectory)
+        if (privateSupport) admitPrivateSupportStage(parent.toPath())
         forceDirectory(parent)
         val stage = Files.createTempFile(parent.toPath(), ".pristinepage-", ".part")
         FileChannel.open(stage, WRITE, NOFOLLOW_LINKS).use { channel ->
@@ -218,6 +219,26 @@ internal class LocalLibraryDirectory(root: File, private val directorySync: Dire
         forceDirectory(parent)
         // A failed write, close or sync keeps its exact stage as recovery evidence. Once durable, unlink only this attempt's temporary name; never remove the final name.
         try { Files.deleteIfExists(stage) } catch (_: IOException) { /* The verified object remains usable. */ }
+    }
+
+    private fun admitPrivateSupportStage(directory: Path) {
+        // The settings lane serializes these writes. Refusal does not prune a locator or prevent reopening an exact existing record.
+        try {
+            Files.newDirectoryStream(directory).use { entries ->
+                var retained = 0
+                var stages = 0
+                for (entry in entries) {
+                    val name = entry.fileName.toString()
+                    if (name.startsWith(".pristinepage-") && name.endsWith(".part") && ++stages >= 4) {
+                        throw IOException("Retained library folder stages need attention")
+                    }
+                    // The closed stage and its exclusive publication link can add two directory entries.
+                    if (++retained > 4_094) throw IOException("Retained library folder records need attention")
+                }
+            }
+        } catch (_: DirectoryIteratorException) {
+            throw IOException("Private library folder records could not be read")
+        }
     }
 
     private fun presentRegularFile(path: Path): Boolean {

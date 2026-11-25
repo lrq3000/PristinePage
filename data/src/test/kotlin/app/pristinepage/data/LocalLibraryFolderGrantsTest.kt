@@ -45,4 +45,19 @@ class LocalLibraryFolderGrantsTest {
         directory.resolve(record.grantId).writeBytes(ByteArray(4_353))
         assertFailsWith<IOException> { LocalLibraryFolderGrants(root, succeeds).readVerified(record.grantId) }
     }
+
+    @Test fun aFullPrivateStageBudgetStillAllowsAnExactExistingBindingToBeReopened() {
+        val root = directories.newFolder().canonicalFile
+        val writer = LocalLibraryFolderGrants(root, succeeds)
+        writer.writeVerified(record)
+        val directory = root.resolve("folder-grants")
+        val staged = (1..4).associate { n -> ".pristinepage-$n.part" to byteArrayOf(n.toByte()) }
+        staged.forEach { (name, bytes) -> directory.resolve(name).writeBytes(bytes) }
+        val next = record.copy(grantId = "42cec5cd-4b52-4d49-99a0-1405e048de83")
+        assertFailsWith<IOException> { writer.writeVerified(next) }
+        assertNull(writer.readVerified(next.grantId))
+        assertEquals(record, writer.writeVerified(record))
+        assertEquals(staged.keys + record.grantId, directory.list().orEmpty().toSet())
+        staged.forEach { (name, bytes) -> assertEquals(bytes.toList(), directory.resolve(name).readBytes().toList()) }
+    }
 }
