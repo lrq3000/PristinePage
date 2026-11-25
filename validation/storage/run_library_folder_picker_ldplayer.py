@@ -67,9 +67,11 @@ SETTINGS_PICKER_CASE = "app.pristinepage.LibraryFolderFilesJourneyTest#settingsO
 SETTINGS_RECOVERY_CASE = "app.pristinepage.LibraryFolderFilesJourneyTest#coldSettingsRecoversTheExactCompletedBackupWithoutWriting"
 BACKUP_DEATH_CASE = "app.pristinepage.LibraryFolderFilesJourneyTest#endsProcessAfterBackupCommitBeforeDelivery"
 BACKUP_DEATH_RECOVERY_CASE = "app.pristinepage.LibraryBackupDeathRecoveryTest#coldProcessInspectsInterruptedDeliveryWithoutReplay"
+BACKUP_DEATH_PICKER_CASE = "app.pristinepage.LibraryFolderFilesJourneyTest#checksTheBackupDeathPickerRouteWithoutSelection"
 SETTINGS_WITNESS_FILE = "files/library-settings-native-witness"
 SETTINGS_COMPLETED_MANIFEST = "cee6ac3fd210d2b36c64dff1b534830368b2677e5ea5b36b1555dc2a15c0029a"
 SETTINGS_COLD_MANIFEST = "ae398db885ea47ac131838a3011766e69d4984be224188b1a282ad8d5190adc5"
+BACKUP_DEATH_PICKER_FAILURE = "e5deb5f75e5e53dae04a8a655d6f9bfde2671e824876a155564a4323b3a156b0"
 UUID_TEXT = r"[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}"
 BACKUP_ORIGINAL = "ebd602840377a3b3cf763cb6828fee67861ff77c444e8fe5894457ef6d99a24d"
 OCR_ACTIVATION_CASES = tuple(f"app.pristinepage.ocr.OcrWorkManagerIntegrationTest#{method}" for method in (
@@ -174,6 +176,16 @@ def select_settings_recovery_case(args):
                   args.activation_compatibility, args.expect_home, args.settings_retry, args.settings_prior_failure)),
          "Settings receipt recovery requires the retained synthetic guest and a standalone invocation")
     return SETTINGS_RECOVERY_CASE
+
+
+def select_backup_death_picker_case(args):
+    if not args.backup_death_picker_only:
+        return None
+    need(not any((args.backup_delivery_death, args.settings_backup, args.settings_picker_only, args.settings_retry,
+                  args.settings_prior_failure, args.settings_recover, args.fresh, args.backup_export, args.probe_write,
+                  args.ocr_activation, args.working_catalog, args.probe_directory, args.activation, args.selected_catalog,
+                  args.activation_compatibility, args.expect_home)), "Backup death picker control requires the retained guest and a standalone invocation")
+    return BACKUP_DEATH_PICKER_CASE
 
 
 def settings_run_anchors(raw, expected_sha):
@@ -516,6 +528,7 @@ def run(args):
     picker_case = select_settings_picker_case(args)
     recovery_case = select_settings_recovery_case(args)
     backup_case = select_backup_case(args)
+    death_picker_case = select_backup_death_picker_case(args)
     if args.backup_delivery_death:
         need(not any((args.fresh, args.settings_picker_only, args.settings_recover, backup_case, args.probe_write,
                       args.ocr_activation, args.working_catalog, args.probe_directory, args.activation, args.selected_catalog,
@@ -545,6 +558,7 @@ def run(args):
     completed = None
     publication_claim = None
     pinned_cold_baseline = None
+    refused_death_destination = None
     death_operation = str(uuid.uuid4()) if args.backup_delivery_death else None
     if args.previous:
         for package, file in zip(built, args.previous):
@@ -574,6 +588,18 @@ def run(args):
             pub_anchor = settings_run_anchors(original_run, SETTINGS_COMPLETED_MANIFEST)
             pub_pair = json.loads(pub_anchor("outcomes.json"))["installedSha256"]
             completed, publication_claim = settings_completed_destination(original_run, SETTINGS_COMPLETED_MANIFEST, args.guest, pub_pair)
+        if death_picker_case:
+            parents = {Path(file).resolve().parent for file in args.previous}
+            need(len(parents) == 1 and previous[APP] == hashes[APP], "Require the exact retained failed death-witness pair")
+            failed_anchor = settings_run_anchors(parents.pop(), BACKUP_DEATH_PICKER_FAILURE)
+            failed = json.loads(failed_anchor("artifacts.json"))
+            attempted = json.loads(failed_anchor("backup-death-attempt.json"))
+            need(failed["guest"] == args.guest and
+                 {package: failed["proof"][package]["sha256"] for package in previous} == previous and
+                 re.fullmatch(r"PristinePage-tree-[a-f0-9]{12}", attempted["destination"]) and
+                 read_results(failed_anchor("backup-death-instrumentation.txt"), (BACKUP_DEATH_CASE,)) == ([], [BACKUP_DEATH_CASE]),
+                 "The retained death attempt was not the exact failed chooser invocation")
+            refused_death_destination = f"/sdcard/Documents/{attempted['destination']}", failed["fixture"]
         if args.settings_retry:
             parents = {Path(file).resolve().parent for file in args.previous}
             need(len(parents) == 1, "Settings cancel predecessor APKs must share the exact receipt")
@@ -642,6 +668,8 @@ def run(args):
             need(not death_operation or baseline == pinned_cold_baseline,
                  "The retained ordinary private backup no longer matches its pinned cold baseline")
             run.save(run.path("recovery-before.json"), baseline, durable=True)
+        if refused_death_destination:
+            verify_unchanged_settings_destination(adb, *refused_death_destination)
         for p, path in retained.items():
             flags = install_flags(p, installed[p], hashes[p], previous.get(TEST), previous.get(APP))
             if flags is not None:
@@ -713,6 +741,26 @@ def run(args):
                 recheck_target(run, ns)
                 verify_completed_destination(adb, *completed)
                 need(settings_private_baseline(adb) == baseline, "The retained ordinary backup attempt changed")
+        if death_picker_case:
+            # Both read/cancel checks share one guest boot. Do not start the descriptor case after a navigation failure.
+            all_passed, all_failed = [], []
+            try:
+                for case, name in ((death_picker_case, "death-picker"), (DESCRIPTOR_CASE, "directory-probe")):
+                    output = adb("shell", "am", "instrument", "-w", "-r", "-e", "class", case,
+                                 "-e", "libraryFixtureFolder", folder, "-e", "libraryFixtureOriginal", original, RUNNER, timeout=155)
+                    run.path(f"{name}-instrumentation.txt").write_text(output, encoding="utf-8")
+                    passed, failed = read_results(output, (case,))
+                    all_passed.extend(passed)
+                    all_failed.extend(failed)
+                    if failed:
+                        break
+            finally:
+                recheck_target(run, ns)
+                verify_unchanged_settings_destination(adb, guest_root, files)
+                verify_unchanged_settings_destination(adb, *refused_death_destination)
+            run.save(run.path("outcomes.json"), {"passed": all_passed, "failed": all_failed, "installedSha256": hashes}, durable=True)
+            print(f"LDPlayer no-write picker/descriptor batch: {len(all_passed)} passed, {len(all_failed)} failed.", flush=True)
+            return bool(all_failed)
         if prior_destinations:
             for previous_destination in prior_destinations:
                 verify_unchanged_settings_destination(adb, *previous_destination)
@@ -811,6 +859,8 @@ if __name__ == "__main__":
     parser.add_argument("--settings-picker-only", action="store_true", help="Open and cancel Files from Settings on the retained synthetic guest; never select a destination")
     parser.add_argument("--settings-recover", metavar="COMPLETED_MANIFEST_SHA", help="Read the existing Settings receipt after a cold launch; never open a picker")
     parser.add_argument("--backup-delivery-death", action="store_true", help="One isolated native process death after commit but before delivery; never replay")
+    parser.add_argument("--backup-death-picker-only", action="store_true",
+                        help="Reach the exact writable chooser folder, cancel without a grant, then separately verify read-only local descriptors")
     parser.add_argument("--settings-retry", metavar="CANCEL_MANIFEST_SHA", help="Permit one new confirmation on the exact retained, independently canceled fixture")
     parser.add_argument("--settings-prior-failure", nargs=2, metavar=("RUN_ID", "MANIFEST_SHA"), help="Verify the exact first pre-selection failure and its unchanged destination")
     parser.add_argument("--ocr-activation", action="store_true", help="Test scoped WorkManager wakes and ordinary synthetic save/edit; no Files fixture")

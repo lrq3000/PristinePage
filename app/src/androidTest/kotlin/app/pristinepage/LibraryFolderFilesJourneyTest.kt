@@ -203,6 +203,19 @@ class LibraryFolderFilesJourneyTest {
         }
         assertEquals(picker, foreground())
         selectSettingsDestination(instrumentation, picker, folder, selectFolder = false)
+        cancelExactFiles(instrumentation, picker, app.packageName)
+        compose.waitUntil(10_000) {
+            foreground() == app.packageName && backup.state.value.let { it.picker == null && it.canReview }
+        }
+        assertEquals(before, attempts())
+        assertEquals(grants, app.contentResolver.persistedUriPermissions.map { Triple(it.uri, it.isReadPermission, it.isWritePermission) }.toSet())
+        assertArrayEquals(originalPointer, pointer.readBytes())
+        assertEquals(ocrBefore, settingsFixtureOcr(app, page.pageId.value))
+    }
+
+    private fun cancelExactFiles(instrumentation: Instrumentation, picker: String, appPackage: String) {
+        val automation = instrumentation.uiAutomation
+        fun foreground() = automation.rootInActiveWindow?.packageName?.toString()
         var backSteps = 0
         while (foreground() == picker) {
             check(++backSteps <= 5) { "The Files cancellation did not leave its bounded directory route" }
@@ -212,17 +225,11 @@ class LibraryFolderFilesJourneyTest {
             assertTrue("The exact Files window did not accept Back", automation.performGlobalAction(AccessibilityService.GLOBAL_ACTION_BACK))
             compose.waitUntil(3_000) {
                 val active = automation.rootInActiveWindow
-                active != null && (active.packageName?.toString() == app.packageName ||
+                active != null && (active.packageName?.toString() == appPackage ||
                     (active.packageName?.toString() == picker && buildList { active.collectLabels(this) } != labels))
             }
         }
-        compose.waitUntil(10_000) {
-            foreground() == app.packageName && backup.state.value.let { it.picker == null && it.canReview }
-        }
-        assertEquals(before, attempts())
-        assertEquals(grants, app.contentResolver.persistedUriPermissions.map { Triple(it.uri, it.isReadPermission, it.isWritePermission) }.toSet())
-        assertArrayEquals(originalPointer, pointer.readBytes())
-        assertEquals(ocrBefore, settingsFixtureOcr(app, page.pageId.value))
+        assertEquals(appPackage, foreground())
     }
 
     private fun settingsFixtureFolder(): String =
@@ -550,6 +557,8 @@ class LibraryFolderFilesJourneyTest {
 
     @Test fun endsProcessAfterBackupCommitBeforeDelivery() = verifyJourney(backupDeath = backupDeathOperation())
 
+    @Test fun checksTheBackupDeathPickerRouteWithoutSelection() = verifyJourney(backupDeathPickerOnly = true)
+
     private fun backupDeathOperation() =
         InstrumentationRegistry.getArguments().getString("libraryBackupDeathOperation")?.let {
             it.also { value -> require(UUID.fromString(value).toString() == value) }
@@ -684,6 +693,7 @@ class LibraryFolderFilesJourneyTest {
         probeWrite: Boolean = false,
         exportBackup: Boolean = false,
         backupDeath: String? = null,
+        backupDeathPickerOnly: Boolean = false,
         revokeAfterProbe: ((Uri) -> Unit)? = null,
         probe: ((ContentResolver, Uri, AndroidLibraryTreeRead, AndroidLibraryTreeRead.Verified, File) -> Unit)? = null,
     ) {
@@ -702,12 +712,15 @@ class LibraryFolderFilesJourneyTest {
         assertFalse(before.keys.any { it in exactFixtureTrees })
         // API 28 may expose filesDir through /data/user/0 rather than the canonical app-owned storage path.
         val scratch = File(app.filesDir.canonicalFile, "tree-read-${UUID.randomUUID()}").apply { check(mkdir()) }
-        val platform = LibraryFolderPickerContract(writable = backupDeath != null)
+        val manualWritableRoute = backupDeath != null || backupDeathPickerOnly
+        val platform = LibraryFolderPickerContract(writable = manualWritableRoute)
         val result = AtomicReference<ActivityResult>()
         val receipt = CountDownLatch(1)
         val registration = compose.runOnUiThread {
             val activity = compose.activity
-            val intent = platform.createIntent(activity, Unit).putExtra(DocumentsContract.EXTRA_INITIAL_URI,
+            val intent = platform.createIntent(activity, Unit)
+            // The manual writable route follows the same launch contract as Settings, without a second initial navigation.
+            if (!manualWritableRoute) intent.putExtra(DocumentsContract.EXTRA_INITIAL_URI,
                 DocumentsContract.buildDocumentUri(requireNotNull(expected.authority), DocumentsContract.getTreeDocumentId(expected)))
             val launcher = activity.activityResultRegistry.register("library-files-native-witness", ActivityResultContracts.StartActivityForResult()) {
                 result.set(it)
@@ -718,9 +731,17 @@ class LibraryFolderFilesJourneyTest {
         }
         try {
             val picker = registration.first
-            if (backupDeath != null) {
+            if (manualWritableRoute) {
                 compose.waitUntil(12_000) { instrumentation.uiAutomation.rootInActiveWindow?.packageName?.toString() == picker }
-                selectSettingsDestination(instrumentation, picker, folder)
+                selectSettingsDestination(instrumentation, picker, folder, selectFolder = !backupDeathPickerOnly)
+                if (backupDeathPickerOnly) {
+                    cancelExactFiles(instrumentation, picker, app.packageName)
+                    compose.waitUntil(10_000) { receipt.count == 0L }
+                    val canceled = requireNotNull(result.get())
+                    assertEquals(LibraryFolderPickerContract.Canceled, platform.parseResult(canceled.resultCode, canceled.data))
+                    assertEquals(before, existing())
+                    return
+                }
             } else {
                 // Files may briefly show navigation controls before resolving the initial URI. Do not open the drawer during that transition.
                 val labels = setOf("SELECT", "Select", "SÉLECTIONNER", "Sélectionner", "Use this folder", "USE THIS FOLDER", "Choose this folder")

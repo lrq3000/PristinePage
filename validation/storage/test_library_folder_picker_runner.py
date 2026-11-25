@@ -11,7 +11,7 @@ import unittest
 from unittest.mock import patch
 
 from run_library_folder_picker_ldplayer import (
-    check_fixture_root, read_backup_delivery_death, recheck_target, select_backup_case, select_settings_picker_case, select_settings_recovery_case, settings_completed_destination, spend_settings_retry,
+    check_fixture_root, read_backup_delivery_death, recheck_target, select_backup_case, select_backup_death_picker_case, select_settings_picker_case, select_settings_recovery_case, settings_completed_destination, spend_settings_retry,
     verify_backup_death_intent, verify_settings_catalog, verify_settings_ocr, verify_settings_retry_evidence,
 )
 from run_local_ocr_guest import read_boot_serial
@@ -123,6 +123,17 @@ class LibraryFolderPickerRunnerTest(unittest.TestCase):
             with self.subTest(key=key), self.assertRaisesRegex(RuntimeError, "retained.*standalone"):
                 select_settings_recovery_case(Namespace(**(flags | {key: True})))
         self.assertIsNone(select_settings_recovery_case(Namespace(**(flags | {"settings_recover": None}))))
+
+    def test_failed_death_picker_control_cannot_be_combined_with_a_write(self):
+        flags = dict(backup_death_picker_only=True, backup_delivery_death=False, settings_backup=False,
+                     settings_picker_only=False, settings_retry=None, settings_prior_failure=None, settings_recover=None,
+                     fresh=False, backup_export=False, probe_write=False, ocr_activation=False, working_catalog=False,
+                     probe_directory=False, activation=False, selected_catalog=False, activation_compatibility=False, expect_home=False)
+        self.assertEqual("app.pristinepage.LibraryFolderFilesJourneyTest#checksTheBackupDeathPickerRouteWithoutSelection",
+                         select_backup_death_picker_case(Namespace(**flags)))
+        for key in flags.keys() - {"backup_death_picker_only"}:
+            with self.subTest(key=key), self.assertRaisesRegex(RuntimeError, "standalone"):
+                select_backup_death_picker_case(Namespace(**(flags | {key: True})))
 
     def test_cold_recovery_does_not_trust_a_replaced_local_catalog(self):
         case = "app.pristinepage.LibraryFolderFilesJourneyTest#settingsPublishesOneBackupOfTheSyntheticDefaultLibrary"
