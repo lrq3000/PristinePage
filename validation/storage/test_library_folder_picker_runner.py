@@ -2,6 +2,7 @@ from argparse import Namespace
 from contextlib import closing
 from hashlib import sha256
 from pathlib import Path
+import json
 import sqlite3
 import shutil
 from subprocess import TimeoutExpired, run
@@ -10,7 +11,7 @@ import unittest
 from unittest.mock import patch
 
 from run_library_folder_picker_ldplayer import (
-    check_fixture_root, recheck_target, select_backup_case, select_settings_picker_case, spend_settings_retry,
+    check_fixture_root, recheck_target, select_backup_case, select_settings_picker_case, select_settings_recovery_case, settings_completed_destination, spend_settings_retry,
     verify_settings_catalog, verify_settings_ocr, verify_settings_retry_evidence,
 )
 from run_local_ocr_guest import read_boot_serial
@@ -110,6 +111,54 @@ class LibraryFolderPickerRunnerTest(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "already spent"):
                 spend_settings_retry(root, "a" * 64, {"guest": "synthetic", "retry": "second"})
             self.assertIn('"retry": "first"', (root / ("settings-retry-spent-" + "a" * 64 + ".json")).read_text())
+
+    def test_cold_receipt_recovery_requires_the_exact_standalone_retained_result(self):
+        flags = dict(settings_recover="a" * 64, settings_backup=False, settings_picker_only=False, settings_retry=None,
+                     fresh=False, backup_export=False, probe_write=False, ocr_activation=False, working_catalog=False,
+                     probe_directory=False, activation=False, selected_catalog=False, activation_compatibility=False, expect_home=False,
+                     settings_prior_failure=None)
+        case = "app.pristinepage.LibraryFolderFilesJourneyTest#coldSettingsRecoversTheExactCompletedBackupWithoutWriting"
+        self.assertEqual(case, select_settings_recovery_case(Namespace(**flags)))
+        for key in flags.keys() - {"settings_recover"}:
+            with self.subTest(key=key), self.assertRaisesRegex(RuntimeError, "retained.*standalone"):
+                select_settings_recovery_case(Namespace(**(flags | {key: True})))
+        self.assertIsNone(select_settings_recovery_case(Namespace(**(flags | {"settings_recover": None}))))
+
+    def test_cold_recovery_does_not_trust_a_replaced_local_catalog(self):
+        case = "app.pristinepage.LibraryFolderFilesJourneyTest#settingsPublishesOneBackupOfTheSyntheticDefaultLibrary"
+        pair = {"app.pristinepage.debug": "a" * 64, "app.pristinepage.debug.test": "b" * 64}
+        generation = "10000000-aaaa-4aaa-8aaa-000000000001"
+        library = "10000000-aaaa-4aaa-8aaa-000000000002"
+        backup = f"/sdcard/Documents/PristinePage-tree-0123456789ab/PristinePage-backup-{generation}"
+        catalog = b"verified"
+        marker = f"pristinepage-library-v1\n{library}\n{generation}\n-\n8\n8\n{sha256(catalog).hexdigest()}\n"
+        witness = "\n".join(["info"] * 6 + [library, generation, backup.rsplit("/", 1)[1]] + ["info"] * 6) + "\n"
+        with TemporaryDirectory() as scratch:
+            raw = Path(scratch)
+            entries = {
+                "artifacts.json": {"guest": "exact-test-guest", "fixture": {}},
+                "outcomes.json": {"passed": [case], "failed": [], "installedSha256": pair},
+                "commands.jsonl": [
+                    {"argv": ["adb", "shell", "cat", f"{backup}/generations/{generation}.complete"], "exit": 0, "stdout": marker},
+                    {"argv": ["adb", "shell", "run-as", "app.pristinepage.debug", "cat", "files/library-settings-native-witness"], "exit": 0, "stdout": witness},
+                ],
+            }
+            anchors = []
+            for suffix, value in entries.items():
+                path = raw / f"{raw.name}-{suffix}"
+                text = "\n".join(map(json.dumps, value)) if suffix == "commands.jsonl" else json.dumps(value)
+                path.write_bytes(text.encode("utf-8"))
+                anchors.append({"path": str(path), "bytes": path.stat().st_size, "sha256": sha256(path.read_bytes()).hexdigest()})
+            manifest = raw / f"{raw.name}-final-manifest.json"
+            manifest.write_text(json.dumps({"stage": "verified-before-release", "evidence": anchors, "ancillaryEvidence": []}),
+                                encoding="utf-8")
+            digest = sha256(manifest.read_bytes()).hexdigest()
+            local = raw / "settings-closed-catalog.sqlite"
+            local.write_bytes(catalog)
+            settings_completed_destination(raw, digest, "exact-test-guest", pair)
+            local.write_bytes(b"replaced")
+            with self.assertRaisesRegex(RuntimeError, "retained catalog"):
+                settings_completed_destination(raw, digest, "exact-test-guest", pair)
 
     def test_settings_ocr_readback_binds_even_empty_text_to_the_exact_producer(self):
         with closing(sqlite3.connect(":memory:")) as db:

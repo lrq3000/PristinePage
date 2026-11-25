@@ -20,8 +20,11 @@ import androidx.activity.result.ActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.ui.test.hasTestTag
 import androidx.compose.ui.test.isEnabled
+import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.compose.ui.test.onNodeWithTag
+import androidx.compose.ui.test.onNodeWithText
+import androidx.compose.ui.test.performScrollTo
 import androidx.compose.ui.test.performClick
 import androidx.lifecycle.ViewModelProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
@@ -45,6 +48,7 @@ import app.pristinepage.data.repository.ScopedCommittedOriginals
 import app.pristinepage.data.repository.SavedOcrWork
 import app.pristinepage.image.decode.AndroidSourceInspector
 import app.pristinepage.image.decode.SourceDecoder
+import app.pristinepage.library.LibraryBackupConfirmation
 import app.pristinepage.library.LibraryBackupViewModel
 import app.pristinepage.library.LibraryFolderGrantHandoff
 import app.pristinepage.library.LibraryFolderPickerContract
@@ -81,6 +85,64 @@ class LibraryFolderFilesJourneyTest {
     @get:Rule val compose = createAndroidComposeRule<MainActivity>()
 
     @Test fun actualFilesGrantReopensAfterActivityRecreationAndRevocationFailsClosed() = verifyJourney()
+
+    @Test fun coldSettingsRecoversTheExactCompletedBackupWithoutWriting() {
+        val instrumentation = InstrumentationRegistry.getInstrumentation()
+        val app = instrumentation.targetContext.applicationContext as PristinePageApplication
+        val folder = InstrumentationRegistry.getArguments().getString("settingsCompletedFolder")
+            ?.takeIf { it.matches(Regex("PristinePage-backup-[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}")) }
+            ?: error("The existing completed backup was not admitted")
+        val backup = compose.runOnUiThread { ViewModelProvider(compose.activity)[LibraryBackupViewModel::class.java].session }
+        val privateRoot = app.filesDir.canonicalFile
+        val witness = File(privateRoot, "library-settings-native-witness")
+        val originalWitness = witness.readBytes()
+        val pointer = File(privateRoot, "library-settings/active-library")
+        val originalPointer = pointer.readBytes()
+        fun attempts() = checkNotNull(privateRoot.list()).filter {
+            it.startsWith("library-out-") || it == "library-backup-acknowledged"
+        }.toSet()
+        val beforeAttempts = attempts()
+        val attemptName = beforeAttempts.single()
+        check(attemptName.matches(Regex("library-out-[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}")))
+        val attempt = File(privateRoot, attemptName)
+        fun attemptRecords(): Map<String, String> {
+            check(attempt.canonicalFile == attempt)
+            val entries = checkNotNull(attempt.listFiles()).also { check(it.size <= 16) }
+            return entries.associate { file ->
+                check(file.isFile && file.canonicalFile == file && file.length() in 1..2L * 1024 * 1024)
+                file.name to sha256(file.readBytes())
+            }.also { check("export.intent" in it && "export.complete" in it && "export.ack" !in it) }
+        }
+        val beforeRecords = attemptRecords()
+        assertTrue(app.contentResolver.persistedUriPermissions.isEmpty())
+        val activation = checkNotNull(runBlocking { app.services.recordedDefaultActivation() })
+
+        compose.onNodeWithTag("atelier-settings").performClick()
+        compose.onNodeWithTag("settings-open-library_storage").performClick()
+        compose.waitUntil(12_000) { backup.state.value.history?.receipts?.size == 1 }
+        val state = backup.state.value
+        val history = checkNotNull(state.history)
+        assertEquals(0, history.unresolvedCount)
+        val previous = (history.receipts.single() as LibraryFolderExportState.Completed).receipt
+        assertEquals(folder, previous.folderName)
+        assertEquals(attemptName.removePrefix("library-out-"), previous.operationId)
+        val lines = originalWitness.toString(Charsets.UTF_8).lines()
+        assertEquals(listOf(previous.libraryId, previous.generationId, folder), lines.subList(6, 9))
+        assertEquals(activation, state.issuedAt)
+        assertEquals(previous, (runBlocking {
+            app.services.inspectConfirmedDefaultBackup(LibraryBackupConfirmation.Ticket(previous.operationId, activation))
+        } as LibraryFolderExportState.Completed).receipt)
+        assertEquals(null, state.completed)
+        assertEquals(null, state.picker)
+        assertTrue(state.canReview)
+        compose.onNodeWithText(app.getString(R.string.library_backup_record, folder)).performScrollTo().assertIsDisplayed()
+        assertEquals(app.packageName, instrumentation.uiAutomation.rootInActiveWindow?.packageName?.toString())
+        assertEquals(beforeAttempts, attempts())
+        assertEquals(beforeRecords, attemptRecords())
+        assertArrayEquals(originalWitness, witness.readBytes())
+        assertArrayEquals(originalPointer, pointer.readBytes())
+        assertTrue(app.contentResolver.persistedUriPermissions.isEmpty())
+    }
 
     @Test fun settingsOpensAndCancelsFilesWithoutStartingABackup() {
         val instrumentation = InstrumentationRegistry.getInstrumentation()

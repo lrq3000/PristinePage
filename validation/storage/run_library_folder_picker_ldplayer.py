@@ -63,6 +63,7 @@ WRITE_PROBE_CASE = "app.pristinepage.LibraryFolderFilesJourneyTest#grantedTreeCa
 BACKUP_CASE = "app.pristinepage.LibraryFolderFilesJourneyTest#defaultLibraryExportsItsOriginalAndAcceptedEditIntoANewFilesBackup"
 SETTINGS_BACKUP_CASE = "app.pristinepage.LibraryFolderFilesJourneyTest#settingsPublishesOneBackupOfTheSyntheticDefaultLibrary"
 SETTINGS_PICKER_CASE = "app.pristinepage.LibraryFolderFilesJourneyTest#settingsOpensAndCancelsFilesWithoutStartingABackup"
+SETTINGS_RECOVERY_CASE = "app.pristinepage.LibraryFolderFilesJourneyTest#coldSettingsRecoversTheExactCompletedBackupWithoutWriting"
 SETTINGS_WITNESS_FILE = "files/library-settings-native-witness"
 BACKUP_ORIGINAL = "ebd602840377a3b3cf763cb6828fee67861ff77c444e8fe5894457ef6d99a24d"
 OCR_ACTIVATION_CASES = tuple(f"app.pristinepage.ocr.OcrWorkManagerIntegrationTest#{method}" for method in (
@@ -130,6 +131,17 @@ def select_settings_picker_case(args):
     return SETTINGS_PICKER_CASE
 
 
+def select_settings_recovery_case(args):
+    if args.settings_recover is None:
+        return None
+    need(re.fullmatch(r"[a-f0-9]{64}", args.settings_recover) and
+         not any((args.fresh, args.settings_backup, args.settings_picker_only, args.backup_export, args.probe_write,
+                  args.ocr_activation, args.working_catalog, args.probe_directory, args.activation, args.selected_catalog,
+                  args.activation_compatibility, args.expect_home, args.settings_retry, args.settings_prior_failure)),
+         "Settings receipt recovery requires the retained synthetic guest and a standalone invocation")
+    return SETTINGS_RECOVERY_CASE
+
+
 def settings_run_anchors(raw, expected_sha):
     manifest = raw / f"{raw.name}-final-manifest.json"
     need(sha(manifest) == expected_sha, "Retained Settings manifest changed")
@@ -186,14 +198,15 @@ def spend_settings_retry(raw, digest, attempt):
         raise RuntimeError("This Settings retry is already spent") from error
 
 
-def verify_unchanged_settings_destination(adb, guest_root, files):
+def verify_unchanged_settings_destination(adb, guest_root, files, backup_name=None):
     namespaces = {"catalogs", "generations", "objects"}
     ident = r"[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}"
     locator = rf"(?:catalogs/{ident}\.sqlite|generations/{ident}\.complete|objects/[a-f0-9]{{64}})"
     need({relative.split("/")[0] for relative in files} == namespaces and
          all(re.fullmatch(locator, file) and re.fullmatch(r"[a-f0-9]{64}", digest) for file, digest in files.items()),
          "Invalid retained synthetic inventory")
-    need(set(adb("shell", "ls", "-A", "-1", guest_root).splitlines()) == namespaces,
+    expected_root = namespaces if backup_name is None else namespaces | {backup_name}
+    need(set(adb("shell", "ls", "-A", "-1", guest_root).splitlines()) == expected_root,
          "The first Settings destination is not unchanged; the backup must not be repeated")
     for namespace in namespaces:
         leaves = {relative.split("/", 1)[1] for relative in files if relative.startswith(f"{namespace}/")}
@@ -216,6 +229,53 @@ def verify_settings_ocr(db, expected):
     need(len(rows) == 1 and rows[0][:9] == expected[:9] and rows[0][9] == "SUCCEEDED" and
          isinstance(rows[0][10], bytes) and sha256(rows[0][10]).hexdigest() == expected[9],
          "Settings backup lost the exact OCR text or producer binding")
+
+
+def settings_completed_destination(raw, digest, guest, previous):
+    anchor = settings_run_anchors(raw, digest)
+    artifacts = json.loads(anchor("artifacts.json"))
+    need(artifacts["guest"] == guest and
+         json.loads(anchor("outcomes.json")) == {"passed": [SETTINGS_BACKUP_CASE], "failed": [], "installedSha256": previous},
+         "No exact completed Settings backup on the admitted synthetic guest")
+    ident = r"[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}"
+    calls = [json.loads(line) for line in anchor("commands.jsonl").splitlines()]
+    marker_path = rf"(/sdcard/Documents/PristinePage-tree-[a-f0-9]{{12}}/PristinePage-backup-({ident}))/generations/\2\.complete"
+    markers = [(match, call["stdout"]) for call in calls if call["exit"] == 0 and call["argv"][-3:-1] == ["shell", "cat"]
+               if (match := re.fullmatch(marker_path, call["argv"][-1]))]
+    witnesses = [call["stdout"] for call in calls if call["exit"] == 0 and
+                 call["argv"][-5:] == ["shell", "run-as", APP, "cat", SETTINGS_WITNESS_FILE]]
+    need(len(markers) == len(witnesses) == 1, "Exactly one anchored backup marker and private witness are required")
+    (match, marker_text), witness = markers[0], witnesses[0]
+    backup, generation = match.groups()
+    marker = marker_text.splitlines()
+    need(len(marker) == 7 and marker[0] == "pristinepage-library-v1" and re.fullmatch(ident, marker[1]) and
+         marker[2:4] == [generation, "-"] and re.fullmatch(r"[1-9][0-9]{0,5}", marker[4]) and
+         re.fullmatch(r"[1-9][0-9]{0,6}", marker[5]) and 0 < int(marker[5]) <= 2 * 1024 * 1024 and
+         re.fullmatch(r"[a-f0-9]{64}", marker[6]), "The retained backup marker is invalid")
+    need(len(witness.splitlines()) == 15 and witness.splitlines()[6:9] == [marker[1], generation, backup.rsplit("/", 1)[1]],
+         "The anchored private witness does not identify the exact closed backup")
+    catalog = raw / "settings-closed-catalog.sqlite"
+    need(catalog.stat().st_size == int(marker[5]) and sha(catalog) == marker[6],
+         "The retained catalog does not match the anchored closed-folder readback")
+    return backup, generation, marker_text, artifacts["fixture"], witness
+
+
+def verify_completed_destination(adb, backup, generation, marker_text, fixture, witness):
+    parent, folder = backup.rsplit("/", 1)
+    verify_unchanged_settings_destination(adb, parent, fixture, backup_name=folder)
+    need(set(adb("shell", "ls", "-A", "-1", backup).splitlines()) ==
+         {"catalogs", "generations", "objects", "staging"}, "Completed destination layout changed")
+    need(not adb("shell", "ls", "-A", "-1", f"{backup}/staging").strip(), "Unexpected staging bytes in the completed backup")
+    for namespace, leaf in (("catalogs", f"{generation}.sqlite"), ("generations", f"{generation}.complete"),
+                            ("objects", BACKUP_ORIGINAL)):
+        need(adb("shell", "ls", "-A", "-1", f"{backup}/{namespace}").splitlines() == [leaf],
+             "Completed destination inventory changed")
+    need(adb("shell", "cat", f"{backup}/generations/{generation}.complete") == marker_text, "Completed marker identity drifted")
+    for relative, digest in ((f"catalogs/{generation}.sqlite", marker_text.splitlines()[6]),
+                             (f"objects/{BACKUP_ORIGINAL}", BACKUP_ORIGINAL)):
+        path = f"{backup}/{relative}"
+        need(adb("shell", "sha256sum", path).split() == [digest, path], "Completed backup bytes changed")
+    need(adb("shell", "run-as", APP, "cat", SETTINGS_WITNESS_FILE) == witness, "The private publication witness changed")
 
 
 def verify_settings_catalog(path, digest, extent, expected, expected_ocr=None):
@@ -262,6 +322,7 @@ def run(args):
     need(re.fullmatch(r"agent-pristinepage-tree-[a-f0-9]{12}", args.guest), "Require a dedicated library app-test guest name")
     need(args.fresh != bool(args.previous), "Choose first admission or an exact retained predecessor pair")
     picker_case = select_settings_picker_case(args)
+    recovery_case = select_settings_recovery_case(args)
     backup_case = select_backup_case(args)
     need(bool(args.settings_retry) == bool(args.settings_prior_failure), "A retained retry requires the exact first failure receipt")
     if args.ocr_activation:
@@ -284,6 +345,7 @@ def run(args):
     previous = {}
     prior_destinations = []
     prior_navigation_only = False
+    completed = None
     if args.previous:
         for package, file in zip(built, args.previous):
             path = Path(file).resolve()
@@ -291,6 +353,10 @@ def run(args):
                  "The predecessor must be the retained evidence file for this package")
             previous[package] = sha(path)
             exact_apk(path, previous[package], stage, package == TEST)
+        if recovery_case:
+            parents = {Path(file).resolve().parent for file in args.previous}
+            need(len(parents) == 1 and previous[APP] == hashes[APP], "Require the exact prior backup app and publication evidence")
+            completed = settings_completed_destination(parents.pop(), args.settings_recover, args.guest, previous)
         if args.settings_retry:
             parents = {Path(file).resolve().parent for file in args.previous}
             need(len(parents) == 1, "Settings cancel predecessor APKs must share the exact receipt")
@@ -317,13 +383,14 @@ def run(args):
         need(sha(saved) == hashes[package], "Retained candidate APK changed")
         retained[package] = saved
     fixture = raw / "synthetic-library"
-    files = {} if args.ocr_activation else make_fixture(fixture, with_scan=True)
-    original = None if args.ocr_activation else synthetic_scan()[0]
-    if not args.ocr_activation:
+    files = {} if args.ocr_activation or recovery_case else make_fixture(fixture, with_scan=True)
+    original = None if args.ocr_activation or recovery_case else synthetic_scan()[0]
+    if original:
         need(files.get(f"objects/{original}") == original, "The populated Files fixture lacks its exact original")
     (raw / f"{prefix}-artifacts.json").write_text(
         json.dumps(dict(proof=proof, source=args.commit, fixture=files, previous=previous, guest=args.guest,
-                        settingsCancel=args.settings_retry, settingsPriorFailure=args.settings_prior_failure)),
+                        settingsCancel=args.settings_retry, settingsPriorFailure=args.settings_prior_failure,
+                        settingsCompleted=args.settings_recover)),
         encoding="utf-8",
     )
     ns = load_allocator(ROOT, args.guest, raw, "pristinepage-tree-" + os.environ["OPENCODE_SESSION_ID"])
@@ -359,6 +426,19 @@ def run(args):
             need(run.installed_hash(p) == hashes[p], "Installed APK differs from the admitted candidate")
         need(adb("shell", "pm", "list", "instrumentation", APP).splitlines() ==
              [f"instrumentation:{RUNNER} (target={APP})"], "The instrumentation registry differs")
+        if recovery_case:
+            recheck_target(run, ns)
+            need(not adb("shell", "pidof", APP, allowed=(0, 1)).strip(), "The completed-backup app process must be absent before cold recovery")
+            verify_completed_destination(adb, *completed)
+            folder = completed[0].rsplit("/", 1)[1]
+            output = adb("shell", "am", "instrument", "-w", "-r", "-e", "class", recovery_case,
+                         "-e", "settingsCompletedFolder", folder, RUNNER, timeout=100)
+            run.path("instrumentation.txt").write_text(output, encoding="utf-8")
+            passed, failed = read_results(output, (recovery_case,))
+            verify_completed_destination(adb, *completed)
+            run.save(run.path("outcomes.json"), {"passed": passed, "failed": failed, "installedSha256": hashes}, durable=True)
+            print(f"Cold Settings receipt recovery: {len(passed)} passed, {len(failed)} failed.", flush=True)
+            return bool(failed)
         if args.ocr_activation:
             recheck_target(run, ns)
             outcomes = []
@@ -486,6 +566,7 @@ if __name__ == "__main__":
     parser.add_argument("--backup-export", action="store_true", help="Export an isolated default library into a separately named backup child")
     parser.add_argument("--settings-backup", action="store_true", help="Exercise real Settings publication on an admitted synthetic guest")
     parser.add_argument("--settings-picker-only", action="store_true", help="Open and cancel Files from Settings on the retained synthetic guest; never select a destination")
+    parser.add_argument("--settings-recover", metavar="COMPLETED_MANIFEST_SHA", help="Read the existing Settings receipt after a cold launch; never open a picker")
     parser.add_argument("--settings-retry", metavar="CANCEL_MANIFEST_SHA", help="Permit one new confirmation on the exact retained, independently canceled fixture")
     parser.add_argument("--settings-prior-failure", nargs=2, metavar=("RUN_ID", "MANIFEST_SHA"), help="Verify the exact first pre-selection failure and its unchanged destination")
     parser.add_argument("--ocr-activation", action="store_true", help="Test scoped WorkManager wakes and ordinary synthetic save/edit; no Files fixture")
