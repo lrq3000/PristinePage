@@ -52,6 +52,15 @@ def need(ok, message):
         raise RuntimeError(message)
 
 
+def read_boot_serial(read):
+    """Before readiness, a deadline or not-yet-present transport is not an observed serial."""
+    try:
+        response = read().strip()
+    except subprocess.TimeoutExpired:
+        return None
+    return response if re.fullmatch(r"emulator-[0-9]+", response) else None
+
+
 def checked_language_results(output, suite="baseline"):
     case, controls = LANGUAGE_SUITES[suite]
     marker = re.compile(r"(?m)^INSTRUMENTATION_STATUS: ocrLanguageControl=([a-z_-]+)\nINSTRUMENTATION_STATUS_CODE: 65\n")
@@ -290,10 +299,10 @@ def run_type(ns, *, purpose="pristinepage-ocr-qualification", operation="Pristin
                             self.save(self.record, record)
                         need(record["runtime_processes"] == ids, "Original guest PIDs changed")
                         if not self.serial:
-                            response = self.command([console, "adb", "--index", str(self.index),
-                                                     "--command", "get-serialno"], timeout=12).strip()
-                            if re.fullmatch(r"emulator-[0-9]+", response):
-                                self.serial = response
+                            remaining = max(0.1, deadline - time.monotonic())
+                            self.serial = read_boot_serial(lambda: self.command(
+                                [console, "adb", "--index", str(self.index), "--command", "get-serialno"],
+                                timeout=min(12, remaining)))
                         if self.serial and self.protocol() == 41:
                             targeted = [adb, "-s", self.serial]
                             try:
