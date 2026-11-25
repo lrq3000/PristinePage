@@ -52,6 +52,63 @@ internal class LocalLibraryDirectory(root: File, private val directorySync: Dire
 
     fun openMergeStage(generation: String) = open(mergeStagePath(generation) + "/catalog.sqlite")
 
+    enum class ExportRecord(val nameOnDisk: String) {
+        INTENT("export.intent"), COMPLETE("export.complete"), ACKNOWLEDGED("export.ack"),
+    }
+
+    fun openExportRecord(record: ExportRecord) = open(record.nameOnDisk)
+
+    fun createExportRecord(record: ExportRecord, bytes: ByteArray, beforeLink: () -> Unit) =
+        create(record.nameOnDisk, beforeLink = beforeLink) { it.write(bytes) }
+
+    fun requireAndForceExportStage(generation: LibraryGeneration, checkpoint: () -> Unit) {
+        val stage = readPath("catalog.sqlite")
+        if (!presentRegularFile(stage)) throw IOException("Private backup catalog is missing")
+        FileChannel.open(stage, READ, WRITE, NOFOLLOW_LINKS).use {
+            generation.verifyCatalog(Channels.newInputStream(it), checkpoint)
+            it.force(true)
+        }
+        forceExportJournal()
+        verifyExportStage(generation, checkpoint)
+    }
+
+    fun verifyExportStage(generation: LibraryGeneration, checkpoint: () -> Unit) =
+        (open("catalog.sqlite") ?: throw IOException("Private backup catalog is missing"))
+            .use { generation.verifyCatalog(it, checkpoint) }
+
+    /** A prior closed stage is explained only by an independently verified final record still linked to the same file. */
+    fun requireResolvedExportStages(records: Set<ExportRecord>) {
+        try {
+            var count = 0
+            Files.newDirectoryStream(rootPath, ".pristinepage-*.part").use { entries ->
+                for (entry in entries) {
+                    if (++count > ExportRecord.entries.size || !presentRegularFile(entry) ||
+                        records.none { Files.isSameFile(entry, readPath(it.nameOnDisk)) }) {
+                        throw IOException("The private backup retains an unacknowledged journal stage")
+                    }
+                }
+            }
+        } catch (_: DirectoryIteratorException) { throw IOException("The private backup stages could not be read") }
+    }
+
+    /** A journal may be positively absent in a fresh attempt; prior staged leaves or other evidence are not absence. */
+    fun requireUnstartedExport() {
+        try {
+            Files.newDirectoryStream(rootPath).use { entries ->
+                for (entry in entries) {
+                    if (entry.fileName.toString() != "catalog.sqlite" || !presentRegularFile(readPath("catalog.sqlite"))) {
+                        throw IOException("The private backup attempt retains unacknowledged evidence")
+                    }
+                }
+            }
+        } catch (_: DirectoryIteratorException) { throw IOException("The private backup attempt could not be read") }
+    }
+
+    fun forceExportJournal() {
+        forceDirectory(paths.root)
+        forceDirectory(checkNotNull(paths.root.parentFile))
+    }
+
     /** Private grant records never cross a library export or accept a destination path from a provider. */
     fun createFolderGrant(record: LibraryFolderGrantRecord) =
         create(folderGrantPath(record.grantId), privateSupport = true) { it.write(record.encode()) }
@@ -201,7 +258,7 @@ internal class LocalLibraryDirectory(root: File, private val directorySync: Dire
         throw IOException("Library path redirects outside its owned location")
     }
 
-    private fun create(relativePath: String, privateSupport: Boolean = false, write: (OutputStream) -> Unit) {
+    private fun create(relativePath: String, privateSupport: Boolean = false, beforeLink: () -> Unit = {}, write: (OutputStream) -> Unit) {
         val file = paths.beneath(relativePath)
         val destination = file.toPath()
         if (presentRegularFile(destination)) throw FileAlreadyExistsException(file.name)
@@ -215,6 +272,7 @@ internal class LocalLibraryDirectory(root: File, private val directorySync: Dire
             channel.force(true)
         }
         // The exclusive link makes the closed stage visible without replacing any existing leaf. A backend without this primitive refuses rather than copying into the final name.
+        beforeLink()
         Files.createLink(destination, stage)
         forceDirectory(parent)
         // A failed write, close or sync keeps its exact stage as recovery evidence. Once durable, unlink only this attempt's temporary name; never remove the final name.
