@@ -2,6 +2,7 @@ package app.pristinepage.library
 
 import app.pristinepage.capture.PhotoImportRequest
 import app.pristinepage.capture.PhotoImportKind
+import app.pristinepage.data.library.LibraryActivation
 import app.pristinepage.data.model.*
 import app.pristinepage.data.repository.AlbumSearchQuery
 import java.time.ZoneId
@@ -273,6 +274,29 @@ class ImportLibrarySession(private val actions: LibraryActions, restored: Librar
         if (error.retryable || error.safeMessageKey != "library_activation_changed" || current.value.request?.matches(request) != true) return false
         current.value = current.value.copy(request = null, launchPending = false, phase = null, loading = false, error = error)
         return true
+    }
+
+    /** Reconcile a retained command with only the issuing album; no normal startup, provider callback or successor lookup. */
+    internal fun refreshIssuedAlbum(issuedAt: LibraryActivation, id: DocumentId, read: suspend () -> DocumentOverview) {
+        if (current.value.activation != issuedAt || current.value.selectedId != id) return
+        val nav = navigation
+        val token = ++metadataGeneration
+        fun stillCurrent() = token == metadataGeneration && nav == navigation &&
+            current.value.let { it.activation == issuedAt && it.selectedId == id }
+        metadataRead?.cancel()
+        current.value = current.value.copy(loading = true, error = null)
+        metadataRead = run(initialize = false, onFailure = { error -> if (stillCurrent()) failed(error) }) {
+            val document = read()
+            currentCoroutineContext().ensureActive()
+            if (!stillCurrent()) return@run
+            if (document.document.documentId != id) {
+                throw RepositoryFailure(OperationError(OperationErrorCode.INTEGRITY_FAILED, false, "album_refresh_identity_changed", id.value))
+            }
+            current.value = current.value.let { value ->
+                value.copy(document = document, loading = false,
+                    selectedPage = value.selectedPage?.takeIf { page -> document.pages.any { it.pageId == page } })
+            }
+        }
     }
 
     private fun refresh(reset: Boolean, includeList: Boolean = true, debounceSearch: Boolean = false): Job {

@@ -1,6 +1,7 @@
 package app.pristinepage
 
 import app.pristinepage.capture.PhotoImportRequest
+import app.pristinepage.data.library.LibraryActivation
 import app.pristinepage.data.model.*
 import app.pristinepage.data.repository.AlbumSearchQuery
 import app.pristinepage.library.*
@@ -20,6 +21,27 @@ import org.junit.Test
 /** Real retained library reducer; only metadata IO is controlled. Selection is an opaque page identity validated against the open document, never an index, provider or bitmap. */
 @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
 class LibraryPageSelectionTest {
+    @Test fun aRetainedRefreshUsesOnlyTheIssuingAlbumAndCannotReplaceLaterNavigation() = runTest {
+        val f = Fixture()
+        val session = ImportLibrarySession(f, LibraryIdentity(f.doc), this)
+        advanceUntilIdle()
+        f.revision = 2
+        session.refreshIssuedAlbum(f.activation.copy(number = 2), f.doc) { error("A foreign activation reached the reader") }
+        advanceUntilIdle()
+        assertEquals(1L, session.state.value.document?.document?.documentRevision)
+        session.refreshIssuedAlbum(f.activation, f.doc) { f.load(f.doc) }
+        advanceUntilIdle()
+        assertEquals(2L, session.state.value.document?.document?.documentRevision)
+        lateinit var old: Continuation<DocumentOverview>
+        session.refreshIssuedAlbum(f.activation, f.doc) { suspendCoroutine { old = it } }
+        runCurrent()
+        session.accept(LibraryEvent.Open(f.other))
+        advanceUntilIdle()
+        old.resume(f.load(f.doc))
+        advanceUntilIdle()
+        assertEquals(f.other, session.state.value.document?.document?.documentId)
+    }
+
     @Test fun anOpenQueryShowsNewlyCommittedOcrWithoutReloadingAlbumMatches() = runTest {
         val f = Fixture()
         var albumReads = 0
@@ -354,12 +376,14 @@ class LibraryPageSelectionTest {
     private fun selected(value: LibraryIdentity) = value.selectedPage
 
     private class Fixture : LibraryActions, SearchableLibraryActions, SearchablePageActions {
+        val activation = LibraryActivation("00000000-0000-0000-0000-000000000007", 1)
         val doc = DocumentId("00000000-0000-0000-0000-000000000001"); val other = DocumentId("00000000-0000-0000-0000-000000000002")
         val first = PageId("00000000-0000-0000-0000-000000000003"); val second = PageId("00000000-0000-0000-0000-000000000004"); val foreign = PageId("00000000-0000-0000-0000-000000000005")
         private val source = SourceId("00000000-0000-0000-0000-000000000006")
         var pages = listOf(DocumentPage(first,source,1,0),DocumentPage(second,source,1,1))
         var gate: CompletableDeferred<Unit>? = null
         override suspend fun startup() = RecoveryReport(0,0,0,0,0,emptyList())
+        override suspend fun openLibrary() = LibraryStartup(startup(), activation)
         var catalogUnavailable = false
         var revision = 1L
         var renameWrites = 0

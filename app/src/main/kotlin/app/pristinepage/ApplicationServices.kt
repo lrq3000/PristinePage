@@ -14,7 +14,10 @@ import app.pristinepage.capture.PhotoImportRequest
 import app.pristinepage.data.library.AndroidLibraryStartup
 import app.pristinepage.data.library.DefaultLibraryOperations
 import app.pristinepage.data.library.LibraryActivation
+import app.pristinepage.data.model.BatchRecipeChange
 import app.pristinepage.data.model.DocumentId
+import app.pristinepage.data.model.DocumentMutationResult
+import app.pristinepage.data.model.DocumentOverview
 import app.pristinepage.data.model.DocumentPage
 import app.pristinepage.data.model.DocumentSummary
 import app.pristinepage.data.model.EditablePage
@@ -25,6 +28,7 @@ import app.pristinepage.data.model.PageId
 import app.pristinepage.data.model.RecoveryReport
 import app.pristinepage.data.model.RepositoryFailure
 import app.pristinepage.data.model.SaveRecipeResult
+import app.pristinepage.data.model.UndoId
 import app.pristinepage.editor.EditorIdentity
 import app.pristinepage.data.files.SourceInspector
 import app.pristinepage.data.repository.PrivateImportStore
@@ -32,6 +36,7 @@ import app.pristinepage.data.repository.ImportSessionLifecycle
 import app.pristinepage.data.repository.AtelierAcquisition
 import app.pristinepage.data.repository.AtelierDraftView
 import app.pristinepage.data.repository.AtelierSavedPages
+import app.pristinepage.data.repository.DocumentRepository
 import app.pristinepage.data.repository.SourceInput
 import app.pristinepage.data.repository.SavedOcrWork
 import app.pristinepage.data.repository.ImportInitializationCleanup
@@ -39,6 +44,7 @@ import app.pristinepage.image.decode.AndroidSourceInspector
 import app.pristinepage.image.decode.ImageAllocationBudget
 import app.pristinepage.image.decode.SourceDecoder
 import app.pristinepage.core.pipeline.RenderCoordinator
+import app.pristinepage.core.pipeline.RenderStatus
 import app.pristinepage.image.render.DefaultRenderCoordinator
 import app.pristinepage.image.render.GeometryEngine
 import app.pristinepage.image.render.AppearanceEngine
@@ -47,6 +53,8 @@ import app.pristinepage.image.ocr.SavedOcrPreparer
 import app.pristinepage.image.preview.OriginalPreviewBitmap
 import app.pristinepage.image.preview.OriginalPreviewBitmapLoader
 import app.pristinepage.image.preview.OriginalPreviewLoader
+import app.pristinepage.image.preview.RenderedPreviewBitmap
+import app.pristinepage.image.preview.RenderedPreviewBitmapLoader
 import java.io.FileNotFoundException
 import java.io.File
 import kotlinx.coroutines.CoroutineScope
@@ -261,6 +269,90 @@ class ApplicationServices(context: Context, internal val budget: ImageAllocation
     private fun draftSourceUnavailable(): Nothing =
         throw RepositoryFailure(OperationError(OperationErrorCode.SOURCE_UNAVAILABLE, false, "draft_source_unavailable", null))
 
+    internal suspend fun loadDefaultBatchPages(issuedAt: LibraryActivation, album: DocumentOverview): List<EditablePage> =
+        withDefaultLibrary(issuedAt) { graph ->
+            val id = album.document.documentId
+            suspend fun requireAlbum() {
+                val live = graph.store.catalog.load(id)
+                if (live.document.documentRevision != album.document.documentRevision || live.pages != album.pages) batchChanged()
+            }
+            requireAlbum()
+            val pages = album.pages.map { graph.store.editablePages.load(id, it.pageId) }
+            if (pages.indices.any { i ->
+                    val page = pages[i]
+                    val expected = album.pages[i]
+                    page.documentRevision != album.document.documentRevision ||
+                        page.recipeRevision != expected.recipeRevision || page.sourceId != expected.sourceId
+                }) batchChanged()
+            requireSameDefault(issuedAt)
+            requireAlbum()
+            requireSameDefault(issuedAt)
+            pages
+        } ?: activationChanged()
+
+    internal suspend fun loadDefaultBatchAlbum(issuedAt: LibraryActivation, album: DocumentId): DocumentOverview =
+        withDefaultLibrary(issuedAt) {
+            val result = it.store.catalog.load(album)
+            requireSameDefault(issuedAt)
+            result
+        } ?: activationChanged()
+
+    internal suspend fun renderDefaultBatchPreview(issuedAt: LibraryActivation, page: EditablePage, request: RenderRequest): RenderedPreviewBitmap =
+        activationPixels(issuedAt, revalidate = { graph ->
+            requireBatchPage(graph, page)
+            requireSameDefault(issuedAt)
+        }) { graph ->
+            requireBatchPage(graph, page)
+            if (request.pageId != page.pageId.value || request.sourceId != page.sourceId.value ||
+                request.recipeRevision != page.recipeRevision) batchChanged()
+            graph.renderer.render(request).use { result ->
+                if (result.request != request || result.status != RenderStatus.OK) {
+                    throw RepositoryFailure(OperationError(OperationErrorCode.PROCESSING_FAILED, true, "batch_preview_failed", null))
+                }
+                RenderedPreviewBitmapLoader(graph.budget).convert(result)
+            }
+        }
+
+    private suspend fun requireBatchPage(graph: ApplicationImports, page: EditablePage) {
+        val live = try { graph.store.editablePages.load(page.documentId, page.pageId) }
+        catch (failure: RepositoryFailure) {
+            if (failure.error.code == OperationErrorCode.SOURCE_UNAVAILABLE) batchChanged()
+            throw failure
+        }
+        if (live != page) batchChanged()
+    }
+
+    internal suspend fun applyDefaultBatch(issuedAt: LibraryActivation, album: DocumentId, revision: Long, changes: List<BatchRecipeChange>) =
+        defaultBatchMutation(issuedAt) { it.applyBatchRecipes(album, revision, changes) }
+
+    internal suspend fun undoDefaultBatch(issuedAt: LibraryActivation, undo: UndoId, revision: Long) =
+        defaultBatchMutation(issuedAt) { it.undoDocumentEdit(undo, revision) }
+
+    private suspend fun defaultBatchMutation(issuedAt: LibraryActivation, operation: suspend (DocumentRepository) -> DocumentMutationResult): DocumentMutationResult {
+        var started = false
+        try {
+            return withDefaultLibrary(issuedAt) { graph ->
+                started = true
+                val applied = operation(graph.store.documents)
+                try { requireSameDefault(issuedAt) }
+                catch (failure: RepositoryFailure) {
+                    if (applied is DocumentMutationResult.Applied) {
+                        throw RepositoryFailure(OperationError(OperationErrorCode.STORAGE_FAILED, false, "batch_mutation_delivery_unconfirmed", null))
+                    }
+                    // Do not expose obsolete conflict details, but keep a proved no-write result distinct from an uncertain save.
+                    return@withDefaultLibrary DocumentMutationResult.Rejected(failure.error)
+                }
+                applied
+            } ?: activationChanged()
+        } catch (refused: RepositoryFailure) {
+            if (started) throw refused
+            return DocumentMutationResult.Rejected(refused.error)
+        }
+    }
+
+    private fun batchChanged(): Nothing =
+        throw RepositoryFailure(OperationError(OperationErrorCode.REVISION_CONFLICT, false, "batch_snapshot_changed", null))
+
     internal suspend fun loadDefaultEditorPage(identity: EditorIdentity) =
         defaultEditorOperation(identity) { it.store.editablePages.load(identity.documentId, identity.pageId) }
 
@@ -323,12 +415,15 @@ class ApplicationServices(context: Context, internal val budget: ImageAllocation
         if (libraryStartup.recordedDefaultActivation() != issuedAt) activationChanged()
     }
 
-    private suspend fun <T : AutoCloseable> activationPixels(issuedAt: LibraryActivation, produce: suspend (ApplicationImports) -> T): T {
+    private suspend fun <T : AutoCloseable> activationPixels(issuedAt: LibraryActivation,
+        revalidate: suspend (ApplicationImports) -> Unit = {}, produce: suspend (ApplicationImports) -> T,
+    ): T {
         var provisional: T? = null
         try {
             withDefaultLibrary(issuedAt) { graph ->
                 provisional = produce(graph)
                 requireSameDefault(issuedAt)
+                revalidate(graph)
             } ?: activationChanged()
             currentCoroutineContext().ensureActive()
             return checkNotNull(provisional).also { provisional = null }

@@ -207,16 +207,18 @@ class LocalOcrImportJourneyTest {
 
         // Use the actual Activity-owned batch host; the single affected scan is no longer selected at Done.
         val batch = compose.runOnUiThread { ViewModelProvider(compose.activity)[BatchEditViewModel::class.java] }
-        val album = graph.store.catalog.load(document)
         val other = saved[0].pageId
         val otherProducer = readOcrJob(context, other)
-        compose.runOnUiThread { editor.closeEditor(); batch.open(album, edited.pageId) }
+        compose.runOnUiThread { editor.closeEditor() }
+        compose.onNodeWithTag("original-page-${edited.pageId.value}").performScrollTo().assertIsEnabled()
+            .performSemanticsAction(SemanticsActions.OnLongClick)
         compose.waitUntil(15_000) { batch.state.value.pages.size == 2 }
+        assertEquals(setOf(edited.pageId), batch.draft?.selection)
         compose.runOnUiThread {
             batch.edit { rotateClockwise() }
             batch.edit { toggle(edited.pageId); null }
-            batch.done()
         }
+        compose.onNodeWithTag("atelier-batch-done").assertIsEnabled().performClick()
         compose.waitUntil(15_000) { batch.state.value.undo != null }
         val batchPage = graph.store.editablePages.load(document, edited.pageId)
         assertEquals(edited.recipeRevision + 1, batchPage.recipeRevision)
@@ -230,7 +232,7 @@ class LocalOcrImportJourneyTest {
         assertEquals(batchProducer.job.value, batchProducer.resultJob)
         requireFinishedWake(edited.pageId, batchProducer.job)
 
-        compose.runOnUiThread { batch.undoSaved() }
+        compose.onNodeWithTag("atelier-batch-undo-saved").performScrollTo().assertIsEnabled().performClick()
         compose.waitUntil(15_000) { !batch.state.value.saving && batch.state.value.undo == null }
         assertNull(batch.state.value.error)
         val restored = graph.store.editablePages.load(document, edited.pageId)

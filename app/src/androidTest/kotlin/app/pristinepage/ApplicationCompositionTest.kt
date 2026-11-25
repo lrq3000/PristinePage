@@ -49,6 +49,97 @@ import org.junit.runner.RunWith
 class ApplicationCompositionTest {
     private val output = OutputSpec(PixelSize(2, 2), RenderPurpose.PREVIEW)
 
+    @Test fun batchDonePreviewAndUndoCannotDeliverAfterTheirIssuingActivationChanges() = runBlocking {
+        Fixture().use { f ->
+            val services = ApplicationServices(f.context, f.budget, f.provider)
+            val cold = LibraryActivation("aaaaaaaa-aaaa-4aaa-8aaa-000000000021", 1)
+            val coldAlbum = DocumentId("aaaaaaaa-aaaa-4aaa-8aaa-000000000022")
+            val coldFailure = runCatching { services.loadDefaultBatchAlbum(cold, coldAlbum) }.exceptionOrNull() as RepositoryFailure
+            assertEquals("library_activation_changed", coldFailure.error.safeMessageKey)
+            assertFalse(File(f.context.filesDir, "library-settings").exists())
+            assertFalse(f.context.getDatabasePath("pristinepage.db").exists())
+            services.imports().useStore { graph ->
+                val document = graph.store.documents.createDocument("Scoped batch")
+                val batch = graph.store.imports.beginImport(document, 1, null)
+                val scan = graph.photoImports.importProviderReferences(listOf(f.good), batch.parentId).single() as IngestResult.Committed
+                val activation = graph.activation
+                val obsolete = activation.copy(number = activation.number + 1)
+                val album = graph.store.catalog.load(document)
+                val original = graph.store.editablePages.load(document, scan.pageId)
+                val rotated = original.recipe.copy(geometry = original.recipe.geometry.withOutputQuarterTurns(1))
+                val change = BatchRecipeChange(scan.pageId, original.recipeRevision, rotated)
+                val originalRequest = RenderRequest(scan.sourceId.value, scan.sourcePixelHash, scan.pageId.value, original.recipeRevision,
+                    rotated, output, 1, null, FallbackPolicy.FAIL)
+                val loadError = runCatching { services.loadDefaultBatchPages(obsolete, album) }.exceptionOrNull() as RepositoryFailure
+                assertEquals("library_activation_changed", loadError.error.safeMessageKey)
+                val staleDone = services.applyDefaultBatch(obsolete, document, original.documentRevision, listOf(change)) as DocumentMutationResult.Rejected
+                assertEquals("library_activation_changed", staleDone.error.safeMessageKey)
+                assertEquals(listOf(original), services.loadDefaultBatchPages(activation, album))
+                services.renderDefaultBatchPreview(activation, original, originalRequest).use {
+                    assertEquals(originalRequest, it.request)
+                    assertEquals(2, it.bitmap.height)
+                }
+                val marker = File(f.context.filesDir, "library-settings/active-library")
+                val baseline = marker.readBytes()
+                val body = "pristinepage-active-library-v1\n${activation.libraryId}\n${obsolete.number}\n-\n-\n"
+                val digest = MessageDigest.getInstance("SHA-256").digest(body.toByteArray(Charsets.US_ASCII))
+                    .joinToString("") { "%02x".format(it.toInt() and 255) }
+                suspend fun duringDelivery(perturb: () -> Unit, action: suspend () -> Unit) {
+                    var checks = 0
+                    f.afterRoomOpen = {
+                        if (++checks == 2) perturb()
+                    }
+                    try { action(); assertTrue(checks >= 2) }
+                    finally {
+                        f.afterRoomOpen = {}
+                        marker.writeBytes(baseline)
+                    }
+                    assertEquals(0L, f.budget.usedBytes)
+                }
+                suspend fun drift(key: String, checkPixels: Boolean = false, action: suspend () -> Any) {
+                    duringDelivery({
+                        if (checkPixels) assertTrue(f.budget.usedBytes > 0)
+                        marker.writeText("$body$digest\n", Charsets.US_ASCII)
+                    }) {
+                        val error = runCatching { action() }.exceptionOrNull() as RepositoryFailure
+                        assertEquals(key, error.error.safeMessageKey)
+                    }
+                }
+                drift("library_activation_changed", checkPixels = true) { services.renderDefaultBatchPreview(activation, original, originalRequest).also { it.close() } }
+                duringDelivery({ marker.writeText("$body$digest\n", Charsets.US_ASCII) }) {
+                    val noWrite = services.applyDefaultBatch(activation, document, original.documentRevision + 1, listOf(change)) as DocumentMutationResult.Rejected
+                    assertEquals("library_activation_changed", noWrite.error.safeMessageKey)
+                }
+                assertEquals(original, graph.store.editablePages.load(document, scan.pageId))
+                drift("batch_mutation_delivery_unconfirmed") {
+                    services.applyDefaultBatch(activation, document, original.documentRevision, listOf(change))
+                }
+                val oldStore = graph.store.editablePages.load(document, scan.pageId)
+                assertEquals(original.recipeRevision + 1, oldStore.recipeRevision)
+                assertEquals(rotated, oldStore.recipe)
+                val restored = oldStore.recipe.copy(geometry = oldStore.recipe.geometry.withOutputQuarterTurns(0))
+                val exact = services.applyDefaultBatch(activation, document, oldStore.documentRevision,
+                    listOf(BatchRecipeChange(scan.pageId, oldStore.recipeRevision, restored))) as DocumentMutationResult.Applied
+                val token = checkNotNull(exact.undoId)
+                assertTrue(services.undoDefaultBatch(obsolete, token, exact.documentRevision) is DocumentMutationResult.Rejected)
+                drift("batch_mutation_delivery_unconfirmed") { services.undoDefaultBatch(activation, token, exact.documentRevision) }
+                val undone = graph.store.editablePages.load(document, scan.pageId)
+                assertEquals(exact.documentRevision + 1, undone.documentRevision)
+                assertEquals(rotated, undone.recipe)
+                val removedPreview = originalRequest.copy(recipeRevision = undone.recipeRevision)
+                duringDelivery({
+                    assertTrue(f.budget.usedBytes > 0)
+                    assertTrue(runBlocking { graph.store.documents.removePage(undone.pageId, undone.documentRevision) } is DocumentMutationResult.Applied)
+                }) {
+                    val refused = runCatching { services.renderDefaultBatchPreview(activation, undone, removedPreview).close() }.exceptionOrNull() as RepositoryFailure
+                    assertEquals(OperationErrorCode.REVISION_CONFLICT, refused.error.code)
+                }
+                assertEquals(emptyList<DocumentPage>(), services.loadDefaultBatchAlbum(activation, document).pages)
+                assertEquals(listOf(f.good), f.opened)
+            }
+        }
+    }
+
     @Test fun anAtelierChooserBelongsToTheDraftAndItsIssuingActivation() = runBlocking {
         Fixture().use { f ->
             val services = ApplicationServices(f.context, f.budget, f.provider)

@@ -39,6 +39,7 @@ import app.pristinepage.capture.PhotoImportRequest.Companion.saveActivation
 import app.pristinepage.capture.AtelierCaptureViewModel
 import app.pristinepage.capture.AtelierCaptureScreen
 import app.pristinepage.data.model.DocumentId
+import app.pristinepage.data.library.LibraryActivation
 import app.pristinepage.data.model.DocumentPage
 import app.pristinepage.data.model.DocumentSummary
 import app.pristinepage.data.model.ImportSessionId
@@ -123,7 +124,7 @@ class MainActivity : ComponentActivity() {
         val batchOwner = ViewModelProvider(this, object : ViewModelProvider.Factory {
             @Suppress("UNCHECKED_CAST") override fun <T : ViewModel> create(modelClass: Class<T>): T {
                 require(modelClass == BatchEditViewModel::class.java)
-                return BatchEditViewModel(services::imports, app.savedOcrSignals::onPagesSaved) as T
+                return BatchEditViewModel(services, app.savedOcrSignals::onPagesSaved, app.savedOcrSignals::requireStartupReconciliation) as T
             }
         })[BatchEditViewModel::class.java]
         val exportOwner = ViewModelProvider(this, object : ViewModelProvider.Factory {
@@ -179,8 +180,13 @@ class MainActivity : ComponentActivity() {
             val atHome = !acquiring.open && batch.album == null && host.identity == null && camera == null && library.selectedId == null
             LaunchedEffect(atHome) { if (!atHome) settingsPage = null }
             fun leaveEditor() { editorOwner.closeEditor(); retained.accept(LibraryEvent.RefreshAlbum) }
-            LaunchedEffect(batch.savedDocument, batch.savedRevision, batch.undo) {
-                if (batch.savedDocument != null) retained.accept(LibraryEvent.RefreshAlbum)
+            fun refreshBatchAlbum(issuing: LibraryActivation, document: DocumentId) {
+                retained.refreshIssuedAlbum(issuing, document) { services.loadDefaultBatchAlbum(issuing, document) }
+            }
+            LaunchedEffect(batch.savedDocument, batch.savedRevision, batch.issuingActivation) {
+                val issuing = batch.issuingActivation
+                val document = batch.savedDocument
+                if (issuing != null && document != null && batch.savedRevision != null) refreshBatchAlbum(issuing, document)
             }
             LaunchedEffect(acquiring.saved, acquiring.activation, library.activation) {
                 acquiring.saved?.let { album ->
@@ -197,7 +203,10 @@ class MainActivity : ComponentActivity() {
                     loadOriginal = { source -> services.originalDefaultAtelier(issuing, checkNotNull(draft), source, 1024) },
                     loadQueueTile = { source -> services.originalDefaultAtelier(issuing, checkNotNull(draft), source, 224) })
             }
-            else if (batch.album != null) BatchEditScreen(batch, batchOwner, services::imports) { album, pages -> exportOwner.review(album, pages) }
+            else if (batch.album != null) BatchEditScreen(batch, batchOwner, services,
+                onReconcile = { issuing, album -> refreshBatchAlbum(issuing, album.document.documentId) }) { album, pages ->
+                if (batch.issuingActivation == library.activation) exportOwner.review(album, pages)
+            }
             else if (host.identity == null && camera != null) key(camera.batchId) {
                 CaptureScreen(camera, { retained.accept(LibraryEvent.CancelImport) }, settings.showCameraGrid) { still ->
                     retained.submitCapture(LibraryEvent.PhotoResult(camera, still))
@@ -218,14 +227,21 @@ class MainActivity : ComponentActivity() {
                     }
                 }
                 AtelierLibraryScreen(retained, app.atelierPreferences, { services.imports().store.catalog.load(it) }, loadThumbnail,
-                     onBatch = { batchOwner.open(it) }, onSelectPages = batchOwner::open,
+                      onBatch = { issuing, album -> batchOwner.open(issuing, album) }, onSelectPages = batchOwner::open,
                      onExport = { exportOwner.review(it, null) },
-                     batchUndo = batch.undo?.takeIf { batch.savedDocument == library.selectedId },
-                     undoBatch = batchOwner::undoSaved, closeBatchNotice = batchOwner::clearNotice,
-                      batchBusy = batch.saving, batchError = batch.error?.takeIf { batch.savedDocument == library.selectedId },
+                      batchUndo = batch.undo?.takeIf { batch.savedDocument == library.selectedId && batch.issuingActivation == library.activation },
+                      undoBatch = batchOwner::undoSaved, closeBatchNotice = batchOwner::clearNotice,
+                       reconcileBatchUndo = {
+                           val issuing = batch.issuingActivation
+                           val document = batch.savedDocument
+                           if (issuing != null && document != null) refreshBatchAlbum(issuing, document)
+                       },
+                       batchBusy = batch.saving && batch.issuingActivation == library.activation,
+                       batchError = batch.error?.takeIf { batch.savedDocument == library.selectedId && batch.issuingActivation == library.activation },
+                       batchUndoUnconfirmed = batch.undoUnconfirmed && batch.savedDocument == library.selectedId && batch.issuingActivation == library.activation,
                       observeOcrPending = observeOcrPending,
                      thumbnailsCurrent = { album ->
-                         batch.savedDocument != album.documentId ||
+                          batch.issuingActivation != library.activation || batch.savedDocument != album.documentId ||
                              (!batch.saving && album.documentRevision >= (batch.savedRevision ?: 0L))
                      },
                        openAtelier = { title, target ->

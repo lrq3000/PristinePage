@@ -81,16 +81,21 @@ internal class SavedOcrAppSignals(
             var completed = false
             try { completed = deliver { scheduling.onPagesSaved(activation, document, committed) } == true }
             finally {
-                if (!completed) startup.getAndUpdate { pass ->
-                    if (pass?.activation != activation) return@getAndUpdate pass
-                    pass.copy(state = when (pass.state) {
-                        Startup.COMPLETE -> Startup.IDLE
-                        Startup.RUNNING -> Startup.RUNNING_INVALIDATED
-                        Startup.PENDING -> Startup.PENDING_INVALIDATED
-                        else -> pass.state
-                    })
-                }
+                if (!completed) requireStartupReconciliation(activation)
             }
+        }
+    }
+
+    /** A lost mutation receipt gives no page hint, but may invalidate a completed pass in its issuing library. */
+    fun requireStartupReconciliation(activation: LibraryActivation) {
+        startup.getAndUpdate { pass ->
+            if (pass?.activation != activation) return@getAndUpdate pass
+            pass.copy(state = when (pass.state) {
+                Startup.COMPLETE -> Startup.IDLE
+                Startup.RUNNING -> Startup.RUNNING_INVALIDATED
+                Startup.PENDING -> Startup.PENDING_INVALIDATED
+                else -> pass.state
+            })
         }
     }
 
