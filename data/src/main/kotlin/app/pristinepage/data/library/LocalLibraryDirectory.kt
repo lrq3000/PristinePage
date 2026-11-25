@@ -22,7 +22,7 @@ import java.nio.file.attribute.BasicFileAttributes
 
 /** Local filesystem only. The caller owns a stable, exclusively controlled app-managed directory; provider URIs cannot be translated into this capability. */
 internal class LocalLibraryDirectory(root: File, private val directorySync: DirectorySync = PlatformDirectorySync) :
-    LibraryObjectTransfer.Store, LibraryCatalogPublication.Store {
+    LibraryObjectTransfer.Store, LibraryCatalogPublication.Store, LibraryBackupRead.Source {
     private val paths = PrivateStorePaths(root)
 
     init {
@@ -30,6 +30,13 @@ internal class LocalLibraryDirectory(root: File, private val directorySync: Dire
     }
 
     val rootPath: Path get() = paths.root.toPath()
+
+    override fun requireIndependentScratch(scratch: Path) {
+        val root = rootPath
+        if (scratch.startsWith(root) || root.startsWith(scratch) || Files.isSameFile(root, scratch)) {
+            throw IOException("Backup and private verification directory overlap or are aliased")
+        }
+    }
 
     override fun open(id: LibraryObjectTransfer.ObjectId) = open(objectPath(id))
     override fun create(id: LibraryObjectTransfer.ObjectId, write: (OutputStream) -> Unit) = create(objectPath(id), write)
@@ -95,31 +102,7 @@ internal class LocalLibraryDirectory(root: File, private val directorySync: Dire
     /** Iterates a bounded inventory and refuses uncertainty rather than silently opening an older generation. Does not publish, remove or repair anything. */
     fun readTip(checkpoint: () -> Unit = {}): LibraryGeneration = generationInventory(checkpoint).tip
 
-    class GenerationInventory(private val markers: List<LibraryGeneration>, private val entryCount: Int) {
-        val tip = LibraryGenerationChain.tip(markers)
-
-        fun requireExact(generation: LibraryGeneration) {
-            if (generation !in markers) throw IOException("The exact retained library generation is missing or changed")
-        }
-
-        fun requireAppendable(candidate: LibraryGeneration) {
-            requireVacantChildId(candidate.id)
-            if (candidate.libraryId != tip.libraryId || candidate.predecessorId != tip.id) {
-                throw IOException("The destination cannot admit the new library generation")
-            }
-        }
-
-        fun requireVacantChildId(id: String) {
-            // Budget both the marker and its staging leaf, even if cleanup of the latter is refused.
-            if (entryCount > 2 * LibraryGenerationChain.MAX_MARKERS - 2 || markers.size == LibraryGenerationChain.MAX_MARKERS ||
-                markers.any { it.id == id }
-            ) {
-                throw IOException("The destination cannot admit the new library generation")
-            }
-        }
-    }
-
-    fun generationInventory(checkpoint: () -> Unit = {}): GenerationInventory {
+    override fun generationInventory(checkpoint: () -> Unit): LibraryGenerationInventory {
         val root = readPath("generations")
         if (!Files.isDirectory(root, NOFOLLOW_LINKS)) throw IOException("Library generation folder is unavailable")
         val markers = ArrayList<LibraryGeneration>()
@@ -142,7 +125,7 @@ internal class LocalLibraryDirectory(root: File, private val directorySync: Dire
             throw IOException("Library generation inventory could not be read")
         }
         checkpoint()
-        return GenerationInventory(markers, entries)
+        return LibraryGenerationInventory(markers, entries)
     }
 
     override fun confirmPayloadDurability(generation: LibraryGeneration, requiresObjects: Boolean) {

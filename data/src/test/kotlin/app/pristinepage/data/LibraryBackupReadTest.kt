@@ -3,12 +3,16 @@ package app.pristinepage.data
 import app.pristinepage.data.files.DirectorySync
 import app.pristinepage.data.library.LibraryBackupRead
 import app.pristinepage.data.library.LibraryGeneration
+import app.pristinepage.data.library.LibraryGenerationInventory
 import app.pristinepage.data.library.LibraryObjectTransfer.ObjectId
 import app.pristinepage.data.library.LocalLibraryDirectory
 import java.io.File
 import java.io.IOException
+import java.io.InputStream
 import java.nio.file.Files
+import java.nio.file.Path
 import java.security.MessageDigest
+import kotlinx.coroutines.CancellationException
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -20,6 +24,72 @@ import org.junit.rules.TemporaryFolder
 
 class LibraryBackupReadTest {
     @get:Rule val temporary = TemporaryFolder()
+
+    @Test fun streamBackedBackupUsesTheSameByteAndGenerationProofWithoutAFileOrWriteCapability() {
+        val fixture = fixture()
+        val store = StreamBackup(fixture)
+        val read = LibraryBackupRead(store, fixture.scratch.toPath(), 1024).read(8) { marker, catalog ->
+            assertEquals(fixture.generation, marker)
+            assertArrayEquals(fixture.catalog, catalog.readBytes())
+            LibraryBackupRead.Projection("verified", listOf(fixture.original, fixture.original))
+        }
+        assertEquals("verified", read.value)
+        assertEquals(2, store.inventoriesRead)
+        assertEquals(2, store.catalogsOpened)
+        assertEquals(1, store.originalsOpened)
+        assertFalse(fixture.scratch.list().orEmpty().any())
+    }
+
+    @Test fun streamBackedProviderLossDuringFinalCheckCannotAcknowledgeTheCatalog() {
+        val fixture = fixture()
+        val store = StreamBackup(fixture, failReread = true)
+        val failure = assertThrows(IOException::class.java) {
+            LibraryBackupRead(store, fixture.scratch.toPath(), 1024).read(8) { _, _ ->
+                LibraryBackupRead.Projection(Unit, listOf(fixture.original))
+            }
+        }
+        assertEquals("Selected tree is unavailable", failure.message)
+        assertEquals(1, store.originalsOpened)
+        assertFalse(fixture.scratch.list().orEmpty().any())
+    }
+
+    @Test fun conflictingExtentsForOneDigestRejectBeforeOpeningAnyOriginal() {
+        val fixture = fixture()
+        val store = StreamBackup(fixture)
+        assertThrows(IOException::class.java) {
+            LibraryBackupRead(store, fixture.scratch.toPath(), 1024).read(8) { _, _ ->
+                LibraryBackupRead.Projection(Unit, listOf(fixture.original, fixture.original.copy(byteCount = 4)))
+            }
+        }
+        assertEquals(0, store.originalsOpened)
+    }
+
+    @Test fun cancellationAtTheLastOriginalClosePreventsReopeningTheCatalog() {
+        val fixture = fixture()
+        var canceled = false
+        val store = StreamBackup(fixture, afterOriginalClose = { canceled = true })
+        assertThrows(CancellationException::class.java) {
+            LibraryBackupRead(store, fixture.scratch.toPath(), 1024, checkpoint = {
+                if (canceled) throw CancellationException("test cancellation")
+            }).read(8) { _, _ -> LibraryBackupRead.Projection(Unit, listOf(fixture.original)) }
+        }
+        assertEquals(1, store.catalogsOpened)
+        assertEquals(1, store.originalsOpened)
+    }
+
+    @Test fun catalogOpenerDistinguishesKnownAbsenceFromInaccessibleProvider() {
+        val fixture = fixture()
+        val missing = StreamBackup(fixture, beforeCatalogOpen = { false })
+        val inaccessible = StreamBackup(fixture, beforeCatalogOpen = { throw IOException("Selected tree is unavailable") })
+        val messages = listOf(missing, inaccessible).map { source ->
+            assertThrows(IOException::class.java) {
+                LibraryBackupRead(source, fixture.scratch.toPath(), 1024).read<Unit>(8) { _, _ ->
+                    error("The row reader must not receive an absent or inaccessible catalog")
+                }
+            }.message
+        }
+        assertEquals(listOf("Library catalog is missing", "Selected tree is unavailable"), messages)
+    }
 
     @Test fun readsAClosedCatalogAndEveryDistinctReferencedObjectWithoutChangingTheBackup() {
         val fixture = fixture()
@@ -148,6 +218,44 @@ class LibraryBackupReadTest {
         val generation: LibraryGeneration, val catalog: ByteArray, val original: ObjectId,
     ) {
         val originalFile = File(backup, "objects/${original.sha256}")
+    }
+
+    private class StreamBackup(
+        private val fixture: Fixture,
+        private val failReread: Boolean = false,
+        private val beforeCatalogOpen: () -> Boolean = { true },
+        private val afterOriginalClose: () -> Unit = {},
+    ) : LibraryBackupRead.Source {
+        var inventoriesRead = 0
+            private set
+        var catalogsOpened = 0
+            private set
+        var originalsOpened = 0
+            private set
+
+        override fun requireIndependentScratch(scratch: Path) {
+            assertEquals(fixture.scratch.toPath(), scratch)
+        }
+
+        override fun generationInventory(checkpoint: () -> Unit): LibraryGenerationInventory {
+            checkpoint()
+            if (++inventoriesRead > 1 && failReread) throw IOException("Selected tree is unavailable")
+            return LibraryGenerationInventory(listOf(fixture.generation), 1)
+        }
+
+        override fun openCatalog(generation: LibraryGeneration): InputStream? {
+            assertEquals(fixture.generation, generation)
+            catalogsOpened++
+            return if (beforeCatalogOpen()) fixture.catalog.inputStream() else null
+        }
+
+        override fun open(id: ObjectId): InputStream {
+            assertEquals(fixture.original, id)
+            originalsOpened++
+            return object : java.io.ByteArrayInputStream(byteArrayOf(1, 2, 3)) {
+                override fun close() = afterOriginalClose()
+            }
+        }
     }
 
     private fun fixture(schema: Int = 8, maximum: Long = 1024): Fixture {
