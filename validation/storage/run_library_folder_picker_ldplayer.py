@@ -81,6 +81,7 @@ BACKUP_DEATH_RECEIPT_ONLY = "b6f9e9329f39c067cecdb1c1130b9f8f28bf65492e17709750c
 ANCESTRY_GRANT_REFUSAL = "3271a4ebf9f4e0c55a25202fecfc160fef75626fe07ab027c767b7c2ce0b8fd1"
 ANCESTRY_FINISHED_GRANT_REFUSAL = "0a2fb4828173346ad9d01ff59d00449ce48c48827d38c1c1882e66dcc6f5083e"
 ANCESTRY_EXISTING_GRANT_REFUSAL = "3e3e68c579d04a3dd6c69627b8d30ea0ac151ac9096519c5d0d626b748486076"
+ANCESTRY_RETAINED_HANDOFF = "9775b7bb50d47222094d4db81e5cc81ccc40958d1e53d803a938a0b886ccb958"
 UUID_TEXT = r"[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}"
 BACKUP_ORIGINAL = "ebd602840377a3b3cf763cb6828fee67861ff77c444e8fe5894457ef6d99a24d"
 OCR_ACTIVATION_CASES = tuple(f"app.pristinepage.ocr.OcrWorkManagerIntegrationTest#{method}" for method in (
@@ -246,6 +247,21 @@ def verify_ancestry_grant_refusal(anchor, guest, pair, *, before_picker=False):
          read_results(transcript, (case,)) == ([], [case]) and
          f"INSTRUMENTATION_STATUS: stack=java.lang.AssertionError: {error}" in transcript.splitlines(),
          "Require the exact failed read-only grant boundary on the installed predecessor")
+
+
+def verify_ancestry_cold_handoff(anchor, guest, pair):
+    artifacts = json.loads(anchor("artifacts.json"))
+    calls = [json.loads(line) for line in anchor("commands.jsonl").splitlines()]
+    relevant = [call for call in calls if any(op in call["argv"] for op in ("instrument", "force-stop", "pidof"))]
+    need(artifacts["guest"] == guest and
+         {package: artifacts["proof"][package]["sha256"] for package in pair} == pair and len(relevant) == 3 and
+         ANCESTRY_GRANT_CASE in relevant[0]["argv"] and relevant[0].get("exit") == 0 and
+         relevant[1]["argv"][-4:] == ["shell", "am", "force-stop", APP] and relevant[1].get("exit") == 0 and
+         relevant[2]["argv"][-4:] == ["shell", "pidof", APP, TEST] and relevant[2].get("exit") == 0 and
+         re.fullmatch(r"[1-9][0-9]{0,8}", relevant[2].get("stdout", "").strip()) and
+         read_results(anchor("tree-ancestry-grant-instrumentation.txt"), (ANCESTRY_GRANT_CASE,)) == ([ANCESTRY_GRANT_CASE], []),
+         "Require the exact cold ancestry handoff with no prior cold launch")
+    return backup_death_control_destination(anchor, ANCESTRY_GRANT_CASE)
 
 
 def verify_backup_death_control(anchor, guest, pair):
@@ -620,6 +636,9 @@ def run(args):
              recovery_case, backup_case, args.probe_write, args.ocr_activation, args.working_catalog, args.probe_directory,
              args.activation, args.selected_catalog, args.activation_compatibility, args.expect_home,
              args.settings_retry, args.settings_prior_failure)))
+    ancestry_resume = args.tree_ancestry_handoff
+    need(ancestry_resume is None or (ancestry_cases and ancestry_resume == ANCESTRY_RETAINED_HANDOFF),
+         "An ancestry handoff requires the exact stopped run and standalone ancestry mode")
     if args.backup_delivery_death:
         need(not any((args.fresh, args.settings_picker_only, args.settings_recover, backup_case, args.probe_write,
                       args.ocr_activation, args.working_catalog, args.probe_directory, args.activation, args.selected_catalog,
@@ -652,6 +671,7 @@ def run(args):
     refused_death_destinations = []
     refused_death_private = None
     retained_death = None
+    retained_ancestry = None
     death_authority = args.backup_death_retry or SETTINGS_COLD_MANIFEST
     death_operation = str(uuid.uuid4()) if args.backup_delivery_death else None
     need(args.backup_death_retry is None or (death_operation and args.backup_death_retry == BACKUP_DIRECT_CONTROL_PASS),
@@ -670,10 +690,20 @@ def run(args):
             completed, publication_claim = settings_completed_destination(parents.pop(), args.settings_recover, args.guest, previous)
         if ancestry_cases:
             parents = {Path(file).resolve().parent for file in args.previous}
-            need(len(parents) == 1 and previous[APP] == hashes[APP] and previous[TEST] != hashes[TEST],
-                 "Require the exact released app and changed instrumentation for the ancestry continuation")
-            old = settings_run_anchors(parents.pop(), ANCESTRY_EXISTING_GRANT_REFUSAL)
-            verify_ancestry_grant_refusal(old, args.guest, previous, before_picker=True)
+            need(len(parents) == 1 and previous[APP] == hashes[APP],
+                 "Require the exact released app pair for the ancestry continuation")
+            predecessor = parents.pop()
+            if ancestry_resume:
+                need(previous == hashes, "Cold ancestry handoff must not change either APK")
+                handoff = settings_run_anchors(predecessor, ancestry_resume)
+                retained_ancestry = verify_ancestry_cold_handoff(handoff, args.guest, previous)
+                prior = raw.parent / "picker-adapter-library-tree-8e93d48f6993"
+            else:
+                need(previous[TEST] != hashes[TEST], "Require changed instrumentation for a new ancestry fixture")
+                prior = predecessor
+            old = settings_run_anchors(prior, ANCESTRY_EXISTING_GRANT_REFUSAL)
+            if not ancestry_resume:
+                verify_ancestry_grant_refusal(old, args.guest, previous, before_picker=True)
             refused_death_destinations.append(backup_death_control_destination(old, ANCESTRY_GRANT_CASE))
             finished = settings_run_anchors(raw.parent / "picker-adapter-library-tree-d41f13a3e0aa", ANCESTRY_FINISHED_GRANT_REFUSAL)
             refused_death_destinations.append(backup_death_control_destination(finished, ANCESTRY_CASE))
@@ -778,7 +808,8 @@ def run(args):
         need(sha(saved) == hashes[package], "Retained candidate APK changed")
         retained[package] = saved
     fixture = raw / "synthetic-library"
-    files = {} if args.ocr_activation or recovery_case or death_receipt else make_fixture(fixture, with_scan=True)
+    files = (retained_ancestry[1] if ancestry_resume else {} if args.ocr_activation or recovery_case or death_receipt
+             else make_fixture(fixture, with_scan=True))
     original = None if args.ocr_activation or recovery_case or death_receipt else synthetic_scan()[0]
     if original:
         need(files.get(f"objects/{original}") == original, "The populated Files fixture lacks its exact original")
@@ -786,7 +817,8 @@ def run(args):
         json.dumps(dict(proof=proof, source=args.commit, fixture=files, previous=previous, guest=args.guest,
                         settingsCancel=args.settings_retry, settingsPriorFailure=args.settings_prior_failure,
                         settingsCompleted=args.settings_recover, backupDeliveryDeath=death_operation,
-                        backupDeathRetry=args.backup_death_retry, backupDeathReceiptOnly=death_receipt)),
+                        backupDeathRetry=args.backup_death_retry, backupDeathReceiptOnly=death_receipt,
+                        treeAncestryHandoff=ancestry_resume)),
         encoding="utf-8",
     )
     ns = load_allocator(ROOT, args.guest, raw, "pristinepage-tree-" + os.environ["OPENCODE_SESSION_ID"])
@@ -885,19 +917,24 @@ def run(args):
         if death_operation:
             need(not (raw.parent / f"settings-retry-spent-{death_authority}.json").exists(),
                  "This isolated backup death authorization became spent before fixture staging")
-        folder = "PristinePage-tree-" + uuid.uuid4().hex[:12]
-        guest_root = f"/sdcard/Documents/{folder}"
-        adb("shell", "mkdir", "-p", "/sdcard/Documents")
-        namespaces = sorted({relative.split("/", 1)[0] for relative in files})
-        # The root reservation must succeed before touching any child, even if a colliding folder already exists.
-        adb("shell", "mkdir", guest_root)
-        adb("shell", "mkdir", *(f"{guest_root}/{namespace}" for namespace in namespaces))
-        for relative, digest in files.items():
-            adb("push", fixture / relative, f"{guest_root}/{relative}")
-            need(adb("shell", "sha256sum", f"{guest_root}/{relative}").split()[0] == digest,
-                 "The synthetic Files fixture differed after staging")
-        need(set(adb("shell", "ls", "-A", "-1", guest_root).splitlines()) == set(namespaces),
-             "The fresh fixture contains an unexpected root entry before instrumentation")
+        if ancestry_resume:
+            guest_root = retained_ancestry[0]
+            folder = guest_root.rsplit("/", 1)[1]
+            verify_unchanged_settings_destination(adb, guest_root, files)
+        else:
+            folder = "PristinePage-tree-" + uuid.uuid4().hex[:12]
+            guest_root = f"/sdcard/Documents/{folder}"
+            adb("shell", "mkdir", "-p", "/sdcard/Documents")
+            namespaces = sorted({relative.split("/", 1)[0] for relative in files})
+            # The root reservation must succeed before touching any child, even if a colliding folder already exists.
+            adb("shell", "mkdir", guest_root)
+            adb("shell", "mkdir", *(f"{guest_root}/{namespace}" for namespace in namespaces))
+            for relative, digest in files.items():
+                adb("push", fixture / relative, f"{guest_root}/{relative}")
+                need(adb("shell", "sha256sum", f"{guest_root}/{relative}").split()[0] == digest,
+                     "The synthetic Files fixture differed after staging")
+            need(set(adb("shell", "ls", "-A", "-1", guest_root).splitlines()) == set(namespaces),
+                 "The fresh fixture contains an unexpected root entry before instrumentation")
         recheck_target(run, ns)
         if death_operation:
             try:
@@ -917,10 +954,13 @@ def run(args):
             try:
                 schedule = tuple(zip(ancestry_cases, ("tree-ancestry-grant", "tree-ancestry-cold"))) if ancestry_cases else (
                     (death_picker_case, "death-picker"), (DESCRIPTOR_CASE, "directory-probe"))
+                if ancestry_resume:
+                    schedule = schedule[1:]
                 for case, name in schedule:
                     if case == ANCESTRY_COLD_CASE:
                         recheck_target(run, ns)
-                        adb("shell", "am", "force-stop", APP)
+                        if not ancestry_resume:
+                            adb("shell", "am", "force-stop", APP)
                         require_cold_backup_app(adb)
                     output = adb("shell", "am", "instrument", "-w", "-r", "-e", "class", case,
                                  "-e", "libraryFixtureFolder", folder, "-e", "libraryFixtureOriginal", original, RUNNER, timeout=155)
@@ -1045,6 +1085,8 @@ if __name__ == "__main__":
                         help="Reach the exact writable chooser folder, cancel without a grant, then separately verify read-only local descriptors")
     parser.add_argument("--tree-ancestry", action="store_true",
                         help="Observe read-only physical ancestry for two children of one verified Files tree")
+    parser.add_argument("--tree-ancestry-handoff", metavar="GRANT_MANIFEST_SHA",
+                        help="Use only the exact retained Files read grant; skip fixture staging and the chooser")
     parser.add_argument("--settings-retry", metavar="CANCEL_MANIFEST_SHA", help="Permit one new confirmation on the exact retained, independently canceled fixture")
     parser.add_argument("--settings-prior-failure", nargs=2, metavar=("RUN_ID", "MANIFEST_SHA"), help="Verify the exact first pre-selection failure and its unchanged destination")
     parser.add_argument("--ocr-activation", action="store_true", help="Test scoped WorkManager wakes and ordinary synthetic save/edit; no Files fixture")

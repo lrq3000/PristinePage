@@ -12,7 +12,7 @@ from unittest.mock import patch
 
 from run_library_folder_picker_ldplayer import (
     check_fixture_root, read_backup_delivery_death, recheck_target, select_backup_case, select_backup_death_picker_case, select_settings_picker_case, select_settings_recovery_case, select_tree_ancestry, settings_completed_destination, spend_settings_retry,
-    verify_ancestry_grant_refusal, verify_backup_death_control, verify_backup_death_intent, verify_backup_receipt_only, verify_settings_catalog, verify_settings_ocr, verify_settings_retry_evidence,
+    verify_ancestry_cold_handoff, verify_ancestry_grant_refusal, verify_backup_death_control, verify_backup_death_intent, verify_backup_receipt_only, verify_settings_catalog, verify_settings_ocr, verify_settings_retry_evidence,
 )
 from run_local_ocr_guest import read_boot_serial
 
@@ -187,6 +187,27 @@ class LibraryFolderPickerRunnerTest(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "grant boundary"):
             verify_ancestry_grant_refusal((evidence | {"tree-ancestry-grant-instrumentation.txt":
                 transcript.replace(text, "An unexpected URI was returned")}).__getitem__, "assigned", pair, before_picker=True)
+
+    def test_cold_ancestry_handoff_refuses_any_prior_cold_launch(self):
+        cls, method = "app.pristinepage.LibraryFolderFilesJourneyTest", "persistsExactFilesReadForColdAncestry"
+        case = f"{cls}#{method}"
+        folder = "PristinePage-tree-012345abcdef"
+        app, test = "app.pristinepage.debug", "app.pristinepage.debug.test"
+        pair = {app: "a" * 64, test: "b" * 64}
+        fields = f"INSTRUMENTATION_STATUS: class={cls}\nINSTRUMENTATION_STATUS: test={method}\n"
+        transcript = fields + "INSTRUMENTATION_STATUS_CODE: 1\n" + fields + (
+            "INSTRUMENTATION_STATUS_CODE: 0\nINSTRUMENTATION_RESULT: stream=\nOK (1 test)\nINSTRUMENTATION_CODE: -1\n")
+        calls = [dict(argv=["shell", "am", "instrument", case, "libraryFixtureFolder", folder], exit=0),
+                 dict(argv=["shell", "am", "force-stop", app], exit=0),
+                 dict(argv=["shell", "pidof", app, test], exit=0, stdout="3749\n")]
+        evidence = {"artifacts.json": json.dumps({"guest": "assigned", "proof": {k: {"sha256": v} for k, v in pair.items()}, "fixture": {}}),
+                    "tree-ancestry-grant-instrumentation.txt": transcript}
+        def anchor(loaded):
+            return (evidence | {"commands.jsonl": "\n".join(map(json.dumps, loaded))}).__getitem__
+        self.assertEqual((f"/sdcard/Documents/{folder}", {}), verify_ancestry_cold_handoff(anchor(calls), "assigned", pair))
+        replay = dict(argv=["shell", "am", "instrument", "app.pristinepage.LibraryProviderAncestryColdTest#provesManagedAncestryWithoutEffectiveWrite"])
+        with self.assertRaisesRegex(RuntimeError, "cold.*handoff"):
+            verify_ancestry_cold_handoff(anchor([*calls, replay]), "assigned", pair)
 
     def test_death_retry_requires_both_no_write_controls_on_the_same_exact_pair(self):
         def transcript(case):

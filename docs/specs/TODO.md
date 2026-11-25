@@ -404,6 +404,8 @@ The Activity finish was insufficient on `c458b00`; neither descriptor stage ran.
 
 `dd764d5` did not reach the cold process: its pre-picker empty-inventory assertion saw an unrelated persisted grant. Preserve that grant; compare the exact fixture read delta and a deterministic digest of all unrelated URI/mode bindings across the handoff and cleanup. Authenticate the pre-picker refusal and retain its fixture alongside the two earlier destinations. Checkpoint at the first actual cold-process permission or ancestry outcome; no unchanged retry, storage reset or release claim.
 
+`321e1ea` passed the Files read handoff; the host withheld cold launch after a package-matching PID appeared after the scoped stop. Instead of opening Files for a fourth grant trial, authenticate the exact passed handoff and finish only its unrun headless test with the same already installed APK pair and retained fixture. Verify both processes are absent before launch, preserving both the unrelated URI grants and all previous files. Checkpoint at the native result; if denied at a later boundary, record it without relaxing the test or enabling selected-folder writes.
+
 ### Current coordination: transition to `main`
 
 - [x] Operator approved the local fast-forward and `main`-based PR/handoff cadence; see [operational authority](OPERATIONAL_PLAN.md) and [queue rules](PARALLEL_EXECUTION_PLAN.md#coordination). Earlier branch/base references below describe their historical claims.
