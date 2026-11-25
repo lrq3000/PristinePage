@@ -412,6 +412,8 @@ The [granted descriptor ancestry witness](../../validation/storage/library-folde
 
 Independent capacity review found no Critical issues and two Important admission gaps: prove effective write denial for both exact spellings before Files opens, and bind the owned allocator record to the anchored predecessor before any APK replacement or fixture staging. Apply both and check the full synthetic inventory, including names and bytes, symmetrically before and after. The debug-only boundary supplies a real measured capacity comparison, not an actual low-disk condition or a Settings-level recovery test.
 
+The [native provider capacity refusal](../../validation/storage/library-folder-android.md#native-provider-capacity-refusal) passed on `0649338`. Real Files access and Android's measured capacity led to a definite pre-intent refusal for an unattainable synthetic requirement; neither fixture changed. Do not fill the retained guest to repeat this coverage. The next backup boundary is a real process interruption after exact payload verification but before the completion marker, with retained private intent/spends and no history success or repeat publication. Keep the full Settings low-capacity/cleanup and independently granted selected-root gates open.
+
 ### Current coordination: transition to `main`
 
 - [x] Operator approved the local fast-forward and `main`-based PR/handoff cadence; see [operational authority](OPERATIONAL_PLAN.md) and [queue rules](PARALLEL_EXECUTION_PLAN.md#coordination). Earlier branch/base references below describe their historical claims.
