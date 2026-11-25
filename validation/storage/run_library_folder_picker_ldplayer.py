@@ -27,6 +27,7 @@ from run_local_ocr_guest import (
 FILES_CASE = ("app.pristinepage.LibraryFolderFilesJourneyTest"
               "#actualFilesGrantReopensAfterActivityRecreationAndRevocationFailsClosed")
 DESCRIPTOR_CASE = "app.pristinepage.LibraryFolderFilesJourneyTest#exactFilesTreeExposesSyncableDirectoryDescriptors"
+ANCESTRY_CASE = "app.pristinepage.LibraryFolderFilesJourneyTest#exactFilesTreeProvesManagedDirectoryAncestry"
 WORKING_CASE = "app.pristinepage.LibraryFolderFilesJourneyTest#populatingAWorkingRoomCatalogDoesNotMaterializeTheOriginal"
 ACTIVATION_CASE = "app.pristinepage.LibraryFolderFilesJourneyTest#defaultAppGraphUsesItsDurableActivationBeforeAndAfterActivityRecreation"
 SELECTED_CATALOG_CASE = "app.pristinepage.LibraryFolderFilesJourneyTest#durableFolderSelectionReopensExactCatalogAndRefusesRevocation"
@@ -195,6 +196,13 @@ def verify_backup_receipt_only(receipt, mixed):
     need(receipt is None or (receipt == BACKUP_DEATH_RECEIPT_ONLY and not mixed),
          "Require the exact retained process-death receipt in a standalone read-only invocation")
     return receipt
+
+
+def select_tree_ancestry(enabled, mixed):
+    if not enabled:
+        return ()
+    need(not mixed, "Actual Files ancestry requires a retained read-only standalone invocation")
+    return (ANCESTRY_CASE,)
 
 
 def settings_run_anchors(raw, expected_sha):
@@ -587,6 +595,11 @@ def run(args):
         any((args.fresh, args.backup_delivery_death, args.backup_death_retry, death_picker_case, picker_case,
              recovery_case, backup_case, args.probe_write, args.ocr_activation, args.working_catalog, args.probe_directory,
              args.activation, args.selected_catalog, args.activation_compatibility, args.expect_home,
+             args.settings_retry, args.settings_prior_failure, args.tree_ancestry)))
+    ancestry_cases = select_tree_ancestry(args.tree_ancestry,
+        any((args.fresh, args.backup_delivery_death, args.backup_death_retry, death_picker_case, picker_case,
+             recovery_case, backup_case, args.probe_write, args.ocr_activation, args.working_catalog, args.probe_directory,
+             args.activation, args.selected_catalog, args.activation_compatibility, args.expect_home,
              args.settings_retry, args.settings_prior_failure)))
     if args.backup_delivery_death:
         need(not any((args.fresh, args.settings_picker_only, args.settings_recover, backup_case, args.probe_write,
@@ -636,6 +649,15 @@ def run(args):
             need(len(parents) == 1 and previous[APP] == hashes[APP] and args.settings_recover == SETTINGS_COMPLETED_MANIFEST,
                  "Require the independently pinned successful backup receipt and exact prior app")
             completed, publication_claim = settings_completed_destination(parents.pop(), args.settings_recover, args.guest, previous)
+        if ancestry_cases:
+            parents = {Path(file).resolve().parent for file in args.previous}
+            need(len(parents) == 1 and previous[APP] == "1c694ab574d8ebb533541b754219133d5246c8b48344557fece0445a7d0cb26d",
+                 "Require the exact released app pair from the preceding recovery")
+            old = settings_run_anchors(parents.pop(), "94965983c698ea277722e113dfd130d7d1df1cf9ee0cdf2dc40ce62bbf626981")
+            need(json.loads(old("artifacts.json"))["guest"] == args.guest and
+                 json.loads(old("outcomes.json")) == {"passed": [BACKUP_DEATH_RECOVERY_CASE], "failed": [],
+                                                     "installedSha256": previous, "deliveryDeathPid": "3635"},
+                 "The ancestry batch must use the exact released guest and recovered pair")
         if death_operation or death_receipt:
             parents = {Path(file).resolve().parent for file in args.previous}
             need(len(parents) == 1 and previous[APP] == hashes[APP], "Require the exact retained cold recovery pair")
@@ -868,11 +890,13 @@ def run(args):
                 if refused_death_private:
                     need(refused_death_private not in adb("shell", "run-as", APP, "ls", "-A", "-1", "files").splitlines(),
                          "The failed death attempt gained unexpected private data")
-        if death_picker_case:
-            # Both read/cancel checks share one guest boot. Do not start the descriptor case after a navigation failure.
+        if death_picker_case or ancestry_cases:
+            # The ancestry witness runs both checks under one Files grant. The chooser-only control still precedes its separate descriptor case.
             all_passed, all_failed = [], []
             try:
-                for case, name in ((death_picker_case, "death-picker"), (DESCRIPTOR_CASE, "directory-probe")):
+                schedule = ((ancestry_cases[0], "tree-ancestry"),) if ancestry_cases else (
+                    (death_picker_case, "death-picker"), (DESCRIPTOR_CASE, "directory-probe"))
+                for case, name in schedule:
                     output = adb("shell", "am", "instrument", "-w", "-r", "-e", "class", case,
                                  "-e", "libraryFixtureFolder", folder, "-e", "libraryFixtureOriginal", original, RUNNER, timeout=155)
                     run.path(f"{name}-instrumentation.txt").write_text(output, encoding="utf-8")
@@ -887,7 +911,8 @@ def run(args):
                 for refused in refused_death_destinations:
                     verify_unchanged_settings_destination(adb, *refused)
             run.save(run.path("outcomes.json"), {"passed": all_passed, "failed": all_failed, "installedSha256": hashes}, durable=True)
-            print(f"LDPlayer no-write picker/descriptor batch: {len(all_passed)} passed, {len(all_failed)} failed.", flush=True)
+            label = "descriptor/ancestry" if ancestry_cases else "picker/descriptor"
+            print(f"LDPlayer no-write {label} batch: {len(all_passed)} passed, {len(all_failed)} failed.", flush=True)
             return bool(all_failed)
         if prior_destinations:
             for previous_destination in prior_destinations:
@@ -993,6 +1018,8 @@ if __name__ == "__main__":
                         help="Verify the exact retained process-death result without launching Files or the writer")
     parser.add_argument("--backup-death-picker-only", action="store_true",
                         help="Reach the exact writable chooser folder, cancel without a grant, then separately verify read-only local descriptors")
+    parser.add_argument("--tree-ancestry", action="store_true",
+                        help="Observe read-only physical ancestry for two children of one verified Files tree")
     parser.add_argument("--settings-retry", metavar="CANCEL_MANIFEST_SHA", help="Permit one new confirmation on the exact retained, independently canceled fixture")
     parser.add_argument("--settings-prior-failure", nargs=2, metavar=("RUN_ID", "MANIFEST_SHA"), help="Verify the exact first pre-selection failure and its unchanged destination")
     parser.add_argument("--ocr-activation", action="store_true", help="Test scoped WorkManager wakes and ordinary synthetic save/edit; no Files fixture")

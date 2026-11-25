@@ -42,9 +42,9 @@ internal object AndroidLibraryDescriptorAncestry {
         return LibraryRootSeparation.admit({ chain(left) }, { chain(right) })
     }
 
-    private data class Observation(val mount: Long, val identity: Identity)
+    data class Observation(val mount: Long, val identity: Identity)
 
-    private fun observe(descriptor: ParcelFileDescriptor): Observation = descriptorIo {
+    fun observe(descriptor: ParcelFileDescriptor): Observation = descriptorIo {
         val stat = Os.fstat(descriptor.fileDescriptor)
         if (!OsConstants.S_ISDIR(stat.st_mode) || stat.st_ino <= 0L || stat.st_nlink <= 0L) unavailable()
         // Device/inode alone cannot reject an intervening same-device bind mount. Require the kernel's mount ID for each held descriptor.

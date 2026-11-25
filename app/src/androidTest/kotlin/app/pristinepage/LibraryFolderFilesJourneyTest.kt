@@ -557,6 +557,11 @@ class LibraryFolderFilesJourneyTest {
         LibraryProviderDirectoryProbe.verify(resolver, tree)
     }
 
+    @Test fun exactFilesTreeProvesManagedDirectoryAncestry() = verifyJourney(requireEffectiveReadOnly = true) { resolver, tree, _, _, _ ->
+        LibraryProviderDirectoryProbe.verify(resolver, tree)
+        LibraryProviderDirectoryProbe.verifyAncestry(resolver, tree)
+    }
+
     @Test fun grantedTreeCanStageAndPublishOneSyntheticFileWithoutOverwriting() = verifyJourney(probeWrite = true)
 
     @Test fun defaultLibraryExportsItsOriginalAndAcceptedEditIntoANewFilesBackup() = verifyJourney(exportBackup = true)
@@ -700,6 +705,7 @@ class LibraryFolderFilesJourneyTest {
         exportBackup: Boolean = false,
         backupDeath: String? = null,
         backupDeathPickerOnly: Boolean = false,
+        requireEffectiveReadOnly: Boolean = false,
         revokeAfterProbe: ((Uri) -> Unit)? = null,
         probe: ((ContentResolver, Uri, AndroidLibraryTreeRead, AndroidLibraryTreeRead.Verified, File) -> Unit)? = null,
     ) {
@@ -874,7 +880,22 @@ class LibraryFolderFilesJourneyTest {
                 }
             }
             assertEquals("Cancellation must prevent the next chunk from reaching the sink", 1, canceledWrites)
-            val observation = probe?.let { runCatching { it(app.contentResolver, uri, AndroidLibraryTreeRead(app, scratch), again, scratch) } }
+            fun assertEffectiveReadOnly() {
+                assertEquals(before + (uri.toString() to (true to false)), existing())
+                assertEquals(PackageManager.PERMISSION_GRANTED,
+                    app.checkUriPermission(uri, Process.myPid(), Process.myUid(), Intent.FLAG_GRANT_READ_URI_PERMISSION))
+                for (tree in exactFixtureTrees) {
+                    assertEquals("Files retained effective write access during the read-only probe", PackageManager.PERMISSION_DENIED,
+                        app.checkUriPermission(Uri.parse(tree), Process.myPid(), Process.myUid(), Intent.FLAG_GRANT_WRITE_URI_PERMISSION))
+                }
+            }
+            val observation = probe?.let {
+                runCatching {
+                    if (requireEffectiveReadOnly) assertEffectiveReadOnly()
+                    it(app.contentResolver, uri, AndroidLibraryTreeRead(app, scratch), again, scratch)
+                    if (requireEffectiveReadOnly) assertEffectiveReadOnly()
+                }
+            }
             if (revokeAfterProbe != null) {
                 observation?.getOrThrow()
                 revokeAfterProbe(uri)

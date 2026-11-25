@@ -2,18 +2,36 @@ package app.pristinepage
 
 import android.content.ContentResolver
 import android.net.Uri
+import android.os.ParcelFileDescriptor
 import android.provider.DocumentsContract
 import android.system.Os
 import android.system.OsConstants
 import android.system.StructStat
+import app.pristinepage.data.library.LibraryDescriptorAncestryWitness
 import java.io.IOException
+import org.junit.Assert.assertEquals
+import org.junit.Assert.assertThrows
 
 /** Test-only scope: query descriptors from the verified synthetic tree, without converting any URI to a filesystem path or creating a file. */
 internal object LibraryProviderDirectoryProbe {
+    private val namespaces = setOf("catalogs", "generations", "objects")
+
     fun verify(resolver: ContentResolver, tree: Uri) {
         val rootId = DocumentsContract.getTreeDocumentId(tree)
         val root = statAndSync(resolver, DocumentsContract.buildDocumentUriUsingTree(tree, rootId), "selected root")
-        val listed = resolver.query(
+        val listed = managedChildren(resolver, tree, rootId)
+        check("catalogs" in listed && "generations" in listed)
+        val identities = hashSetOf(root.st_dev to root.st_ino)
+        for ((name, id) in listed) {
+            val directory = statAndSync(resolver, DocumentsContract.buildDocumentUriUsingTree(tree, id), name)
+            check(directory.st_dev == root.st_dev && identities.add(directory.st_dev to directory.st_ino)) {
+                "Provider did not expose distinct managed directory identities"
+            }
+        }
+    }
+
+    private fun managedChildren(resolver: ContentResolver, tree: Uri, rootId: String): Map<String, String> =
+        resolver.query(
             DocumentsContract.buildChildDocumentsUriUsingTree(tree, rootId),
             arrayOf(DocumentsContract.Document.COLUMN_DOCUMENT_ID, DocumentsContract.Document.COLUMN_DISPLAY_NAME,
                 DocumentsContract.Document.COLUMN_MIME_TYPE), null, null, null,
@@ -22,19 +40,38 @@ internal object LibraryProviderDirectoryProbe {
             val entries = HashMap<String, String>()
             while (rows.moveToNext()) {
                 val name = rows.getString(1)
-                if (name in setOf("catalogs", "generations", "objects")) {
-                    check(rows.getString(2) == DocumentsContract.Document.MIME_TYPE_DIR)
-                    check(entries.put(name, rows.getString(0)) == null)
+                if (name in namespaces) {
+                    val id = rows.getString(0)
+                    check(id.isNotBlank() && id != rootId && rows.getString(2) == DocumentsContract.Document.MIME_TYPE_DIR)
+                    check(entries.put(name, id) == null)
                 }
             }
-            entries.toMap()
+            entries.toMap().also { check(it.values.toSet().size == it.size) }
         } ?: throw IOException("Provider could not enumerate the synthetic probe")
-        check("catalogs" in listed && "generations" in listed)
-        val identities = hashSetOf(root.st_dev to root.st_ino)
-        for ((name, id) in listed) {
-            val directory = statAndSync(resolver, DocumentsContract.buildDocumentUriUsingTree(tree, id), name)
-            check(directory.st_dev == root.st_dev && identities.add(directory.st_dev to directory.st_ino)) {
-                "Provider did not expose distinct managed directory identities"
+
+    /** The control uses provider-opened descriptors, not host paths or IDs interpreted as paths. */
+    fun verifyAncestry(resolver: ContentResolver, tree: Uri) {
+        val root = DocumentsContract.getTreeDocumentId(tree)
+        val children = managedChildren(resolver, tree, root)
+        check(children.keys == namespaces)
+        fun open(id: String): ParcelFileDescriptor =
+            checkNotNull(resolver.openFileDescriptor(DocumentsContract.buildDocumentUriUsingTree(tree, id), "r"))
+        open(root).use { anchor ->
+            open(children.getValue("catalogs")).use { a ->
+                open(children.getValue("objects")).use { b ->
+                    LibraryDescriptorAncestryWitness.requireDisjoint(anchor, a, b)
+                    open(children.getValue("catalogs")).use { same ->
+                        LibraryDescriptorAncestryWitness.requireSameIdentity(a, same)
+                        assertEquals("Library folders overlap or have no proven shared storage anchor",
+                            assertThrows(IOException::class.java) { LibraryDescriptorAncestryWitness.requireDisjoint(anchor, a, same) }.message)
+                    }
+                    assertEquals("Library folder ancestry is incomplete",
+                        assertThrows(IOException::class.java) { LibraryDescriptorAncestryWitness.requireDisjoint(anchor, anchor, a) }.message)
+                    check(managedChildren(resolver, tree, root) == children) { "The provider changed its managed child locators" }
+                    for ((id, held) in listOf(root to anchor, children.getValue("catalogs") to a, children.getValue("objects") to b)) {
+                        open(id).use { LibraryDescriptorAncestryWitness.requireSameIdentity(held, it) }
+                    }
+                }
             }
         }
     }
