@@ -168,13 +168,14 @@ class AndroidLibraryTreeRead(context: Context, private val scratchDirectory: Fil
         private const val PACKAGE = "com.android.externalstorage"
         private val ATTEMPT = Mutex()
 
-        /** Only the exact primary shared-storage subdirectory selected by Files; never a root, single document URI, or a provider-supplied raw path. */
+        /** Exact primary shared-storage or AOSP Documents-subtree grant. Never a volume root, single document URI, or translated filesystem path. */
         fun localTreeDocumentId(uri: Uri): String? {
             if (uri.scheme != "content" || uri.encodedAuthority != AUTHORITY || uri.encodedQuery != null || uri.encodedFragment != null ||
                 uri.toString().length > 4096 || !DocumentsContract.isTreeUri(uri)
             ) return null
             val id = DocumentsContract.getTreeDocumentId(uri)
-            if (id.length > 2048 || !id.startsWith("primary:") ||
+            // AOSP may identify the same Documents child by its more specific home root. Keep that identifier verbatim for grants and provider calls.
+            if (id.length > 2048 || (!id.startsWith("primary:") && !id.startsWith("home:")) ||
                 id.substringAfter(':').split('/').any { it.isBlank() || it == "." || it == ".." || it.any(Char::isISOControl) } ||
                 DocumentsContract.buildTreeDocumentUri(AUTHORITY, id).toString() != uri.toString()
             ) return null

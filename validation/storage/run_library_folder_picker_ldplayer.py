@@ -25,6 +25,7 @@ FILES_CASE = ("app.pristinepage.LibraryFolderFilesJourneyTest"
 CASES = (
     "app.pristinepage.LibraryFolderPickerContractTest#retainsTheActualEncodedTreeAndBothReturnedModes",
     "app.pristinepage.LibraryFolderPickerContractTest#rejectsDocumentUrisAndCancelledOrNonpersistentSelections",
+    "app.pristinepage.LibraryFolderPickerContractTest#retainsAnExactDocumentsHomeChildButRejectsTheHomeRootAndTraversal",
     FILES_CASE,
 )
 INPUTS = ("app", "data", "core", "image-android", "test-fixtures", "gradle",

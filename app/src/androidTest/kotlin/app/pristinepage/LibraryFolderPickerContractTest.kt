@@ -36,4 +36,17 @@ class LibraryFolderPickerContractTest {
         assertEquals(LibraryFolderPickerContract.Rejected.UNSUPPORTED_TREE,
             contract.parseResult(Activity.RESULT_OK, Intent().setData(tree.buildUpon().appendPath("document").appendPath("other").build()).setFlags(read or persist)))
     }
+
+    @Test fun retainsAnExactDocumentsHomeChildButRejectsTheHomeRootAndTraversal() {
+        val contract = LibraryFolderPickerContract()
+        val prefix = "content://com.android.externalstorage.documents/tree/"
+        fun parse(suffix: String) = contract.parseResult(Activity.RESULT_OK, Intent().setData(Uri.parse(prefix + suffix))
+            .setFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION))
+        val selected = parse("home%3AScans") as LibraryFolderPickerContract.Picked
+        assertEquals(prefix + "home%3AScans", selected.grant.exactUri)
+        assertEquals(prefix + "home%3AScans", selected.uri.toString())
+        for (bad in listOf("home%3A", "home%3A%2FScans", "home%3AParent%2F..%2FScans", "external%3AScans")) {
+            assertEquals(LibraryFolderPickerContract.Rejected.UNSUPPORTED_TREE, parse(bad))
+        }
+    }
 }

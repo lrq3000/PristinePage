@@ -50,9 +50,11 @@ class LibraryFolderFilesJourneyTest {
             check(it.matches(Regex("[0-9a-f]{64}")))
         }
         val expected = DocumentsContract.buildTreeDocumentUri("com.android.externalstorage.documents", "primary:Documents/$folder")
+        val home = DocumentsContract.buildTreeDocumentUri("com.android.externalstorage.documents", "home:$folder")
+        val exactFixtureTrees = setOf(expected.toString(), home.toString())
         val existing = { app.contentResolver.persistedUriPermissions.associate { it.uri.toString() to (it.isReadPermission to it.isWritePermission) } }
         val before = existing()
-        assertFalse(before.containsKey(expected.toString()))
+        assertFalse(before.keys.any { it in exactFixtureTrees })
         val scratch = File(app.filesDir, "tree-read-${UUID.randomUUID()}").apply { check(mkdir()) }
         val platform = LibraryFolderPickerContract()
         val result = AtomicReference<ActivityResult>()
@@ -90,9 +92,9 @@ class LibraryFolderFilesJourneyTest {
                     "clipMatches=${raw.data?.clipData?.takeIf { it.itemCount == 1 }?.getItemAt(0)?.uri?.toString() == expected.toString()}; " +
                     resultShape(raw.data?.data, expected, folder),
             )
-            assertEquals(expected.toString(), picked.uri.toString())
+            assertTrue("Files returned a tree other than the exact synthetic directory", picked.uri.toString() in exactFixtureTrees)
             val uri = LibraryFolderGrantHandoff(app).persistRead(picked)
-            assertEquals(before + (expected.toString() to (true to false)), existing())
+            assertEquals(before + (uri.toString() to (true to false)), existing())
             val first = runBlocking { AndroidLibraryTreeRead(app, scratch).verify(uri) }
             assertEquals("9e940d7b-76c7-45ea-b5e4-0ad86f26ea13", first.libraryId)
             assertEquals("25c49d9b-02d8-418f-b982-154980d89cfb", first.generationId)
@@ -131,8 +133,10 @@ class LibraryFolderFilesJourneyTest {
                 assertEquals(0, afterRevocation.size())
             }
         } finally {
-            if (existing()[expected.toString()] == (true to false)) {
-                app.contentResolver.releasePersistableUriPermission(expected, Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            for (fixtureTree in exactFixtureTrees) {
+                if (existing()[fixtureTree] == (true to false)) {
+                    app.contentResolver.releasePersistableUriPermission(Uri.parse(fixtureTree), Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                }
             }
             val activePackage = instrumentation.uiAutomation.rootInActiveWindow?.packageName?.toString()
             if (activePackage == registration.first) instrumentalBack(instrumentation)
