@@ -11,8 +11,8 @@ import unittest
 from unittest.mock import patch
 
 from run_library_folder_picker_ldplayer import (
-    check_fixture_root, recheck_target, select_backup_case, select_settings_picker_case, select_settings_recovery_case, settings_completed_destination, spend_settings_retry,
-    verify_settings_catalog, verify_settings_ocr, verify_settings_retry_evidence,
+    check_fixture_root, read_backup_delivery_death, recheck_target, select_backup_case, select_settings_picker_case, select_settings_recovery_case, settings_completed_destination, spend_settings_retry,
+    verify_backup_death_intent, verify_settings_catalog, verify_settings_ocr, verify_settings_retry_evidence,
 )
 from run_local_ocr_guest import read_boot_serial
 
@@ -197,6 +197,58 @@ class LibraryFolderPickerRunnerTest(unittest.TestCase):
             db.execute("UPDATE Job SET canonicalInputSha256='different'")
             with self.assertRaisesRegex(RuntimeError, "OCR.*binding"):
                 verify_settings_ocr(db, expected)
+
+    def test_backup_delivery_death_requires_exact_checkpoint_and_process_crash(self):
+        operation = "10000000-aaaa-4aaa-8aaa-000000000001"
+        uuid = "10000000-aaaa-4aaa-8aaa-000000000002"
+        receipt = ":".join((uuid, uuid))
+        bindings = ":".join((uuid, uuid, uuid, "a"*64, "b"*64, "c"*64))
+        trace = (
+            "INSTRUMENTATION_STATUS: class=app.pristinepage.LibraryFolderFilesJourneyTest\n"
+            "INSTRUMENTATION_STATUS: test=endsProcessAfterBackupCommitBeforeDelivery\n"
+            "INSTRUMENTATION_STATUS_CODE: 1\n"
+            f"INSTRUMENTATION_STATUS: backupDeathOperation={operation}\n"
+            "INSTRUMENTATION_STATUS: backupDeathPid=3021\n"
+            f"INSTRUMENTATION_STATUS: backupDeathReceipt={receipt}\n"
+            f"INSTRUMENTATION_STATUS: backupDeathBindings={bindings}\n"
+            "INSTRUMENTATION_STATUS_CODE: 71\n"
+            "INSTRUMENTATION_RESULT: shortMsg=Process crashed.\n"
+            "INSTRUMENTATION_CODE: 0\n"
+        )
+        self.assertEqual(("3021", receipt.split(":"), bindings.split(":")), read_backup_delivery_death(trace, operation))
+        for bad in (trace.replace("Process crashed.", "Test failed."), trace.replace(operation, operation[:-1] + "2"),
+                    trace.replace("backupDeathPid=3021", "backupDeathPid=3021\nINSTRUMENTATION_STATUS: backupDeathPid=501"),
+                    trace.replace("backupDeathPid=3021", "backupDeathPid=3021\nINSTRUMENTATION_STATUS: backupDeathPid=malformed"),
+                    trace.replace("INSTRUMENTATION_STATUS_CODE: 1\n", "").replace(
+                        "INSTRUMENTATION_STATUS_CODE: 71", "INSTRUMENTATION_STATUS_CODE: 1\nINSTRUMENTATION_STATUS_CODE: 71"),
+                    trace.replace("INSTRUMENTATION_RESULT: shortMsg=", "INSTRUMENTATION_CODE: -1\nINSTRUMENTATION_RESULT: shortMsg="),
+                    trace.replace("STATUS_CODE: 71", "STATUS_CODE: 0"), trace + "INSTRUMENTATION_CODE: -1\n"):
+            with self.assertRaisesRegex(RuntimeError, "checkpoint"):
+                read_backup_delivery_death(bad, operation)
+
+    def test_death_readback_rejects_a_valid_private_intent_for_another_catalog(self):
+        operation = "10000000-aaaa-4aaa-8aaa-000000000001"
+        library = "10000000-aaaa-4aaa-8aaa-000000000002"
+        generation = "10000000-aaaa-4aaa-8aaa-000000000003"
+        parent = "PristinePage-tree-0123456789ab"
+        isolated = f"files/library-export-source-{operation}"
+        attempt = f"{isolated}/files/library-out-{operation}"
+        marker = f"pristinepage-library-v1\n{library}\n{generation}\n-\n8\n536576\n{'a'*64}\n"
+        digest = lambda text: sha256(text.encode("ascii")).hexdigest()
+        grant = f"pristinepage-library-grant-v1\n{operation}\n3\ncontent://com.android.externalstorage.documents/tree/home%3A{parent}\n"
+
+        def evidence(record_marker):
+            body = f"pristinepage-library-export-intent-v2\n{operation}\n{library}\n1\n1\n1\n{grant}{digest(grant)}\n{record_marker}"
+            intent = f"{body}{digest(body)}\n"
+            complete = f"pristinepage-library-export-complete-v2\n{operation}\n{digest(intent)}\n"
+            leaves = {f"{attempt}/export.intent": intent, f"{attempt}/export.complete": complete}
+            return lambda *cmd: leaves[cmd[-1]], {"files": {path: (len(value), digest(value)) for path, value in leaves.items()}}
+
+        adb, baseline = evidence(marker)
+        verify_backup_death_intent(adb, isolated, operation, parent, marker, baseline)
+        adb, baseline = evidence(marker.replace("a"*64, "b"*64))
+        with self.assertRaisesRegex(RuntimeError, "does not match.*intent"):
+            verify_backup_death_intent(adb, isolated, operation, parent, marker, baseline)
 
     def test_settings_readback_rejects_a_valid_catalog_with_another_source_binding(self):
         first, second = (b'{"geometry":{"outputQuarterTurns":0}}', b'{"geometry":{"outputQuarterTurns":1}}')

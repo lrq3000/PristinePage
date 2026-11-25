@@ -62,9 +62,12 @@ internal object LibraryDefaultFolderExportProbe {
         }
     }
 
-    suspend fun verify(app: Context, picked: LibraryFolderPickerContract.Picked): Backup {
+    suspend fun verify(app: Context, picked: LibraryFolderPickerContract.Picked,
+        beforeDelivery: (suspend (LibraryFolderExportReceipt, List<String>) -> Nothing)? = null,
+        operation: String = UUID.randomUUID().toString(),
+    ): Backup {
         val tree = picked.uri
-        val isolated = File(app.filesDir.canonicalFile, "library-export-source-${UUID.randomUUID()}").apply { check(mkdir()) }
+        val isolated = File(app.filesDir.canonicalFile, "library-export-source-$operation").apply { check(mkdir()) }
         val files = File(isolated, "files").apply { check(mkdir()) }
         val db = File(isolated, "databases").apply { check(mkdir()) }
         val forbidProvider = AtomicBoolean()
@@ -90,13 +93,13 @@ internal object LibraryDefaultFolderExportProbe {
             val ingest = graph.photoImports.importProviderReferences(listOf(reference), batch.parentId).single() as IngestResult.Committed
             val source = store.committedSources.load(ingest.sourceId)
             val inspection = source.inspection
+            val originalRecipe = store.editablePages.load(album, ingest.pageId).recipe
             val recipe = Recipe(geometry = GeometryRecipe.None(
                 SourceBinding(inspection.sourcePixelHash, inspection.normalizedSize, inspection.conversionFingerprint), outputQuarterTurns = 1,
             ))
             val saved = store.documents.saveRecipe(ingest.pageId, 1, recipe) as SaveRecipeResult.Saved
             val defaultPointer = File(files, "library-settings/active-library")
             val activeBefore = defaultPointer.readBytes()
-            val operation = UUID.randomUUID().toString()
             val modes = if (picked.grant.returnedWrite) 3 else 1
             val attempt = files.resolve("library-out-$operation")
             val completion = attempt.resolve("export.complete")
@@ -127,11 +130,28 @@ internal object LibraryDefaultFolderExportProbe {
             assertEquals(namesBefore, destinationNames())
             noAttempt()
 
-            // Run the real Room/provider publication. Cancel only the dispatch back to the caller after the private completion is visible.
+            if (beforeDelivery != null) {
+                // Receive a successful return in the test relay, not merely a visible completion file on either success or failure.
+                val completed = store.exportLibraryTo(bindResult())
+                assertEquals(operation, completed.operationId)
+                assertEquals(2L, saved.recipeRevision)
+                assertArrayEquals(activeBefore, defaultPointer.readBytes())
+                assertArrayEquals(png, source.file.readBytes())
+                assertTrue(File(attempt, "export.intent").isFile && completion.isFile)
+                assertFalse(File(attempt, "export.ack").exists())
+                assertEquals(readGrants, grants())
+                fun recipeDigest(value: Recipe) = MessageDigest.getInstance("SHA-256").digest(RecipeCodec.encode(value))
+                    .joinToString("") { "%02x".format(it.toInt() and 255) }
+                beforeDelivery(completed, listOf(album.value, ingest.pageId.value, ingest.sourceId.value,
+                    inspection.sourcePixelHash, recipeDigest(originalRecipe), recipeDigest(recipe)))
+            }
+            // The independent legacy canceled-delivery case still intercepts the publisher's dispatcher.
             val withheld = AtomicBoolean()
             val delivery = object : CoroutineDispatcher() {
                 override fun dispatch(context: CoroutineContext, block: Runnable) {
-                    if (completion.isFile && withheld.compareAndSet(false, true)) checkNotNull(context[Job]).cancel()
+                    if (completion.isFile && withheld.compareAndSet(false, true)) {
+                        checkNotNull(context[Job]).cancel()
+                    }
                     Dispatchers.Default.dispatch(context, block)
                 }
             }

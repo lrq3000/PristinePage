@@ -13,6 +13,7 @@ import android.database.sqlite.SQLiteDatabase
 import android.graphics.Rect
 import android.net.Uri
 import android.os.Build
+import android.os.Bundle
 import android.os.Process
 import android.os.SystemClock
 import android.provider.DocumentsContract
@@ -72,6 +73,7 @@ import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.suspendCancellableCoroutine
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -546,6 +548,13 @@ class LibraryFolderFilesJourneyTest {
 
     @Test fun defaultLibraryExportsItsOriginalAndAcceptedEditIntoANewFilesBackup() = verifyJourney(exportBackup = true)
 
+    @Test fun endsProcessAfterBackupCommitBeforeDelivery() = verifyJourney(backupDeath = backupDeathOperation())
+
+    private fun backupDeathOperation() =
+        InstrumentationRegistry.getArguments().getString("libraryBackupDeathOperation")?.let {
+            it.also { value -> require(UUID.fromString(value).toString() == value) }
+        } ?: error("No exclusive synthetic backup death operation")
+
     @Test fun durableFolderSelectionReopensExactCatalogAndRefusesRevocation() {
         lateinit var context: Context
         lateinit var spool: File
@@ -674,6 +683,7 @@ class LibraryFolderFilesJourneyTest {
     private fun verifyJourney(
         probeWrite: Boolean = false,
         exportBackup: Boolean = false,
+        backupDeath: String? = null,
         revokeAfterProbe: ((Uri) -> Unit)? = null,
         probe: ((ContentResolver, Uri, AndroidLibraryTreeRead, AndroidLibraryTreeRead.Verified, File) -> Unit)? = null,
     ) {
@@ -692,7 +702,7 @@ class LibraryFolderFilesJourneyTest {
         assertFalse(before.keys.any { it in exactFixtureTrees })
         // API 28 may expose filesDir through /data/user/0 rather than the canonical app-owned storage path.
         val scratch = File(app.filesDir.canonicalFile, "tree-read-${UUID.randomUUID()}").apply { check(mkdir()) }
-        val platform = LibraryFolderPickerContract()
+        val platform = LibraryFolderPickerContract(writable = backupDeath != null)
         val result = AtomicReference<ActivityResult>()
         val receipt = CountDownLatch(1)
         val registration = compose.runOnUiThread {
@@ -708,16 +718,21 @@ class LibraryFolderFilesJourneyTest {
         }
         try {
             val picker = registration.first
-            // Files may briefly show navigation controls before resolving the initial URI. Do not open the drawer during that transition.
-            val labels = setOf("SELECT", "Select", "SÉLECTIONNER", "Sélectionner", "Use this folder", "USE THIS FOLDER", "Choose this folder")
-            val choice = await(instrumentation, picker, "exact fixture and affirmative action") {
-                it.hasText(folder) && it.hasText("catalogs") && it.hasText("generations") && labels.any { name -> it.find(name) != null }
-            }
-            val button = labels.firstNotNullOfOrNull { choice.find(it) } ?: error("Files did not expose a folder confirmation")
-            tap(instrumentation, button)
-            if (!receipt.await(4, TimeUnit.SECONDS)) {
-                val confirm = await(instrumentation, picker, "optional Files confirmation") { it.allowButton() != null }
-                tap(instrumentation, confirm.allowButton() ?: error("No Files confirmation"))
+            if (backupDeath != null) {
+                compose.waitUntil(12_000) { instrumentation.uiAutomation.rootInActiveWindow?.packageName?.toString() == picker }
+                selectSettingsDestination(instrumentation, picker, folder)
+            } else {
+                // Files may briefly show navigation controls before resolving the initial URI. Do not open the drawer during that transition.
+                val labels = setOf("SELECT", "Select", "SÉLECTIONNER", "Sélectionner", "Use this folder", "USE THIS FOLDER", "Choose this folder")
+                val choice = await(instrumentation, picker, "exact fixture and affirmative action") {
+                    it.hasText(folder) && it.hasText("catalogs") && it.hasText("generations") && labels.any { name -> it.find(name) != null }
+                }
+                val button = labels.firstNotNullOfOrNull { choice.find(it) } ?: error("Files did not expose a folder confirmation")
+                tap(instrumentation, button)
+                if (!receipt.await(4, TimeUnit.SECONDS)) {
+                    val confirm = await(instrumentation, picker, "optional Files confirmation") { it.allowButton() != null }
+                    tap(instrumentation, confirm.allowButton() ?: error("No Files confirmation"))
+                }
             }
             assertTrue("Files did not return a selection", receipt.await(10, TimeUnit.SECONDS))
             val raw = requireNotNull(result.get())
@@ -731,6 +746,25 @@ class LibraryFolderFilesJourneyTest {
             assertTrue("Files returned a tree other than the exact synthetic directory", picked.uri.toString() in exactFixtureTrees)
             if (arguments.getString("libraryExpectHome") == "1") {
                 assertTrue("Files did not return the exact Documents namespace", picked.uri.toString() == home.toString())
+            }
+            if (backupDeath != null) {
+                assertTrue(before.isEmpty())
+                assertEquals(before, existing())
+                runBlocking {
+                    LibraryDefaultFolderExportProbe.verify(app, picked, operation = backupDeath, beforeDelivery = { completed, bindings ->
+                        // No receiver is resumed or fallback exception thrown after arming death.
+                        suspendCancellableCoroutine<Nothing> {
+                            instrumentation.sendStatus(71, Bundle().apply {
+                                putString("backupDeathOperation", completed.operationId)
+                                putInt("backupDeathPid", Process.myPid())
+                                putString("backupDeathReceipt", "${completed.libraryId}:${completed.generationId}")
+                                putString("backupDeathBindings", bindings.joinToString(":"))
+                            })
+                            Process.killProcess(Process.myPid())
+                        }
+                    })
+                }
+                error("The publication must lose its process before delivering success")
             }
             if (exportBackup) {
                 val temporary = AndroidLibraryWritableFolder(app)
