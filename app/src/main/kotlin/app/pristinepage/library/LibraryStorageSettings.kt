@@ -220,10 +220,17 @@ private object AndroidLibraryTreeReadLabel {
     }
 }
 
-@Composable internal fun LibraryStorageSettings(owner: LibraryStorageViewModel, backup: LibraryBackupSession) {
+internal fun AndroidLibraryStartup.Location.requiresLibraryReconnect(refusedActivation: LibraryActivation?): Boolean =
+    folderLabel != null && (needsReconnect || activation == refusedActivation)
+
+@Composable internal fun LibraryStorageSettings(owner: LibraryStorageViewModel, backup: LibraryBackupSession,
+    refusedActivation: LibraryActivation? = null,
+) {
     val state by owner.state.collectAsStateWithLifecycle()
     val backupState by backup.state.collectAsStateWithLifecycle()
     val location = state.location
+    // A persisted grant only proves its modes, not that the exact root or accepted generation still opens.
+    val reconnect = location?.requiresLibraryReconnect(refusedActivation) == true
     val fallback = stringResource(R.string.library_selected_folder)
     val default = stringResource(R.string.library_default_location)
     val label = location?.folderLabel?.ifBlank { fallback } ?: default
@@ -232,13 +239,13 @@ private object AndroidLibraryTreeReadLabel {
     LaunchedEffect(owner) { owner.refresh() }
     Column {
         if (location?.folderLabel != null) Text(label, style = MaterialTheme.typography.titleMedium)
-        Button(onClick = { owner.pick(if (location?.needsReconnect == true) LibraryStorageViewModel.Action.RECONNECT
+        Button(onClick = { owner.pick(if (reconnect) LibraryStorageViewModel.Action.RECONNECT
             else LibraryStorageViewModel.Action.CHANGE) }, enabled = selectable,
             modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp).testTag("library-storage-folder")) {
-            Text(stringResource(if (location?.needsReconnect == true) R.string.library_reconnect else R.string.library_change_folder))
+            Text(stringResource(if (reconnect) R.string.library_reconnect else R.string.library_change_folder))
         }
         if (location?.folderLabel != null) {
-            Button(onClick = { owner.pick(LibraryStorageViewModel.Action.IMPORT) }, enabled = selectable && !location.needsReconnect,
+            Button(onClick = { owner.pick(LibraryStorageViewModel.Action.IMPORT) }, enabled = selectable && !reconnect,
                 modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp).testTag("library-storage-import")) {
                 Text(stringResource(R.string.library_import))
             }
@@ -249,7 +256,7 @@ private object AndroidLibraryTreeReadLabel {
         }
         if (state.busy) LinearProgressIndicator(Modifier.fillMaxWidth())
         if (state.error) Text(stringResource(R.string.library_folder_unavailable))
-        LibraryBackupSettings(backup, allowExport = !state.busy && state.picker == null && state.review == null)
+        LibraryBackupSettings(backup, allowExport = !reconnect && !state.busy && state.picker == null && state.review == null)
     }
     if (state.returnReview) AlertDialog(
         onDismissRequest = owner::cancelDefaultReview,

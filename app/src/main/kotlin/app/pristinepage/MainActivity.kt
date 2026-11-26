@@ -257,7 +257,8 @@ class MainActivity : ComponentActivity() {
                  AtelierSettingsScreen(checkNotNull(settingsPage), app.atelierPreferences, ocrReady,
                       libraryStorage = {
                           // Keep the existing backup usable while the selected-folder write and cutover paths are qualified.
-                          if (library.selectedFolder) LibraryStorageSettings(storage, backup) else LibraryBackupSettings(backup)
+                           if (library.selectedFolder) LibraryStorageSettings(storage, backup, library.activation.takeIf { library.reconnect })
+                           else LibraryBackupSettings(backup)
                       }) {
                       if (storageState.busy) return@AtelierSettingsScreen
                       if (settingsPage == SettingsPage.LIBRARY_STORAGE && it != SettingsPage.LIBRARY_STORAGE) storage.cancelReview()
