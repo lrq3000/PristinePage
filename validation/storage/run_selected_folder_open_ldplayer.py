@@ -17,19 +17,41 @@ BASELINE = "picker-adapter-library-tree-08be480f914d"
 BASELINE_SHA = "e25e685fa3e8aa5bb59f4c97fabb978ce4d506b0491ea660a2583d67da392996"
 CONTENTION = "picker-adapter-selected-open-6a7fc64cfdfb"
 CONTENTION_SHA = "9adc674e5eaad0defb01d2857384684431c3af4bf11e4cef227ef1120287d7d9"
+STAGING_STOP = "picker-adapter-selected-open-cdcd541e5823"
+STAGING_STOP_SHA = "bba85bee569bc935edc8ddffa78630f663b0a5402e7fd01060fe44ceb428cb78"
+TEARDOWN_STOP = "picker-adapter-selected-open-8f4e46542f1e"
+TEARDOWN_STOP_SHA = "6c28baa2732db0ecc835481d744820daed50aff77ca04b6159b4ee496a7b09ca"
 FIRST_CASE = "app.pristinepage.LibraryFolderFilesJourneyTest#confirmedOpenSwitchesToTheSelectedFilesCatalogAndRevocationDoesNotFallBack"
 CASE = "app.pristinepage.LibraryFolderFilesJourneyTest#opensSelectedAlbumGridAndVerifiedOriginalWhileBrowsing"
 
 
-def run_open(commit, app_sha, test_sha, build_receipt, *, after_contention=False):
+def verify_teardown_failure(record, claim, prior_generation, folder, pair, outcome, preservation, transcript, trace):
+    commands = [row for row in trace if "instrument" in row["argv"]]
+    expected = ["-s", claim["serial"], "shell", "am", "instrument", "-w", "-r", "-e", "class", CASE,
+                "-e", "libraryFixtureFolder", folder, checks.RUNNER]
+    checks.need(record["predecessor"] == STAGING_STOP_SHA and record["reusedReadFixture"] is True and
+                record["guest"] == claim["name"] and record["previous"] == pair and
+                claim["ownership_history"][-1]["generation"] == prior_generation and
+                outcome == dict(passed=[], failed=[CASE], installedSha256=pair) and
+                preservation == dict(externalFixturesUnchanged=True, advancedReceiptUnchanged=True,
+                                     persistedGrantCount=0, ordinaryPointerAbsent=True) and
+                "java.lang.AssertionError: expected:<0> but was:<56>" in transcript and
+                "LibraryFolderFilesJourneyTest.kt:1023" in transcript and
+                len(commands) == 1 and commands[0]["argv"][1:] == expected and commands[0]["exit"] == 0 and
+                not any({"install", "push"}.intersection(row["argv"]) for row in trace),
+                "The exact read-only teardown predecessor is not verified")
+
+
+def run_open(commit, app_sha, test_sha, build_receipt, *, after_contention=False, reuse_read_fixture=False, after_teardown=False):
     root = checks.ROOT
     checks.need(__debug__ and Path.cwd().resolve() == root and not any(os.environ.get(key) for key in checks.LOCAL_ADB_OVERRIDES),
                 "Use the exact worktree and the ordinary scoped transport")
-    checks.need(re.fullmatch(r"[a-f0-9]{40}", commit) and
-                subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip() == commit and
-                not subprocess.check_output(["git", "diff", commit, "--", *checks.INPUTS]) and
-                not subprocess.check_output(["git", "ls-files", "--others", "--exclude-standard", "--", *checks.INPUTS]),
-                "The production or instrumentation inputs do not match the named candidate")
+    checks.need(re.fullmatch(r"[a-f0-9]{40}", commit), "The candidate must name a complete source commit")
+    if not reuse_read_fixture:
+        checks.need(subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip() == commit and
+                    not subprocess.check_output(["git", "diff", commit, "--", *checks.INPUTS]) and
+                    not subprocess.check_output(["git", "ls-files", "--others", "--exclude-standard", "--", *checks.INPUTS]),
+                    "The production or instrumentation inputs do not match the named candidate")
     history = root / "validation/raw/storage"
     prior = history / BASELINE
     manifest = prior / f"{BASELINE}-final-manifest.json"
@@ -56,7 +78,9 @@ def run_open(commit, app_sha, test_sha, build_receipt, *, after_contention=False
                       json.loads(earlier_bound("selected-recipe-attempt.json")),
                       (bound_report["catalogBytes"], bound_report["catalogSha256"]))
     failed_fixture = None
-    if after_contention:
+    untouched_pending = None
+    predecessor = BASELINE_SHA
+    if after_contention or reuse_read_fixture or after_teardown:
         failed = history / CONTENTION
         latest_manifest = failed / f"{CONTENTION}-final-manifest.json"
         latest = checks.settings_run_anchors(failed, CONTENTION_SHA)
@@ -76,9 +100,55 @@ def run_open(commit, app_sha, test_sha, build_receipt, *, after_contention=False
         previous = latest_pair
         manifest, claim = latest_manifest, latest_claim
         snapshot = json.loads(manifest.read_bytes())["recordSnapshot"]
+        predecessor = CONTENTION_SHA
+    if reuse_read_fixture or after_teardown:
+        stopped = history / STAGING_STOP
+        staged = checks.settings_run_anchors(stopped, STAGING_STOP_SHA)
+        record = json.loads(staged("artifacts.json"))
+        stopped_claim = json.loads(staged("claim.json"))
+        stopped_pair = {package: record["proof"][package]["sha256"] for package in previous}
+        pending = json.loads(staged("selected-open-attempt.json"))
+        folder = pending["folder"]
+        left = checks.independent_fixture_children(folder)[0]
+        trace = [json.loads(line) for line in staged("commands.jsonl").splitlines()]
+        pushes = [row for row in trace if "push" in row["argv"]]
+        first_file = f"/sdcard/Documents/{folder}/{left}/" + next(path for path in pending["files"] if path.startswith("catalogs/"))
+        checks.need((after_teardown or (commit == record["source"] and {checks.APP: app_sha, checks.TEST: test_sha} == stopped_pair)) and
+                    record["predecessor"] == CONTENTION_SHA and record["previous"] == previous and
+                    record["guest"] == guest == stopped_claim["name"] and
+                    stopped_claim["ownership_history"][-1]["generation"] == claim["generation"] and
+                    len(pushes) == 1 and pushes[0].get("exit") is None and pushes[0]["argv"][-1] == first_file and
+                    not any("instrument" in row["argv"] for row in trace) and
+                    all(checks.sha(stopped / f"{package}.apk") == digest for package, digest in stopped_pair.items()),
+                    "The earlier transport refusal cannot be distinguished from a spent instrumentation attempt")
+        untouched_pending = folder
+        previous = stopped_pair
+        manifest = stopped / f"{STAGING_STOP}-final-manifest.json"
+        claim = stopped_claim
+        snapshot = json.loads(manifest.read_bytes())["recordSnapshot"]
+        predecessor = STAGING_STOP_SHA
+    if after_teardown:
+        stopped = history / TEARDOWN_STOP
+        failed = checks.settings_run_anchors(stopped, TEARDOWN_STOP_SHA)
+        record = json.loads(failed("artifacts.json"))
+        released = json.loads(failed("claim.json"))
+        fixture = json.loads(failed("selected-open-attempt.json"))
+        checks.need(released["name"] == guest and fixture == failed_fixture | {"siblingFiles": failed_fixture["files"]} and
+                    {package: record["proof"][package]["sha256"] for package in previous} == previous and
+                    all(checks.sha(stopped / f"{package}.apk") == digest for package, digest in previous.items()),
+                    "The teardown predecessor does not bind the complete fixture and installed pair")
+        verify_teardown_failure(record, released, claim["generation"], fixture["folder"], previous,
+                                json.loads(failed("outcomes.json")), json.loads(failed("preservation.json")),
+                                failed("instrumentation.txt"), [json.loads(line) for line in failed("commands.jsonl").splitlines()])
+        manifest = stopped / f"{TEARDOWN_STOP}-final-manifest.json"
+        claim = released
+        snapshot = json.loads(manifest.read_bytes())["recordSnapshot"]
+        predecessor = TEARDOWN_STOP_SHA
 
     paths = {checks.APP: root / "app/build/outputs/apk/debug/app-debug.apk",
              checks.TEST: root / "app/build/outputs/apk/androidTest/debug/app-debug-androidTest.apk"}
+    if reuse_read_fixture:
+        paths = {package: history / STAGING_STOP / f"{package}.apk" for package in paths}
     pair = {checks.APP: app_sha, checks.TEST: test_sha}
     receipt = json.loads(build_receipt.read_bytes())
     checks.need(receipt == dict(source=commit, sha256=pair),
@@ -87,7 +157,7 @@ def run_open(commit, app_sha, test_sha, build_receipt, *, after_contention=False
                 "The retained guest and APK evidence need more disk space")
     inputs = root / "validation/raw/providers/ocr-app-standard-full"
     proof = {package: checks.exact_apk(path, pair[package], inputs, package == checks.TEST) for package, path in paths.items()}
-    checks.need(pair[checks.TEST] != previous[checks.TEST], "The selected preview requires the current test APK, not the predecessor")
+    checks.need(reuse_read_fixture or pair[checks.TEST] != previous[checks.TEST], "The selected preview requires the current test APK, not the old test")
     checks.require_independent_manifests(proof.values())
     prefix = "picker-adapter-selected-open-" + uuid.uuid4().hex[:12]
     raw = history / prefix
@@ -98,7 +168,7 @@ def run_open(commit, app_sha, test_sha, build_receipt, *, after_contention=False
         checks.need(checks.sha(saved[package]) == pair[package], "Candidate changed during evidence retention")
     (raw / f"{prefix}-artifacts.json").write_text(
         json.dumps(dict(source=commit, proof=proof, previous=previous,
-                        predecessor=CONTENTION_SHA if after_contention else BASELINE_SHA, guest=guest)), encoding="ascii")
+                         predecessor=predecessor, guest=guest, reusedReadFixture=reuse_read_fixture or after_teardown)), encoding="ascii")
     ns = checks.load_allocator(root, guest, raw, "pristinepage-tree-" + os.environ["OPENCODE_SESSION_ID"])
     base = checks.run_type(ns, purpose="pristinepage-library-app-tree", operation="PristinePage selected catalog and frame",
                            admit_released=lambda record: checks.verify_bound_recipe_release(claim, record, manifest, snapshot))
@@ -140,10 +210,21 @@ def run_open(commit, app_sha, test_sha, build_receipt, *, after_contention=False
         checks.require_cold_backup_app(adb)
         check_protected()
         # Run the protected-witness checks even when installation or fixture setup stops partway through.
+        # No command may rewrite or adopt the uncertain partial staging from the transport refusal.
+        if untouched_pending:
+            checks.need(failed_fixture["folder"] != untouched_pending, "The retained complete and uncertain partial fixtures overlap")
+            pending_root = f"/sdcard/Documents/{untouched_pending}"
+            pending_before = adb("shell", "stat", "-c", "%d:%i:%s:%Y", pending_root).strip()
+            checks.need(re.fullmatch(r"[0-9]+:[1-9][0-9]*:[0-9]+:[0-9]+", pending_before),
+                        "The retained partial fixture directory is unavailable")
         try:
-            passed, failed = exercise(runner, adb, ns, raw, saved, pair, previous, installed)
+            passed, failed = exercise(runner, adb, ns, raw, saved, pair, previous, installed,
+                                      failed_fixture if reuse_read_fixture or after_teardown else None)
         finally:
             check_protected()
+            if untouched_pending:
+                checks.need(adb("shell", "stat", "-c", "%d:%i:%s:%Y", pending_root).strip() == pending_before,
+                            "The retained partial fixture directory changed during the read-only batch")
         runner.save(runner.path("preservation.json"), dict(externalFixturesUnchanged=True, advancedReceiptUnchanged=True,
                                                           persistedGrantCount=0, ordinaryPointerAbsent=True), durable=True)
         print(f"Selected Files Open and original preview: {len(passed)} passed, {len(failed)} failed; preservation verified.", flush=True)
@@ -153,7 +234,7 @@ def run_open(commit, app_sha, test_sha, build_receipt, *, after_contention=False
             checks.close_owned(runner)
 
 
-def exercise(runner, adb, ns, raw, saved, pair, previous, installed):
+def exercise(runner, adb, ns, raw, saved, pair, previous, installed, read_fixture):
     for package, path in saved.items():
         flags = checks.install_flags(package, installed[package], pair[package], previous[checks.TEST], previous[checks.APP])
         if flags is not None:
@@ -166,20 +247,25 @@ def exercise(runner, adb, ns, raw, saved, pair, previous, installed):
     fingerprint = adb("shell", "getprop", "ro.build.fingerprint").strip()
     checks.need(re.fullmatch(r"[A-Za-z0-9_.+:/,-]{12,256}", fingerprint), "The exact Android build fingerprint is unavailable")
     policy = f"android-imagedecoder-v2/api28/{checks.sha256(fingerprint.encode()).hexdigest()[:16]}/srgb-straight-white-exif-v1"
-    fixture = raw / "synthetic-library"
-    files = checks.make_fixture(fixture, with_scan=True, conversion=policy)
-    folder = "PristinePage-tree-" + uuid.uuid4().hex[:12]
-    parent = f"/sdcard/Documents/{folder}"
-
     def admit_fixture():
         checks.recheck_target(runner, ns)
         checks.require_cold_backup_app(adb)
         checks.need(not checks.read_app_persisted_grants(adb), "A different Files grant appeared")
 
-    sibling = raw / "synthetic-sibling"
-    sibling_files = checks.make_fixture(sibling, with_scan=True, alternate_scan=True, conversion=policy)
+    if read_fixture:
+        checks.need(read_fixture["conversion"] == policy, "The retained complete fixture belongs to another decode policy")
+        folder, files = read_fixture["folder"], read_fixture["files"]
+        sibling_files = files
+    else:
+        fixture = raw / "synthetic-library"
+        files = checks.make_fixture(fixture, with_scan=True, conversion=policy)
+        folder = "PristinePage-tree-" + uuid.uuid4().hex[:12]
+        sibling = raw / "synthetic-sibling"
+        sibling_files = checks.make_fixture(sibling, with_scan=True, alternate_scan=True, conversion=policy)
+    parent = f"/sdcard/Documents/{folder}"
     runner.save(runner.path("selected-open-attempt.json"), dict(folder=folder, files=files, siblingFiles=sibling_files, conversion=policy), durable=True)
-    checks.stage_independent_fixture_pair(adb, parent, folder, ((fixture, files), (sibling, sibling_files)), admit_fixture)
+    if not read_fixture:
+        checks.stage_independent_fixture_pair(adb, parent, folder, ((fixture, files), (sibling, sibling_files)), admit_fixture)
     try:
         admit_fixture()
         output = adb("shell", "am", "instrument", "-w", "-r", "-e", "class", CASE,
@@ -203,6 +289,10 @@ if __name__ == "__main__":
     parser.add_argument("app_sha")
     parser.add_argument("test_sha")
     parser.add_argument("--build-receipt", required=True, type=Path)
-    parser.add_argument("--after-contention", action="store_true", help="Require the exact stopped no-write contention predecessor")
+    resume = parser.add_mutually_exclusive_group()
+    resume.add_argument("--after-contention", action="store_true", help="Require the exact stopped no-write contention predecessor")
+    resume.add_argument("--reuse-read-fixture", action="store_true", help="Use the installed pair from the exact staging timeout and read the earlier complete fixture without reinstalling or staging new files")
+    resume.add_argument("--after-teardown", action="store_true", help="Use the exact teardown failure as the immediate predecessor without staging new files")
     args = parser.parse_args()
-    raise SystemExit(run_open(args.commit, args.app_sha, args.test_sha, args.build_receipt, after_contention=args.after_contention))
+    raise SystemExit(run_open(args.commit, args.app_sha, args.test_sha, args.build_receipt,
+                              after_contention=args.after_contention, reuse_read_fixture=args.reuse_read_fixture, after_teardown=args.after_teardown))

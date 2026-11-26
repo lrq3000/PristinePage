@@ -22,6 +22,28 @@ from run_local_ocr_guest import read_boot_serial
 
 
 class LibraryFolderPickerRunnerTest(unittest.TestCase):
+    def test_selected_open_teardown_retry_requires_exact_read_only_predecessor(self):
+        from run_selected_folder_open_ldplayer import CASE, STAGING_STOP_SHA, verify_teardown_failure
+        folder = "PristinePage-tree-1234567890ab"
+        pair = {"app.pristinepage.debug": "a" * 64, "app.pristinepage.debug.test": "b" * 64}
+        claim = {"name": "test-guest", "serial": "emulator-5556", "ownership_history": [{"generation": "previous"}]}
+        record = {"predecessor": STAGING_STOP_SHA, "previous": pair, "guest": claim["name"], "reusedReadFixture": True}
+        outcome = {"passed": [], "failed": [CASE], "installedSha256": pair}
+        preservation = dict(externalFixturesUnchanged=True, advancedReceiptUnchanged=True,
+                            persistedGrantCount=0, ordinaryPointerAbsent=True)
+        transcript = ("java.lang.AssertionError: expected:<0> but was:<56>\n"
+                      "LibraryFolderFilesJourneyTest.kt:1023")
+        trace = [{"argv": ["adb", "-s", claim["serial"], "shell", "am", "instrument", "-w", "-r",
+                          "-e", "class", CASE, "-e", "libraryFixtureFolder", folder,
+                          "app.pristinepage.debug.test/androidx.test.runner.AndroidJUnitRunner"], "exit": 0}]
+        verify_teardown_failure(record, claim, "previous", folder, pair, outcome, preservation, transcript, trace)
+        for wrong in ([*trace, {"argv": ["adb", "push", "unknown", "fixture"]}],
+                      [trace[0] | {"argv": [*trace[0]["argv"][:-2], "unverified", trace[0]["argv"][-1]]}]):
+            with self.assertRaisesRegex(RuntimeError, "teardown predecessor"):
+                verify_teardown_failure(record, claim, "previous", folder, pair, outcome, preservation, transcript, wrong)
+        with self.assertRaisesRegex(RuntimeError, "teardown predecessor"):
+            verify_teardown_failure(record, claim, "previous", folder, pair, outcome, preservation, "unrelated exception", trace)
+
     def test_native_preview_fixture_changes_only_the_recorded_pixel_binding(self):
         fingerprint = "android-imagedecoder-v2/api28/0123456789abcdef/srgb-straight-white-exif-v1"
         old_digest, old_payload, old_rows = synthetic_scan()
