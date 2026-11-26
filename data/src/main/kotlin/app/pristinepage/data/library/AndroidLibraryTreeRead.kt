@@ -20,6 +20,7 @@ import app.pristinepage.data.model.SourceBlobId
 import app.pristinepage.data.model.SourceInspection
 import app.pristinepage.data.repository.CommittedSourceBinding
 import app.pristinepage.data.repository.DocumentCatalog
+import app.pristinepage.data.repository.EditablePages
 import app.pristinepage.data.repository.ScopedCommittedOriginals
 import java.io.File
 import java.io.IOException
@@ -295,21 +296,21 @@ class AndroidLibraryTreeRead(context: Context, private val scratchDirectory: Fil
     /** Rebuild a private Room catalog without importing original bytes. This detached read cannot activate a library or commit an edit. */
     suspend fun <T : Any> openWorkingCatalog(
         verified: Verified, block: suspend CoroutineScope.(DocumentCatalog) -> T,
-    ): T = useWorkingCatalog({ verified }, {}) { catalog, _ -> block(catalog) }
+    ): T = useWorkingCatalog({ verified }, {}) { catalog, _, _ -> block(catalog) }
 
     /** A detached read-only original port under the same verified catalog lifetime; it cannot change the selected library. */
     suspend fun openWorkingOriginals(
         verified: Verified, block: suspend CoroutineScope.(ScopedCommittedOriginals) -> Unit,
-    ) = useWorkingCatalog({ verified }, {}) { _, originals -> block(originals) }
+    ) = useWorkingCatalog({ verified }, {}) { _, originals, _ -> block(originals) }
 
     internal suspend fun <T : Any> useSelectedWorkingLibrary(
         tree: Uri, generation: LibraryGeneration, confirmSelection: suspend () -> Unit,
-        block: suspend CoroutineScope.(DocumentCatalog, ScopedCommittedOriginals) -> T,
+        block: suspend CoroutineScope.(DocumentCatalog, ScopedCommittedOriginals, EditablePages) -> T,
     ): T = useWorkingCatalog({ attempt -> verifyExact(tree, generation, attempt) }, confirmSelection, block)
 
     private suspend fun <T : Any> useWorkingCatalog(
         verify: suspend (File) -> Verified, confirmSelection: suspend () -> Unit,
-        block: suspend CoroutineScope.(DocumentCatalog, ScopedCommittedOriginals) -> T,
+        block: suspend CoroutineScope.(DocumentCatalog, ScopedCommittedOriginals, EditablePages) -> T,
     ): T = withContext(Dispatchers.IO) {
         if (!WORKING.tryLock()) throw IOException("A library working catalog is already open")
         try {
@@ -350,8 +351,8 @@ class AndroidLibraryTreeRead(context: Context, private val scratchDirectory: Fil
                 }
                 val originals = workingOriginals(selected, snapshot, access, checkpoint)
                 mayRetire = false
-                val result = stage.useCatalog(file, access, acknowledgeClose = { mayRetire = true }) { catalog ->
-                    block(catalog, originals)
+                val result = stage.useCatalog(file, access, acknowledgeClose = { mayRetire = true }) { catalog, editable ->
+                    block(catalog, originals, editable)
                 }
                 access.requireCurrent()
                 result

@@ -996,6 +996,24 @@ class LibraryFolderFilesJourneyTest {
             selectWith(marker)
             runBlocking {
                 val album = DocumentId("aaaaaaaa-aaaa-4aaa-8aaa-000000000001")
+                val startup = AndroidLibraryStartup(context)
+                val expected = LibraryActivation(selected.libraryId, 2)
+                val listed = startup.useSelectedCatalog(spool) { _, catalog -> catalog.load(album).pages.single() }
+                val reopened = startup.loadSelectedEditablePage(spool, expected, album, listed.pageId)
+                assertEquals(album, reopened.documentId)
+                assertEquals(listed.pageId, reopened.pageId)
+                assertEquals(listed.sourceId, reopened.sourceId)
+                assertEquals(2L, reopened.recipeRevision)
+                // Revision 2's literal digest from the independent host fixture, not a hash recomputed with the app's codec.
+                assertEquals("0d0d5f0f7fe4177c302382deebd3ac931e9102137593dabeb50b27977b53222d", reopened.recipeHash)
+                assertTrue(spool.list().orEmpty().isEmpty())
+                val unavailableScratch = File(files, "no-stale-editor-scratch")
+                val obsoleteEditor = runCatching {
+                    startup.loadSelectedEditablePage(unavailableScratch, expected.copy(number = 1), album, listed.pageId)
+                }.exceptionOrNull() as RepositoryFailure
+                assertEquals("library_activation_changed", obsoleteEditor.error.safeMessageKey)
+                assertFalse(unavailableScratch.exists())
+                assertTrue(spool.list().orEmpty().isEmpty())
                 repeat(2) {
                     AndroidLibraryStartup(context).useSelectedCatalog(spool) { activation, catalog ->
                         assertEquals(LibraryActivation(selected.libraryId, 2), activation)

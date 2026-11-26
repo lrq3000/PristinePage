@@ -6,8 +6,11 @@ import androidx.room.Room
 import androidx.room.RoomDatabase
 import app.pristinepage.data.db.PristineDatabase
 import app.pristinepage.data.model.DocumentId
+import app.pristinepage.data.model.PageId
 import app.pristinepage.data.repository.DocumentCatalog
+import app.pristinepage.data.repository.EditablePages
 import app.pristinepage.data.repository.RoomDocumentCatalog
+import app.pristinepage.data.repository.RoomEditablePages
 import app.pristinepage.data.repository.RoomMetadataAccess
 import java.io.File
 import java.io.IOException
@@ -47,13 +50,15 @@ internal class RoomLibraryCatalogStage(private val application: Context) {
     /** The caller verified this closed, app-built stage. Only structured metadata reads are exposed, not Room or local writes. */
     suspend fun <T : Any> useCatalog(
         file: File, access: LibraryWorkingCatalogAccess, acknowledgeClose: () -> Unit,
-        block: suspend CoroutineScope.(DocumentCatalog) -> T,
+        block: suspend CoroutineScope.(DocumentCatalog, EditablePages) -> T,
     ): T {
         val stage = database(file)
         var primary: Throwable? = null
         try {
             if (stage.openHelper.readableDatabase.path != file.path) throw IOException("Working catalog path mismatch")
-            val catalog = RoomDocumentCatalog(RoomMetadataAccess(stage), stage.catalog())
+            val metadata = RoomMetadataAccess(stage)
+            val catalog = RoomDocumentCatalog(metadata, stage.catalog())
+            val editable = RoomEditablePages(metadata, stage.catalog())
             val scoped = object : DocumentCatalog {
                 override suspend fun list(after: DocumentId?, limit: Int) =
                     access.read { catalog.list(after, limit) }
@@ -62,9 +67,13 @@ internal class RoomLibraryCatalogStage(private val application: Context) {
                 override suspend fun activeImport(documentId: DocumentId) =
                     access.read { catalog.activeImport(documentId) }
             }
+            val scopedEditable = object : EditablePages {
+                override suspend fun load(documentId: DocumentId, pageId: PageId) =
+                    access.read { editable.load(documentId, pageId) }
+            }
             return coroutineScope {
                 access.requireCurrent()
-                block(scoped)
+                block(scoped, scopedEditable)
             }
         } catch (failure: Throwable) {
             primary = failure
