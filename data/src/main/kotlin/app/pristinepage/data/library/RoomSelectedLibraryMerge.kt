@@ -1,11 +1,16 @@
 package app.pristinepage.data.library
 
 import android.content.Context
+import android.system.ErrnoException
+import android.system.Os
 import app.pristinepage.data.model.requireOpaqueId
 import java.io.File
 import java.io.IOException
 import java.nio.file.Files
 import java.nio.file.LinkOption.NOFOLLOW_LINKS
+import java.nio.file.NoSuchFileException
+import java.nio.file.Path
+import java.nio.file.attribute.BasicFileAttributes
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.withContext
@@ -24,7 +29,7 @@ internal class RoomSelectedLibraryMerge(context: Context, private val scratchDir
         val reader = AndroidLibraryTreeRead(app, scratchDirectory)
         val plan = reader.planMerge(operationId, destination, incoming, requireAuthority)
         val files = app.filesDir.toPath().toRealPath()
-        val storage = files.resolve("library-selected-merge-v1")
+        val storage = files.resolve(STORAGE)
         if (files.toFile().usableSpace < 3 * maximum) throw IOException("Not enough private space to stage the merged library")
         requireAuthority()
         checkpoint()
@@ -51,15 +56,42 @@ internal class RoomSelectedLibraryMerge(context: Context, private val scratchDir
         verifier.verifyStagedProjection(file, plan.candidate.catalog, ::requireOwner)
         if (fingerprintClosedLibraryCatalog(file, ::requireOwner) != proof) throw IOException("The private selected library catalog changed")
         val child = LibraryGeneration(destination.expected.libraryId, operationId, destination.expected.id, schema, proof)
-        val journal = LocalLibraryMergeJournal(root.toFile(), files)
-        reader.appendMerge(plan, child, attempt, journal, LocalLibraryMoveAuthorization(attempt.toFile()), ::requireOwner) {
+        val journal = journal(root, files)
+        val published = reader.appendMerge(plan, child, attempt, journal, LocalLibraryMoveAuthorization(attempt.toFile()), ::requireOwner) {
             verifier.verifyStagedProjection(it, plan.candidate.catalog, ::requireOwner)
-        }.also {
-            requireOwner()
-            Files.newDirectoryStream(attempt, "library-catalog-*").use { verification ->
-                if (verification.iterator().hasNext()) throw IOException("The selected library readback scratch was not retired")
+        }
+        // The paired reader, writer, and scratch owners have all unwound. A late I/O failure or canceled result before this boundary leaves only intent.
+        requireOwner()
+        Files.newDirectoryStream(attempt, "library-catalog-*").use { verification ->
+            if (verification.iterator().hasNext()) throw IOException("The selected library readback scratch was not retired")
+        }
+        published.completion.recordCompletion(published.generation, checkpoint, ::requireOwner)
+        published.generation
+    }
+
+    companion object {
+        private const val STORAGE = "library-selected-merge-v1"
+
+        private fun journal(root: Path, files: Path) = LocalLibraryMergeJournal(root.toFile(), files, nodeIdentity = { path, _ ->
+            try { Os.lstat(path.toString()).let { it.st_dev to it.st_ino } }
+            catch (failure: ErrnoException) { throw IOException("The private selected merge evidence cannot be identified", failure) }
+        })
+
+        /** Inspect one retained private attempt. A completion is historical, not proof the external folder is still accessible. */
+        suspend fun inspect(context: Context, operationId: String): LocalLibraryMergeJournal.SelectedState? = withContext(Dispatchers.IO) {
+            requireOpaqueId(operationId)
+            val files = context.applicationContext.filesDir.toPath().toRealPath()
+            val storage = files.resolve(STORAGE)
+            try {
+                Files.readAttributes(storage, BasicFileAttributes::class.java, NOFOLLOW_LINKS)
+            } catch (_: NoSuchFileException) {
+                return@withContext null
             }
-            if (!Files.exists(closed, NOFOLLOW_LINKS)) throw IOException("The selected library intent lost its closed catalog")
+            val root = canonicalLibraryDirectory(storage.toFile(), files)
+            val key = localLibraryRootKey(root)
+            val state = journal(root, files).inspectSelected(operationId) { coroutineContext.ensureActive() }
+            if (localLibraryRootKey(root) != key) throw IOException("The private selected merge journal changed")
+            state
         }
     }
 }

@@ -57,6 +57,9 @@ object LibraryDescriptorAncestryWitness {
         requireAuthority: () -> Unit,
     ): String = RoomSelectedLibraryMerge(context, scratch).append(operation, destination.input, incoming.input, requireAuthority).id
 
+    suspend fun completedMerge(context: Context, operation: String): String? =
+        RoomSelectedLibraryMerge.inspect(context, operation)?.takeIf { it.completed }?.intent?.candidate?.id
+
     fun requireSameIdentity(held: ParcelFileDescriptor, reopened: ParcelFileDescriptor) {
         check(AndroidLibraryDescriptorAncestry.observe(held) == AndroidLibraryDescriptorAncestry.observe(reopened)) {
             "The reopened directory descriptor does not match its held identity and mount"

@@ -49,10 +49,48 @@ internal class LocalLibraryDirectory(root: File, private val directorySync: Dire
     /** Private merge-journal use only. An operation ID is never supplied by SQLite rows or a display label. */
     fun openMergeIntent(generation: String) = open(mergeStagePath(generation) + "/merge.intent")
 
-    fun createMergeIntent(generation: String, bytes: ByteArray) =
-        create(mergeStagePath(generation) + "/merge.intent") { it.write(bytes) }
+    fun createMergeIntent(generation: String, bytes: ByteArray, beforeLink: () -> Unit = {}) =
+        create(mergeStagePath(generation) + "/merge.intent", beforeLink = beforeLink) { it.write(bytes) }
 
     fun openMergeStage(generation: String) = open(mergeStagePath(generation) + "/catalog.sqlite")
+
+    fun requireFreshSelectedMergeStage(generation: String) {
+        Files.newDirectoryStream(readPath(mergeStagePath(generation))).use { entries ->
+            val names = entries.iterator()
+            if (!names.hasNext() || names.next().fileName.toString() != "catalog.sqlite" || names.hasNext()) {
+                throw IOException("The private selected merge stage is not fresh")
+            }
+        }
+    }
+
+    fun openSelectedMergeCompletion(generation: String) = open(mergeStagePath(generation) + "/selected-merge.complete")
+
+    fun createSelectedMergeCompletion(generation: String, bytes: ByteArray, beforeLink: () -> Unit) =
+        create(mergeStagePath(generation) + "/selected-merge.complete", beforeLink = beforeLink) { it.write(bytes) }
+
+    data class MergeNode(val identity: Any, val byteCount: Long)
+    data class SelectedMergeEvidence(val attempt: Any, val catalog: MergeNode?, val intent: MergeNode?, val completion: MergeNode?)
+
+    /** Pin the exact observed nodes across the directory barrier; an unexplained SQLite sidecar invalidates the closed-stage proof. */
+    fun selectedMergeEvidence(generation: String, identity: (Path, BasicFileAttributes) -> Any): SelectedMergeEvidence? {
+        val relative = mergeStagePath(generation)
+        fun attributes(path: Path): BasicFileAttributes? = try {
+            Files.readAttributes(path, BasicFileAttributes::class.java, NOFOLLOW_LINKS)
+        } catch (_: NoSuchFileException) { null }
+        val attempt = readPath(relative)
+        val parent = attributes(attempt) ?: return null
+        if (!parent.isDirectory) throw IOException("The private selected merge attempt is not a directory")
+        fun file(name: String): MergeNode? {
+            val path = readPath("$relative/$name")
+            val attrs = attributes(path) ?: return null
+            if (!attrs.isRegularFile) throw IOException("The private selected merge evidence is not a regular file")
+            return MergeNode(identity(path, attrs), attrs.size())
+        }
+        for (suffix in listOf("-wal", "-shm", "-journal")) {
+            if (attributes(readPath("$relative/catalog.sqlite$suffix")) != null) throw IOException("The selected merge catalog is not closed")
+        }
+        return SelectedMergeEvidence(identity(attempt, parent), file("catalog.sqlite"), file("merge.intent"), file("selected-merge.complete"))
+    }
 
     enum class ExportRecord(val nameOnDisk: String) {
         INTENT("export.intent"), COMPLETE("export.complete"), ACKNOWLEDGED("export.ack"),
@@ -210,14 +248,17 @@ internal class LocalLibraryDirectory(root: File, private val directorySync: Dire
         forceDirectory(paths.root)
     }
 
-    fun forceMergeStage(generation: String, durableAncestor: Path) {
+    fun forceMergeStage(generation: String, durableAncestor: Path, exactCatalogBytes: Long? = null) {
         val directory = mergeStagePath(generation)
         val stage = readPath("$directory/catalog.sqlite")
         if (!rootPath.startsWith(durableAncestor) || !Files.isDirectory(durableAncestor, NOFOLLOW_LINKS) ||
             durableAncestor.toRealPath() != durableAncestor
         ) throw IOException("Private merge stage has no admitted durable ancestor")
         if (!presentRegularFile(stage)) throw IOException("Private merge stage is missing")
-        FileChannel.open(stage, WRITE, NOFOLLOW_LINKS).use { it.force(true) }
+        FileChannel.open(stage, WRITE, NOFOLLOW_LINKS).use {
+            if (exactCatalogBytes != null && it.size() != exactCatalogBytes) throw IOException("The private merge stage extent changed")
+            it.force(true)
+        }
         var containing = checkNotNull(stage.parent)
         while (true) {
             forceDirectory(containing.toFile())

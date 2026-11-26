@@ -120,11 +120,13 @@ class AndroidLibraryTreeRead(context: Context, private val scratchDirectory: Fil
         project: (PairMember, PairMember) -> T,
     ): T = withVerifiedPairOriginals(left, right, requireAuthority) { a, b, _ -> project(a, b) }
 
-    /** Runs the commit under the same held roots, grants and provider owner used for admission. The ordinary reader stays immutable. */
+    internal data class SelectedAppend(val generation: LibraryGeneration, val completion: LocalLibraryMergeJournal.SelectedCompletion)
+
+    /** Runs the commit under the admitted roots and provider owner. The private completion token stays provisional until all provider scopes close. */
     internal suspend fun appendMerge(plan: MergePlan, generation: LibraryGeneration, scratch: Path,
         journal: LocalLibraryMergeJournal, spend: LocalLibraryMoveAuthorization, requireAuthority: () -> Unit,
         verifyReopened: (File) -> Unit,
-    ): LibraryGeneration = withVerifiedPairOriginals(plan.destination, plan.incoming, requireAuthority, appended = generation) { left, right, pair ->
+    ): SelectedAppend = withVerifiedPairOriginals(plan.destination, plan.incoming, requireAuthority, appended = generation) { left, right, pair ->
         val writable = pair.writableDestination()
         fun requireRoots() {
             pair.requireCurrent()
@@ -148,12 +150,12 @@ class AndroidLibraryTreeRead(context: Context, private val scratchDirectory: Fil
                 requireRoots()
                 if (target.generationInventory(pair.checkpoint).tip != intent.destination) throw IOException("The destination generation changed")
                 if (pair.incoming.generationInventory(pair.checkpoint).tip != intent.incoming) throw IOException("The incoming generation changed")
-                if (journal.reopen(generation.id, pair.checkpoint) != null) throw IOException("The selected library append was already attempted")
-                journal.publish(intent, pair.checkpoint)
+                val completion = journal.startSelected(intent, pair.checkpoint, ::requireRoots)
                 target.requireReady(originalNames)
-                LibraryMergePublication(target, pair.incoming, scratch, ::requireRoots, pair.checkpoint)
+                val published = LibraryMergePublication(target, pair.incoming, scratch, ::requireRoots, pair.checkpoint)
                     .publish(intent, LibraryMergeIntent.Resume.WRITE_MISSING, plan.candidate, left.snapshot.originals, right.snapshot.originals,
                         pair.availableDestinationBytes(), metadata, { journal.openStage(generation.id) }, verifyReopened)
+                SelectedAppend(published, completion)
             }
         }
     }

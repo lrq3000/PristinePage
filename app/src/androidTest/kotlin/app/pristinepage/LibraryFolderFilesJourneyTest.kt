@@ -635,6 +635,7 @@ class LibraryFolderFilesJourneyTest {
 
     @Test fun selectedFilesMergeAppendsOnlyTheMissingOriginalAndKeepsItsPredecessor() {
         val args = InstrumentationRegistry.getArguments()
+        val witness = LibraryDescriptorAncestryWitness
         val operation = UUID.fromString(requireNotNull(args.getString("librarySelectedAppendOperation"))).toString()
         val expectedMissing = requireNotNull(args.getString("librarySelectedAppendBytes")).toLong()
         check(expectedMissing in 70_000..71_000)
@@ -646,7 +647,7 @@ class LibraryFolderFilesJourneyTest {
             }
             val scratch = File(app.filesDir.canonicalFile, "tree-read-${UUID.randomUUID()}").apply { check(mkdir()) }
             runBlocking {
-                val witness = LibraryDescriptorAncestryWitness
+                assertEquals(null, witness.completedMerge(app, operation))
                 val inputs = witness.verifyPairWithSharedOwner(app, scratch, selected[0], selected[1], ::requireAuthority)
                 assertEquals(selected, inputs.map { it.tree })
                 assertTrue(inputs.all { it.albums == 1 && it.scans == 1 })
@@ -664,6 +665,9 @@ class LibraryFolderFilesJourneyTest {
             }
             requireAuthority()
         }
+        // Construct a new private reader only after the Files fixture grants are restored.
+        val app = InstrumentationRegistry.getInstrumentation().targetContext.applicationContext
+        runBlocking { assertEquals(operation, witness.completedMerge(app, operation)) }
     }
 
     private fun withIndependentFilesSelections(chooseAnchor: Boolean, writableDestination: Boolean = false,
