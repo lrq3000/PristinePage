@@ -367,6 +367,28 @@ def verify_released_selected_repeat_guest(original, stopped):
          "The repeat needs completed same-generation release, cleanup and evidence with no remaining consumers")
 
 
+def verify_bound_recipe_release(original, stopped, manifest, snapshot):
+    """Prove the synchronous detached runner's release without changing the shared record or treating an unknown roster as empty elsewhere."""
+    verify_released_independent_guest(original, stopped)
+    generation = original["generation"]
+    cleanup = snapshot.get("cleanup_attempt") or {}
+    completed = stopped.get("cleanup_attempt") or {}
+    error = "The bound edit needs the exact anchored synchronous release"
+    need(snapshot.get("generation") == snapshot.get("claim_generation") == cleanup.get("generation") == generation and
+         snapshot.get("state") == "shutdown_ready" and snapshot.get("shutdown_verified") is False and
+         snapshot.get("shutdown_ready") is True and snapshot.get("evidence_saved") is True and
+         snapshot.get("keep_running") is False and snapshot.get("handoff_to") is None and
+         snapshot.get("reservedKiB") == 0 and snapshot.get("consumers", []) == [] and
+         snapshot.get("shutdown_processes") == original["runtime_processes"] and cleanup.get("state") == "running" and
+         bool(stopped.get("stopped")) and bool(completed.get("finished")), error)
+    expected = dict(snapshot, owner=None, state="stopped-released", shutdown_verified=True,
+                    stopped=stopped["stopped"], runtime_evidence=str(manifest.resolve()),
+                    cleanup_attempt=dict(cleanup, state="completed", finished=completed["finished"]))
+    if "consumers" not in snapshot and stopped.get("consumers") == []:
+        expected["consumers"] = []
+    need(stopped == expected, error)
+
+
 def verify_released_append_guest(original, stopped, generation):
     """Accept only an explicitly named intervening release on the same disk, retaining the dry-run provenance."""
     stable = ("name", "installation", "index", "created", "api", "created_by_agent")
@@ -2045,6 +2067,7 @@ def run(args):
     recipe_interrupted_expected = None
     recipe_retained = None
     bound_baseline = None
+    bound_release = None
     protect_interrupted = None
     death_authority = CAPACITY_PASSED if before_marker else args.backup_death_retry or SETTINGS_COLD_MANIFEST
     death_operation = str(uuid.uuid4()) if args.backup_delivery_death or before_marker else None
@@ -2071,7 +2094,19 @@ def run(args):
             artifact = json.loads(pinned("artifacts.json"))
             need(artifact["selectedRecipeFresh"] and artifact["guest"] == recipe_baseline["name"] == args.guest and
                  json.loads(pinned("outcomes.json")) == {"passed": [SELECTED_RECIPE_CASE], "failed": [], "installedSha256": previous},
-                 "The exact detached predecessor did not pass on this app guest")
+                  "The exact detached predecessor did not pass on this app guest")
+            manifest = old / f"{old.name}-final-manifest.json"
+            manifest_bytes = manifest.read_bytes()
+            need(sha256(manifest_bytes).hexdigest() == DETACHED_RECIPE_PASSED, "Detached release manifest changed")
+            snapshot = json.loads(manifest_bytes)["recordSnapshot"]
+            shutdown = json.loads(pinned("shutdown.json"))
+            need(shutdown["generation"] == recipe_baseline["generation"] and
+                 shutdown["originalProcesses"] == recipe_baseline["runtime_processes"] and
+                 shutdown["stage"] == "verified-before-release" and shutdown["ownedShutdownVerified"] is True and
+                 shutdown["isrunning"] == "stop" and shutdown["storageDeleted"] is False and
+                 read_results(pinned("selected-recipe-instrumentation.txt"), (SELECTED_RECIPE_CASE,)) == ([SELECTED_RECIPE_CASE], []),
+                 "The detached predecessor did not finish its synchronous test and shut down")
+            bound_release = manifest, snapshot
             bound_baseline = artifact["fixture"], json.loads(pinned("selected-recipe-attempt.json")), json.loads(pinned("selected-recipe-readback.json"))
         elif selected_recipe:
             old = raw.parent / "picker-adapter-library-tree-e569733fb1fa"
@@ -2395,7 +2430,9 @@ def run(args):
     ns = load_allocator(ROOT, args.guest, raw, "pristinepage-tree-" + os.environ["OPENCODE_SESSION_ID"])
 
     def admit_independent(record):
-        if recipe_baseline:
+        if bound_release:
+            verify_bound_recipe_release(recipe_baseline, record, *bound_release)
+        elif recipe_baseline:
             verify_released_selected_repeat_guest(recipe_boot_retry or recipe_baseline, record)
         elif append_release:
             verify_released_append_guest(independent_claim, record, append_release)

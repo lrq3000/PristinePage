@@ -96,6 +96,31 @@ class LibraryFolderPickerRunnerTest(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "same-generation"):
                 verify_released_selected_repeat_guest(original, stopped | mismatch)
 
+    def test_bound_edit_reuses_only_the_exact_anchored_synchronous_release(self):
+        from run_library_folder_picker_ldplayer import verify_bound_recipe_release
+        original = dict(name="synthetic", installation="installed", index=3, created="creation", worktree="owned",
+                        purpose="library", api=28, created_by_agent=True, generation="exact", runtime_processes=[[15, 42], [17, 47]])
+        snapshot = original | dict(state="shutdown_ready", claim_generation="exact", shutdown_verified=False,
+                                   shutdown_ready=True, evidence_saved=True, owner="writer", reservedKiB=0,
+                                   keep_running=False, handoff_to=None, shutdown_processes=original["runtime_processes"],
+                                   cleanup_attempt={"generation": "exact", "state": "running", "token": "cleanup"})
+        manifest = Path("retained-manifest.json").resolve()
+        stopped = snapshot | dict(owner=None, state="stopped-released", shutdown_verified=True, stopped="stopped",
+                                  runtime_evidence=str(manifest),
+                                  cleanup_attempt=snapshot["cleanup_attempt"] | {"state": "completed", "finished": "stopped"})
+        verify_bound_recipe_release(original, stopped, manifest, snapshot)
+        verify_bound_recipe_release(original, stopped | {"consumers": []}, manifest, snapshot)
+        for bad in (stopped | {"consumers": ["live"]}, stopped | {"consumers": None},
+                    stopped | {"runtime_evidence": str(manifest.with_name("unrelated.json"))},
+                    stopped | {"cleanup_attempt": stopped["cleanup_attempt"] | {"token": "different"}},
+                    stopped | {"ownership_history": [{"owner": "other"}]}):
+            with self.subTest(bad=bad), self.assertRaises(RuntimeError):
+                verify_bound_recipe_release(original, bad, manifest, snapshot)
+        with self.assertRaisesRegex(RuntimeError, "same-generation"):
+            verify_released_selected_repeat_guest(original, stopped)
+        with self.assertRaises(RuntimeError):
+            verify_bound_recipe_release(original, stopped, manifest, snapshot | {"consumers": ["live"]})
+
     def test_repeat_refuses_grant_mode_drift_before_the_new_fixture_is_written(self):
         from run_library_folder_picker_ldplayer import APP, URI_PERMISSIONS_HEADER
         initial = (f"{URI_PERMISSIONS_HEADER}\n  Granted Uri Permissions:\n  * UID 10234 holds:\n"
