@@ -94,6 +94,7 @@ import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.suspendCancellableCoroutine
@@ -140,7 +141,7 @@ class LibraryFolderFilesJourneyTest {
                  "selectedFilesMergeCanAppendTwiceWithoutReusingAnOlderStage", "endsProcessAfterSelectedAppendCompletionBeforeDelivery",
                  "oneFilesSelectionPublishesOnlyAClosedEditedCatalog", "selectedRecipeReceiptBindsTheExactIssuingActivation",
                  "selectedRecipeAdvancesOnlyTheVerifiedDirectSuccessor", "opensSelectedAlbumGridAndVerifiedOriginalWhileBrowsing",
-                 "startEmptyRefusesANestedStageOfTheCurrentFilesLibrary"))
+                 "startEmptyRefusesANestedStageOfTheCurrentFilesLibrary", "unconfirmedDefaultGraphCloseFencesBothSuccessorAndReturn"))
             interruptionCompose else compose
         rule.apply(next, description)
     }
@@ -1082,6 +1083,51 @@ class LibraryFolderFilesJourneyTest {
                 assertEquals(retained, pointer.readBytes().toList())
                 assertEquals(0, contents())
                 assertEquals(before, startup.useSelectedCatalog(scratch) { activation, _ -> activation })
+            }
+        }
+    }
+
+    @Test fun unconfirmedDefaultGraphCloseFencesBothSuccessorAndReturn() {
+        withIndependentFilesSelections(chooseAnchor = false, writableDestination = true, singleDestination = true) { app, _, selections, _ ->
+            val tree = selections.single()
+            val isolated = File(app.filesDir.canonicalFile, "library-cutover-observer-${UUID.randomUUID()}").apply { check(mkdir()) }
+            val files = File(isolated, "files").apply { check(mkdir()) }
+            val databases = File(isolated, "databases").apply { check(mkdir()) }
+            val context = object : ContextWrapper(app) {
+                override fun getApplicationContext(): Context = this
+                override fun getFilesDir(): File = files
+                override fun getDatabasePath(name: String): File = File(databases, name)
+            }
+            runBlocking {
+                val services = ApplicationServices(context)
+                val graph = services.imports()
+                val issuing = graph.activation
+                graph.store.documents.createDocument("Retained Default graph witness")
+                val preview = services.inspectLibraryFolder(issuing, tree)
+                // Hold the real store through its Room invalidation collector, without starting or exposing any OCR job.
+                val ready = CompletableDeferred<Unit>()
+                val observer = launch {
+                    graph.store.savedOcr.observeSearchChanges().collect {
+                        ready.complete(Unit)
+                        awaitCancellation()
+                    }
+                }
+                try {
+                    withTimeout(15_000) { ready.await() }
+                    val failedClose = runCatching { services.selectLibraryFolder(issuing, preview) {} }.exceptionOrNull() as RepositoryFailure
+                    assertEquals("ordinary_export_store_in_use", failedClose.error.safeMessageKey)
+                    val selected = services.storageLocation()
+                    assertEquals(issuing.number + 1, selected.activation.number)
+                    assertNotNull(selected.folderLabel)
+                    val startup = runCatching { services.openLibraryPresentation() }.exceptionOrNull() as RepositoryFailure
+                    assertEquals("library_graph_close_unconfirmed", startup.error.safeMessageKey)
+                    val returnToDefault = runCatching { services.returnToDefaultLibrary(selected.activation) }.exceptionOrNull() as RepositoryFailure
+                    assertEquals("library_graph_close_unconfirmed", returnToDefault.error.safeMessageKey)
+                    assertEquals(selected, services.storageLocation())
+                } finally {
+                    observer.cancelAndJoin()
+                    graph.close()
+                }
             }
         }
     }
