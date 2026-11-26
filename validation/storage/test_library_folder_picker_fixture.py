@@ -61,3 +61,34 @@ class LibraryFolderPickerFixtureTest(unittest.TestCase):
             make_fixture(root)
         self.assertEqual([other], list(root.iterdir()))
         self.assertEqual(b"unrelated data", other.read_bytes())
+
+    def test_merge_input_can_exercise_one_real_missing_original_without_a_name_or_id_conflict(self):
+        parent = Path(mkdtemp(prefix="pristinepage-library-files-merge-test-"))
+        destination, incoming = parent / "destination", parent / "incoming"
+        target_files = make_fixture(destination, with_scan=True)
+        incoming_files = make_fixture(incoming, with_scan=True, alternate_scan=True)
+
+        def read_original(root):
+            catalog, = (root / "catalogs").glob("*.sqlite")
+            with closing(sqlite3.connect(catalog.as_uri() + "?mode=ro", uri=True)) as db:
+                row, = db.execute("""
+                    SELECT d.title, n.filename, p.pageId, s.sourceId, b.sourceBlobId, b.byteSha256, b.byteCount
+                    FROM Document d JOIN Page p USING(documentId) JOIN LibraryScanName n USING(pageId)
+                    JOIN Source s USING(sourceId) JOIN SourceBlob b USING(sourceBlobId)
+                    """).fetchall()
+                self.assertEqual([(1, None), (2, 1)], db.execute(
+                    "SELECT recipeRevision,parentRevision FROM RecipeRevision ORDER BY recipeRevision"
+                ).fetchall())
+            reference = f"objects/{row[-2]}"
+            original = (root / reference).read_bytes()
+            self.assertEqual(row[-1], len(original))
+            self.assertEqual(row[-2], sha256(original).hexdigest())
+            return row, reference
+
+        target, target_object = read_original(destination)
+        received, received_object = read_original(incoming)
+        self.assertEqual(("Synthetic folder test", "Synthetic.png"), target[:2])
+        self.assertEqual(("Synthetic folder test", "Additional synthetic.png"), received[:2])
+        self.assertTrue(all(left != right for left, right in zip(target[2:6], received[2:6])))
+        self.assertEqual({received_object}, {path for path in incoming_files.keys() - target_files.keys() if path.startswith("objects/")})
+        self.assertNotIn(target_object, incoming_files)

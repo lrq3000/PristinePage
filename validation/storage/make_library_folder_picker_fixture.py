@@ -18,10 +18,16 @@ LIBRARY = "9e940d7b-76c7-45ea-b5e4-0ad86f26ea13"
 GENERATION = "25c49d9b-02d8-418f-b982-154980d89cfb"
 
 
-def synthetic_scan():
+def synthetic_scan(alternate=False):
     """One 3×2 RGB image and two canonical revisions. The synthetic binding is not a mobile codec witness."""
     width, height = 3, 2
     rgb = bytes((19, 43, 71, 255, 250, 240, 211, 233, 191, 17, 90, 126, 50, 8, 200, 99, 123, 137))
+    blob, source, page, transaction, filename = BLOB, SOURCE, PAGE, DRAFT, "Synthetic.png"
+    if alternate:
+        # Keep the album title and its identity, but make an independent scan and original for a missing-object transfer.
+        blob, source, page, transaction = (f"daaaaaaa-aaaa-4aaa-8aaa-{number:012d}" for number in range(1, 5))
+        filename = "Additional synthetic.png"
+        rgb = bytes((23,)) + rgb[1:]
 
     def chunk(kind, data):
         return pack(">I", len(data)) + kind + data + pack(">I", crc32(kind + data))
@@ -35,11 +41,11 @@ def synthetic_scan():
     pixel = sha256(b"pristinepage-source-pixels-v1\0" + pack(">I", len(fingerprint)) + fingerprint +
                    pack(">IIQ", width, height, len(rgb)) + rgb).hexdigest()
     rows = [
-        f"INSERT INTO SourceBlob VALUES ('{BLOB}','{digest}',{len(payload)},'image/png',3,2,'sources/{BLOB}/original.bin','READY',1,'{DRAFT}',0)",
-        f"INSERT INTO Source VALUES ('{SOURCE}','{BLOB}','{pixel}',3,2,1,'srgb-v1',NULL,3,'READY',0)",
-        f"INSERT INTO Page VALUES ('{PAGE}','{DOC}','{SOURCE}',2,'ACTIVE',0,NULL,0)",
-        f"INSERT INTO LibraryScanName VALUES ('{PAGE}','{DOC}','Synthetic.png','synthetic.png')",
-        f"INSERT INTO SourceReference VALUES ('PAGE','{PAGE}','{SOURCE}',0)",
+        f"INSERT INTO SourceBlob VALUES ('{blob}','{digest}',{len(payload)},'image/png',3,2,'sources/{blob}/original.bin','READY',1,'{transaction}',0)",
+        f"INSERT INTO Source VALUES ('{source}','{blob}','{pixel}',3,2,1,'srgb-v1',NULL,3,'READY',0)",
+        f"INSERT INTO Page VALUES ('{page}','{DOC}','{source}',2,'ACTIVE',0,NULL,0)",
+        f"INSERT INTO LibraryScanName VALUES ('{page}','{DOC}','{filename}','{filename.lower()}')",
+        f"INSERT INTO SourceReference VALUES ('PAGE','{page}','{source}',0)",
     ]
     for turns in range(2):
         recipe = json.dumps(
@@ -52,18 +58,20 @@ def synthetic_scan():
         revision = turns + 1
         recipe_digest = sha256(b"pristinepage-recipe-json-v1\0" + pack(">I", len(recipe)) + recipe).hexdigest()
         rows += [
-            f"INSERT INTO RecipeRevision VALUES ('{PAGE}',{revision},'{SOURCE}',1,X'{recipe.hex()}','{recipe_digest}',{'1' if turns else 'NULL'},0)",
-            f"INSERT INTO SourceReference VALUES ('RECIPE_HISTORY','recipe-v1/{PAGE}/{revision}','{SOURCE}',0)",
+            f"INSERT INTO RecipeRevision VALUES ('{page}',{revision},'{source}',1,X'{recipe.hex()}','{recipe_digest}',{'1' if turns else 'NULL'},0)",
+            f"INSERT INTO SourceReference VALUES ('RECIPE_HISTORY','recipe-v1/{page}/{revision}','{source}',0)",
         ]
     return digest, payload, rows
 
 
-def make_fixture(destination: Path, *, with_scan=False):
+def make_fixture(destination: Path, *, with_scan=False, alternate_scan=False):
+    if alternate_scan and not with_scan:
+        raise ValueError("The alternate fixture must contain a scan")
     cli = shutil.which("sqlite3")
     if not cli:
         raise RuntimeError("The existing FTS4-capable SQLite CLI is required")
     schema = json.loads(SCHEMA.read_text(encoding="utf-8"))["database"]
-    scan = synthetic_scan() if with_scan else None
+    scan = synthetic_scan(alternate_scan) if with_scan else None
     commands = [*create_tables(schema["version"]), *sync_triggers(), *schema["setupQueries"],
                 "PRAGMA user_version=8", "PRAGMA foreign_keys=ON", "BEGIN",
                 f"INSERT INTO Document VALUES ('{DOC}','Synthetic folder test',{2 if scan else 1},'ACTIVE',0,0,NULL)",

@@ -480,6 +480,8 @@ Four filesystem controls reproduced the failure boundaries before correction: a 
 
 The missing visibility callback reproduced at test compilation. Independent review found no live production regression and identified three missing controls, now covered: a final-name collision during the spend withholds the move, cancellation when the guard returns withholds it, and successful identity-verified reconciliation does not call the guard again. The final offline run recorded 1,993 JVM cases without failures or skips and compiled both Android test suites. The existing export does not supply the new guard; no device was used for this increment. The guarded path still assumes cooperative ownership, and neither the callback nor separate provider lookups establish an atomic no-overwrite guarantee against another process.
 
+For the next native selected-root write, the synthetic fixture generator now has a populated alternate source with the same album title, a different logical scan name and independent scan, source and blob IDs. Actual SQLite and SHA-256 checks distinguish its one missing destination original from the unrelated unreferenced object already present on both sides. Both two-revision histories are independently checked. The missing fixture mode reproduced first; 273 host storage checks passed afterward. This fixture does not itself run a provider or enable writing.
+
 ### Current coordination: transition to `main`
 
 - [x] Operator approved the local fast-forward and `main`-based PR/handoff cadence; see [operational authority](OPERATIONAL_PLAN.md) and [queue rules](PARALLEL_EXECUTION_PLAN.md#coordination). Earlier branch/base references below describe their historical claims.
