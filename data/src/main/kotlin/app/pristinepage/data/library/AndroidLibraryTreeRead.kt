@@ -75,10 +75,39 @@ class AndroidLibraryTreeRead(context: Context, private val scratchDirectory: Fil
 
     internal data class PairInput(val tree: Uri, val expected: LibraryGeneration? = null)
     internal data class PairMember(val tree: Uri, val generation: LibraryGeneration, val snapshot: RoomLibrarySavedCatalog.Snapshot)
+    internal data class MergeEstimate(val destination: PairInput, val incoming: PairInput,
+        val candidate: LibraryCatalogMerge.Candidate, val missingBytes: Long)
+
+    private class PairedOriginals(val destination: LibraryTreeReadSource, val incoming: LibraryTreeReadSource,
+        val requireCurrent: () -> Unit, val checkpoint: () -> Unit)
+
+    /** Compare both inventories and compute missing original bytes only. Catalog space and final destination capacity are separate checks. */
+    internal suspend fun estimateMerge(operationId: String, destination: PairInput, incoming: PairInput,
+        requireAuthority: () -> Unit,
+    ): MergeEstimate = withVerifiedPairOriginals(destination, incoming, requireAuthority) { left, right, originals ->
+        val candidate = LibraryCatalogMerge.plan(operationId, left.snapshot, right.snapshot, originals.checkpoint)
+        LibraryBackupRead.admitOriginals(candidate.catalog.originals.map { ObjectId(it.byteSha256, it.byteCount) },
+            MAX_TREE_ORIGINAL_BYTES, originals.checkpoint)
+        // Each input already used its own ordinary verification budget. Charge a separate bounded allowance for comparison reopens.
+        var remaining = 2 * MAX_TREE_ORIGINAL_BYTES
+        fun open(source: LibraryTreeReadSource, id: ObjectId): InputStream? {
+            if (id.byteCount > remaining) throw IOException("The library merge exceeds the original comparison budget")
+            remaining -= id.byteCount
+            return source.open(id)
+        }
+        val estimate = LibraryMergePayloads.estimate(candidate, left.snapshot.originals, right.snapshot.originals,
+            { open(originals.destination, it) }, { open(originals.incoming, it) },
+            originals.requireCurrent, 0, Long.MAX_VALUE, originals.checkpoint)
+        MergeEstimate(PairInput(left.tree, left.generation), PairInput(right.tree, right.generation), candidate, estimate.missingBytes)
+    }
 
     /** Prepare a detached, resource-free result without delivering it or causing visible side effects from the projection. Not publication or activation authority. */
     internal suspend fun <T : Any> withVerifiedPair(left: PairInput, right: PairInput, requireAuthority: () -> Unit,
         project: (PairMember, PairMember) -> T,
+    ): T = withVerifiedPairOriginals(left, right, requireAuthority) { a, b, _ -> project(a, b) }
+
+    private suspend fun <T : Any> withVerifiedPairOriginals(left: PairInput, right: PairInput, requireAuthority: () -> Unit,
+        project: (PairMember, PairMember, PairedOriginals) -> T,
     ): T = withContext(Dispatchers.IO) {
         LibraryProviderAttempt.runOwned { owner ->
             val checkpoint = owner::requireCurrent
@@ -91,38 +120,42 @@ class AndroidLibraryTreeRead(context: Context, private val scratchDirectory: Fil
             val a = localTreeDocumentId(left.tree) ?: throw LibraryTreeUnavailable("This folder provider is not supported")
             val b = localTreeDocumentId(right.tree) ?: throw LibraryTreeUnavailable("This folder provider is not supported")
             val hints = LibraryTreeAncestryHint.parentHops(a, b)
-            val scratch = canonicalLibraryDirectory(scratchDirectory, app.filesDir.toPath().toRealPath())
+            val scratchRoot = canonicalLibraryDirectory(scratchDirectory, app.filesDir.toPath().toRealPath())
             val detached = withLibraryProviderSignal { signal ->
-                val first = Backend(app, left.tree, a, scratch, signal, checkpoint)
-                val second = Backend(app, right.tree, b, scratch, signal, checkpoint)
-                first.openRootDirectory().use { heldLeft ->
-                    second.openRootDirectory().use { heldRight ->
-                        val leftIdentity = AndroidLibraryDescriptorAncestry.observe(heldLeft)
-                        val rightIdentity = AndroidLibraryDescriptorAncestry.observe(heldRight)
-                        AndroidLibraryDescriptorAncestry.withDerivedAnchor(heldLeft, heldRight, hints, checkpoint) { requireAncestry ->
-                            fun requireCurrent() {
-                                requireIssuingAuthority()
-                                first.rebindRoot(leftIdentity)
-                                second.rebindRoot(rightIdentity)
-                                requireAncestry()
-                                requireIssuingAuthority()
-                            }
-                            val leftRead = backupRead(a, first, scratch, checkpoint)
-                            val rightRead = backupRead(b, second, scratch, checkpoint)
-                            requireCurrent()
-                            val verifiedLeft = readCatalog(leftRead, left.expected, checkpoint, first::member).value
-                            requireCurrent()
-                            val verifiedRight = readCatalog(rightRead, right.expected, checkpoint, second::member).value
-                            fun requireBothTips() {
+                LibraryPairScratch.use(scratchRoot, bind = ::bindScratch) { scratch ->
+                    val first = Backend(app, left.tree, a, scratch, signal, checkpoint)
+                    val second = Backend(app, right.tree, b, scratch, signal, checkpoint)
+                    first.openRootDirectory().use { heldLeft ->
+                        second.openRootDirectory().use { heldRight ->
+                            val leftIdentity = AndroidLibraryDescriptorAncestry.observe(heldLeft)
+                            val rightIdentity = AndroidLibraryDescriptorAncestry.observe(heldRight)
+                            AndroidLibraryDescriptorAncestry.withDerivedAnchor(heldLeft, heldRight, hints, checkpoint) { requireAncestry ->
+                                fun requireCurrent() {
+                                    requireIssuingAuthority()
+                                    first.rebindRoot(leftIdentity)
+                                    second.rebindRoot(rightIdentity)
+                                    requireAncestry()
+                                    requireIssuingAuthority()
+                                }
+                                val leftObjects = LibraryTreeReadSource(a, first)
+                                val rightObjects = LibraryTreeReadSource(b, second)
+                                val leftRead = backupRead(leftObjects, scratch, checkpoint)
+                                val rightRead = backupRead(rightObjects, scratch, checkpoint)
                                 requireCurrent()
-                                leftRead.requireCurrent(verifiedLeft.generation)
-                                rightRead.requireCurrent(verifiedRight.generation)
+                                val verifiedLeft = readCatalog(leftRead, left.expected, checkpoint, first::member).value
                                 requireCurrent()
+                                val verifiedRight = readCatalog(rightRead, right.expected, checkpoint, second::member).value
+                                fun requireBothTips() {
+                                    requireCurrent()
+                                    leftRead.requireCurrent(verifiedLeft.generation)
+                                    rightRead.requireCurrent(verifiedRight.generation)
+                                    requireCurrent()
+                                }
+                                requireBothTips()
+                                val projected = project(verifiedLeft, verifiedRight, PairedOriginals(leftObjects, rightObjects, ::requireCurrent, checkpoint))
+                                requireBothTips()
+                                projected
                             }
-                            requireBothTips()
-                            val projected = project(verifiedLeft, verifiedRight)
-                            requireBothTips()
-                            projected
                         }
                     }
                 }
@@ -130,6 +163,11 @@ class AndroidLibraryTreeRead(context: Context, private val scratchDirectory: Fil
             requireIssuingAuthority()
             detached
         }
+    }
+
+    private fun bindScratch(path: Path): () -> Unit {
+        val key = localLibraryRootKey(path)
+        return { if (localLibraryRootKey(path) != key) throw IOException("The library verification attempt changed") }
     }
 
     private fun <T : Any> readCatalog(read: LibraryBackupRead, expected: LibraryGeneration?, checkpoint: () -> Unit,
@@ -297,15 +335,15 @@ class AndroidLibraryTreeRead(context: Context, private val scratchDirectory: Fil
                 val scratch = canonicalLibraryDirectory(scratchLocation, app.filesDir.toPath().toRealPath())
                 val backend = Backend(app, tree, root, scratch, signal, checkpoint)
                 backend.requireRoot()
-                val result = block(backupRead(root, backend, scratch, checkpoint), checkpoint)
+                val result = block(backupRead(LibraryTreeReadSource(root, backend), scratch, checkpoint), checkpoint)
                 backend.requireRoot()
                 result
             }
         }
     }
 
-    private fun backupRead(root: String, backend: Backend, scratch: Path, checkpoint: () -> Unit) =
-        LibraryBackupRead(LibraryTreeReadSource(root, backend), scratch, MAX_PORTABLE_BYTES, checkpoint)
+    private fun backupRead(source: LibraryTreeReadSource, scratch: Path, checkpoint: () -> Unit) =
+        LibraryBackupRead(source, scratch, MAX_PORTABLE_BYTES, checkpoint)
 
     private class Backend(
         private val app: Context, private val tree: Uri, private val rootId: String,

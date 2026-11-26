@@ -3,6 +3,7 @@ package app.pristinepage.data
 import app.pristinepage.data.db.SourceBlobRow
 import app.pristinepage.data.files.DirectorySync
 import app.pristinepage.data.library.LibraryCatalogMerge
+import app.pristinepage.data.library.LibraryBackupRead
 import app.pristinepage.data.library.LibraryMergePayloads
 import app.pristinepage.data.library.LibraryObjectTransfer.ObjectId
 import app.pristinepage.data.library.LocalLibraryDirectory
@@ -62,6 +63,28 @@ class LibraryMergePayloadsTest {
         }
         assertEquals("abc", local.open(abc)?.use { it.readBytes().decodeToString() })
         assertEquals("xyz", backup.open(abc)?.use { it.readBytes().decodeToString() })
+    }
+
+    @Test fun readOnlyPortsCompareMatchedBytesAndEstimateMissingObjectsWithoutAWriter() {
+        val local = folder("destination", abc to "abc")
+        val good = folder("good", abc to "abc", hello to "hello")
+        val bad = folder("bad", abc to "xyz", hello to "hello")
+        val prior = blob(1, abc)
+        val matched = blob(2, abc)
+        val appended = blob(3, hello)
+        val plan = candidate(listOf(prior, appended), listOf(match(1, 2)), mapOf(id(3) to id(3)))
+        fun estimate(source: LocalLibraryDirectory) =
+            LibraryMergePayloads.estimate(plan, listOf(prior), listOf(matched, appended), local::open, source::open, {}, 0, Long.MAX_VALUE)
+        assertEquals(5L, estimate(good).missingBytes)
+        assertThrows(IOException::class.java) { estimate(bad) }
+        assertNull(local.open(hello))
+    }
+
+    @Test fun theUnionMustFitEvenWhenTheTwoInputInventoriesFitIndividually() {
+        assertEquals(listOf(abc), LibraryBackupRead.admitOriginals(listOf(abc, abc), 5).toList())
+        assertEquals(listOf(hello), LibraryBackupRead.admitOriginals(listOf(hello), 5).toList())
+        assertThrows(IOException::class.java) { LibraryBackupRead.admitOriginals(listOf(abc, hello), 5) }
+        assertThrows(IOException::class.java) { LibraryBackupRead.admitOriginals(listOf(abc, abc.copy(byteCount = 2)), 8) }
     }
 
     @Test fun onlyTheExactReferencedSnapshotsCanSatisfyThePlan() {

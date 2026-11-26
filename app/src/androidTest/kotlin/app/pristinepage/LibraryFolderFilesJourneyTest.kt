@@ -605,6 +605,14 @@ class LibraryFolderFilesJourneyTest {
                 assertEquals(1, catalog.albums)
                 assertEquals(1, catalog.scans)
             }
+            val preview = runBlocking {
+                LibraryDescriptorAncestryWitness.estimateMerge(app, scratch, catalogs[0], catalogs[1], ::requireNoParentAccess)
+            }
+            assertEquals(1, preview.albums)
+            assertEquals(listOf("Synthetic.png"), preview.names)
+            assertEquals(1, preview.matchedOriginals)
+            assertEquals(0L, preview.missingBytes)
+            assertEquals(emptyList<String>(), scratch.list()?.toList())
             requireNoParentAccess()
         }
     }

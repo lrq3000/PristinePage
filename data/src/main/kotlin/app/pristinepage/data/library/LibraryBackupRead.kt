@@ -97,20 +97,7 @@ internal class LibraryBackupRead(
     }
 
     private fun verifyOriginals(objects: Collection<ObjectId>, maximumBytes: Long) {
-        // Reject contradictory declarations before opening any payload; identical references need only one read.
-        val unique = LinkedHashMap<String, ObjectId>()
-        var remaining = maximumBytes
-        for (id in objects) {
-            checkpoint()
-            val retained = unique.putIfAbsent(id.sha256, id)
-            if (retained != null) {
-                if (retained != id) throw IOException("Conflicting library object lengths")
-            } else {
-                if (id.byteCount > remaining) throw IOException("The library exceeds the original verification budget")
-                remaining -= id.byteCount
-            }
-        }
-        for (id in unique.values) {
+        for (id in admitOriginals(objects, maximumBytes, checkpoint)) {
             checkpoint()
             val input = store.open(id) ?: throw IOException("Missing required library object")
             input.use { transferExactBytes(it, null, id.byteCount, id.sha256, checkpoint) }
@@ -118,6 +105,26 @@ internal class LibraryBackupRead(
     }
 
     private fun openCatalog(tip: LibraryGeneration) = store.openCatalog(tip) ?: throw IOException("Library catalog is missing")
+
+    companion object {
+        /** Admit the complete distinct payload union before opening any original, or before promising a readable merge. */
+        fun admitOriginals(objects: Collection<ObjectId>, maximumBytes: Long, checkpoint: () -> Unit = {}): Collection<ObjectId> {
+            require(maximumBytes >= 0)
+            val unique = LinkedHashMap<String, ObjectId>()
+            var remaining = maximumBytes
+            for (id in objects) {
+                checkpoint()
+                val retained = unique.putIfAbsent(id.sha256, id)
+                if (retained != null) {
+                    if (retained != id) throw IOException("Conflicting library object lengths")
+                } else {
+                    if (id.byteCount > remaining) throw IOException("The library exceeds the original verification budget")
+                    remaining -= id.byteCount
+                }
+            }
+            return unique.values
+        }
+    }
 }
 
 internal class UnexpectedLibraryTip : IOException("The verified library generation is no longer current")

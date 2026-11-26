@@ -28,9 +28,28 @@ internal object LibraryMergePayloads {
         catalogAndJournalBytes: Long,
         availableBytes: Long,
         checkpoint: () -> Unit = {},
+    ): Estimate = estimate(candidate, destinationRows, incomingRows, destination::open, source::open,
+        requireSeparate = { destination.requireIndependentScratch(source.rootPath) }, catalogAndJournalBytes, availableBytes, checkpoint)
+
+    /** No writable port is needed to compare matched bytes or count distinct missing objects. */
+    fun estimate(
+        candidate: LibraryCatalogMerge.Candidate,
+        destinationRows: List<SourceBlobRow>,
+        incomingRows: List<SourceBlobRow>,
+        openDestination: (ObjectId) -> InputStream?,
+        openSource: (ObjectId) -> InputStream?,
+        requireSeparate: () -> Unit,
+        catalogAndJournalBytes: Long,
+        availableBytes: Long,
+        checkpoint: () -> Unit = {},
     ): Estimate {
-        val prepared = prepare(candidate, destinationRows, incomingRows, destination, source::open,
-            requireSeparate = { destination.requireIndependentScratch(source.rootPath) }, catalogAndJournalBytes, availableBytes, false, checkpoint)
+        val readOnly = object : Destination {
+            override fun open(id: ObjectId) = openDestination(id)
+            override fun create(id: ObjectId, requireCurrent: () -> Unit, write: (OutputStream) -> Unit): Nothing =
+                throw IOException("A library dry run cannot create original objects")
+        }
+        val prepared = prepare(candidate, destinationRows, incomingRows, readOnly, openSource, requireSeparate,
+            catalogAndJournalBytes, availableBytes, published = false, checkpoint)
         return Estimate(prepared.missingBytes, prepared.requiredBytes)
     }
 

@@ -4,6 +4,7 @@ import android.content.Context
 import android.net.Uri
 import android.os.ParcelFileDescriptor
 import java.io.File
+import java.util.UUID
 
 /** Debug instrumentation bridge. It does not validate a grant, hold topology stable, or authorize mutation. */
 object LibraryDescriptorAncestryWitness {
@@ -22,7 +23,11 @@ object LibraryDescriptorAncestryWitness {
         proof.requireCurrentSiblings()
     }
 
-    data class Catalog(val tree: Uri, val libraryId: String, val generationId: String, val albums: Int, val scans: Int)
+    class Catalog internal constructor(internal val input: AndroidLibraryTreeRead.PairInput, val libraryId: String,
+        val generationId: String, val albums: Int, val scans: Int,
+    ) {
+        val tree: Uri get() = input.tree
+    }
 
     suspend fun verifyPairWithSharedOwner(context: Context, scratch: File, left: Uri, right: Uri,
         requireAuthority: () -> Unit,
@@ -30,9 +35,20 @@ object LibraryDescriptorAncestryWitness {
         AndroidLibraryTreeRead(context, scratch).withVerifiedPair(AndroidLibraryTreeRead.PairInput(left),
             AndroidLibraryTreeRead.PairInput(right), requireAuthority) { a, b ->
             listOf(a, b).map { (tree, generation, snapshot) ->
-                Catalog(tree, generation.libraryId, generation.id, snapshot.albums.size, snapshot.albums.sumOf { it.pages.size })
+                Catalog(AndroidLibraryTreeRead.PairInput(tree, generation), generation.libraryId, generation.id,
+                    snapshot.albums.size, snapshot.albums.sumOf { it.pages.size })
             }
         }
+
+    data class MergePreview(val albums: Int, val names: List<String>, val matchedOriginals: Int, val missingBytes: Long)
+
+    suspend fun estimateMerge(context: Context, scratch: File, destination: Catalog, incoming: Catalog, requireAuthority: () -> Unit): MergePreview {
+        val estimate = AndroidLibraryTreeRead(context, scratch).estimateMerge(UUID.randomUUID().toString(),
+            destination.input, incoming.input, requireAuthority)
+        val albums = estimate.candidate.catalog.albums
+        return MergePreview(albums.size, albums.flatMap { album -> album.pages.map { it.filename } },
+            estimate.candidate.requiredMatches.size, estimate.missingBytes)
+    }
 
     fun requireSameIdentity(held: ParcelFileDescriptor, reopened: ParcelFileDescriptor) {
         check(AndroidLibraryDescriptorAncestry.observe(held) == AndroidLibraryDescriptorAncestry.observe(reopened)) {
