@@ -91,6 +91,15 @@ internal class LocalLibraryRecipeEditJournal(
     /** A known exact attempt may be inspected without creating a receipt, touching the provider, or reviving its writer. */
     fun inspect(intent: Intent): Phase? = inspectOwned(intent, null)?.phase
 
+    /** Reconstruct a private observation for the exact issuing selection. This does not return a live receipt or prove current provider bytes. */
+    fun observeForRecovery(binding: LocalSelectedLibraryAuthority.Selected.Folder): Observation {
+        requireAttemptDirectory()
+        val intent = directory.openRecipeEditRecord(RecipeEditRecord.INTENT)?.use { readIntent(it, binding) } ?: invalid()
+        return Observation(intent, inspect(intent) ?: invalid())
+    }
+
+    data class Observation(val intent: Intent, val phase: Phase)
+
     private data class Evidence(val phase: Phase, val nodes: Map<String, Any>)
 
     private fun inspectOwned(intent: Intent, ownedStage: Path?): Evidence? {
@@ -179,8 +188,36 @@ internal class LocalLibraryRecipeEditJournal(
     }
 
     private fun requireAttempt(intent: Intent) {
+        requireAttemptDirectory()
+        if (root.fileName.toString() != intent.successor.id) invalid()
+    }
+
+    private fun requireAttemptDirectory() {
         checkpoint()
-        if (root.fileName.toString() != intent.successor.id || !Files.isDirectory(root, NOFOLLOW_LINKS) || root.toRealPath() != root) invalid()
+        if (!Files.isDirectory(root, NOFOLLOW_LINKS) || root.toRealPath() != root) invalid()
+    }
+
+    private fun readIntent(input: InputStream, binding: LocalSelectedLibraryAuthority.Selected.Folder): Intent {
+        val bytes = ByteArray(MAX_INTENT_BYTES)
+        var count = 0
+        while (true) {
+            checkpoint()
+            val byte = input.read()
+            if (byte == -1) break
+            if (count == bytes.size || (byte != 10 && byte !in 32..126)) invalid()
+            bytes[count++] = byte.toByte()
+        }
+        val raw = String(bytes, 0, count, Charsets.US_ASCII)
+        if (!raw.endsWith('\n')) invalid()
+        val fields = raw.dropLast(1).split('\n', limit = 20)
+        // Five envelope fields precede the two seven-field markers. The predecessor comes from the caller's durable binding, not from this record.
+        if (fields.size != 19) invalid()
+        val successor = fields.subList(12, 19).joinToString("\n", postfix = "\n")
+            .byteInputStream(Charsets.US_ASCII).use(LibraryGeneration::read)
+        val intent = try { Intent(binding, fields[4], successor) }
+        catch (_: IllegalArgumentException) { invalid() }
+        if (intent.encode().toString(Charsets.US_ASCII) != raw) invalid()
+        return intent
     }
 
     private fun requireSidecarsAbsent() {
@@ -199,5 +236,6 @@ internal class LocalLibraryRecipeEditJournal(
 
     private companion object {
         const val CATALOG_OWNER = "recipe-edit.catalog-owner"
+        const val MAX_INTENT_BYTES = 1024
     }
 }

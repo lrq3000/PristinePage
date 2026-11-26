@@ -48,6 +48,50 @@ class LocalLibraryRecipeEditJournalTest {
         assertFailsWith<IOException> { cold.inspect(intent.copy(binding = binding(4))) }
     }
 
+    @Test fun coldDiscoveryReadsOnlyTheExactIssuingBindingAndDoesNotCreateCompletion() {
+        val (attempt, intent) = fixture()
+        val live = journal(attempt).start(intent) {}
+        assertEquals(LocalLibraryRecipeEditJournal.Observation(intent, LocalLibraryRecipeEditJournal.Phase.INTENT_ONLY),
+            journal(attempt).observeForRecovery(binding(3)))
+        assertFalse(attempt.resolve("recipe-edit.complete").exists())
+        assertFailsWith<IOException> { journal(attempt).observeForRecovery(binding(4)) }
+        assertFailsWith<IOException> {
+            journal(attempt).observeForRecovery(binding(3, owner = grant.copy(exactUri = grant.exactUri.replace("%3A", "%3a"))))
+        }
+        assertFailsWith<IOException> {
+            journal(attempt).observeForRecovery(binding(3, predecessor = prior.copy(catalog = ObjectId("d".repeat(64), 512))))
+        }
+        live.recordAfterProviderClosure(next)
+        assertEquals(LocalLibraryRecipeEditJournal.Observation(intent, LocalLibraryRecipeEditJournal.Phase.COMPLETED),
+            journal(attempt).observeForRecovery(binding(3)))
+    }
+
+    @Test fun coldDiscoveryPreservesUnresolvedAndNoncanonicalJournalBytes() {
+        val (attempt, intent) = fixture()
+        val record = attempt.resolve("recipe-edit.intent")
+        assertFailsWith<IOException> { journal(attempt).observeForRecovery(intent.binding) }
+        assertFalse(record.exists())
+        journal(attempt).start(intent) {}
+        val text = intent.encode().toString(Charsets.US_ASCII)
+        for (broken in listOf(text.replaceFirst("\n3\n", "\n03\n"), text + "extra\n", text + " ".repeat(1024))) {
+            record.writeText(broken, Charsets.US_ASCII)
+            assertFailsWith<IOException> { journal(attempt).observeForRecovery(intent.binding) }
+            assertEquals(broken, record.readText(Charsets.US_ASCII))
+        }
+        assertFalse(attempt.resolve("recipe-edit.complete").exists())
+    }
+
+    @Test fun coldDiscoveryRefusesUnconfirmedParentBarrierAndPreservesPrivateEvidence() {
+        val (attempt, intent) = fixture()
+        journal(attempt).start(intent) {}.recordAfterProviderClosure(next)
+        fun inventory() = attempt.listFiles()!!.associate { it.name to it.readBytes().toList() }
+        val before = inventory()
+        assertFailsWith<IOException> {
+            journal(attempt, DirectorySync { it != attempt.parentFile }).observeForRecovery(intent.binding)
+        }
+        assertEquals(before, inventory())
+    }
+
     @Test fun liveReceiptCannotAuthorizeAdoptionAfterByteIdenticalCompletionReplacement() {
         val (attempt, intent) = fixture()
         val writer = LocalLibraryRecipeEditJournal(attempt, sync, nodeIdentity = { _, attrs ->
@@ -138,10 +182,11 @@ class LocalLibraryRecipeEditJournalTest {
         assertFalse(attempt.resolve("recipe-edit.complete").exists())
     }
 
-    private fun binding(number: Long): LocalSelectedLibraryAuthority.Selected.Folder {
-        val selection = Selection(Location.Folder(grant.grantId, prior.id), Identity(library, number))
+    private fun binding(number: Long, owner: LibraryFolderGrantRecord = grant,
+        predecessor: LibraryGeneration = prior): LocalSelectedLibraryAuthority.Selected.Folder {
+        val selection = Selection(Location.Folder(owner.grantId, predecessor.id), Identity(library, number))
         return LocalSelectedLibraryAuthority.Selected.Folder(
-            LocalSelectedLibraryAuthority.boundSelection(selection, grant, prior), grant, prior,
+            LocalSelectedLibraryAuthority.boundSelection(selection, owner, predecessor), owner, predecessor,
         )
     }
 
