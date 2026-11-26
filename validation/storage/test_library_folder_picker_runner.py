@@ -14,12 +14,60 @@ from run_library_folder_picker_ldplayer import (
     check_fixture_root, read_backup_delivery_death, recheck_target, require_independent_manifests, select_backup_case, select_backup_death_picker_case, select_independent_roots, select_provider_capacity, select_settings_picker_case, select_settings_recovery_case, select_tree_ancestry, settings_completed_destination, spend_settings_retry, verify_released_independent_guest,
     finish_pre_marker_outcome, independent_fixture_children, read_independent_grant_record, retry_pre_marker_checksum, verify_ancestry_cold_handoff, verify_ancestry_grant_refusal, verify_backup_death_control, verify_backup_death_intent, verify_backup_receipt_only, verify_pre_marker_handoff, verify_pre_marker_read_refusal, verify_settings_catalog, verify_settings_ocr, verify_settings_retry_evidence,
     verify_independent_derived_installed, verify_derived_receipt, verify_selected_append_catalog, verify_released_append_guest,
-    stage_independent_fixture_pair, verify_selected_append_host_refusal, verify_selected_append_records,
+    stage_independent_fixture_pair, verify_selected_append_host_refusal, verify_selected_append_records, select_selected_repeat,
+    verify_released_selected_repeat_guest, parse_app_persisted_grants, require_same_repeat_grants, verify_library_move_spend,
 )
 from run_local_ocr_guest import read_boot_serial
 
 
 class LibraryFolderPickerRunnerTest(unittest.TestCase):
+    def test_repeat_refuses_contradictory_release_and_cleanup_metadata(self):
+        original = dict(name="synthetic", installation="installed", index=3, created="creation", worktree="owned",
+                        purpose="library", api=28, created_by_agent=True, generation="exact", runtime_processes=[[15, 42], [17, 47]])
+        stopped = original | dict(state="stopped-released", claim_generation="exact", shutdown_verified=True,
+                                  shutdown_ready=True, evidence_saved=True, owner=None, consumers=[], reservedKiB=0,
+                                  keep_running=False, handoff_to=None, shutdown_processes=original["runtime_processes"],
+                                  cleanup_attempt={"generation": "exact", "state": "completed"})
+        verify_released_selected_repeat_guest(original, stopped)
+        for mismatch in (dict(claim_generation="later"), dict(consumers=["work"]), dict(reservedKiB=4),
+                         dict(cleanup_attempt={"generation": "exact", "state": "running"}), dict(evidence_saved=False)):
+            with self.assertRaisesRegex(RuntimeError, "same-generation"):
+                verify_released_selected_repeat_guest(original, stopped | mismatch)
+
+    def test_repeat_refuses_grant_mode_drift_before_the_new_fixture_is_written(self):
+        from run_library_folder_picker_ldplayer import APP, URI_PERMISSIONS_HEADER
+        initial = (f"{URI_PERMISSIONS_HEADER}\n  Granted Uri Permissions:\n  * UID 10234 holds:\n"
+                   "    UriPermission{123 content://synthetic/tree/folder [user 0] [prefix]}\n"
+                   f"      targetUserId=0 sourcePkg=synthetic.docs targetPkg={APP}\n"
+                   "      mode=0x3 owned=0x0 global=0x0 persistable=0x3 persisted=0x3 persistedCreate=42\n"
+                   "-------------------------------------------------------------------------------\n")
+        before = parse_app_persisted_grants(initial)
+        require_same_repeat_grants(before, parse_app_persisted_grants(initial.replace("UriPermission{123", "UriPermission{456")))
+        after = parse_app_persisted_grants(initial.replace("persisted=0x3", "persisted=0x1"))
+        def deny_write(*args, **kwargs):
+            self.fail("The new fixture was touched before checking its preserved permissions")
+        folder = "PristinePage-tree-0123456789ab"
+        with self.assertRaisesRegex(RuntimeError, "persisted grant inventory changed"):
+            stage_independent_fixture_pair(deny_write, f"/sdcard/Documents/{folder}", folder, (("left", {}), ("right", {})),
+                                           lambda: require_same_repeat_grants(before, after))
+        for wrong in (initial.replace(f" targetPkg={APP}", " targetPkg=foreign.app"), initial.rsplit("\n", 2)[0]):
+            with self.assertRaisesRegex(RuntimeError, "package-scoped"):
+                parse_app_persisted_grants(wrong)
+
+    def test_correctly_named_spend_cannot_authorize_a_different_payload(self):
+        key = sha256(b"catalogs/exact.sqlite").hexdigest()
+        good = f"pristinepage-library-move-spent-v1\n{key}\n{'b' * 64}\n42:15\n{'c' * 64}\n512\n"
+        verify_library_move_spend(good, key, 512, "c" * 64)
+        for wrong in (good.replace("c" * 64, "d" * 64), good.replace("\n512\n", "\n513\n"), good.replace("42:15", "42:0")):
+            with self.assertRaisesRegex(RuntimeError, "move spend"):
+                verify_library_move_spend(wrong, key, 512, "c" * 64)
+
+    def test_repeat_mode_is_not_allowed_to_accept_a_reassigned_or_failed_prior_attempt(self):
+        self.assertTrue(select_selected_repeat(True, selected_append=True, reassigned=None, failed_host=False))
+        for selected_append, reassigned, failed in ((False, None, False), (True, self._uuid(9), False), (True, None, True)):
+            with self.assertRaisesRegex(RuntimeError, "exact successful predecessor"):
+                select_selected_repeat(True, selected_append=selected_append, reassigned=reassigned, failed_host=failed)
+
     def test_repeat_receipt_requires_the_exact_intent_and_all_three_markers(self):
         def marker(suffix, predecessor):
             return (f"pristinepage-library-v1\n{self._uuid(99)}\n{self._uuid(suffix)}\n{predecessor}\n"

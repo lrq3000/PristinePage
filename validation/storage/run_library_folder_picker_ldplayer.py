@@ -33,6 +33,7 @@ ANCESTRY_COLD_CASE = "app.pristinepage.LibraryProviderAncestryColdTest#provesMan
 INDEPENDENT_GRANT_CASE = "app.pristinepage.LibraryFolderFilesJourneyTest#persistsIndependentFilesRootsAndAnchor"
 INDEPENDENT_DERIVED_CASE = "app.pristinepage.LibraryFolderFilesJourneyTest#separatesIndependentlySelectedRootsWithoutAParentGrant"
 SELECTED_APPEND_CASE = "app.pristinepage.LibraryFolderFilesJourneyTest#selectedFilesMergeAppendsOnlyTheMissingOriginalAndKeepsItsPredecessor"
+SELECTED_REPEAT_CASE = "app.pristinepage.LibraryFolderFilesJourneyTest#selectedFilesMergeCanAppendTwiceWithoutReusingAnOlderStage"
 INDEPENDENT_COLD_CASE = "app.pristinepage.LibraryProviderAncestryColdTest#twoIndependentFilesRootsRequireDisjointPhysicalAncestry"
 INDEPENDENT_CHILDREN = ("Library-Left", "Library-Right")
 WORKING_CASE = "app.pristinepage.LibraryFolderFilesJourneyTest#populatingAWorkingRoomCatalogDoesNotMaterializeTheOriginal"
@@ -103,7 +104,9 @@ INDEPENDENT_DERIVED_PASSED = "550461e2206a8f887853ded659da4a494215144c64ba53f14f
 INDEPENDENT_SHARED_READER_PASSED = "8fbc16be139aa19e4e81d73e2c48ebf0e41199ba42500cfcbcf0df5a47b15081"
 INDEPENDENT_CLOSED_DRY_RUN_PASSED = "8730d1669c0f61f82d07eb2ee8d4bcd3d3bd762fed8e73317660e0e640a478db"
 SELECTED_APPEND_HOST_REFUSAL = "ea076b07261c53b5d5f3aea812717dc5f974dec05675c5ff8065c0802fd986f4"
+SELECTED_APPEND_PASSED = "3498e3282d00a523ed7257524afbe2d357c10bec999e617244bead1a2f1e16a7"
 UUID_TEXT = r"[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}"
+URI_PERMISSIONS_HEADER = "ACTIVITY MANAGER URI PERMISSIONS (dumpsys activity permissions)"
 BACKUP_ORIGINAL = "ebd602840377a3b3cf763cb6828fee67861ff77c444e8fe5894457ef6d99a24d"
 OCR_ACTIVATION_CASES = tuple(f"app.pristinepage.ocr.OcrWorkManagerIntegrationTest#{method}" for method in (
     "sameActivationKeepsTheLiveWakeButAnotherActivationDoesNotShareIt",
@@ -328,6 +331,17 @@ def verify_released_independent_guest(original, stopped):
          "The released guest does not match the exact independent-root predecessor")
 
 
+def verify_released_selected_repeat_guest(original, stopped):
+    verify_released_independent_guest(original, stopped)
+    generation = original["generation"]
+    cleanup = stopped.get("cleanup_attempt") or {}
+    need(stopped.get("claim_generation") == generation and stopped.get("consumers") == [] and
+         stopped.get("reservedKiB") == 0 and stopped.get("shutdown_ready") is True and stopped.get("evidence_saved") is True and
+         stopped.get("keep_running") is False and stopped.get("handoff_to") is None and
+         cleanup.get("generation") == generation and cleanup.get("state") == "completed",
+         "The repeat needs completed same-generation release, cleanup and evidence with no remaining consumers")
+
+
 def verify_released_append_guest(original, stopped, generation):
     """Accept only an explicitly named intervening release on the same disk, retaining the dry-run provenance."""
     stable = ("name", "installation", "index", "created", "api", "created_by_agent")
@@ -538,14 +552,14 @@ def spend_settings_retry(raw, digest, attempt):
         raise RuntimeError("This Settings retry is already spent") from error
 
 
-def verify_unchanged_settings_destination(adb, guest_root, files, backup_name=None):
+def verify_unchanged_settings_destination(adb, guest_root, files, backup_name=None, *, extra_names=()):
     namespaces = {"catalogs", "generations", "objects"}
     ident = r"[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}"
     locator = rf"(?:catalogs/{ident}\.sqlite|generations/{ident}\.complete|objects/[a-f0-9]{{64}})"
     need({relative.split("/")[0] for relative in files} == namespaces and
          all(re.fullmatch(locator, file) and re.fullmatch(r"[a-f0-9]{64}", digest) for file, digest in files.items()),
          "Invalid retained synthetic inventory")
-    expected_root = namespaces if backup_name is None else namespaces | {backup_name}
+    expected_root = namespaces | set(extra_names) | ({backup_name} if backup_name is not None else set())
     need(set(adb("shell", "ls", "-A", "-1", guest_root).splitlines()) == expected_root,
          "The first Settings destination is not unchanged; the backup must not be repeated")
     for namespace in namespaces:
@@ -655,6 +669,235 @@ def verify_selected_append_records(intent, completion, baseline_marker, incoming
         need(completion == "pristinepage-selected-merge-complete-v1\n" + intent,
              "The private selected append completion does not match its exact intent")
     return fields.groups()
+
+
+def exercise_selected_repeat(run, adb, ns, raw, guest_root, folder, files, received, hashes, operation, repeat, missing, missing_bytes):
+    left, right = (f"{guest_root}/{name}" for name in independent_fixture_children(folder))
+    scope = f"library-selected-repeat-{operation}"
+    need(re.fullmatch(UUID_TEXT, operation) and re.fullmatch(UUID_TEXT, repeat) and operation != repeat,
+         "The selected repeat needs two fresh, distinct IDs")
+    verify_unchanged_settings_destination(adb, left, files)
+    verify_unchanged_settings_destination(adb, right, received)
+    require_cold_backup_app(adb)
+    need(scope not in adb("shell", "run-as", APP, "ls", "-A", "-1", "files").splitlines(),
+         "A retained selected repeat scope must never be repeated")
+    status = run.path("independent-roots-grants.json")
+    run.save(status, {"fixture": folder, "state": "cleanup-unconfirmed"}, durable=True)
+    try:
+        recheck_target(run, ns)
+        output = adb("shell", "am", "instrument", "-w", "-r", "-e", "class", SELECTED_REPEAT_CASE,
+                     "-e", "libraryFixtureFolder", folder, "-e", "librarySelectedAppendOperation", operation,
+                     "-e", "librarySelectedRepeatOperation", repeat, "-e", "librarySelectedAppendBytes", str(missing_bytes), RUNNER, timeout=260)
+        run.path("independent-roots-append-instrumentation.txt").write_text(output, encoding="utf-8")
+        passed, failed = read_results(output, (SELECTED_REPEAT_CASE,))
+        if not failed:
+            baseline, = (name for name in files if name.startswith("generations/"))
+            incoming, = (name for name in received if name.startswith("generations/"))
+            baseline_text = adb("shell", "cat", f"{left}/{baseline}")
+            source_text = adb("shell", "cat", f"{right}/{incoming}")
+            inventory = files | {f"objects/{missing}": missing}
+            stages = []
+            root_keys = None
+            journal = f"files/{scope}/library-selected-merge-v1/merge-stages"
+            need(set(adb("shell", "run-as", APP, "ls", "-A", "-1", journal).splitlines()) == {operation, repeat},
+                 "The selected repeat did not retain exactly the two admitted attempts")
+            for candidate, label in ((operation, "selected-append"), (repeat, "selected-repeat")):
+                repeated = candidate == repeat
+                predecessor = baseline_text.splitlines()
+                marker_path, catalog_path = f"generations/{candidate}.complete", f"catalogs/{candidate}.sqlite"
+                marker_text = adb("shell", "cat", f"{left}/{marker_path}")
+                marker = marker_text.splitlines()
+                need(len(predecessor) == 7 and len(marker) == 7 and
+                     marker[:5] == [predecessor[0], predecessor[1], candidate, predecessor[2], predecessor[4]] and
+                     marker[5].isdigit() and 0 < int(marker[5]) <= 2 * 1024 * 1024 and re.fullmatch(r"[a-f0-9]{64}", marker[6]),
+                     "The selected append did not publish one exact successor")
+                inventory.update({marker_path: sha256(marker_text.encode("ascii")).hexdigest(), catalog_path: marker[6]})
+                stage_name = f"merge-staging-{candidate}"
+                stages.append(stage_name)
+                need(not adb("shell", "ls", "-A", "-1", f"{left}/{stage_name}").strip(),
+                     "The selected append retained a staged provider file")
+                catalog = raw / f"{label}-catalog.sqlite"
+                need(adb("shell", "stat", "-c", "%s", f"{left}/{catalog_path}").strip() == marker[5],
+                     "The selected append catalog extent differs from its marker")
+                adb("pull", f"{left}/{catalog_path}", catalog, timeout=20)
+                need(catalog.stat().st_size == int(marker[5]) and sha(catalog) == marker[6], "The pulled selected append catalog changed")
+                verify_selected_append_catalog(catalog, synthetic_scan()[0], missing, repeated=repeated)
+                stage = f"{journal}/{candidate}"
+                intent = adb("shell", "run-as", APP, "cat", f"{stage}/merge.intent")
+                completion = adb("shell", "run-as", APP, "cat", f"{stage}/selected-merge.complete")
+                keys = verify_selected_append_records(intent, completion, baseline_text, source_text, marker_text)
+                need(root_keys is None or keys == root_keys, "The repeat receipt refers to different selected roots")
+                root_keys = keys
+                need(adb("shell", "run-as", APP, "sha256sum", f"{stage}/catalog.sqlite").split() ==
+                     [marker[6], f"{stage}/catalog.sqlite"], "The private selected append stage differs from the external catalog")
+                known = {"catalog.sqlite", "merge.intent", "selected-merge.complete"}
+                leaves = set(adb("shell", "run-as", APP, "ls", "-A", "-1", stage).splitlines())
+                need(known <= leaves, "The selected append did not retain all records")
+                payloads = {catalog_path: (int(marker[5]), marker[6]),
+                            marker_path: (len(marker_text.encode("ascii")), inventory[marker_path])}
+                if not repeated:
+                    payloads[f"objects/{missing}"] = (missing_bytes, missing)
+                verify_library_move_spends(adb, stage, leaves - known, payloads)
+                run.save(run.path(f"{label}-readback.json"), {
+                    "generation": candidate, "predecessor": predecessor[2], "catalogSha256": marker[6],
+                    "catalogBytes": int(marker[5]), "missingBytes": 0 if repeated else missing_bytes,
+                    "copiedObjectSha256": None if repeated else missing,
+                    "privateIntentSha256": sha256(intent.encode("ascii")).hexdigest(),
+                    "privateCompletionSha256": sha256(completion.encode("ascii")).hexdigest(),
+                }, durable=True)
+                baseline_text = marker_text
+            verify_unchanged_settings_destination(adb, left, inventory, extra_names=stages)
+            run.save(status, {"fixture": folder, "state": "prior-inventory-restored"}, durable=True)
+        return {"passed": passed, "failed": failed, "installedSha256": hashes}
+    finally:
+        recheck_target(run, ns)
+        need(adb("shell", "ls", "-A", "-1", guest_root).splitlines() == sorted(independent_fixture_children(folder)),
+             "The repeat selected append changed its synthetic parent")
+        verify_unchanged_settings_destination(adb, right, received)
+        for relative, digest in files.items():
+            leaf = f"{left}/{relative}"
+            need(adb("shell", "sha256sum", leaf).split() == [digest, leaf],
+                 "The repeat selected append changed predecessor or unreferenced fixture bytes")
+
+
+def select_selected_repeat(enabled, *, selected_append, reassigned, failed_host):
+    need(not enabled or (selected_append and reassigned is None and not failed_host),
+         "Repeated selected append requires the standalone lane and the exact successful predecessor")
+    return enabled
+
+
+def parse_app_persisted_grants(text):
+    """Decode only the Android 9 package-filtered grant section, never a global dump."""
+    refused = "Could not establish the package-scoped persisted grant inventory"
+    rows = text.strip().splitlines()
+    need(len(text) <= 65536 and len(rows) >= 3 and rows[0] == URI_PERMISSIONS_HEADER and
+         re.fullmatch(r"-{16,}", rows[-1]), refused)
+    body = [row for row in rows[1:-1] if row]
+    if [row.strip() for row in body] == ["(nothing)"]:
+        return ()
+    need(len(body) >= 5 and body[0] == "  Granted Uri Permissions:" and re.fullmatch(r"  \* UID [1-9][0-9]{0,4} holds:", body[1]), refused)
+    result = set()
+    index = 2
+    while index < len(body):
+        need(index + 2 < len(body), refused)
+        uri, package, modes = body[index:index + 3]
+        locator = re.fullmatch(r"    UriPermission\{[a-f0-9]+ (content://\S+) \[user (0)\]( \[prefix\])?\}", uri)
+        parties = re.fullmatch(rf"      targetUserId=0 sourcePkg=([a-zA-Z0-9._]+) targetPkg={re.escape(APP)}", package)
+        bits = re.fullmatch(r"      mode=0x[0-3] owned=0x[0-3] global=0x[0-3] persistable=0x[0-3] persisted=0x([0-3])(?: persistedCreate=[0-9]+)?", modes)
+        need(locator is not None and parties is not None and bits is not None, refused)
+        if bits[1] != "0":
+            grant = (locator[1], bool(locator[3]), parties[1], int(bits[1]))
+            need(grant not in result and len(result) < 8, refused)
+            result.add(grant)
+        index += 3
+        while index < len(body) and re.fullmatch(r"      (?:readOwners:|writeOwners:|  \* .+)", body[index]):
+            index += 1
+    return tuple(sorted(result))
+
+
+def read_app_persisted_grants(adb):
+    # API 28's direct permissions subcommand ignores -p. The full -a -p branch passes it to the section; filter on-device so unrelated sections never reach ADB.
+    command = (f"set -o pipefail; dumpsys -t 10 activity -a -p {APP} | "
+               f"sed -n '/^{URI_PERMISSIONS_HEADER}$/,/^----------------/p'")
+    return parse_app_persisted_grants(adb("shell", command, timeout=20))
+
+
+def require_same_repeat_grants(expected, actual):
+    need(actual == expected, "The package's persisted grant inventory changed")
+
+
+def verify_library_move_spend(text, key, size, digest):
+    fields = text.splitlines()
+    need(0 < len(text.encode("ascii")) <= 512 and text == "\n".join(fields) + "\n" and len(fields) == 6 and
+         fields[:2] == ["pristinepage-library-move-spent-v1", key] and re.fullmatch(r"[a-f0-9]{64}", fields[2]) and
+         re.fullmatch(r"[0-9]+:[1-9][0-9]*", fields[3]) and fields[4:] == [digest, str(size)],
+         "The library move spend does not bind its exact payload")
+
+
+def verify_library_move_spends(adb, stage, actual_names, payloads):
+    expected = {sha256(leaf.encode("ascii")).hexdigest(): proof for leaf, proof in payloads.items()}
+    need(actual_names == {f"{key}.spent" for key in expected}, "The selected append move spend inventory differs")
+    for key, (size, digest) in expected.items():
+        path = f"{stage}/{key}.spent"
+        extent = adb("shell", "run-as", APP, "stat", "-c", "%s", path).strip()
+        need(re.fullmatch(r"[1-9][0-9]{0,2}", extent) and int(extent) <= 512, "The library move spend extent is invalid")
+        text = adb("shell", "run-as", APP, "cat", path)
+        need(len(text.encode("ascii")) == int(extent), "The library move spend extent changed")
+        verify_library_move_spend(text, key, size, digest)
+
+def pinned_selected_repeat_predecessor(raw, guest, installed):
+    anchor = settings_run_anchors(raw, SELECTED_APPEND_PASSED)
+    artifact = json.loads(anchor("artifacts.json"))
+    grants = json.loads(anchor("independent-roots-grants.json"))
+    readback = json.loads(anchor("selected-append-readback.json"))
+    claim = json.loads(anchor("claim.json"))
+    need(raw.name == "picker-adapter-library-tree-6a2d8a67bc65" and artifact["guest"] == guest == claim["name"]
+         and artifact["selectedRootAppend"] == readback["generation"] and re.fullmatch(UUID_TEXT, readback["generation"])
+         and grants["state"] == "prior-inventory-restored"
+         and json.loads(anchor("outcomes.json")) == {"passed": [SELECTED_APPEND_CASE], "failed": [], "installedSha256": installed}
+         and read_results(anchor("independent-roots-append-instrumentation.txt"), (SELECTED_APPEND_CASE,)) == ([SELECTED_APPEND_CASE], []),
+         "The exact successful selected append predecessor was not verified")
+    independent_fixture_children(grants["fixture"])
+    catalog = raw / "selected-append-catalog.sqlite"
+    need(catalog.stat().st_size == readback["catalogBytes"] and sha(catalog) == readback["catalogSha256"],
+         "The successful selected append catalog anchor changed")
+    verify_selected_append_catalog(catalog, synthetic_scan()[0], readback["copiedObjectSha256"])
+    return claim, (grants["fixture"], artifact["fixture"], artifact["incomingFixture"], readback), artifact["previous"]
+
+
+def observe_legacy_selected_append(adb, receipt):
+    folder, files, incoming, readback = receipt
+    root = f"/sdcard/Documents/{folder}"
+    children = independent_fixture_children(folder)
+    need(adb("shell", "ls", "-A", "-1", root).splitlines() == sorted(children),
+         "The retained selected append parent inventory changed")
+    left, right = (f"{root}/{name}" for name in children)
+    operation = readback["generation"]
+    marker = f"generations/{operation}.complete"
+    catalog = f"catalogs/{operation}.sqlite"
+    baseline, = (name for name in files if name.startswith("generations/"))
+    source, = (name for name in incoming if name.startswith("generations/"))
+    before_text = adb("shell", "cat", f"{left}/{baseline}")
+    source_text = adb("shell", "cat", f"{right}/{source}")
+    child_text = adb("shell", "cat", f"{left}/{marker}")
+    child = child_text.splitlines()
+    original = before_text.splitlines()
+    need(len(original) == 7 and len(child) == 7 and original[2] == readback["predecessor"] and
+         child[:5] == [original[0], original[1], operation, original[2], original[4]] and
+         child[5:] == [str(readback["catalogBytes"]), readback["catalogSha256"]],
+         "The retained selected append marker changed")
+    missing = readback["copiedObjectSha256"]
+    verify_unchanged_settings_destination(adb, left, files | {
+        marker: sha256(child_text.encode("ascii")).hexdigest(), catalog: child[6], f"objects/{missing}": missing,
+    }, backup_name="merge-staging")
+    need(not adb("shell", "ls", "-A", "-1", f"{left}/merge-staging").strip(), "The retained selected write stage is not empty")
+    verify_unchanged_settings_destination(adb, right, incoming)
+    private = "files/library-selected-merge-v1"
+    def private_list(path):
+        return set(adb("shell", "run-as", APP, "ls", "-A", "-1", path).splitlines())
+    need(private_list(private) == {"merge-stages"} and private_list(f"{private}/merge-stages") == {operation},
+         "The retained private selected append namespace changed")
+    stage = f"{private}/merge-stages/{operation}"
+    names = private_list(stage)
+    spend_names = names - {"catalog.sqlite", "merge.intent"}
+    need({"catalog.sqlite", "merge.intent"} <= names, "The retained selected append private inventory changed")
+    verify_library_move_spends(adb, stage, spend_names, {
+        catalog: (readback["catalogBytes"], readback["catalogSha256"]),
+        marker: (len(child_text.encode("ascii")), sha256(child_text.encode("ascii")).hexdigest()),
+        f"objects/{missing}": (readback["missingBytes"], missing),
+    })
+    intent = adb("shell", "run-as", APP, "cat", f"{stage}/merge.intent")
+    verify_selected_append_records(intent, None, before_text, source_text, child_text)
+    observed = {}
+    for name in sorted(names):
+        path = f"{stage}/{name}"
+        fields = adb("shell", "run-as", APP, "sha256sum", path).split()
+        need(len(fields) == 2 and fields[1] == path and re.fullmatch(r"[a-f0-9]{64}", fields[0]),
+             "The retained selected append private leaf could not be fingerprinted")
+        observed[name] = fields[0]
+    need(observed["catalog.sqlite"] == child[6] and observed["merge.intent"] == sha256(intent.encode("ascii")).hexdigest(),
+         "The retained selected append private catalog or intent changed")
+    return observed
 
 
 def verify_selected_append_catalog(catalog, destination_digest, incoming_digest, *, repeated=False):
@@ -1024,11 +1267,9 @@ def complete_pre_marker_death(run, adb, ns, raw, fixture_root, fixture, operatio
         extent, recorded = before["files"][path]
         need(extent <= 512, "The interrupted move spend exceeds its bound")
         text = adb("shell", "run-as", APP, "cat", path)
-        fields = text.splitlines()
-        need(len(text) == extent and sha256(text.encode("ascii")).hexdigest() == recorded and
-             text == "\n".join(fields) + "\n" and len(fields) == 6 and fields[:2] == ["pristinepage-library-move-spent-v1", key] and
-             re.fullmatch(r"[a-f0-9]{64}", fields[2]) and re.fullmatch(r"[0-9]+:[1-9][0-9]*", fields[3]) and
-             fields[4:] == [digest, str(size)], "The interrupted move spend does not bind its exact payload")
+        need(len(text) == extent and sha256(text.encode("ascii")).hexdigest() == recorded,
+             "The interrupted move spend changed")
+        verify_library_move_spend(text, key, size, digest)
 
     def verify_external():
         verify_interrupted_external(adb, fixture_root, fixture, generation, payloads)
@@ -1190,6 +1431,8 @@ def run(args):
     selected_append = args.selected_root_append
     append_release = args.selected_append_released_generation
     append_host_recovery = args.selected_append_host_recovery
+    selected_repeat = select_selected_repeat(args.selected_append_repeat, selected_append=selected_append,
+                                           reassigned=append_release, failed_host=append_host_recovery)
     need(append_release is None or (selected_append and re.fullmatch(UUID_TEXT, append_release)),
          "Reassignment is valid only for a standalone selected append and one exact released generation")
     need(not append_host_recovery or (selected_append and append_release is None),
@@ -1248,10 +1491,12 @@ def run(args):
     independent_protected = None
     prior_derived = []
     failed_append_fixture = None
+    prior_successful_append = None
     protect_interrupted = None
     death_authority = CAPACITY_PASSED if before_marker else args.backup_death_retry or SETTINGS_COLD_MANIFEST
     death_operation = str(uuid.uuid4()) if args.backup_delivery_death or before_marker else None
     append_operation = str(uuid.uuid4()) if selected_append else None
+    repeat_operation = str(uuid.uuid4()) if selected_repeat else None
     need(args.backup_death_retry is None or (death_operation and args.backup_death_retry == BACKUP_DIRECT_CONTROL_PASS),
          "Retry requires the exact new no-write batch receipt")
     if args.previous:
@@ -1274,19 +1519,25 @@ def run(args):
             if args.independent_roots_retry or independent_handoff or independent_derived:
                 if independent_derived:
                     dry_pair = previous
-                    if append_host_recovery:
+                    if selected_repeat:
+                        independent_claim, prior_successful_append, recovered_pair = pinned_selected_repeat_predecessor(root, args.guest, previous)
+                        root = raw.parent / "picker-adapter-library-tree-f417bf74e32d"
+                    if append_host_recovery or selected_repeat:
+                        recovered_pair = recovered_pair if selected_repeat else previous
                         failed = settings_run_anchors(root, SELECTED_APPEND_HOST_REFUSAL)
                         verify_selected_append_host_refusal(failed("independent-roots-append-instrumentation.txt"))
                         artifact = json.loads(failed("artifacts.json"))
                         status = json.loads(failed("independent-roots-grants.json"))
                         need(artifact["guest"] == args.guest and artifact["selectedRootAppend"] and artifact["incomingFixture"]
                              and artifact["appendInterveningRelease"] and status["state"] == "cleanup-unconfirmed"
-                             and json.loads(failed("outcomes.json")) == {"passed": [], "failed": [SELECTED_APPEND_CASE], "installedSha256": previous}
-                             and previous[APP] == hashes[APP] and previous[TEST] != hashes[TEST],
-                             "Recovery requires the exact failed host attempt and a test-only successor")
+                             and json.loads(failed("outcomes.json")) == {"passed": [], "failed": [SELECTED_APPEND_CASE], "installedSha256": recovered_pair}
+                             and (previous[APP] == recovered_pair[APP] if selected_repeat else
+                                  previous[APP] == hashes[APP] and previous[TEST] != hashes[TEST]),
+                             "The failed host attempt and corrected successor do not match the pinned history")
                         dry_pair = json.loads(failed("installed-before.json"))
                         need(dry_pair == artifact["previous"], "The failed append did not start from the exact dry-run pair")
-                        independent_claim = json.loads(failed("claim.json"))
+                        if not selected_repeat:
+                            independent_claim = json.loads(failed("claim.json"))
                         failed_append_fixture = status["fixture"], artifact["fixture"], artifact["incomingFixture"]
                         root = raw.parent / "picker-adapter-library-tree-d0bcd64ff487"
                     latest = settings_run_anchors(root, INDEPENDENT_CLOSED_DRY_RUN_PASSED if selected_append else INDEPENDENT_SHARED_READER_PASSED)
@@ -1532,7 +1783,7 @@ def run(args):
                         treeAncestryHandoff=ancestry_resume, backupPreMarker=before_marker,
                         backupPreMarkerHandoff=pre_marker_handoff, independentRoots=bool(independent_cases),
                         independentRootsRetry=args.independent_roots_retry, independentRootsHandoff=independent_handoff,
-                         independentRootsDerived=independent_derived, selectedRootAppend=append_operation,
+                          independentRootsDerived=independent_derived, selectedRootAppend=append_operation, selectedRepeat=repeat_operation,
                          appendInterveningRelease=append_release, appendHostRecovery=append_host_recovery, incomingFixture=received)),
         encoding="utf-8",
     )
@@ -1541,6 +1792,8 @@ def run(args):
     def admit_independent(record):
         if append_release:
             verify_released_append_guest(independent_claim, record, append_release)
+        elif selected_repeat:
+            verify_released_selected_repeat_guest(independent_claim, record)
         else:
             verify_released_independent_guest(independent_claim, record)
 
@@ -1605,9 +1858,13 @@ def run(args):
         run.save(run.path("installed-before.json"), installed, durable=True)
         if independent_cases:
             require_cold_backup_app(adb)
+        def require_fresh_append_scope():
+            private = adb("shell", "run-as", APP, "ls", "-A", "-1", "files").splitlines()
+            name = f"library-selected-repeat-{append_operation}" if selected_repeat else "library-selected-merge-v1"
+            need(name not in private, "A retained selected append must never be repeated")
+
         if selected_append:
-            need("library-selected-merge-v1" not in adb("shell", "run-as", APP, "ls", "-A", "-1", "files").splitlines(),
-                 "A retained selected append must never be repeated")
+            require_fresh_append_scope()
         if completed:
             verify_completed_guest(publication_claim, run.owned())
             require_cold_backup_app(adb)
@@ -1646,6 +1903,23 @@ def run(args):
                     protect_interrupted(adb)
                 check_interrupted()
                 independent_preservation = (*checks, check_interrupted)
+                if prior_successful_append:
+                    grants_before = read_app_persisted_grants(adb)
+                    run.save(run.path("repeat-prior-grants.json"), {
+                        "quantity": len(grants_before),
+                        "sha256": sha256(json.dumps(grants_before).encode("utf8")).hexdigest(),
+                    }, durable=True)
+                    def check_prior_grants():
+                        recheck_target(run, ns)
+                        require_same_repeat_grants(grants_before, read_app_persisted_grants(adb))
+                    independent_preservation = (*independent_preservation, check_prior_grants)
+                    protected_append = observe_legacy_selected_append(adb, prior_successful_append)
+                    run.save(run.path("legacy-selected-append-private.json"), protected_append, durable=True)
+                    def check_prior_successful_append():
+                        recheck_target(run, ns)
+                        need(observe_legacy_selected_append(adb, prior_successful_append) == protected_append,
+                             "The earlier successful selected append changed")
+                    independent_preservation = (*independent_preservation, check_prior_successful_append)
                 if independent_prior:
                     def check_prior_picker():
                         recheck_target(run, ns)
@@ -1774,14 +2048,16 @@ def run(args):
                         need({p: run.installed_hash(p) for p in hashes} == hashes,
                              "The selected append APK pair changed after installation")
                         require_cold_backup_app(adb)
-                        need("library-selected-merge-v1" not in adb("shell", "run-as", APP, "ls", "-A", "-1", "files").splitlines(),
-                             "A retained selected append must never be repeated")
+                        require_fresh_append_scope()
                         recheck_target(run, ns)
                 stage_independent_fixture_pair(adb, guest_root, folder,
                     ((fixture, files), (alternate_fixture, received) if selected_append else (fixture, files)), admit_fixtures)
-            if selected_append:
+            if selected_repeat:
+                independent_outcome = exercise_selected_repeat(run, adb, ns, raw, guest_root, folder, files, received,
+                                                                hashes, append_operation, repeat_operation, missing, missing_bytes)
+            elif selected_append:
                 independent_outcome = exercise_selected_append(run, adb, ns, raw, guest_root, folder, files, received,
-                                                               hashes, append_operation, missing, missing_bytes)
+                                                                hashes, append_operation, missing, missing_bytes)
             else:
                 independent_outcome = exercise_independent_roots(run, adb, ns, guest_root, folder, files, hashes,
                                                                 independent_prior[0] if independent_prior else None,
@@ -2002,6 +2278,8 @@ if __name__ == "__main__":
                         help="With standalone derived roots, append one missing original to the fresh synthetic destination")
     parser.add_argument("--selected-append-released-generation", metavar="GENERATION",
                         help="Reconcile one exact intervening released claim; still require the installed dry-run pair and preserved fixtures")
+    parser.add_argument("--selected-append-repeat", action="store_true",
+                        help="Run two new selected appends in one isolated synthetic scope after the exact successful release")
     parser.add_argument("--selected-append-host-recovery", action="store_true",
                         help="Use the pinned failure before Files launch; verify both previous fixture trees before a new test-only attempt")
     parser.add_argument("--provider-capacity", action="store_true",
