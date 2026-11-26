@@ -10,6 +10,9 @@ import java.nio.file.Files
 import java.nio.file.LinkOption.NOFOLLOW_LINKS
 import java.nio.file.Path
 
+/** The private spend was attempted but could not be acknowledged. No destination file has been opened for writing. */
+class CatalogRevisionSpendUnconfirmed internal constructor() : IOException("The private catalog revision spend was not confirmed")
+
 /** A metadata-only successor of one held library. The caller owns the durable attempt and the exact writable scope. */
 internal class LibraryCatalogRevisionPublication(
     private val destination: LibraryMergePublication.Destination,

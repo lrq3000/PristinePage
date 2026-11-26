@@ -39,6 +39,7 @@ import app.pristinepage.data.model.SaveRecipeResult
 import app.pristinepage.data.model.UndoId
 import app.pristinepage.editor.EditorIdentity
 import app.pristinepage.editor.SelectedEditorSaveDelivery
+import app.pristinepage.data.library.CatalogRevisionSpendUnconfirmed
 import app.pristinepage.data.files.SourceInspector
 import app.pristinepage.data.repository.PrivateImportStore
 import app.pristinepage.data.repository.ImportSessionLifecycle
@@ -288,9 +289,14 @@ class ApplicationServices(context: Context, internal val budget: ImageAllocation
         return delivery.run {
             withSelectedLibraryLane {
                 val scratch = selectedLibraryScratch()
-                when (val result = libraryStartup.advanceSelectedRecipeEdit(scratch, identity.issuedAt,
-                    java.util.UUID.randomUUID().toString(), identity.documentId, identity.pageId, revision, ClassicalRecipeAdmission(),
-                    onPublicationStarted = ::publicationStarted, onPointerVerified = ::pointerVerified) { recipe }) {
+                val result = try {
+                    libraryStartup.advanceSelectedRecipeEdit(scratch, identity.issuedAt,
+                        java.util.UUID.randomUUID().toString(), identity.documentId, identity.pageId, revision, ClassicalRecipeAdmission(),
+                        onPublicationStarted = ::publicationStarted, onPointerVerified = ::pointerVerified) { recipe }
+                } catch (_: CatalogRevisionSpendUnconfirmed) {
+                    throw RepositoryFailure(OperationError(OperationErrorCode.STORAGE_FAILED, false, "editor_save_attempt_unconfirmed", identity.pageId.value))
+                }
+                when (result) {
                     is AndroidLibraryStartup.SelectedRecipeSave.Refused -> identity.issuedAt to result.result
                     is AndroidLibraryStartup.SelectedRecipeSave.Activated -> {
                         val reopen = libraryStartup.loadSelectedEditablePage(scratch, result.activation, identity.documentId, identity.pageId)

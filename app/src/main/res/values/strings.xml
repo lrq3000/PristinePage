@@ -194,6 +194,7 @@
     <string name="error_permission_lost">Access to the selected photo was lost. Select it again.</string>
     <string name="error_source_unavailable">The selected source or document is unavailable. Refresh or select another photo.</string>
     <string name="editor_save_delivery_unconfirmed">This edit may already be saved. Reopen the page to check before trying again.</string>
+    <string name="editor_save_attempt_unconfirmed">The save stopped before writing to the library folder. Reopen the page before trying again.</string>
     <string name="editor_selected_preview_only">You can preview changes here, but saving edits in this folder is not available yet.</string>
     <string name="atelier_save_delivery_unconfirmed">This album may already be saved in the previous library. Reopen that library to check before retrying.</string>
     <string name="atelier_save_not_found">No matching save was found. Review the draft before saving again.</string>

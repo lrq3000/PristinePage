@@ -241,8 +241,11 @@ class PageEditorScreen(
             if (state.loading) CircularProgressIndicator()
             if (!allowSave) Text(stringResource(R.string.editor_selected_preview_only), style = MaterialTheme.typography.bodySmall)
             state.error?.let {
-                Text(if (it.safeMessageKey == "editor_save_delivery_unconfirmed") stringResource(R.string.editor_save_delivery_unconfirmed)
-                    else errorText(it.code), color = MaterialTheme.colorScheme.error)
+                Text(when (it.safeMessageKey) {
+                    "editor_save_attempt_unconfirmed" -> stringResource(R.string.editor_save_attempt_unconfirmed)
+                    "editor_save_delivery_unconfirmed" -> stringResource(R.string.editor_save_delivery_unconfirmed)
+                    else -> errorText(it.code)
+                }, color = MaterialTheme.colorScheme.error)
                 if (state.page == null) Button(onClick = session::retryLoad, modifier = control("editor-retry-load")) { Text(stringResource(R.string.editor_retry_load)) }
             }
             // When the catalog admits the page, an independent original read need not execute its accepted recipe.

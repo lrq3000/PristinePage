@@ -43,7 +43,10 @@ internal class EditorSaveCandidate(
 /** Only supported immutable metadata belongs here. Image owners remain in the selected-preview scheduler; saved state may carry opaque IDs, never these pixels, provider references or private paths. */
 data class EditorState(val page: EditablePage? = null, val draft: Recipe? = null, val loading: Boolean = true, val saving: Boolean = false, val dirty: Boolean = false, val canUndo: Boolean = false, val canRedo: Boolean = false, val confirmExit: Boolean = false, val exitReady: Boolean = false, val error: OperationError? = null, val view: EditorView = EditorView.RESULT)
 
-internal val EditorState.saveNeedsReopen: Boolean get() = error?.safeMessageKey == "editor_save_delivery_unconfirmed"
+internal val EditorState.saveNeedsReopen: Boolean get() = when (error?.safeMessageKey) {
+    "editor_save_attempt_unconfirmed", "editor_save_delivery_unconfirmed" -> true
+    else -> false
+}
 
 internal fun EditorState.shapeBlocksApply(preview: PreviewState): Boolean {
     val page = page ?: return false

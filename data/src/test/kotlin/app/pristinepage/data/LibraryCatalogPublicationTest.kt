@@ -3,6 +3,7 @@ package app.pristinepage.data
 import app.pristinepage.data.library.LibraryCatalogPublication
 import app.pristinepage.data.library.LibraryGenerationInventory
 import app.pristinepage.data.library.LibraryCatalogRevisionPublication
+import app.pristinepage.data.library.CatalogRevisionSpendUnconfirmed
 import app.pristinepage.data.library.LibraryGeneration
 import app.pristinepage.data.library.LibraryMergePublication
 import app.pristinepage.data.library.LocalLibraryDirectory
@@ -138,6 +139,21 @@ class LibraryCatalogPublicationTest {
                 { error("Capacity refusal cannot read the staged catalog") }, { error("Capacity refusal cannot read back") })
         }
         local.journal.requireUnspentCatalogRevision(generation.id)
+        assertFalse(local.catalog.exists())
+        assertFalse(local.marker.exists())
+    }
+
+    @Test fun privateSpendBarrierFailureIsDistinctFromCapacityRefusalAndCannotWriteTheDestination() {
+        val journalSync = DirectorySync { directory ->
+            !directory.resolve("${generation.id}.spent").isFile
+        }
+        val local = localRevisionFixture(journalSync = journalSync)
+        val writer = LibraryCatalogRevisionPublication(local.store, temporary.newFolder().canonicalFile.toPath(),
+            local.journal, requireOwner = {}, onPublicationStarted = { error("An uncertain spend does not authorize a destination write") })
+        assertThrows(CatalogRevisionSpendUnconfirmed::class.java) {
+            local.publish(writer, openStage = { error("The writable destination must not open") })
+        }
+        assertTrue(local.journal.rootPath.resolve("catalog-revision-spends/${generation.id}.spent").toFile().isFile)
         assertFalse(local.catalog.exists())
         assertFalse(local.marker.exists())
     }
@@ -363,9 +379,9 @@ class LibraryCatalogPublicationTest {
         }
     }
 
-    private fun localRevisionFixture(sync: DirectorySync = DirectorySync { true }): LocalRevision {
+    private fun localRevisionFixture(sync: DirectorySync = DirectorySync { true }, journalSync: DirectorySync = DirectorySync { true }): LocalRevision {
         val store = LocalLibraryDirectory(temporary.newFolder().canonicalFile, sync)
-        val journal = LocalLibraryDirectory(temporary.newFolder().canonicalFile, DirectorySync { true })
+        val journal = LocalLibraryDirectory(temporary.newFolder().canonicalFile, journalSync)
         val synthetic = fixture()
         val prior = generation.copy(id = predecessor, predecessorId = null, catalog = id(synthetic.previous))
         val original = File(temporary.newFolder(), "original").apply { writeText("prior original") }

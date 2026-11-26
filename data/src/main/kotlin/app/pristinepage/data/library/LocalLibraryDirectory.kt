@@ -57,10 +57,18 @@ internal class LocalLibraryDirectory(root: File, private val directorySync: Dire
     }
 
     /** A one-use admission record, not completion. It must be durable before any writable destination stage is opened. */
-    fun spendCatalogRevision(predecessor: LibraryGeneration, successor: LibraryGeneration, requireOwner: () -> Unit) =
-        create(catalogRevisionSpend(successor.id), privateSupport = true, beforeStage = requireOwner, beforeLink = requireOwner) {
-            it.write(catalogRevisionSpendBytes(predecessor, successor))
+    fun spendCatalogRevision(predecessor: LibraryGeneration, successor: LibraryGeneration, requireOwner: () -> Unit) {
+        var linkAttempted = false
+        try {
+            create(catalogRevisionSpend(successor.id), privateSupport = true, beforeStage = requireOwner, beforeLink = {
+                requireOwner()
+                linkAttempted = true
+            }) { it.write(catalogRevisionSpendBytes(predecessor, successor)) }
+        } catch (failure: IOException) {
+            if (linkAttempted) throw CatalogRevisionSpendUnconfirmed()
+            throw failure
         }
+    }
 
     fun catalogRevisionSpendByteCount(predecessor: LibraryGeneration, successor: LibraryGeneration): Int =
         catalogRevisionSpendBytes(predecessor, successor).size
