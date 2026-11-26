@@ -324,7 +324,9 @@ class EditorSession @JvmOverloads constructor(documentId: String, pageId: String
 
     private fun updateDraft() {
         val edits = checkNotNull(history)
-        current.value = current.value.copy(draft = edits.current, dirty = edits.dirty, canUndo = edits.canUndo, canRedo = edits.canRedo, error = null, confirmExit = false, view = EditorView.RESULT)
+        val previous = current.value
+        current.value = previous.copy(draft = edits.current, dirty = edits.dirty, canUndo = edits.canUndo, canRedo = edits.canRedo,
+            error = previous.error.takeIf { previous.saveNeedsReopen }, confirmExit = false, view = EditorView.RESULT)
     }
 
     private fun renderDraft() {
@@ -359,6 +361,7 @@ class EditorSession @JvmOverloads constructor(documentId: String, pageId: String
     /** A wizard move can consume only the exact draft accepted by the ordinary save path, never a pending or failed write. */
     internal suspend fun checkpointForNavigation(): Boolean {
         cancelGeometryAnalysis()
+        if (current.value.saveNeedsReopen) return false
         val edits = editable() ?: return false
         if (!edits.dirty) return true
         val expected = edits.current
@@ -371,6 +374,8 @@ class EditorSession @JvmOverloads constructor(documentId: String, pageId: String
 
     private fun save(andBack: Boolean) {
         cancelGeometryAnalysis()
+        // A lost receipt is not a conflict or retryable refusal. Editing and Discard do not grant a second write from this page snapshot.
+        if (current.value.saveNeedsReopen) return
         val edits = editable() ?: return
         if (!edits.dirty) { if (andBack) exit(); return }
         // Both Apply paths pass this guard before enqueueing the repository CAS, not just when the buttons recompose.
@@ -408,7 +413,7 @@ class EditorSession @JvmOverloads constructor(documentId: String, pageId: String
 
     private fun saveFailed(error: OperationError) { if (!closed) current.value = current.value.copy(saving = false, error = error) }
     internal fun showNavigationRefusal(error: OperationError) {
-        if (!closed && !current.value.saving) current.value = current.value.copy(error = error)
+        if (!closed && !current.value.saving && !current.value.saveNeedsReopen) current.value = current.value.copy(error = error)
     }
     fun requestBack() {
         if (closed || current.value.saving) return

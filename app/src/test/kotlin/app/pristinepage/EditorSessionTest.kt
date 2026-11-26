@@ -139,6 +139,30 @@ class EditorSessionTest {
         }
     }
 
+    @Test fun unconfirmedSaveCannotWriteAgainFromTheSameEditorEvenAfterAnotherEdit() = runTest {
+        val issue = OperationError(OperationErrorCode.STORAGE_FAILED, false, "editor_save_delivery_unconfirmed", pageId.value)
+        val f = Fixture().apply { saving = { throw RepositoryFailure(issue) } }
+        val s = f.session(this)
+        advanceUntilIdle()
+        s.edit(white)
+        s.command("apply")
+        advanceUntilIdle()
+        assertEquals(issue, s.error)
+        assertEquals(7L, s.page!!.recipeRevision)
+        assertTrue(s.field("Dirty"))
+        s.edit(rotated)
+        s.command("apply")
+        s.command("applyAndBack")
+        advanceUntilIdle()
+        assertEquals(1, f.saves.size)
+        assertEquals(rotated, s.draft)
+        assertFalse(s.field("ExitReady"))
+        s.command("requestBack")
+        s.command("discardAndBack")
+        assertTrue(s.field("ExitReady"))
+        s.close()
+    }
+
     @Test fun malformedSuccessCannotAuthorizeAnotherPageRecipeOrNonmonotonicRevision() = runTest {
         for (response in listOf(saved(white).copy(pageId = PageId("00000000-0000-0000-0000-000000000004")),saved(white).copy(recipeHash = "b".repeat(64)),saved(white).copy(recipeRevision = 7),saved(white).copy(documentRevision = 5))) {
             val f = Fixture().apply { saving = { response } }; val s = f.session(this); advanceUntilIdle(); s.edit(white); s.command("apply"); advanceUntilIdle()

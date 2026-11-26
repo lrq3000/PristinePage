@@ -630,6 +630,8 @@ The [exact selected preview successor](../../validation/storage/library-folder-a
 
 Foreground Save remains the next activation boundary after the isolated read witness. Reuse the live writer's exact receipt and recorded successor; capture the post-pointer obligation before dispatch can discard it, invalidate old preview/metadata delivery, and distinguish successful adoption, loss after a verified pointer advance, and an external publication without a confirmed pointer. The last case must not mint a new operation or treat the visible child as an acknowledgment. Keep the existing no-auto-replay and retained Undo/producer checks. For tentative folder grants, release introduced modes on definite pre-pointer refusal/owner disposal only; bind retention to the first exact pointer publication attempt, not to confirmation or private staging.
 
+First foreground delivery control: after `editor_save_delivery_unconfirmed`, the editor regression reproduced a second save under the same stale editor (`expected 1, observed 2`). The guard now keeps the warning after draft edits, allows Back/Discard and prevents another Apply or Apply-and-leave until a fresh guarded open. The strict-offline app suite and Android instrumentation compilation passed. This guard by itself does not recognize an interrupted external write or authorize selected Save.
+
 ### Current coordination: transition to `main`
 
 - [x] Operator approved the local fast-forward and `main`-based PR/handoff cadence; see [operational authority](OPERATIONAL_PLAN.md) and [queue rules](PARALLEL_EXECUTION_PLAN.md#coordination). Earlier branch/base references below describe their historical claims.
