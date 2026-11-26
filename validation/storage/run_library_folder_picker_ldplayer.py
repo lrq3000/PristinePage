@@ -392,11 +392,14 @@ def verify_bound_recipe_release(original, stopped, manifest, snapshot):
 
 
 def verify_advanced_recipe_release(original, stopped, manifest, snapshot, intervening):
-    if intervening is None:
+    if not intervening:
         verify_bound_recipe_release(original, stopped, manifest, snapshot)
         return
-    verify_released_append_guest(original, stopped, intervening)
-    prior = stopped["ownership_history"][-1]
+    history = stopped.get("ownership_history", [])[-len(intervening):]
+    need(1 <= len(intervening) <= 4 and len(set(intervening)) == len(intervening) and
+         [row.get("generation") for row in history] == [original["generation"], *intervening[:-1]],
+         "The exact intervening release sequence changed")
+    prior = history[0]
     # Other allocator clients retain only a projection of the prior claim. Bind that projection to the pinned shutdown snapshot, not to guessed defaults.
     archived = dict(snapshot, owner=None, state="stopped-released", shutdown_verified=True,
                     stopped=prior.get("stopped"), runtime_evidence=str(manifest.resolve()),
@@ -405,6 +408,15 @@ def verify_advanced_recipe_release(original, stopped, manifest, snapshot, interv
     need(all(prior.get(k) == archived[k] for k in
              ("generation", "owner", "state", "worktree", "purpose", "shutdown_processes", "stopped", "cleanup_attempt")),
          "The intervening process history does not retain the exact bound release")
+    for released in history[1:]:
+        cleanup = released.get("cleanup_attempt") or {}
+        need(released.get("state") == "stopped-released" and released.get("owner") is None and released.get("stopped") and
+             len(released.get("shutdown_processes", ())) == 2 and cleanup.get("state") == "completed" and
+             cleanup.get("generation") == released["generation"] and cleanup.get("finished"),
+             "An intervening claim is not positively released")
+    previous = history[-1]
+    verify_released_append_guest(original | dict(generation=previous["generation"], worktree=previous["worktree"],
+                                                 runtime_processes=previous["shutdown_processes"]), stopped, intervening[-1])
 
 
 def verify_released_append_guest(original, stopped, generation):
@@ -2034,8 +2046,9 @@ def run(args):
     bound_recipe = args.selected_bound_recipe_edit
     advanced_recipe = args.selected_advanced_recipe_edit
     advanced_release = args.selected_advanced_released_generation
-    need(advanced_release is None or (advanced_recipe and not args.fresh and re.fullmatch(UUID_TEXT, advanced_release)),
-         "An intervening release requires the retained advanced recipe mode and one exact generation")
+    need(advanced_release is None or (advanced_recipe and not args.fresh and 1 <= len(advanced_release) <= 4 and
+         all(re.fullmatch(UUID_TEXT, generation) for generation in advanced_release)),
+         "Intervening releases require the retained advanced recipe mode and exact consecutive generations")
     selected_recipe = args.selected_recipe_edit or bound_recipe or advanced_recipe
     need(not (bound_recipe or advanced_recipe) or
          not (args.selected_recipe_edit or args.selected_recipe_boot_retry or (bound_recipe and (args.fresh or advanced_recipe))),
@@ -2558,7 +2571,8 @@ def run(args):
         if recipe_baseline:
             current = run.owned()
             verify_completed_guest(recipe_baseline, current)
-            need(current["ownership_history"][-1]["generation"] == (advanced_release or (recipe_boot_retry or recipe_baseline)["generation"]),
+            expected_release = advanced_release[-1] if advanced_release else (recipe_boot_retry or recipe_baseline)["generation"]
+            need(current["ownership_history"][-1]["generation"] == expected_release,
                  "The selected edit does not follow its exact verified release")
         if capacity_claim:
             verify_completed_guest(capacity_claim, run.owned())
@@ -3122,8 +3136,8 @@ if __name__ == "__main__":
                         help="Record one active-binding recipe receipt on the exact released detached-edit guest without advancing the pointer")
     parser.add_argument("--selected-advanced-recipe-edit", action="store_true",
                          help="Verify one new isolated live receipt and direct pointer advance; retain the exact bound and detached predecessors")
-    parser.add_argument("--selected-advanced-released-generation", metavar="GENERATION",
-                        help="Admit one exact intervening stopped release without relaxing the installed pair and retained evidence checks")
+    parser.add_argument("--selected-advanced-released-generation", metavar="GENERATION", action="append",
+                        help="Name each exact intervening stopped release in order without relaxing installed pair or retained evidence checks")
     parser.add_argument("--provider-capacity", action="store_true",
                         help="Verify the real Files capacity gate with an unattainable synthetic requirement and no publication")
     parser.add_argument("--settings-retry", metavar="CANCEL_MANIFEST_SHA", help="Permit one new confirmation on the exact retained, independently canceled fixture")

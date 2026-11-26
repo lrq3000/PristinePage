@@ -167,12 +167,18 @@ class LibraryFolderPickerRunnerTest(unittest.TestCase):
         processes = [[25, 52], [27, 57]]
         later = stopped | dict(generation=generation, claim_generation=generation, worktree="other", consumers=[],
                                runtime_processes=processes, shutdown_processes=processes, ownership_history=[prior],
-                               cleanup_attempt={"generation": generation, "state": "completed"})
+                               cleanup_attempt={"generation": generation, "state": "completed", "finished": "done"})
         manifest = Path("retained-advance-predecessor.json").resolve()
-        verify_advanced_recipe_release(original, later, manifest, snapshot, generation)
-        for named, record in ((self._uuid(3), later), (generation, later | {"consumers": ["live"]}),
-                              (generation, later | {"ownership_history": [prior | {"shutdown_processes": processes}]}),
-                              (generation, later | {"ownership_history": [prior | {"cleanup_attempt": prior["cleanup_attempt"] | {"token": "other"}}]})):
+        verify_advanced_recipe_release(original, later, manifest, snapshot, [generation])
+        final = self._uuid(3)
+        interim = {k: later[k] for k in prior} | {"stopped": "interim complete"}
+        latest = later | dict(generation=final, claim_generation=final, ownership_history=[prior, interim],
+                              cleanup_attempt={"generation": final, "state": "completed"})
+        verify_advanced_recipe_release(original, latest, manifest, snapshot, [generation, final])
+        for named, record in (([final], latest), ([generation, final], latest | {"ownership_history": [prior, interim | {"owner": "active"}]}),
+                              ([final], later), ([generation], later | {"consumers": ["live"]}),
+                              ([generation], later | {"ownership_history": [prior | {"shutdown_processes": processes}]}),
+                              ([generation], later | {"ownership_history": [prior | {"cleanup_attempt": prior["cleanup_attempt"] | {"token": "other"}}]})):
             with self.subTest(named=named, record=record), self.assertRaises(RuntimeError):
                 verify_advanced_recipe_release(original, record, manifest, snapshot, named)
 
