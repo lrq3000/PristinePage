@@ -122,9 +122,10 @@ class DocumentCatalogIntegrationTest {
     internal class Fixture(encoded: ByteArray? = null, private val realProvider: Boolean = false, private val memoryClassMiB: Int = 64) : AutoCloseable {
         private val base = InstrumentationRegistry.getInstrumentation().targetContext
         private val root = File(base.filesDir, "t04-catalog-${UUID.randomUUID()}")
+        private val files = File(root, "files").apply { check(mkdirs()) }
         private val context = object : ContextWrapper(base) {
             override fun getApplicationContext(): Context = this
-            override fun getFilesDir(): File = File(root, "files")
+            override fun getFilesDir(): File = files
             override fun getDatabasePath(name: String): File = File(root, "databases/$name").also { it.parentFile!!.mkdirs() }
         }
         val good = "content://fixture.documents/good"; val bad = "content://fixture.documents/bad"
@@ -134,10 +135,11 @@ class DocumentCatalogIntegrationTest {
         var providerOpens = 0; var forbid = false
         var beforeProvider: (String, Int) -> Unit = { _, _ -> }
         private var graph: ApplicationImports? = null
-        suspend fun open(): ApplicationImports = (if (realProvider) ApplicationServices(context) else ApplicationServices(context, ApplicationImageBudget.create(memoryClassMiB), SourceInput { reference ->
+        fun services(): ApplicationServices = if (realProvider) ApplicationServices(context) else ApplicationServices(context, ApplicationImageBudget.create(memoryClassMiB), SourceInput { reference ->
             check(!forbid); check(reference == good || reference == bad); providerOpens++; beforeProvider(reference, providerOpens)
             ByteArrayInputStream(if (reference == good) png else byteArrayOf(1, 2, 3, 4))
-        })).imports().also { graph = it }
+        })
+        suspend fun open(services: ApplicationServices = services()): ApplicationImports = services.imports().also { graph = it }
         suspend fun reopen(): ApplicationImports { close(); graph = null; return open() }
         fun write(sql: String, vararg args: Any) = SQLiteDatabase.openDatabase(context.getDatabasePath("pristinepage.db").path, null, SQLiteDatabase.OPEN_READWRITE).use { it.execSQL(sql, args) }
         fun scalars(sql: String, id: String): List<String> = SQLiteDatabase.openDatabase(context.getDatabasePath("pristinepage.db").path, null, SQLiteDatabase.OPEN_READONLY).use { db ->

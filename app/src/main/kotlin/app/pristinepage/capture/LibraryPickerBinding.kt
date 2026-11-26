@@ -9,15 +9,15 @@ import app.pristinepage.library.LibrarySession
 
 /** Main-thread Activity owner of exactly one current request registration. Restore/synchronize before STARTED; close on destruction, while the retained session/structured IO outlives recreation. No saved URI or second import engine lives here. */
 class LibraryPickerBinding(private val registry: ActivityResultRegistry, private val session: LibrarySession) : AutoCloseable {
-    private var registeredId: String? = null
+    private var registeredKey: String? = null
     private var registration: PhotoPickerRegistration? = null
 
     fun synchronize() {
-        val request = session.state.value.request?.takeUnless { it.kind == PhotoImportKind.CAMERA }
-        if (registeredId != request?.batchId) {
+        val request = session.state.value.request?.takeIf { it.canDeliver && it.kind != PhotoImportKind.CAMERA }
+        if (registeredKey != request?.registryKey) {
             close()
             if (request != null) {
-                registeredId = request.batchId
+                registeredKey = request.registryKey
                 // register may synchronously consume a queued raw result before returning its launcher. The callback closes over immutable identity/session only, not registration or a constructor-local lateinit variable.
                 registration = PhotoPickerRegistration(registry, request) { owner, result ->
                     val handoff = when (result) {
@@ -31,7 +31,7 @@ class LibraryPickerBinding(private val registry: ActivityResultRegistry, private
         }
         val active = session.state.value.request
         val launcher = registration
-        if (active != null && active.batchId == registeredId && launcher != null && session.claimPickerLaunch(ImportSessionId(active.batchId))) {
+        if (active != null && active.registryKey == registeredKey && launcher != null && session.claimPickerLaunch(ImportSessionId(active.batchId))) {
             try { launcher.launch() }
             catch (_: ActivityNotFoundException) { failed(active) }
             catch (_: SecurityException) { failed(active) }
@@ -40,5 +40,5 @@ class LibraryPickerBinding(private val registry: ActivityResultRegistry, private
     }
 
     private fun failed(request: PhotoImportRequest) { session.accept(LibraryEvent.PickerFailed(request)) }
-    override fun close() { registration?.close(); registration = null; registeredId = null }
+    override fun close() { registration?.close(); registration = null; registeredKey = null }
 }

@@ -22,6 +22,8 @@
     <string name="atelier_batch_undo_saved">Undo album edits</string>
     <string name="atelier_batch_dismiss">Dismiss</string>
     <string name="atelier_batch_uncertain">PristinePage could not confirm the save. Close and reopen the album to check which edits were saved.</string>
+    <string name="atelier_batch_undo_unconfirmed">PristinePage could not confirm Undo. Reopen the album in its original library to check the edits.</string>
+    <string name="atelier_batch_refresh_album">Refresh album</string>
     <string name="atelier_batch_discard_title">Discard album edits?</string>
     <string name="atelier_batch_discard_body">Unsaved changes to all pages will be lost, including pages that are no longer selected.</string>
     <string name="atelier_batch_discard">Discard edits</string>

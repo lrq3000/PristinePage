@@ -2,20 +2,36 @@ package app.pristinepage.library
 
 import app.pristinepage.capture.PhotoImportRequest
 import app.pristinepage.capture.PhotoImportKind
+import app.pristinepage.data.library.LibraryActivation
 import app.pristinepage.data.model.*
 import app.pristinepage.data.repository.AlbumSearchQuery
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.emptyFlow
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import java.time.ZoneId
 import java.util.Locale
+
+data class LibraryStartup(val report: RecoveryReport, val activation: LibraryActivation? = null)
 
 /** Immediate foreground commands against the existing Application-owned store. These ports carry no Activity, live bitmap, private path or persistable-grant promise. Real adapter delegates to the already tested repositories/controller. */
 interface LibraryActions {
     suspend fun startup(): RecoveryReport
+    suspend fun openLibrary(): LibraryStartup = LibraryStartup(startup())
     suspend fun list(after: DocumentId?, limit: Int): List<DocumentSummary>
     suspend fun load(id: DocumentId): DocumentOverview
+    suspend fun loadIssued(id: DocumentId, issuedAt: LibraryActivation): DocumentOverview = load(id)
+    suspend fun openPageHit(hit: HomePageSearchHit, issuedAt: LibraryActivation?): DocumentOverview? {
+        val overview = if (issuedAt != null) loadIssued(hit.document, issuedAt) else load(hit.document)
+        currentCoroutineContext().ensureActive()
+        if (!hit.belongsTo(overview) || !hit.stillMatches()) return null
+        currentCoroutineContext().ensureActive()
+        return if (issuedAt == null) overview else loadIssued(hit.document, issuedAt).takeIf(hit::belongsTo)
+    }
     suspend fun activeImport(id: DocumentId): ImportSessionId?
+    suspend fun activeImportRequest(id: DocumentId): PhotoImportRequest? = activeImport(id)?.let { PhotoImportRequest.abandonmentOnly(it) }
+    suspend fun activeIssuedImport(id: DocumentId, issuedAt: LibraryActivation): PhotoImportRequest? = activeImportRequest(id)
     suspend fun create(title: String): DocumentId
     suspend fun begin(document: DocumentSummary): PhotoImportRequest
     suspend fun deliver(request: PhotoImportRequest, selection: LibraryPhotoResult): List<IngestResult>
@@ -26,29 +42,42 @@ interface LibraryActions {
 
 /** Opt-in so older/synthetic consumers of the plain ID-ordered catalog keep their own cursor contract. */
 internal interface OrderedLibraryActions {
-    suspend fun listAlbums(order: AlbumOrder, locale: Locale, after: AlbumPosition?, limit: Int): AlbumPage
+    suspend fun listAlbums(order: AlbumOrder, locale: Locale, after: AlbumPosition?, limit: Int, issuedAt: LibraryActivation? = null): AlbumPage
 }
 
 internal interface SearchableLibraryActions {
-    suspend fun searchAlbums(query: AlbumSearchQuery, order: AlbumOrder, locale: Locale, after: AlbumPosition?, limit: Int): AlbumPage
+    suspend fun searchAlbums(query: AlbumSearchQuery, order: AlbumOrder, locale: Locale, after: AlbumPosition?, limit: Int,
+        issuedAt: LibraryActivation? = null): AlbumPage
 }
 
 internal interface SearchablePageActions {
-    suspend fun searchPages(query: String): HomePageSearchPage
-    fun pageSearchChanges(query: String): Flow<Unit> = emptyFlow()
+    suspend fun searchPages(query: String, issuedAt: LibraryActivation? = null): HomePageSearchPage
+    fun pageSearchChanges(query: String, issuedAt: LibraryActivation? = null): Flow<Unit> = emptyFlow()
 }
 
 /** No recognized text or persistent search token. Revalidation belongs to the store that issued the hit. */
 class HomePageSearchHit internal constructor(
     val document: DocumentId, val page: PageId, val albumTitle: String, val pageNumber: Int,
+    internal val issuedAt: LibraryActivation? = null,
     internal val stillMatches: suspend () -> Boolean,
-)
+) {
+    internal fun belongsTo(overview: DocumentOverview): Boolean =
+        overview.document.documentId == document && overview.pages.any { it.pageId == page }
+}
 
 class HomePageSearchPage internal constructor(val hits: List<HomePageSearchHit>, internal val next: (suspend () -> HomePageSearchPage)?)
 
 /** Only opaque identity may be placed in app saved state. A restored batch is not permission to relaunch a picker, reopen a URI, or infer a successful import. */
-data class LibraryIdentity @JvmOverloads constructor(val selected: DocumentId? = null, val pending: ImportSessionId? = null, val selectedPage: PageId? = null, val kind: PhotoImportKind = PhotoImportKind.GALLERY) {
-    init { require(selected != null || selectedPage == null) { "A selected page needs its document identity" } }
+data class LibraryIdentity @JvmOverloads constructor(
+    val selected: DocumentId? = null, val pending: ImportSessionId? = null, val selectedPage: PageId? = null,
+    val kind: PhotoImportKind = PhotoImportKind.GALLERY, val issuedAt: LibraryActivation? = null,
+    val selectedAt: LibraryActivation? = null,
+) {
+    init {
+        require(selected != null || selectedPage == null) { "A selected page needs its document identity" }
+        require(pending != null || issuedAt == null) { "A batch activation needs its batch identity" }
+        require(selected != null || selectedAt == null) { "A selection activation needs its document identity" }
+    }
 }
 /** Transient process-private handoff, never saved UI state or scheduler data. URI-specific parsing/grants stay at the Activity/Android adapter; the session owns only immediate consumption lifetime. */
 sealed interface LibraryPhotoResult {
@@ -70,6 +99,7 @@ data class LibraryState(
     val resultBatch: ImportSessionId? = null,
     val results: List<IngestResult> = emptyList(),
     val recovery: RecoveryReport? = null,
+    val activation: LibraryActivation? = null,
     val error: OperationError? = null,
     val selectedPage: PageId? = null,
     val albumOrder: AlbumOrder = AlbumOrder.MODIFIED,
@@ -81,6 +111,7 @@ data class LibraryState(
     val pageMatches: List<HomePageSearchHit> = emptyList(),
     val pageSearchUnavailable: Boolean = false,
     val albumSearchUnavailable: Boolean = false,
+    val restoringSelection: Boolean = false,
 ) {
     // Keep transient search input (which can contain a private quote) out of incidental diagnostics.
     override fun toString() = "LibraryState(loading=$loading, albumCount=${documents.size}, hasMore=$hasMore, phase=$phase)"
@@ -113,5 +144,5 @@ interface LibrarySession {
     fun accept(event: LibraryEvent)
     fun identity(): LibraryIdentity
     fun claimPickerLaunch(batchId: ImportSessionId): Boolean
-    suspend fun observePageSearch(query: String) = Unit
+    suspend fun observePageSearch(query: String, issuedAt: LibraryActivation? = state.value.activation) = Unit
 }

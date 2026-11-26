@@ -1,6 +1,8 @@
 package app.pristinepage
 
+import app.pristinepage.capture.PhotoImportKind
 import app.pristinepage.capture.PhotoImportRequest
+import app.pristinepage.data.library.LibraryActivation
 import app.pristinepage.data.model.*
 import app.pristinepage.data.repository.AlbumSearchQuery
 import app.pristinepage.library.*
@@ -20,6 +22,76 @@ import org.junit.Test
 /** Real retained library reducer; only metadata IO is controlled. Selection is an opaque page identity validated against the open document, never an index, provider or bitmap. */
 @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
 class LibraryPageSelectionTest {
+    @Test fun aSavedAlbumAndPageOnlyReopenInTheActivationThatIssuedThem() = runTest {
+        val f = Fixture()
+        val older = f.activation.copy(number = 2)
+        val obsolete = ImportLibrarySession(f, LibraryIdentity(selected = f.doc, selectedPage = f.second, selectedAt = older), this)
+        advanceUntilIdle()
+        assertNull(obsolete.state.value.selectedId)
+        assertNull(obsolete.state.value.document)
+        assertTrue(f.loaded.isEmpty())
+        val exact = ImportLibrarySession(f, LibraryIdentity(selected = f.doc, selectedPage = f.second, selectedAt = f.activation), this)
+        advanceUntilIdle()
+        assertEquals(f.doc, exact.state.value.document?.document?.documentId)
+        assertEquals(f.second, exact.state.value.selectedPage)
+        assertEquals(f.activation, exact.identity().selectedAt)
+        assertEquals(listOf(f.doc), f.loaded)
+        assertEquals(listOf(f.doc to f.activation), f.scopedLoads)
+    }
+
+    @Test fun leavingHomeWhileStartupIsPendingCancelsAlbumRestoreButNotTheExactFilesRequest() = runTest {
+        val f = Fixture()
+        val startup = CompletableDeferred<Unit>()
+        f.startupGate = startup
+        val batch = ImportSessionId("00000000-0000-0000-0000-000000000008")
+        val saved = LibraryIdentity(f.doc, batch, f.second, PhotoImportKind.FILES, f.activation, f.activation)
+        val session = ImportLibrarySession(f, saved, this)
+        runCurrent()
+        assertNull(session.state.value.selectedId)
+        val waiting = checkNotNull(session.state.value.request)
+        session.accept(LibraryEvent.LeaveHomeSearch)
+        startup.complete(Unit)
+        advanceUntilIdle()
+        assertNull(session.state.value.selectedId)
+        assertTrue(f.loaded.isEmpty())
+        assertSame(waiting, session.state.value.request)
+        assertTrue(waiting.matches(PhotoImportRequest(batch.value, PhotoImportKind.FILES, f.activation)))
+    }
+
+    @Test fun exactRestorationFindsAPendingBatchOnlyForAbandonmentUnderTheIssuingActivation() = runTest {
+        val f = Fixture()
+        val batch = ImportSessionId("00000000-0000-0000-0000-000000000008")
+        f.pendingBatch = batch
+        val session = ImportLibrarySession(f, LibraryIdentity(f.doc, selectedAt = f.activation), this)
+        advanceUntilIdle()
+        assertEquals(listOf(f.doc to f.activation), f.scopedImportLookups)
+        val request = checkNotNull(session.state.value.request)
+        assertEquals(batch, request.session)
+        assertEquals(f.activation, request.issuedAt)
+        assertFalse(request.canDeliver)
+    }
+
+    @Test fun aRetainedRefreshUsesOnlyTheIssuingAlbumAndCannotReplaceLaterNavigation() = runTest {
+        val f = Fixture()
+        val session = ImportLibrarySession(f, LibraryIdentity(f.doc), this)
+        advanceUntilIdle()
+        f.revision = 2
+        session.refreshIssuedAlbum(f.activation.copy(number = 2), f.doc) { error("A foreign activation reached the reader") }
+        advanceUntilIdle()
+        assertEquals(1L, session.state.value.document?.document?.documentRevision)
+        session.refreshIssuedAlbum(f.activation, f.doc) { f.load(f.doc) }
+        advanceUntilIdle()
+        assertEquals(2L, session.state.value.document?.document?.documentRevision)
+        lateinit var old: Continuation<DocumentOverview>
+        session.refreshIssuedAlbum(f.activation, f.doc) { suspendCoroutine { old = it } }
+        runCurrent()
+        session.accept(LibraryEvent.Open(f.other))
+        advanceUntilIdle()
+        old.resume(f.load(f.doc))
+        advanceUntilIdle()
+        assertEquals(f.other, session.state.value.document?.document?.documentId)
+    }
+
     @Test fun anOpenQueryShowsNewlyCommittedOcrWithoutReloadingAlbumMatches() = runTest {
         val f = Fixture()
         var albumReads = 0
@@ -57,6 +129,74 @@ class LibraryPageSelectionTest {
         runCurrent()
         assertEquals(listOf(hit), session.state.value.pageMatches)
         observer.cancel()
+    }
+
+    @Test fun aSearchHitCannotNavigateThroughAnUnscopedAlbumReadAfterActivationRefusal() = runTest {
+        val f = Fixture()
+        var validated = false
+        val hit = HomePageSearchHit(f.doc, f.second, "Synthetic selection", 2) {
+            validated = true
+            true
+        }
+        f.textMatches = { HomePageSearchPage(listOf(hit), null) }
+        val session = ImportLibrarySession(f, LibraryIdentity(), this)
+        session.accept(LibraryEvent.SetAlbumSearch("receipt", ZoneOffset.UTC))
+        advanceUntilIdle()
+        assertEquals(listOf(hit), session.state.value.pageMatches)
+
+        f.refuseIssuedLoads = true
+        var opened = false
+        session.accept(LibraryEvent.OpenPageMatch(hit) { _, _ -> opened = true })
+        advanceUntilIdle()
+
+        assertEquals(listOf(f.doc to f.activation), f.scopedLoads)
+        assertTrue("The ordinary catalog can still find these IDs, but is not this hit's library", f.loaded.isEmpty())
+        assertFalse(validated)
+        assertFalse(opened)
+        assertNull(session.state.value.selectedId)
+        assertTrue(session.state.value.pageSearchUnavailable)
+    }
+
+    @Test fun producerValidationCannotPublishAnAlbumAfterItsActivationIsRefused() = runTest {
+        val f = Fixture()
+        val reachedProducer = CompletableDeferred<Unit>()
+        val continueProducer = CompletableDeferred<Unit>()
+        val hit = HomePageSearchHit(f.doc, f.second, "Synthetic selection", 2) {
+            reachedProducer.complete(Unit)
+            continueProducer.await()
+            true
+        }
+        f.textMatches = { HomePageSearchPage(listOf(hit), null) }
+        val session = ImportLibrarySession(f, LibraryIdentity(), this)
+        session.accept(LibraryEvent.SetAlbumSearch("receipt", ZoneOffset.UTC))
+        advanceUntilIdle()
+        var opened = false
+        session.accept(LibraryEvent.OpenPageMatch(hit) { _, _ -> opened = true })
+        runCurrent()
+        assertTrue(reachedProducer.isCompleted)
+
+        f.refuseIssuedLoads = true
+        continueProducer.complete(Unit)
+        advanceUntilIdle()
+        assertFalse(opened)
+        assertNull(session.state.value.document)
+        assertNull(session.state.value.selectedId)
+    }
+
+    @Test fun paginationCannotInstallHitsFromAnotherActivationEvenWithOverlappingIds() = runTest {
+        val f = Fixture()
+        val original = HomePageSearchHit(f.doc, f.first, "Issuing album", 1, f.activation) { true }
+        val foreign = HomePageSearchHit(f.doc, f.second, "Successor album", 2, f.activation.copy(number = 2)) { true }
+        f.textMatches = { HomePageSearchPage(listOf(original)) { HomePageSearchPage(listOf(foreign), null) } }
+        val session = ImportLibrarySession(f, LibraryIdentity(), this)
+        session.accept(LibraryEvent.SetAlbumSearch("receipt", ZoneOffset.UTC))
+        advanceUntilIdle()
+        assertEquals(listOf(original), session.state.value.pageMatches)
+
+        session.accept(LibraryEvent.More)
+        advanceUntilIdle()
+        assertEquals(listOf(original), session.state.value.pageMatches)
+        assertTrue(session.state.value.pageSearchUnavailable)
     }
 
     @Test fun committedOcrRefreshPreservesTheLoadedPageWindowAndItsCursor() = runTest {
@@ -354,13 +494,24 @@ class LibraryPageSelectionTest {
     private fun selected(value: LibraryIdentity) = value.selectedPage
 
     private class Fixture : LibraryActions, SearchableLibraryActions, SearchablePageActions {
+        val activation = LibraryActivation("00000000-0000-0000-0000-000000000007", 1)
         val doc = DocumentId("00000000-0000-0000-0000-000000000001"); val other = DocumentId("00000000-0000-0000-0000-000000000002")
         val first = PageId("00000000-0000-0000-0000-000000000003"); val second = PageId("00000000-0000-0000-0000-000000000004"); val foreign = PageId("00000000-0000-0000-0000-000000000005")
         private val source = SourceId("00000000-0000-0000-0000-000000000006")
         var pages = listOf(DocumentPage(first,source,1,0),DocumentPage(second,source,1,1))
         var gate: CompletableDeferred<Unit>? = null
-        override suspend fun startup() = RecoveryReport(0,0,0,0,0,emptyList())
+        var startupGate: CompletableDeferred<Unit>? = null
+        val loaded = mutableListOf<DocumentId>()
+        val scopedLoads = mutableListOf<Pair<DocumentId, LibraryActivation>>()
+        val scopedImportLookups = mutableListOf<Pair<DocumentId, LibraryActivation>>()
+        var pendingBatch: ImportSessionId? = null
+        override suspend fun startup(): RecoveryReport {
+            startupGate?.await()
+            return RecoveryReport(0, 0, 0, 0, 0, emptyList())
+        }
+        override suspend fun openLibrary() = LibraryStartup(startup(), activation)
         var catalogUnavailable = false
+        var refuseIssuedLoads = false
         var revision = 1L
         var renameWrites = 0
         var afterRename: () -> DocumentMutationResult = { error("Unexpected rename write") }
@@ -376,17 +527,44 @@ class LibraryPageSelectionTest {
             check(!catalogUnavailable)
             return listOf(summary(doc), summary(other))
         }
-        override suspend fun searchAlbums(query: AlbumSearchQuery, order: AlbumOrder, locale: Locale, after: AlbumPosition?, limit: Int): AlbumPage {
+        override suspend fun searchAlbums(query: AlbumSearchQuery, order: AlbumOrder, locale: Locale, after: AlbumPosition?, limit: Int,
+            issuedAt: LibraryActivation?): AlbumPage {
+            assertEquals(activation, issuedAt)
             find?.let { return it(query, after) }
             assertEquals("receipt", query.text)
             assertEquals(null, after)
             return page(other)
         }
         fun page(id: DocumentId, next: AlbumPosition? = null) = AlbumPage(listOf(summary(id)), next)
-        override suspend fun searchPages(query: String) = textMatches(query)
-        override fun pageSearchChanges(query: String) = searchChanges.onStart { if (initialSearchSignal) emit(Unit) }
-        override suspend fun load(id: DocumentId): DocumentOverview { val snapshot = DocumentOverview(summary(id),if (id == doc) pages.toList() else emptyList()); gate?.await(); return snapshot }
-        private fun summary(id: DocumentId) = DocumentSummary(id,"Synthetic selection",revision,if (id == doc) pages.size else 0,false)
+        override suspend fun searchPages(query: String, issuedAt: LibraryActivation?): HomePageSearchPage {
+            assertEquals(activation, issuedAt)
+            return textMatches(query)
+        }
+        override fun pageSearchChanges(query: String, issuedAt: LibraryActivation?) = searchChanges.onStart {
+            assertEquals(activation, issuedAt)
+            if (initialSearchSignal) emit(Unit)
+        }
+        override suspend fun load(id: DocumentId): DocumentOverview {
+            loaded += id
+            val snapshot = DocumentOverview(summary(id), if (id == doc) pages.toList() else emptyList())
+            gate?.await()
+            return snapshot
+        }
+        override suspend fun loadIssued(id: DocumentId, issuedAt: LibraryActivation): DocumentOverview {
+            assertEquals(activation, issuedAt)
+            scopedLoads += id to issuedAt
+            if (refuseIssuedLoads) throw RepositoryFailure(
+                OperationError(OperationErrorCode.SOURCE_UNAVAILABLE, false, "library_activation_changed", null),
+            )
+            return load(id)
+        }
+        override suspend fun activeIssuedImport(id: DocumentId, issuedAt: LibraryActivation): PhotoImportRequest? {
+            assertEquals(activation, issuedAt)
+            scopedImportLookups += id to issuedAt
+            return pendingBatch?.let { PhotoImportRequest.abandonmentOnly(it, issuedAt) }
+        }
+        private fun summary(id: DocumentId) = DocumentSummary(id, "Synthetic selection", revision,
+            if (id == doc) pages.size else 0, id == doc && pendingBatch != null)
         override suspend fun activeImport(id: DocumentId): ImportSessionId? = null
         override suspend fun create(title: String): DocumentId = error("Selection does not create documents")
         override suspend fun begin(document: DocumentSummary): PhotoImportRequest = error("Selection does not reserve imports")

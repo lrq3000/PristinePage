@@ -12,7 +12,9 @@ import androidx.core.app.ActivityOptionsCompat
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import app.pristinepage.capture.PhotoImportRequest
+import app.pristinepage.capture.PhotoImportKind
 import app.pristinepage.capture.PhotoPickerRegistration
+import app.pristinepage.data.library.LibraryActivation
 import app.pristinepage.data.model.ImportSessionId
 import app.pristinepage.library.*
 import java.lang.reflect.InvocationTargetException
@@ -24,6 +26,79 @@ import org.junit.runner.RunWith
 /** Tests our Activity-owned binding against actual AndroidX queued raw results and Android Parcel. This is not an actual Activity recreation, external picker or platform URI-grant experiment. */
 @RunWith(AndroidJUnit4::class)
 class LibraryPickerBindingTest {
+    @Test fun savedHomeNavigationRequiresAnExactActivationButLegacyChooserIdentityRemainsSeparate() {
+        val album = app.pristinepage.data.model.DocumentId("aaaaaaaa-aaaa-4aaa-8aaa-000000000033")
+        val page = app.pristinepage.data.model.PageId("aaaaaaaa-aaaa-4aaa-8aaa-000000000034")
+        val activation = LibraryActivation("aaaaaaaa-aaaa-4aaa-8aaa-000000000035", 3)
+        val identity = LibraryIdentity(selected = album, selectedPage = page, selectedAt = activation)
+        val saved = Bundle()
+        MainActivity.saveLibraryIdentity(saved, identity, allowPendingResult = false)
+        assertEquals(identity, MainActivity.restoreLibraryIdentity(parcel(saved)))
+        val legacy = Bundle().apply {
+            putBundle("pristinepage.library.identity.v1", Bundle().apply {
+                putString("document", album.value)
+                putString("page", page.value)
+            })
+        }
+        assertEquals(LibraryIdentity(), MainActivity.restoreLibraryIdentity(parcel(legacy)))
+    }
+
+    @Test fun malformedHomeNavigationDoesNotDiscardAnExactQueuedFilesIdentity() {
+        val activation = LibraryActivation("aaaaaaaa-aaaa-4aaa-8aaa-000000000035", 3)
+        val chooser = LibraryIdentity(pending = ImportSessionId("aaaaaaaa-aaaa-4aaa-8aaa-000000000032"),
+            kind = PhotoImportKind.FILES, issuedAt = activation)
+        val saved = Bundle()
+        MainActivity.saveLibraryIdentity(saved, chooser, allowPendingResult = true)
+        saved.putBundle("pristinepage.library.navigation.v2", Bundle().apply {
+            putString("document", "aaaaaaaa-aaaa-4aaa-8aaa-000000000033")
+            putString("page", "not-a-page-id")
+        })
+        assertEquals(chooser, MainActivity.restoreLibraryIdentity(parcel(saved)))
+    }
+
+    @Test fun libraryBackupRegistryDeliversOnlyTheLaunchedWritableSelection() {
+        val activation = LibraryActivation("aaaaaaaa-aaaa-4aaa-8aaa-000000000021", 2)
+        val owner = app.pristinepage.library.LibraryBackupConfirmation()
+        val ticket = checkNotNull(owner.confirm(activation))
+        val registry = RecordingRegistry()
+        val tree = android.provider.DocumentsContract.buildTreeDocumentUri("com.android.externalstorage.documents", "primary:Documents/SyntheticBackup")
+        val delivered = mutableListOf<app.pristinepage.library.LibraryBackupPickerRegistration.Delivery>()
+        main {
+            app.pristinepage.library.LibraryBackupPickerRegistration(registry, owner, ticket, delivered::add).use { registration ->
+                assertFalse(registration.launch(activation.copy(number = 1)))
+                assertTrue(registration.launch(activation))
+                assertFalse(registration.launch(activation))
+                val result = Intent().setData(tree).addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION or Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION)
+                assertTrue(registry.dispatchResult(registry.codes.single(), Activity.RESULT_OK, result))
+                val exact = delivered.single()
+                assertSame(ticket, exact.ticket)
+                assertEquals(tree, (exact.selection as app.pristinepage.library.LibraryFolderPickerContract.Picked).uri)
+                assertTrue(exact.consume(activation))
+                assertFalse(exact.consume(activation))
+            }
+        }
+    }
+
+
+    @Test fun savedEditorNeedsItsIssuingActivationAndLegacyIdsCannotReopen() {
+        val identity = app.pristinepage.editor.EditorIdentity(
+            app.pristinepage.data.model.DocumentId("aaaaaaaa-aaaa-4aaa-8aaa-000000000011"),
+            app.pristinepage.data.model.PageId("aaaaaaaa-aaaa-4aaa-8aaa-000000000012"),
+            LibraryActivation("aaaaaaaa-aaaa-4aaa-8aaa-000000000010", 2))
+        val stored = Bundle()
+        MainActivity.saveEditorIdentity(stored, identity)
+        assertEquals(identity, MainActivity.restoreEditorIdentity(parcel(stored)))
+        val key = stored.keySet().single()
+        checkNotNull(stored.getBundle(key)).remove("activation")
+        assertTrue(runCatching { MainActivity.restoreEditorIdentity(parcel(stored)) }.isFailure)
+        val legacy = Bundle().apply {
+            putBundle("pristinepage.editor.identity.v1", Bundle().apply {
+                putString("document", identity.documentId.value)
+                putString("page", identity.pageId.value)
+            })
+        }
+        assertNull(MainActivity.restoreEditorIdentity(parcel(legacy)))
+    }
     @Test fun parceledQueuedRawResultIsConsumedSynchronouslyDuringRestoredRegistrationWithoutRelaunch() {
         val batch = ImportSessionId("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa")
         val request = PhotoImportRequest(batch.value)
@@ -59,6 +134,43 @@ class LibraryPickerBindingTest {
             assertEquals(request.batchId, failed.request.batchId); assertEquals(1, registry.codes.size)
             assertFalse(session.state.value.launchPending)
         } finally { main { binding.close() } }
+    }
+
+    @Test fun restoredScopedFilesRegistrationClaimsOnlyItsQueuedResult() {
+        val id = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+        val issuedAt = LibraryActivation("aaaaaaaa-aaaa-4aaa-8aaa-000000000011", 2)
+        val request = PhotoImportRequest(id, PhotoImportKind.FILES, issuedAt)
+        val registry = RecordingRegistry()
+        val saved = Bundle()
+        main {
+            listOf(PhotoImportRequest(id), PhotoImportRequest(id, PhotoImportKind.FILES, issuedAt.copy(number = 1)),
+                PhotoImportRequest(id, PhotoImportKind.GALLERY, issuedAt), request).forEachIndexed { index, issued ->
+                val registration = PhotoPickerRegistration(registry, issued) { _, _ -> fail("Detached registry consumed a queued result") }
+                registration.launch()
+                registration.close()
+                assertTrue(registry.dispatchResult(registry.codes.last(), Activity.RESULT_OK,
+                    Intent().setData(Uri.parse("content://fixture.documents/picked-$index"))))
+            }
+            assertEquals(4, registry.codes.distinct().size)
+            registry.onSaveInstanceState(saved)
+        }
+        val appState = Bundle()
+        MainActivity.saveLibraryIdentity(appState, LibraryIdentity(pending = ImportSessionId(id), kind = request.kind, issuedAt = issuedAt),
+            allowPendingResult = true)
+        val restoredIdentity = MainActivity.restoreLibraryIdentity(parcel(appState))
+        val state = Session(PhotoImportRequest(checkNotNull(restoredIdentity.pending).value, restoredIdentity.kind, restoredIdentity.issuedAt), false)
+        val reopened = RecordingRegistry()
+        main { reopened.onRestoreInstanceState(parcel(saved)) }
+        val binding = binding(reopened, state)
+        try {
+            main { synchronize(binding); synchronize(binding) }
+            val delivered = state.events.single() as LibraryEvent.PhotoResult
+            assertTrue(request.matches(delivered.request))
+            assertEquals(listOf("content://fixture.documents/picked-3"), (delivered.selection as LibraryPhotoResult.Selected).references)
+            assertTrue(reopened.codes.isEmpty())
+        } finally { main { binding.close() } }
+        checkNotNull(appState.getBundle("pristinepage.library.identity.v1")).remove("acquisition")
+        assertTrue(runCatching { MainActivity.restoreLibraryIdentity(parcel(appState)) }.exceptionOrNull() is IllegalArgumentException)
     }
 
     private class Session(request: PhotoImportRequest, launch: Boolean) : LibrarySession {

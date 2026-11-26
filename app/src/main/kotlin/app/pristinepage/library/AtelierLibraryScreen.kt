@@ -49,6 +49,7 @@ import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.repeatOnLifecycle
 import app.pristinepage.R
+import app.pristinepage.data.library.LibraryActivation
 import app.pristinepage.capture.PhotoImportKind
 import app.pristinepage.data.model.*
 import app.pristinepage.data.repository.AlbumSearchQuery
@@ -68,25 +69,27 @@ import kotlinx.coroutines.launch
 
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
 @Composable internal fun AtelierLibraryScreen(
-    session: LibrarySession,
+     session: LibrarySession,
+    state: LibraryState,
     preferences: AtelierPreferences,
     loadOverview: suspend (DocumentId) -> DocumentOverview,
     loadThumbnail: suspend (DocumentSummary, DocumentPage) -> RenderedPreviewBitmap,
-    onBatch: (DocumentOverview) -> Unit = {},
-    onSelectPages: (DocumentOverview, PageId) -> Unit = { album, _ -> onBatch(album) },
+    onBatch: (LibraryActivation, DocumentOverview) -> Unit = { _, _ -> },
+    onSelectPages: (LibraryActivation, DocumentOverview, PageId) -> Unit = { activation, album, _ -> onBatch(activation, album) },
     onExport: (DocumentOverview) -> Unit = {},
     batchUndo: UndoId? = null,
     undoBatch: () -> Unit = {},
     closeBatchNotice: () -> Unit = {},
     batchBusy: Boolean = false,
     batchError: OperationErrorCode? = null,
+    batchUndoUnconfirmed: Boolean = false,
+    reconcileBatchUndo: () -> Unit = {},
     thumbnailsCurrent: (DocumentSummary) -> Boolean = { true },
     observeOcrPending: ((DocumentId, DocumentPage) -> Flow<AlbumOcrPending.State?>)? = null,
     openAtelier: ((String, DocumentSummary?) -> Unit)? = null,
     onSettings: () -> Unit,
     onEdit: (DocumentId, PageId) -> Unit,
 ) {
-    val state by session.state.collectAsStateWithLifecycle()
     val preferencesState by preferences.settings.collectAsStateWithLifecycle()
     val locale = ConfigurationCompat.getLocales(LocalConfiguration.current)[0] ?: Locale.getDefault()
     LaunchedEffect(session, preferencesState.order, locale) {
@@ -142,9 +145,9 @@ import kotlinx.coroutines.launch
             val searching = state.albumSearch.isNotBlank()
             val query = state.albumSearch
             val lifecycle = LocalLifecycleOwner.current.lifecycle
-            LaunchedEffect(session, query, lifecycle) {
+            LaunchedEffect(session, query, lifecycle, state.activation) {
                 if (query.isNotBlank()) lifecycle.repeatOnLifecycle(Lifecycle.State.STARTED) {
-                    session.observePageSearch(query)
+                    session.observePageSearch(query, state.activation)
                 }
             }
             if (state.canSearchAlbums) OutlinedTextField(
@@ -217,21 +220,26 @@ import kotlinx.coroutines.launch
             }
         } else {
             val selectedId = state.selectedId
+            val batchActivation = state.activation
             key(selectedId) {
                 LazyVerticalGrid(GridCells.Adaptive(148.dp), Modifier.weight(1f).fillMaxWidth().testTag("document-overview"),
                     contentPadding = PaddingValues(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp),
                     horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     item(span = { androidx.compose.foundation.lazy.grid.GridItemSpan(maxLineSpan) }) {
                         Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                             LibraryFeedback(state, session)
-                             if (batchUndo != null && batchError == null) {
-                                 Text(stringResource(R.string.atelier_batch_saved))
-                                 TextButton(onClick = undoBatch, enabled = !batchBusy) { Text(stringResource(R.string.atelier_batch_undo_saved)) }
-                             }
-                             if (batchError != null) {
-                                 Text(errorText(batchError), color = MaterialTheme.colorScheme.error)
-                                 TextButton(onClick = closeBatchNotice) { Text(stringResource(R.string.atelier_batch_dismiss)) }
-                             }
+                            LibraryFeedback(state, session)
+                            if (batchUndo != null && batchError == null) {
+                                Text(stringResource(R.string.atelier_batch_saved))
+                                TextButton(onClick = undoBatch, enabled = !batchBusy, modifier = Modifier.testTag("atelier-batch-undo-saved")) {
+                                    Text(stringResource(R.string.atelier_batch_undo_saved))
+                                }
+                            }
+                            if (batchError != null || batchUndoUnconfirmed) {
+                                Text(if (batchUndoUnconfirmed) stringResource(R.string.atelier_batch_undo_unconfirmed) else errorText(checkNotNull(batchError)),
+                                    color = MaterialTheme.colorScheme.error)
+                                if (batchUndoUnconfirmed) TextButton(onClick = reconcileBatchUndo) { Text(stringResource(R.string.atelier_batch_refresh_album)) }
+                                TextButton(onClick = closeBatchNotice) { Text(stringResource(R.string.atelier_batch_dismiss)) }
+                            }
                             Text(stringResource(R.string.atelier_all_pages), style = MaterialTheme.typography.titleMedium)
                             overview?.document?.updatedAt?.let { Text(stringResource(R.string.atelier_modified_date, date(it))) }
                             if (overview?.pages?.isEmpty() == true) Text(stringResource(R.string.no_saved_pages))
@@ -243,11 +251,8 @@ import kotlinx.coroutines.launch
                                 .semantics { selected = state.selectedPage == page.pageId }
                                 .combinedClickable(enabled = canAcquire && overview != null, role = Role.Button,
                                     onLongClickLabel = stringResource(R.string.carnet_select_page),
-                                    onLongClick = { overview?.let { onSelectPages(it, page.pageId) } }) {
-                                    overview?.let {
-                                        session.accept(LibraryEvent.SelectPage(page.pageId))
-                                        onEdit(it.document.documentId, page.pageId)
-                                    }
+                                    onLongClick = { if (batchActivation != null && overview != null) onSelectPages(batchActivation, overview, page.pageId) }) {
+                                    overview?.let { onEdit(it.document.documentId, page.pageId) }
                                 },
                             shape = RoundedCornerShape(AtelierStyle.surfaceRadius), color = MaterialTheme.colorScheme.surface,
                         ) {
@@ -265,7 +270,7 @@ import kotlinx.coroutines.launch
             HorizontalDivider(color = AtelierStyle.divider)
             Column(Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp)) {
                 if (overview != null && overview.pages.isNotEmpty()) FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                    TextButton(onClick = { onBatch(overview) }, enabled = canAcquire,
+                    TextButton(onClick = { batchActivation?.let { onBatch(it, overview) } }, enabled = canAcquire && batchActivation != null,
                         modifier = Modifier.heightIn(min = AtelierStyle.touchTarget).testTag("atelier-batch-select")) {
                         Text(stringResource(R.string.atelier_batch_select))
                     }

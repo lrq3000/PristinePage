@@ -3,14 +3,19 @@ package app.pristinepage.library
 import android.content.Context
 import android.net.Uri
 import app.pristinepage.ApplicationImports
+import app.pristinepage.ApplicationServices
 import app.pristinepage.capture.CaptureStage
 import app.pristinepage.capture.PhotoImportKind
+import app.pristinepage.capture.PhotoImportController
 import app.pristinepage.capture.PhotoImportRequest
 import app.pristinepage.capture.PhotoImportResultRouter
 import app.pristinepage.capture.PhotoSelection
+import app.pristinepage.data.library.LibraryActivation
+import app.pristinepage.data.repository.AtelierDraftView
 import app.pristinepage.data.model.*
 import app.pristinepage.data.repository.AlbumSearchQuery
 import app.pristinepage.data.repository.DocumentCatalog
+import app.pristinepage.data.repository.ImportSessionLifecycle
 import app.pristinepage.data.repository.RoomSourceMetadataSearch
 import app.pristinepage.data.repository.SavedOcrWork
 import app.pristinepage.data.repository.SourceMetadataQuery
@@ -21,48 +26,100 @@ import kotlinx.coroutines.withContext
 import java.util.Locale
 
 /** A cold adapter to the one Application graph, not another store or acquisition path. Temporary references return to the existing router/controller; no grant, new journal, recovery engine or source normalization is duplicated here. */
-class ApplicationLibraryActions(
+class ApplicationLibraryActions private constructor(
     private val context: Context?,
-    private val onPagesSaved: ((DocumentId, List<PageId>) -> Unit)?,
+    private val onPagesSaved: ((LibraryActivation, DocumentId, List<PageId>) -> Unit)?,
     private val open: suspend () -> ApplicationImports,
+    private val scoped: ApplicationServices?,
 ) : LibraryActions, OrderedLibraryActions, SearchableLibraryActions, SearchablePageActions {
-    constructor(context: Context? = null, open: suspend () -> ApplicationImports) : this(context, null, open)
+    constructor(context: Context? = null, open: suspend () -> ApplicationImports) : this(context, null, open, null)
+    constructor(context: Context?, onPagesSaved: ((LibraryActivation, DocumentId, List<PageId>) -> Unit)?,
+        open: suspend () -> ApplicationImports) : this(context, onPagesSaved, open, null)
+    internal constructor(context: Context?, onPagesSaved: ((LibraryActivation, DocumentId, List<PageId>) -> Unit)?,
+        services: ApplicationServices) : this(context, onPagesSaved, services::imports, services)
 
     override suspend fun startup() = open().startupRecovery
+    override suspend fun openLibrary() = open().let { LibraryStartup(it.startupRecovery, it.activation) }
     override suspend fun list(after: DocumentId?, limit: Int) = open().store.catalog.list(after, limit)
-    override suspend fun listAlbums(order: AlbumOrder, locale: Locale, after: AlbumPosition?, limit: Int) = open().store.albums.listAlbums(order, locale, after, limit)
-    override suspend fun searchAlbums(query: AlbumSearchQuery, order: AlbumOrder, locale: Locale, after: AlbumPosition?, limit: Int) =
-        open().store.albumSearch.searchAlbums(query, order, locale, after, limit)
-
-    override suspend fun searchPages(query: String): HomePageSearchPage =
-        if (SourceMetadataQuery.parse(query) != null) searchMetadata(query, null) else searchRecognizedText(query, null)
-
-    override fun pageSearchChanges(query: String) = flow {
-        if (SourceMetadataQuery.parse(query) == null) emitAll(open().store.savedOcr.observeSearchChanges())
+    override suspend fun listAlbums(order: AlbumOrder, locale: Locale, after: AlbumPosition?, limit: Int, issuedAt: LibraryActivation?): AlbumPage {
+        val services = scoped ?: return open().store.albums.listAlbums(order, locale, after, limit)
+        return services.readDefaultHomeAlbums(issuedAt, null, order, locale, after, limit)
     }
 
-    private suspend fun searchRecognizedText(query: String, cursor: SavedOcrWork.Continuation?): HomePageSearchPage {
-        val store = open().store
-        val page = store.savedOcr.find(query, cursor, 20)
-        return HomePageSearchPage(presentPageHits(page.hits, { it.document }, { it.page }, store.catalog, store.savedOcr::canOpen),
-            page.nextAfter?.let { next -> { searchRecognizedText(query, next) } })
+    override suspend fun searchAlbums(query: AlbumSearchQuery, order: AlbumOrder, locale: Locale, after: AlbumPosition?, limit: Int,
+        issuedAt: LibraryActivation?): AlbumPage {
+        val services = scoped ?: return open().store.albumSearch.searchAlbums(query, order, locale, after, limit)
+        return services.readDefaultHomeAlbums(issuedAt, query, order, locale, after, limit)
     }
 
-    private suspend fun searchMetadata(query: String, cursor: RoomSourceMetadataSearch.Continuation?): HomePageSearchPage {
-        val store = open().store
-        val page = store.sourceMetadata.find(query, cursor, 20)
-        return HomePageSearchPage(presentPageHits(page.hits, { it.document }, { it.page }, store.catalog, store.sourceMetadata::canOpen,
-            skipMalformedAlbums = true),
-            page.next?.let { next -> { searchMetadata(query, next) } })
+    override suspend fun searchPages(query: String, issuedAt: LibraryActivation?): HomePageSearchPage {
+        val services = scoped ?: return fixtureSearch(open(), query, null)
+        return services.readDefaultHomePage(issuedAt, query)
     }
+
+    override fun pageSearchChanges(query: String, issuedAt: LibraryActivation?) = flow {
+        if (SourceMetadataQuery.parse(query) == null) {
+            val services = scoped
+            emitAll(if (services != null) services.observeDefaultHomeSearch(issuedAt) else open().store.savedOcr.observeSearchChanges())
+        }
+    }
+
+    private suspend fun fixtureSearch(graph: ApplicationImports, query: String, cursor: HomePageCursor?): HomePageSearchPage =
+        queryHomePages(graph, query, cursor) { fixtureSearch(graph, query, it) }
 
     override suspend fun rename(document: DocumentId, revision: Long, title: String) = open().store.documents.renameDocument(document, revision, title)
     override suspend fun load(id: DocumentId) = open().store.catalog.load(id)
+    override suspend fun loadIssued(id: DocumentId, issuedAt: LibraryActivation) =
+        scoped?.loadDefaultAlbum(issuedAt, id) ?: load(id)
+    override suspend fun openPageHit(hit: HomePageSearchHit, issuedAt: LibraryActivation?): DocumentOverview? {
+        val services = scoped ?: return super.openPageHit(hit, issuedAt)
+        if (issuedAt == null || hit.issuedAt != issuedAt) return null
+        return services.openDefaultPageHit(issuedAt, hit)
+    }
     override suspend fun activeImport(id: DocumentId) = open().store.catalog.activeImport(id)
     override suspend fun create(title: String) = open().store.documents.createDocument(title)
-    override suspend fun begin(document: DocumentSummary): PhotoImportRequest = PhotoImportRequest(open().store.imports.beginImport(document.documentId, document.documentRevision, null).parentId.value)
-    override suspend fun deliver(request: PhotoImportRequest, selection: LibraryPhotoResult): List<IngestResult> {
+    override suspend fun activeImportRequest(id: DocumentId): PhotoImportRequest? {
         val graph = open()
+        val services = scoped
+        if (services == null) return graph.store.catalog.activeImport(id)?.let { PhotoImportRequest.abandonmentOnly(it) }
+        return services.findDefaultPhotoBatch(graph.activation, id)?.let { PhotoImportRequest.abandonmentOnly(it, graph.activation) }
+    }
+
+    override suspend fun activeIssuedImport(id: DocumentId, issuedAt: LibraryActivation): PhotoImportRequest? {
+        val services = scoped ?: return activeImportRequest(id)
+        return services.findDefaultPhotoBatch(issuedAt, id)?.let { PhotoImportRequest.abandonmentOnly(it, issuedAt) }
+    }
+
+    override suspend fun begin(document: DocumentSummary): PhotoImportRequest {
+        val graph = open()
+        val services = scoped
+        if (services == null) return PhotoImportRequest(graph.store.imports.beginImport(document.documentId, document.documentRevision, null).parentId.value)
+        val batch = services.reserveDefaultPhotoBatch(graph.activation, document.documentId, document.documentRevision)
+        return PhotoImportRequest(batch.value, issuedAt = graph.activation)
+    }
+
+    override suspend fun deliver(request: PhotoImportRequest, selection: LibraryPhotoResult): List<IngestResult> {
+        if (!request.canDeliver) throw RepositoryFailure(OperationError(OperationErrorCode.SESSION_EXPIRED, false, "photo_result_not_issued", request.batchId))
+        var delivered: List<IngestResult>? = null
+        route(request) { activation, controller, lifecycle ->
+            delivered = deliverIn(request, selection, activation, controller, lifecycle)
+        }
+        return checkNotNull(delivered)
+    }
+
+    internal data class AtelierPhotoDelivery(val draft: AtelierDraftView, val results: List<IngestResult>)
+
+    internal suspend fun deliverAtelier(issuedAt: LibraryActivation, draft: AtelierDraftView, request: PhotoImportRequest, selection: LibraryPhotoResult): AtelierPhotoDelivery {
+        if (!request.canDeliver) throw RepositoryFailure(OperationError(OperationErrorCode.SESSION_EXPIRED, false, "photo_result_not_issued", request.batchId))
+        var delivered: List<IngestResult>? = null
+        val observed = checkNotNull(scoped).useDefaultAtelierPhoto(issuedAt, draft, request) { controller, lifecycle ->
+            delivered = deliverIn(request, selection, issuedAt, controller, lifecycle)
+        }
+        return AtelierPhotoDelivery(observed, checkNotNull(delivered))
+    }
+
+    private suspend fun deliverIn(request: PhotoImportRequest, selection: LibraryPhotoResult, activation: LibraryActivation,
+        controller: PhotoImportController, lifecycle: ImportSessionLifecycle): List<IngestResult> {
         val capture = if (request.kind == PhotoImportKind.CAMERA) CaptureStage(checkNotNull(context), request.batchId) else null
         val native = when (selection) {
             is LibraryPhotoResult.Selected -> {
@@ -76,7 +133,8 @@ class ApplicationLibraryActions(
             LibraryPhotoResult.Canceled -> PhotoSelection.Canceled
             is LibraryPhotoResult.Rejected -> PhotoSelection.Rejected(selection.error)
         }
-        val outcomes = PhotoImportResultRouter(graph.photoImports, graph.store.lifecycle, onPagesSaved).deliver(request, native)
+        val signal = onPagesSaved?.let { send -> { album: DocumentId, pages: List<PageId> -> send(activation, album, pages) } }
+        val outcomes = PhotoImportResultRouter(controller, lifecycle, signal).deliver(request, native)
         // A late staging refusal can follow a real shutter but precede ingest. Keep the camera handoff
         // available until the user explicitly clears its pending batch; do not treat it as a completed copy.
         if (capture != null && outcomes.none { it is IngestResult.Pending || it is IngestResult.Rejected &&
@@ -87,15 +145,63 @@ class ApplicationLibraryActions(
         return outcomes
     }
     override suspend fun cancel(request: PhotoImportRequest) {
-        open().store.lifecycle.cancelBatch(request.session)
-        // A durable batch rediscovered without Activity state no longer carries its original UI route.
-        context?.let { app -> withContext(Dispatchers.IO) { CaptureStage(app, request.batchId).discard() } }
+        route(request) { _, _, lifecycle ->
+            cancelIn(request, lifecycle)
+        }
+    }
+
+    internal suspend fun cancelAtelier(issuedAt: LibraryActivation, draft: AtelierDraftView, request: PhotoImportRequest): AtelierDraftView =
+        checkNotNull(scoped).useDefaultAtelierPhoto(issuedAt, draft, request, allowAlreadySettled = true) { _, lifecycle ->
+            cancelIn(request, lifecycle)
+        }
+
+    private suspend fun cancelIn(request: PhotoImportRequest, lifecycle: ImportSessionLifecycle) {
+        lifecycle.cancelBatch(request.session)
+        // A rediscovered, untyped reservation can be settled but does not prove ownership of any camera bytes.
+        if (request.canDeliver && request.kind == PhotoImportKind.CAMERA) {
+            context?.let { app -> withContext(Dispatchers.IO) { CaptureStage(app, request.batchId).discard() } }
+        }
+    }
+    private suspend fun route(request: PhotoImportRequest,
+        operation: suspend (LibraryActivation, PhotoImportController, ImportSessionLifecycle) -> Unit) {
+        val services = scoped
+        if (services != null) services.useDefaultPhotoRouting(request.issuedAt) { controller, lifecycle ->
+            operation(checkNotNull(request.issuedAt), controller, lifecycle)
+        } else {
+            val graph = open()
+            operation(graph.activation, graph.photoImports, graph.store.lifecycle)
+        }
+    }
+}
+
+internal sealed interface HomePageCursor {
+    data class Text(val continuation: SavedOcrWork.Continuation) : HomePageCursor
+    data class Metadata(val continuation: RoomSourceMetadataSearch.Continuation) : HomePageCursor
+}
+
+/** The next request must be wired by the caller to the exact graph admission that issued this page. */
+internal suspend fun queryHomePages(graph: ApplicationImports, query: String, cursor: HomePageCursor?,
+    nextPage: suspend (HomePageCursor) -> HomePageSearchPage): HomePageSearchPage {
+    val store = graph.store
+    return if (SourceMetadataQuery.parse(query) != null) {
+        check(cursor == null || cursor is HomePageCursor.Metadata)
+        val page = store.sourceMetadata.find(query, (cursor as? HomePageCursor.Metadata)?.continuation, 20)
+        HomePageSearchPage(presentPageHits(page.hits, { it.document }, { it.page }, store.catalog, store.sourceMetadata::canOpen,
+            skipMalformedAlbums = true, issuedAt = graph.activation),
+            page.next?.let { next -> { nextPage(HomePageCursor.Metadata(next)) } })
+    } else {
+        check(cursor == null || cursor is HomePageCursor.Text)
+        val page = store.savedOcr.find(query, (cursor as? HomePageCursor.Text)?.continuation, 20)
+        HomePageSearchPage(presentPageHits(page.hits, { it.document }, { it.page }, store.catalog, store.savedOcr::canOpen,
+            issuedAt = graph.activation),
+            page.nextAfter?.let { next -> { nextPage(HomePageCursor.Text(next)) } })
     }
 }
 
 internal suspend fun <Hit> presentPageHits(
     candidates: List<Hit>, document: (Hit) -> DocumentId, page: (Hit) -> PageId,
     catalog: DocumentCatalog, revalidate: suspend (Hit) -> Boolean, skipMalformedAlbums: Boolean = false,
+    issuedAt: LibraryActivation? = null,
 ): List<HomePageSearchHit> {
     val albums = mutableMapOf<DocumentId, DocumentOverview?>()
     return candidates.mapNotNull { hit ->
@@ -113,6 +219,6 @@ internal suspend fun <Hit> presentPageHits(
         }
         val album = albums[documentId] ?: return@mapNotNull null
         val member = album.pages.firstOrNull { it.pageId == pageId } ?: return@mapNotNull null
-        HomePageSearchHit(documentId, pageId, album.document.title, member.ordinal + 1) { revalidate(hit) }
+        HomePageSearchHit(documentId, pageId, album.document.title, member.ordinal + 1, issuedAt) { revalidate(hit) }
     }
 }

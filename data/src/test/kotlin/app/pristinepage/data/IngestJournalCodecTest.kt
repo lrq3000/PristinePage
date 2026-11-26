@@ -1,5 +1,6 @@
 package app.pristinepage.data
 
+import app.pristinepage.data.journal.IngestJournalCodec
 import app.pristinepage.core.pipeline.PixelSize
 import app.pristinepage.data.model.*
 import java.lang.reflect.InvocationTargetException
@@ -7,6 +8,26 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class IngestJournalCodecTest {
+    @Test fun versionThreeSealAndReceiptCarrySeparatePrivateLogicalNames() {
+        val named = seal.copy(schemaVersion = 3, preferredFilename = "Report.PNG")
+        val sealed = IngestJournalCodec.encodeSeal(named)
+        assertEquals(named, IngestJournalCodec.decodeSeal(sealed, intent))
+        assertTrue(sealed.decodeToString().contains("\"preferredFilename\":\"Report.PNG\""))
+        val receipt = IngestJournalCommit(named, 4, libraryFilename = "Report (2).PNG")
+        assertEquals(receipt, IngestJournalCodec.decodeCommit(IngestJournalCodec.encodeCommit(receipt), intent))
+        assertThrows(IllegalArgumentException::class.java) { IngestJournalCodec.encodeCommit(receipt.copy(libraryFilename = null)) }
+        assertThrows(IllegalArgumentException::class.java) { IngestJournalCodec.encodeSeal(named.copy(preferredFilename = "../secret.png")) }
+        assertThrows(IllegalArgumentException::class.java) { IngestJournalCodec.encodeSeal(named.copy(schemaVersion = 1)) }
+    }
+
+    @Test fun versionThreeWithNoProviderHintStillRequiresAnAllocatedFilename() {
+        val unnamed = seal.copy(schemaVersion = 3)
+        assertEquals(unnamed, IngestJournalCodec.decodeSeal(IngestJournalCodec.encodeSeal(unnamed), intent))
+        val receipt = IngestJournalCommit(unnamed, 4, libraryFilename = "Scan ${intent.pageId.value}.png")
+        assertEquals(receipt, IngestJournalCodec.decodeCommit(IngestJournalCodec.encodeCommit(receipt), intent))
+        assertThrows(IllegalArgumentException::class.java) { IngestJournalCodec.encodeCommit(receipt.copy(libraryFilename = null)) }
+    }
+
     private val id = "9b58d249-0641-4cb7-bbe7-ff805098b21b"
     private val intent = IngestJournalIntent(TransactionId(id), ImportSessionId(id), DocumentId(id), PageId(id), SourceBlobId(id), SourceId(id), JobId(id), 1)
     private val inspection = SourceInspection("image/png", PixelSize(3, 2), PixelSize(2, 3), 6, null, "srgb-v1", "a".repeat(64))
@@ -70,7 +91,7 @@ class IngestJournalCodecTest {
         val good = String(call("encodeSeal", dated) as ByteArray, Charsets.UTF_8)
         for (bad in listOf(good.replace("19782", "19782.0"), good.replace("19782", "2932897"),
             good.replace("\"epochDay\":19782", "\"epochDay\":19782,\"gps\":\"synthetic\""),
-            good.replace("\"schemaVersion\":2", "\"schemaVersion\":3"))) {
+             good.replace("\"schemaVersion\":2", "\"schemaVersion\":4"))) {
             assertThrows(IllegalArgumentException::class.java) { call("decodeSeal", bad.encodeToByteArray(), intent) }
         }
         assertThrows(IllegalArgumentException::class.java) { call("encodeCommit", IngestJournalCommit(dated, 4, schemaVersion = 1)) }

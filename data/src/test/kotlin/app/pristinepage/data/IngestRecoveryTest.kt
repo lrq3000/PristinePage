@@ -21,7 +21,7 @@ class IngestRecoveryTest {
         val type = try { Class.forName("app.pristinepage.data.repository.RoomRecoveryCoordinator") }
         catch (error: ClassNotFoundException) { throw AssertionError("Admitted seal-backed ingest reconciliation is absent", error) }
         val db = f.db
-        val completion = RoomIngestCompletion(db.metadata, db, db, db, db, f.files, { db.now }, { db.now }, Dispatchers.Unconfined)
+        val completion = RoomIngestCompletion(db.metadata, db, db, db, db, f.files, { db.now }, { db.now }, Dispatchers.Unconfined, scanNames = db.scanNames)
         return try {
             val args = arrayOf(db.metadata, queries, db, journal, db, f.files, RoomIngestLookup(db.metadata, db, db, db), completion, completion, RoomIngestPhases(db.metadata, db, db, db, db, { db.now }, { db.now }), RoomIngestReadmission(db.metadata, db, db, db, owners, { db.now }), RoomJobLeases(db.metadata, db, owners, { db.now }, { db.now }, Dispatchers.Unconfined), owners, Dispatchers.Unconfined)
             val consuming = type.constructors.singleOrNull { it.parameterCount == 15 }

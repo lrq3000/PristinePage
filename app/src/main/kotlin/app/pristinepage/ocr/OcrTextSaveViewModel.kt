@@ -12,24 +12,30 @@ import android.provider.DocumentsContract
 import androidx.annotation.MainThread
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import app.pristinepage.ApplicationServices
 import app.pristinepage.R
+import app.pristinepage.data.library.LibraryActivation
+import app.pristinepage.data.model.RepositoryFailure
 import app.pristinepage.data.repository.SavedOcrWork
 import app.pristinepage.data.repository.SavedOcrWork.TextSaveOutcome
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 
 internal class OcrTextSaveViewModel(
     context: Context,
-    private val open: suspend () -> SavedOcrWork,
+    private val services: ApplicationServices,
 ) : ViewModel() {
     private val app = context.applicationContext
     private val current = MutableStateFlow(State())
     val state = current.asStateFlow()
     private var request: Pending? = null
     private var retry: SavedOcrWork.PreparedTextExport? = null
+    private var activation: LibraryActivation? = null
+    private var recovery: Job? = null
 
     internal data class State(
         val busy: Boolean = false,
@@ -46,11 +52,19 @@ internal class OcrTextSaveViewModel(
     private class Pending(val id: String, val result: CompletableDeferred<Destination?> = CompletableDeferred())
     private class Destination(val uri: Uri, val read: Boolean)
 
-    init {
-        viewModelScope.launch {
+    @MainThread fun show(issuedAt: LibraryActivation?) {
+        if (activation == issuedAt) return
+        activation = issuedAt
+        recovery?.cancel()
+        retry = null
+        // Leave an admitted writer busy through cleanup, but detach its old chooser and do not show its UI in a successor.
+        request?.result?.complete(null)
+        current.value = State(busy = current.value.busy)
+        if (issuedAt == null) return
+        recovery = viewModelScope.launch {
             try {
-                val recovered = open().recoverTextPublications()
-                if (recovered.needsVerification && !current.value.busy && current.value.notice == null) {
+                val recovered = services.recoverDefaultTextPublications(issuedAt)
+                if (activation == issuedAt && recovered.needsVerification && !current.value.busy && current.value.notice == null) {
                     retry = recovered.retry
                     current.value = current.value.copy(pastWriteNeedsVerification = true,
                         destination = destinationLabel(recovered.priorDestination), mayRetry = retry != null)
@@ -60,30 +74,32 @@ internal class OcrTextSaveViewModel(
         }
     }
 
-    @MainThread fun save(observed: SavedOcrWork.TextExportObservation): Boolean =
-        submit { it.prepareTextExport(observed) }
+    @MainThread fun save(issuedAt: LibraryActivation, observed: SavedOcrWork.TextExportObservation): Boolean =
+        submit(issuedAt) { services.prepareDefaultTextExport(issuedAt, observed) }
 
     @MainThread fun retry() {
+        val issuedAt = activation ?: return
         val reviewed = retry ?: return
-        submit { reviewed }
+        submit(issuedAt) { reviewed }
     }
 
-    private fun submit(freeze: suspend (SavedOcrWork) -> SavedOcrWork.PreparedTextExport?): Boolean {
-        if (current.value.busy) return false
+    private fun submit(issuedAt: LibraryActivation, freeze: suspend () -> SavedOcrWork.PreparedTextExport?): Boolean {
+        if (activation != issuedAt || current.value.busy) return false
         retry = null
         current.value = State(busy = true)
         viewModelScope.launch {
             var destination: Destination? = null
             var prepared: SavedOcrWork.PreparedTextExport? = null
             try {
-                val work = open()
-                val frozen = freeze(work)
+                val frozen = freeze()
+                if (activation != issuedAt) return@launch
                 prepared = frozen
                 if (frozen == null) {
                     notify(R.string.ocr_save_text_changed)
                     return@launch
                 }
-                val result = work.publishPreparedText(frozen, choose = { id ->
+                val result = services.publishDefaultTextExport(issuedAt, frozen, choose = { id ->
+                    if (activation != issuedAt) return@publishDefaultTextExport null
                     val pending = Pending(id)
                     request = pending
                     current.value = current.value.copy(consent = id, launchRequested = true)
@@ -92,14 +108,16 @@ internal class OcrTextSaveViewModel(
                         if (request === pending) { request = null; current.value = current.value.copy(consent = null, launchRequested = false) }
                     }
                     destination?.uri?.toString()
-                }) { target, bytes ->
+                }) { target, bytes, admit ->
                     val selected = checkNotNull(destination)
                     check(selected.uri.toString() == target)
                     val resolver = app.contentResolver
                     writeOcrTextDocument(bytes, frozen.byteSha256,
                         open = { resolver.openFileDescriptor(selected.uri, "rw") },
-                        reopen = if (selected.read) ({ resolver.openInputStream(selected.uri) }) else null)
+                        reopen = if (selected.read) ({ resolver.openInputStream(selected.uri) }) else null,
+                        admit = admit)
                 }
+                if (activation != issuedAt) return@launch
                 when (result) {
                     TextSaveOutcome.CANCELED -> if (current.value.notice != null) offerRetry(frozen, null) else Unit
                     TextSaveOutcome.READBACK_VERIFIED -> notify(R.string.ocr_save_text_verified)
@@ -111,9 +129,17 @@ internal class OcrTextSaveViewModel(
                 }
             } catch (canceled: CancellationException) {
                 throw canceled
-            } catch (_: Exception) {
-                notify(if (destination == null) R.string.ocr_save_text_failed else R.string.ocr_save_text_verify)
-                prepared?.let { offerRetry(it, destination) }
+            } catch (failure: Exception) {
+                if (activation == issuedAt) {
+                    when ((failure as? RepositoryFailure)?.error?.safeMessageKey) {
+                        "library_activation_changed" -> notify(R.string.ocr_save_text_refused)
+                        "library_text_output_delivery_unconfirmed" -> notify(R.string.ocr_save_text_interrupted)
+                        else -> {
+                            notify(if (destination == null) R.string.ocr_save_text_failed else R.string.ocr_save_text_verify)
+                            prepared?.let { offerRetry(it, destination) }
+                        }
+                    }
+                }
             } finally {
                 current.value = current.value.copy(busy = false)
             }

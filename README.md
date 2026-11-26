@@ -2,6 +2,8 @@
 
 Native offline Android document/photo scanner under active implementation. Confirmed future store title: **PristinePage: Doc & Photo Scan**. **This is not a delivered or accepted complete scanner.** Source now contains immutable storage/normalized decoding, the shared classical geometry/appearance renderer, a basic persistent library/editor and ordinary frozen-page render groundwork. Camera, complete export/sharing, larger editor controls, cumulative album batches and genuine neural methods remain unfinished. Current source/evidence limits are in [TODO](docs/specs/TODO.md) and [execution progress](validation/progress.md), not the historical bootstrap receipt.
 
+**Lossless original retention.** PristinePage keeps imported and captured originals byte-for-byte as received. Crop, rotation and corrections are saved separately as editable recipes, so you can return to the original and try different settings or newer algorithms later. Edited previews and exports can resample pixels or use lossy formats such as JPEG; they never overwrite the retained original.
+
 ## Authorities and scope
 
 `X:\local-workspace` on `main` is the canonical application and documentation checkout. The original development worktree `X:\local-workspace\.worktrees\paperlight-v1` and its worker branches are retained history; do not start new assignments from them. New PRs target `main`; with no remote configured, use the local PR-style queue in the [parallel execution plan](docs/specs/PARALLEL_EXECUTION_PLAN.md#coordination). See [the main transition](docs/specs/OPERATIONAL_PLAN.md) for the verified-index rule and operational gates.

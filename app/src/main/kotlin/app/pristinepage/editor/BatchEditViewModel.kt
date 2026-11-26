@@ -2,7 +2,8 @@ package app.pristinepage.editor
 
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
-import app.pristinepage.ApplicationImports
+import app.pristinepage.ApplicationServices
+import app.pristinepage.data.library.LibraryActivation
 import app.pristinepage.data.model.*
 import app.pristinepage.image.render.ClassicalRecipeAdmission
 import app.pristinepage.ocr.sendCommittedOcrHint
@@ -17,14 +18,17 @@ internal data class BatchHost(
     val saving: Boolean = false,
     val error: OperationErrorCode? = null,
     val uncertain: Boolean = false,
+    val undoUnconfirmed: Boolean = false,
     val undo: UndoId? = null,
     val savedDocument: DocumentId? = null,
     val savedRevision: Long? = null,
+    val issuingActivation: LibraryActivation? = null,
 )
 
 internal class BatchEditViewModel(
-    private val openGraph: suspend () -> ApplicationImports,
-    private val onPagesSaved: (DocumentId, List<PageId>) -> Unit,
+    private val services: ApplicationServices,
+    private val onPagesSaved: (LibraryActivation, DocumentId, List<PageId>) -> Unit,
+    private val onUnconfirmedMutation: (LibraryActivation) -> Unit,
 ) : ViewModel() {
     private val mutable = MutableStateFlow(BatchHost())
     val state = mutable.asStateFlow()
@@ -32,22 +36,17 @@ internal class BatchEditViewModel(
         private set
     private var opening: Job? = null
 
-    fun open(album: DocumentOverview, firstSelected: PageId? = null) {
+    fun open(issuedAt: LibraryActivation, album: DocumentOverview, firstSelected: PageId? = null) {
         if (mutable.value.album != null || mutable.value.saving) return
         if (firstSelected != null && album.pages.none { it.pageId == firstSelected }) return
-        mutable.value = BatchHost(album = album)
+        mutable.value = BatchHost(album = album, issuingActivation = issuedAt)
         opening = viewModelScope.launch {
             try {
-                val graph = openGraph()
-                val id = album.document.documentId
-                val pages = album.pages.map { graph.store.editablePages.load(id, it.pageId) }
-                if (pages.indices.any { i -> pages[i].documentRevision != album.document.documentRevision ||
-                        pages[i].recipeRevision != album.pages[i].recipeRevision }) {
-                    mutable.value = mutable.value.copy(error = OperationErrorCode.REVISION_CONFLICT)
-                    return@launch
-                }
+                val pages = services.loadDefaultBatchPages(issuedAt, album)
+                currentCoroutineContext().ensureActive()
                 val admission = ClassicalRecipeAdmission()
-                draft = BatchEditSession(pages, { _, recipe -> admission.check(recipe, false) }, graph.store.documents::applyBatchRecipes,
+                draft = BatchEditSession(pages, { _, recipe -> admission.check(recipe, false) },
+                    { document, revision, changes -> services.applyDefaultBatch(issuedAt, document, revision, changes) },
                     setOfNotNull(firstSelected))
                 mutable.value = mutable.value.copy(pages = pages)
             } catch (canceled: CancellationException) { throw canceled }
@@ -71,14 +70,19 @@ internal class BatchEditViewModel(
                 when (val result = session.done()) {
                     is BatchEditOutcome.Saved -> {
                         val document = checkNotNull(mutable.value.album).document
+                        val activation = checkNotNull(mutable.value.issuingActivation)
                         draft = null
-                        mutable.value = BatchHost(undo = result.undo, savedDocument = document.documentId, savedRevision = document.documentRevision + 1)
-                        sendCommittedOcrHint(document.documentId, result.pageIds, onPagesSaved)
+                        mutable.value = BatchHost(undo = result.undo, savedDocument = document.documentId, savedRevision = document.documentRevision + 1,
+                            issuingActivation = activation)
+                        sendCommittedOcrHint(document.documentId, result.pageIds) { album, pages -> onPagesSaved(activation, album, pages) }
                     }
                     BatchEditOutcome.Unchanged -> dismiss()
                     is BatchEditOutcome.Conflict -> mutable.value = mutable.value.copy(error = OperationErrorCode.REVISION_CONFLICT)
                     is BatchEditOutcome.Failed -> mutable.value = mutable.value.copy(error = result.error.code)
-                    BatchEditOutcome.NeedsRefresh -> mutable.value = mutable.value.copy(uncertain = true)
+                    BatchEditOutcome.NeedsRefresh -> {
+                        mutable.value = mutable.value.copy(uncertain = true)
+                        onUnconfirmedMutation(checkNotNull(mutable.value.issuingActivation))
+                    }
                     BatchEditOutcome.Busy -> Unit
                 }
             } finally { mutable.value = mutable.value.copy(saving = false) }
@@ -95,22 +99,27 @@ internal class BatchEditViewModel(
         val token = value.undo ?: return
         val revision = value.savedRevision ?: return
         val document = value.savedDocument ?: return
+        val issuing = value.issuingActivation ?: return
         if (value.saving) return
         mutable.value = value.copy(saving = true)
         viewModelScope.launch {
             try {
-                val outcome = openGraph().store.documents.undoDocumentEdit(token, revision)
+                val outcome = services.undoDefaultBatch(issuing, token, revision)
                 val error = when (outcome) {
                     is DocumentMutationResult.Applied -> null
                     is DocumentMutationResult.Conflict -> OperationErrorCode.REVISION_CONFLICT
                     is DocumentMutationResult.Rejected -> outcome.error.code
                 }
-                mutable.value = BatchHost(error = error, savedDocument = value.savedDocument,
+                mutable.value = BatchHost(error = error, savedDocument = document, issuingActivation = issuing,
                     savedRevision = (outcome as? DocumentMutationResult.Applied)?.documentRevision)
-                if (outcome is DocumentMutationResult.Applied) sendCommittedOcrHint(document, outcome.affectedPageIds, onPagesSaved)
+                if (outcome is DocumentMutationResult.Applied) sendCommittedOcrHint(document, outcome.affectedPageIds) { album, pages ->
+                    onPagesSaved(issuing, album, pages)
+                }
             } catch (canceled: CancellationException) { throw canceled }
-            catch (failure: RepositoryFailure) { mutable.value = BatchHost(error = failure.error.code, savedDocument = value.savedDocument) }
-            catch (_: Exception) { mutable.value = BatchHost(error = OperationErrorCode.STORAGE_FAILED, savedDocument = value.savedDocument) }
+            catch (_: Exception) {
+                mutable.value = BatchHost(undoUnconfirmed = true, savedDocument = document, issuingActivation = issuing)
+                onUnconfirmedMutation(issuing)
+            }
             finally { mutable.value = mutable.value.copy(saving = false) }
         }
     }

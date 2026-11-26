@@ -1,6 +1,7 @@
 package app.pristinepage.ocr
 
 import app.pristinepage.core.ocr.OcrConfiguration
+import app.pristinepage.data.library.LibraryActivation
 import app.pristinepage.data.model.DocumentId
 import app.pristinepage.data.model.PageId
 import app.pristinepage.data.repository.SavedOcrWork
@@ -29,64 +30,86 @@ internal class SavedOcrAppSignals(
             else -> IDLE
         }
     }
-    private val startup = AtomicReference(Startup.IDLE)
+    private data class Pass(val activation: LibraryActivation, val state: Startup)
+    private val startup = AtomicReference<Pass?>(null)
     private val manualRerun = MutableStateFlow(false)
     val rerunInFlight = manualRerun.asStateFlow()
 
-    fun onStartup() {
+    /** Completion describes this exact foreground pass, not recognition completion for every page. */
+    fun isStartupComplete(activation: LibraryActivation): Boolean = startup.get() == Pass(activation, Startup.COMPLETE)
+
+    fun onStartup(activation: LibraryActivation) {
         // A foreground event during a refused/incomplete pass must not wait for a third foreground transition.
-        val previous = startup.getAndUpdate {
-            when (it) {
-                Startup.IDLE -> Startup.RUNNING
-                Startup.RUNNING -> Startup.PENDING
-                Startup.RUNNING_INVALIDATED -> Startup.PENDING_INVALIDATED
-                else -> it
+        val previous = startup.getAndUpdate { current ->
+            if (current == null || activation.number > current.activation.number) Pass(activation, Startup.RUNNING)
+            else if (current.activation != activation) current
+            else when (current.state) {
+                Startup.IDLE -> current.copy(state = Startup.RUNNING)
+                Startup.RUNNING -> current.copy(state = Startup.PENDING)
+                Startup.RUNNING_INVALIDATED -> current.copy(state = Startup.PENDING_INVALIDATED)
+                else -> current
             }
         }
-        if (previous != Startup.IDLE) return
+        if (previous != null && activation.number <= previous.activation.number &&
+            (previous.activation != activation || previous.state != Startup.IDLE)) return
         processScope.launch {
             try {
-                do {
-                    val completed = deliver { scheduling.onStartup() } == true
+                while (startup.get()?.activation == activation) {
+                    val completed = try { deliver { scheduling.onStartup(activation) } == true }
+                    catch (_: CancellationException) {
+                        // A canceled attempt is incomplete while the process job remains live. Honor only the already coalesced visit, never poll.
+                        currentCoroutineContext().ensureActive()
+                        false
+                    }
                     // Invalidation and pass completion are one transition: a concurrent failed save may be behind this pass's cursor.
-                    val finished = startup.getAndUpdate { it.afterPass(completed) }
-                } while (finished.afterPass(completed) == Startup.RUNNING)
+                    val finished = startup.getAndUpdate { pass ->
+                        if (pass?.activation == activation) pass.copy(state = pass.state.afterPass(completed)) else pass
+                    }
+                    if (finished?.activation != activation || finished.state.afterPass(completed) != Startup.RUNNING) break
+                }
             } catch (canceled: CancellationException) {
-                startup.set(Startup.IDLE)
+                startup.getAndUpdate { pass -> if (pass?.activation == activation) pass.copy(state = Startup.IDLE) else pass }
                 throw canceled
             }
         }
     }
 
-    fun onPagesSaved(document: DocumentId, pages: List<PageId>) {
+    fun onPagesSaved(activation: LibraryActivation, document: DocumentId, pages: List<PageId>) {
         val committed = pages.toList()
         if (committed.isEmpty()) return
         processScope.launch {
             var completed = false
-            try { completed = deliver { scheduling.onPagesSaved(document, committed) } == true }
+            try { completed = deliver { scheduling.onPagesSaved(activation, document, committed) } == true }
             finally {
-                if (!completed) startup.getAndUpdate {
-                    when (it) {
-                        Startup.COMPLETE -> Startup.IDLE
-                        Startup.RUNNING -> Startup.RUNNING_INVALIDATED
-                        Startup.PENDING -> Startup.PENDING_INVALIDATED
-                        else -> it
-                    }
-                }
+                if (!completed) requireStartupReconciliation(activation)
             }
+        }
+    }
+
+    /** A lost mutation receipt gives no page hint, but may invalidate a completed pass in its issuing library. */
+    fun requireStartupReconciliation(activation: LibraryActivation) {
+        startup.getAndUpdate { pass ->
+            if (pass?.activation != activation) return@getAndUpdate pass
+            pass.copy(state = when (pass.state) {
+                Startup.COMPLETE -> Startup.IDLE
+                Startup.RUNNING -> Startup.RUNNING_INVALIDATED
+                Startup.PENDING -> Startup.PENDING_INVALIDATED
+                else -> pass.state
+            })
         }
     }
 
     /** A deliberate command may finish after its dialog closes. Only the observation-bound Room job and its opaque wake can survive the dialog. */
     suspend fun onRerun(
         qualify: suspend () -> OcrConfiguration?,
+        activation: LibraryActivation,
         commit: suspend (OcrConfiguration) -> SavedOcrWork.Target,
     ): SavedOcrScheduling.RerunOutcome {
         currentCoroutineContext().ensureActive()
         return processScope.async {
             // Keep the gate with the command even when the original UI waiter is canceled or a new panel is opened.
             if (!manualRerun.compareAndSet(expect = false, update = true)) return@async SavedOcrScheduling.RerunOutcome.BUSY
-            try { scheduling.requestRerun(qualify, commit) } finally { manualRerun.value = false }
+            try { scheduling.requestRerun(qualify, activation, commit) } finally { manualRerun.value = false }
         }.await()
     }
 

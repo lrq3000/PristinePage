@@ -140,7 +140,7 @@ class RoomRepositoryIntegrationTest {
         private fun repository() = RoomDocumentRepository(RoomMetadataAccess(database), RecipeAdmission { _, _ -> null })
         fun reopen() { database.close(); database = open(); repository = repository() }
         fun count(table: String): Long {
-            require(table in setOf("RecipeRevision", "UndoEntry", "SourceReference"))
+            require(table in setOf("RecipeRevision", "UndoEntry", "SourceReference", "LibraryScanName"))
             return database.openHelper.readableDatabase.query("SELECT COUNT(*) FROM $table").use { cursor -> check(cursor.moveToFirst()); cursor.getLong(0) }
         }
         /** Complete bounded synthetic metadata, including BLOB bytes. Availability-only expiry may explicitly ignore just UndoEntry.state; all history/pins/pointers/content remain compared. No production database or image file is inspected. */

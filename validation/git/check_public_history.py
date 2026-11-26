@@ -17,6 +17,24 @@ REVIEWED_EMAIL_FALSE_POSITIVES = {
      b"app/src/test/kotlin/app/pristinepage/ocr/SavedOcrApplicationTest.kt",
      "7b0b3a981d05d4e0c56a4b697836f3af18ac586f26e72795272bf5afa727060e"):
         b"this@" + b"SavedOcrApplicationTest.target",
+    # The fixture reads its enclosing test's baseline, then calls copy; the email regex consumes both property names.
+    ("3e43ef5984f61ff2aee83c9cde38043ce27cf741",
+     b"data/src/test/kotlin/app/pristinepage/data/LocalLibraryMergeCommitTest.kt",
+     "4ee919e6c8f55884bad60a37dba11835238887452fdc9fb7a8a0b4f1d2b6b5aa"):
+        b"this@" + b"LocalLibraryMergeCommitTest.baseline.copy",
+    # These three fixtures refer to their enclosing test's activation property.
+    ("35e5519c1ca84ad95f8e46771bf108442311bbd0",
+     b"app/src/test/kotlin/app/pristinepage/ocr/SavedOcrAppSignalsTest.kt",
+     "168e28b3c1eb9bc3657f2c81610549036965ce659663918b225568677132b73d"):
+        b"this@" + b"SavedOcrAppSignalsTest.activation",
+    ("35e5519c1ca84ad95f8e46771bf108442311bbd0",
+     b"app/src/test/kotlin/app/pristinepage/ocr/SavedOcrApplicationTest.kt",
+     "d0884d92779b28ca8f41e6545aef965a9c224381585559f1abcf878773690a1d"):
+        b"this@" + b"SavedOcrApplicationTest.activation",
+    ("35e5519c1ca84ad95f8e46771bf108442311bbd0",
+     b"app/src/test/kotlin/app/pristinepage/ocr/SavedOcrApplicationTest.kt",
+     "6b9369d228e6bc535777cdf23357fe744b57c63b3f021ff1e663b9727eff12ac"):
+        b"this@" + b"SavedOcrApplicationTest.activation",
 }
 LOCAL_PATH = re.compile(rb"(?:[a-z]:[\\/]+(?:Users|Documents and Settings)[\\/]+|/(?:home|Users)/)[^\\/ \t\r\n`]+", re.I)
 COMMIT_TOKEN = re.compile(rb"(?<![0-9a-f])[0-9a-f]{7,40}(?![0-9a-f])", re.I)

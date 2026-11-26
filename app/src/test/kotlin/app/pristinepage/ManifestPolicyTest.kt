@@ -15,10 +15,10 @@ import org.xml.sax.InputSource
 /** Reads the actual AGP merged artifacts, not the source manifest: a dependency can add a permission or change application attributes during merging. Device backup behavior remains a separate gate. */
 class ManifestPolicyTest {
     @Test
-    fun debugMergedManifestCannotGrantNetworkOrBackup() = assertManifest("debug", "app.pristinepage.debug")
+    fun debugMergedManifestCannotGrantNetworkBackupOrBroadStorage() = assertManifest("debug", "app.pristinepage.debug")
 
     @Test
-    fun releaseMergedManifestCannotGrantNetworkOrBackup() = assertManifest("release", "app.pristinepage")
+    fun releaseMergedManifestCannotGrantNetworkBackupOrBroadStorage() = assertManifest("release", "app.pristinepage")
 
     @Test
     fun legacyBackupRulesExcludeAllPrivateAndExternalDomains() {
@@ -50,13 +50,22 @@ class ManifestPolicyTest {
     private fun assertManifest(variant: String, packageName: String) {
         val manifest = parse(inputFile("pristinepage.manifest.$variant"))
         assertEquals(packageName, manifest.documentElement.getAttribute("package"))
+        val forbiddenPermissions = setOf(
+            "android.permission.INTERNET",
+            "android.permission.ACCESS_NETWORK_STATE",
+            "android.permission.READ_EXTERNAL_STORAGE",
+            "android.permission.WRITE_EXTERNAL_STORAGE",
+            "android.permission.MANAGE_EXTERNAL_STORAGE",
+            "android.permission.READ_MEDIA_IMAGES",
+        )
+        val declaredPermissions = mutableSetOf<String>()
         for (tag in listOf("uses-permission", "uses-permission-sdk-23")) {
             val permissions = manifest.getElementsByTagName(tag)
             for (index in 0 until permissions.length) {
-                val permission = (permissions.item(index) as Element).android("name")
-                assertFalse("$variant grants network permission $permission", permission in setOf("android.permission.INTERNET", "android.permission.ACCESS_NETWORK_STATE"))
+                declaredPermissions += (permissions.item(index) as Element).android("name")
             }
         }
+        assertEquals("$variant must use scoped grants, not broad storage or network access", emptySet<String>(), declaredPermissions intersect forbiddenPermissions)
         val sdk = manifest.getElementsByTagName("uses-sdk").item(0) as Element
         assertEquals("26", sdk.android("minSdkVersion"))
         assertEquals("36", sdk.android("targetSdkVersion"))

@@ -40,7 +40,7 @@ import java.util.Locale
         val intent = state.launch ?: return@LaunchedEffect
         val isSaveAs = intent.action == android.content.Intent.ACTION_CREATE_DOCUMENT
         if (isSaveAs && create == null) return@LaunchedEffect
-        owner.consumeLaunch()
+        if (!owner.consumeLaunch(intent)) return@LaunchedEffect
         try {
             if (isSaveAs) checkNotNull(create).launch(intent)
             else context.startActivity(intent)

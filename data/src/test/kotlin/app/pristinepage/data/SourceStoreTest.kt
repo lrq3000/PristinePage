@@ -22,15 +22,24 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.*
+import org.junit.Rule
 import org.junit.Test
+import org.junit.rules.TemporaryFolder
 
 /** Real source-store orchestration/private files/journal/lease/owner/metadata commands. Only provider streams, normalized inspection and Android DB storage are substituted; this is not actual decoder/provider/device/process-death acceptance. */
 class SourceStoreTest {
-    internal class Fixture(directorySync: DirectorySync? = null, enableRetry: Boolean = false, captureDate: SourceCaptureDate? = null) {
+    @get:Rule
+    val ownedScratch: TemporaryFolder = TemporaryFolder.builder()
+        .parentFolder(File(System.getProperty("user.dir"), "build/test-owned-scratch").apply { Files.createDirectories(toPath()) })
+        .assureDeletion()
+        .build()
+
+    internal class Fixture(directorySync: DirectorySync? = null, enableRetry: Boolean = false, captureDate: SourceCaptureDate? = null, scratchRoot: File? = null) {
         val db = IngestIntentTest.Fixture()
         val bytes = byteArrayOf(1, 2, 3, 4)
-        private val parent = File(System.getProperty("user.dir"), "build/test-source-files").apply { mkdirs() }
-        val root = Files.createTempDirectory(parent.toPath(), "source-store-").toFile()
+        val root = scratchRoot ?: Files.createTempDirectory(
+            File(System.getProperty("user.dir"), "build/test-source-files").apply { mkdirs() }.toPath(), "source-store-",
+        ).toFile()
         val files = if (directorySync == null) SourceFiles(root) else SourceFiles(root, directorySync)
         val owners = LocalOperationOwners()
         var opened = 0; var closed = 0; var inspected = 0
@@ -67,7 +76,7 @@ class SourceStoreTest {
                 override suspend fun inspectForIngest(file: File, expectedByteSha256: String): InspectedSourceForIngest =
                     InspectedSourceForIngest(normalizedInspector.inspect(file, expectedByteSha256), captureDate)
             }
-            val completion = RoomIngestCompletion(db.metadata, db, db, db, db, files, { db.now }, { db.now }, Dispatchers.Unconfined)
+            val completion = RoomIngestCompletion(db.metadata, db, db, db, db, files, { db.now }, { db.now }, Dispatchers.Unconfined, scanNames = db.scanNames)
             val replay = object : IngestReplay { override suspend fun replay(intent: IngestJournalIntent): IngestResult { beforeReplay(intent); return completion.replay(intent) } }
             val preparation = object : IngestPreparation { override fun prepare(sessionId: ImportSessionId, boundUriText: String): IngestJournalIntent { beforePreparation(); return db.commands.prepare(sessionId, boundUriText) } }
             val lookup = RoomIngestLookup(db.metadata, db, db, db)
@@ -155,6 +164,22 @@ class SourceStoreTest {
         assertTrue(f.db.catalog.pages.isEmpty())
         assertTrue(f.db.blobs.isEmpty())
         assertFalse(f.db.jobs.values.any { it.state == "SUCCEEDED" })
+    }
+
+    @Test fun finalSuccessCannotAcknowledgeAChangedReceipt() = runTest {
+        val f = Fixture()
+        f.db.afterJobUpdate = { job ->
+            if (job.state == "SUCCEEDED") {
+                val (id, row) = f.db.files.entries.single()
+                f.db.files[id] = row.copy(payload = byteArrayOf(0))
+            }
+        }
+        val result = f.store.ingestBoundProvider(f.db.uri, f.db.child) as IngestResult.Rejected
+        assertEquals("ingest_journal_changed", result.error.safeMessageKey)
+        assertTrue(f.db.catalog.pages.isEmpty())
+        val intent = checkNotNull(RoomIngestLookup(f.db.metadata, f.db, f.db, f.db).find(f.db.child))
+        assertEquals("MOVED", f.db.files.getValue(intent.transactionId.value).state)
+        assertArrayEquals(f.bytes, f.files.finalFile(intent.sourceBlobId.value).readBytes())
     }
 
     @Test fun revokedMidCopyClosesTheDescriptorAndCannotCommitAPage() = runTest {
@@ -265,8 +290,25 @@ class SourceStoreTest {
         assertEquals(1, f.closed); assertEquals(0, f.inspected); assertTrue(f.db.catalog.pages.isEmpty())
     }
 
+    @Test fun smallStreamingLimitRejectsOneExtraByteWithoutPublishing() {
+        val root = ownedScratch.newFolder()
+        val files = SourceFiles(root)
+        val exact = ByteArray(8) { 1 }
+        val blob = UUID.randomUUID().toString()
+        assertEquals(8L, files.stage(UUID.randomUUID().toString(), blob, ByteArrayInputStream(exact), 8).byteCount)
+        val oversized = object : ByteArrayInputStream(exact + 1.toByte()) {
+            override fun read(buffer: ByteArray, offset: Int, length: Int): Int =
+                super.read(buffer, offset, minOf(length, exact.size))
+        }
+        val tx = UUID.randomUUID().toString()
+        assertThrows(IllegalArgumentException::class.java) { files.stage(tx, blob, oversized, 8) }
+        assertArrayEquals(exact, File(root, "staging/$tx/original.part").readBytes())
+        assertFalse(files.finalFile(blob).exists())
+    }
+
     @Test fun encodedByteLimitIsEnforcedDuringStreamingBeforeDecodeOrFinalPublication() = runTest {
-        val f = Fixture()
+        // The genuine production-limit path must retain its partial until the assertion; JUnit, not the store, owns the synthetic file's lifetime.
+        val f = Fixture(scratchRoot = ownedScratch.newFolder())
         f.input = {
             object : InputStream() {
                 private var remaining = 104857601L
@@ -283,7 +325,7 @@ class SourceStoreTest {
         assertEquals(OperationErrorCode.RESOURCE_LIMIT, result.error.code)
         assertEquals(1, f.closed); assertEquals(0, f.inspected)
         val row = f.db.files.values.single()
-        assertTrue(File(f.root, row.stagingPath!!).length() <= 104857600L)
+        assertEquals(104857600L, Files.size(File(f.root, row.stagingPath!!).toPath()))
         assertFalse(File(f.root, row.finalPath!!).exists()); assertTrue(f.db.catalog.pages.isEmpty())
     }
 

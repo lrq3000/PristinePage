@@ -7,30 +7,22 @@ import app.pristinepage.core.recipe.GeometryRecipe
 import app.pristinepage.core.recipe.RecipeCodec
 import app.pristinepage.data.db.*
 import app.pristinepage.data.model.*
+import app.pristinepage.data.repository.LibraryUndoCodec.MembershipPointer
+import app.pristinepage.data.repository.LibraryUndoCodec.MembershipState
+import app.pristinepage.data.repository.LibraryUndoCodec.RecipePointer as UndoPointer
+import app.pristinepage.data.repository.LibraryUndoCodec.RecipeState
 import java.util.UUID
-import java.nio.ByteBuffer
-import java.nio.charset.CodingErrorAction
 import kotlin.coroutines.CoroutineContext
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.ensureActive
-import kotlinx.serialization.Serializable
-import kotlinx.serialization.json.Json
-import kotlinx.serialization.json.JsonArray
-import kotlinx.serialization.json.JsonElement
-import kotlinx.serialization.json.JsonObject
-
-@Serializable private data class UndoPointer(val pageId: String, val sourceId: String, val recipeRevision: Long)
-@Serializable private data class RecipeUndoState(val version: Int = 1, val pages: List<UndoPointer>)
-@Serializable private data class MembershipPointer(val pageId: String, val sourceId: String, val state: String, val ordinal: Int?, val removedAt: Long?)
-@Serializable private data class MembershipUndoState(val documentId: String, val pages: List<MembershipPointer>, val version: Int = 1)
 
 /** File/decode/render work is deliberately absent. Canonical/capability preflight finishes before a short metadata transaction, which rechecks every mutable pointer and publishes all revisions together. RoomMetadataAccess supplies actual Android rollback; host tests exercise this same business code through its database port. */
 class RoomDocumentRepository @JvmOverloads constructor(private val metadata: MetadataAccess, private val admission: RecipeAdmission, private val clock: () -> Long = System::currentTimeMillis, private val dispatcher: CoroutineDispatcher = Dispatchers.IO, private val recovery: RecoveryCoordinator? = null, private val snapshots: ExportSnapshots? = null) : DocumentRepository {
     private val q: CatalogQueries get() = metadata.queries
-    private val json = Json { encodeDefaults = true; ignoreUnknownKeys = false }
+    private val scanNames get() = (metadata as? RoomMetadataAccess)?.libraryScanNames
     private class Conflict(val actual: Long) : RuntimeException()
     private data class MaskState(val pageId: String, val revision: Long, val links: List<RecipeMaskRow>, val identities: List<MaskRow>)
     private data class Prepared(val page: PageRow, val current: RecipeRevisionRow, val recipe: Recipe, val bytes: ByteArray, val hash: String, val masks: MaskState, val restored: RecipeRevisionRow?, val sourceBlob: String)
@@ -158,9 +150,7 @@ class RoomDocumentRepository @JvmOverloads constructor(private val metadata: Met
     internal suspend fun publishAtelierDraft(drafts: AtelierDraftDao, draftId: String, generation: Long,
         witnessed: List<AtelierPageWitness>, renderer: RenderCoordinator): AtelierPublicationReceipt = withContext(dispatcher) {
         try {
-            requireOpaqueId(draftId)
-            if (!metadata.ownsAtelierPublication(drafts)) reject(OperationErrorCode.INVALID_INPUT, "draft_transaction_owner_mismatch", draftId)
-            if (generation < 1 || witnessed.size !in 1..RoomAtelierDrafts.MAX_ITEMS_PER_DRAFT) reject(OperationErrorCode.REVISION_CONFLICT, "draft_preview_changed", draftId)
+            requireAtelierPublicationRequest(drafts, draftId, generation, witnessed)
             val inputs = witnessed.toList()
             val scope = DraftEdit(draftId, generation)
             val initial = metadata.transaction {
@@ -210,6 +200,7 @@ class RoomDocumentRepository @JvmOverloads constructor(private val metadata: Met
                 }
                 val now = clock()
                 val document = DocumentId(live.target?.documentId ?: live.staged.documentId)
+                val copiedNames = mutableListOf<Pair<PageId, String>>()
                 val saved = if (live.target == null) {
                     updateDocument(live.staged.copy(createdAt = now, updatedAt = now))
                     pages.map { PageId(it.pageId) }
@@ -220,6 +211,8 @@ class RoomDocumentRepository @JvmOverloads constructor(private val metadata: Met
                         val id = PageId(uuid())
                         val source = pages[index].sourceId
                         q.insertPage(PageRow(id.value, document.value, source, 1, "ACTIVE", live.targetPageCount + index, null, now))
+                        scanNames?.copyName(pages[index].pageId, live.staged.documentId, id.value, document.value, proof.original.mime)
+                            ?.let { copiedNames += id to it }
                         q.insertRecipe(RecipeRevisionRow(id.value, 1, source, 1, proof.prepared.bytes.copyOf(), proof.prepared.hash, null, now))
                         pinSource("PAGE", id.value, source, now)
                         pinSource("RECIPE_HISTORY", recipeOwner(id.value, 1), source, now)
@@ -233,6 +226,7 @@ class RoomDocumentRepository @JvmOverloads constructor(private val metadata: Met
                         committedDocumentId = document.value, receiptPageIds = receipt.encode())) != 1) {
                     reject(OperationErrorCode.STORAGE_FAILED, "draft_receipt_write_failed", draftId)
                 }
+                for ((pageId, filename) in copiedNames) verifyCopiedScanName(pageId, document.value, filename)
                 coroutineContext.ensureActive()
                 receipt
             }
@@ -241,6 +235,28 @@ class RoomDocumentRepository @JvmOverloads constructor(private val metadata: Met
         catch (_: Conflict) { reject(OperationErrorCode.REVISION_CONFLICT, "draft_preview_changed", draftId) }
         catch (_: IllegalArgumentException) { reject(OperationErrorCode.INTEGRITY_FAILED, "draft_publication_invalid", draftId) }
         catch (_: Exception) { reject(OperationErrorCode.STORAGE_FAILED, "draft_publication_failed", draftId) }
+    }
+
+    /** Resolve an uncertain delivery without rendering or attempting another publication. */
+    internal suspend fun inspectAtelierPublication(drafts: AtelierDraftDao, draftId: String, generation: Long,
+        witnessed: List<AtelierPageWitness>): AtelierPublicationReceipt? = withContext(dispatcher) {
+        try {
+            requireAtelierPublicationRequest(drafts, draftId, generation, witnessed)
+            val inputs = witnessed.toList()
+            metadata.transaction {
+                coroutineContext.ensureActive()
+                replayPublication(publicationRow(drafts, draftId), generation, inputs)
+            }
+        } catch (canceled: CancellationException) { throw canceled }
+        catch (failure: RepositoryFailure) { throw failure }
+        catch (_: IllegalArgumentException) { reject(OperationErrorCode.INTEGRITY_FAILED, "draft_publication_invalid", draftId) }
+        catch (_: Exception) { reject(OperationErrorCode.STORAGE_FAILED, "draft_publication_failed", draftId) }
+    }
+
+    private fun requireAtelierPublicationRequest(drafts: AtelierDraftDao, draftId: String, generation: Long, witnessed: List<AtelierPageWitness>) {
+        requireOpaqueId(draftId)
+        if (!metadata.ownsAtelierPublication(drafts)) reject(OperationErrorCode.INVALID_INPUT, "draft_transaction_owner_mismatch", draftId)
+        if (generation < 1 || witnessed.size !in 1..RoomAtelierDrafts.MAX_ITEMS_PER_DRAFT) reject(OperationErrorCode.REVISION_CONFLICT, "draft_preview_changed", draftId)
     }
 
     private fun publicationOriginal(drafts: AtelierDraftDao, prepared: Prepared, scope: DraftEdit, revision: Long): SourceBlobRow {
@@ -438,6 +454,11 @@ class RoomDocumentRepository @JvmOverloads constructor(private val metadata: Met
                 for (page in pages) updatePage(page.copy(ordinal = checkNotNull(page.ordinal) + pages.size + 1))
                 val added = PageRow(id.value, doc.documentId, source.sourceId, 1, "ACTIVE", index + 1, null, now)
                 q.insertPage(added)
+                val filename = scanNames?.let {
+                    val binding = boundedSource(added.sourceId)
+                    val blob = q.sourceBlob(binding.sourceBlobId) ?: reject(OperationErrorCode.INTEGRITY_FAILED, "source_unavailable", added.pageId)
+                    it.copyName(original.pageId, doc.documentId, added.pageId, doc.documentId, blob.mime)
+                }
                 q.insertRecipe(RecipeRevisionRow(id.value, 1, source.sourceId, 1, prepared.bytes.copyOf(), prepared.hash, null, now))
                 for ((position, page) in pages.withIndex()) updatePage(page.copy(ordinal = if (position <= index) position else position + 1))
                 pinSource("PAGE", id.value, source.sourceId, now)
@@ -446,6 +467,8 @@ class RoomDocumentRepository @JvmOverloads constructor(private val metadata: Met
                 val finalOrder = (pages.take(index + 1) + added + pages.drop(index + 1)).mapIndexed { ordinal, page -> page.copy(ordinal = ordinal) }
                 val undo = addMembershipUndo(doc.documentId, "PAGE_DUPLICATE", pages, finalOrder, nextDoc, now)
                 updateDocument(doc.copy(documentRevision = nextDoc, updatedAt = now))
+                if (filename != null) verifyCopiedScanName(id, doc.documentId, filename)
+                coroutineContext.ensureActive()
                 DocumentMutationResult.Applied(nextDoc, listOf(id), undo)
             }
         }
@@ -490,6 +513,12 @@ class RoomDocumentRepository @JvmOverloads constructor(private val metadata: Met
         }
     }
 
+    private fun verifyCopiedScanName(id: PageId, document: String, filename: String) {
+        if (scanNames?.matches(id.value, document, filename) != true) {
+            reject(OperationErrorCode.INTEGRITY_FAILED, "copied_scan_name_mismatch", id.value)
+        }
+    }
+
     /** All callers hold the same Room transaction. Unresolved insertion reservations cannot be silently relocated by membership commands or their Undo. */
     private fun membershipPages(documentId: String): List<PageRow> {
         if (q.hasPendingImport(documentId)) reject(OperationErrorCode.REVISION_CONFLICT, "finish_import_before_membership_edit", documentId, true)
@@ -516,34 +545,8 @@ class RoomDocumentRepository @JvmOverloads constructor(private val metadata: Met
     private fun undoMembership(entry: UndoEntryRow, expectedDocumentRevision: Long, ownerContext: CoroutineContext): DocumentMutationResult {
         if (expectedDocumentRevision < 1 || entry.state != "AVAILABLE" || entry.expiresAt <= clock()) reject(OperationErrorCode.INVALID_INPUT, "undo_unavailable", entry.undoId)
         val before = decodeMembership(entry.beforeState); val after = decodeMembership(entry.afterState)
-        if (before.documentId != entry.documentId || after.documentId != entry.documentId) reject(OperationErrorCode.INTEGRITY_FAILED, "invalid_undo_metadata", entry.undoId)
-        // Every supported membership edit starts from an active set. Validate before reading non-null ordinals so corrupted but canonical history never becomes a misleading storage retry.
-        if (before.pages.any { it.state != "ACTIVE" }) reject(OperationErrorCode.INTEGRITY_FAILED, "invalid_undo_metadata", entry.undoId)
-        val duplicate = if (entry.action == "PAGE_DUPLICATE") {
-            val beforeIds = before.pages.map { it.pageId }.toSet()
-            val added = after.pages.filter { it.pageId !in beforeIds }
-            if (after.pages.size != before.pages.size + 1 || added.size != 1 || after.pages.any { it.state != "ACTIVE" }) reject(OperationErrorCode.INTEGRITY_FAILED, "invalid_undo_metadata", entry.undoId)
-            val copy = added.single(); val ordinal = checkNotNull(copy.ordinal)
-            val original = before.pages.singleOrNull { it.ordinal == ordinal - 1 }
-            if (ordinal < 1 || original?.sourceId != copy.sourceId) reject(OperationErrorCode.INTEGRITY_FAILED, "invalid_undo_metadata", entry.undoId)
-            val derived = (before.pages.map { page -> page.copy(ordinal = checkNotNull(page.ordinal).let { if (it >= ordinal) it + 1 else it }) } + copy).sortedBy { it.pageId }
-            if (derived != after.pages) reject(OperationErrorCode.INTEGRITY_FAILED, "invalid_undo_metadata", entry.undoId)
-            copy
-        } else {
-            if (before.pages.map { it.pageId to it.sourceId } != after.pages.map { it.pageId to it.sourceId }) reject(OperationErrorCode.INTEGRITY_FAILED, "invalid_undo_metadata", entry.undoId)
-            null
-        }
-        if ((entry.action == "PAGE_REORDER" && after.pages.any { it.state != "ACTIVE" }) || (entry.action == "PAGE_REMOVE" && after.pages.count { it.state == "REMOVED" } != 1)) reject(OperationErrorCode.INTEGRITY_FAILED, "invalid_undo_metadata", entry.undoId)
-        if (entry.action == "PAGE_REMOVE") {
-            val removed = after.pages.single { it.state == "REMOVED" }
-            val oldOrdinal = checkNotNull(before.pages.single { it.pageId == removed.pageId }.ordinal)
-            val derived = before.pages.map { prior ->
-                if (prior.pageId == removed.pageId) prior.copy(state = "REMOVED", ordinal = null, removedAt = removed.removedAt)
-                else prior.copy(ordinal = checkNotNull(prior.ordinal).let { if (it > oldOrdinal) it - 1 else it })
-            }
-            // Canonical snapshots can still disagree semantically. A removal may restore its one page, not silently reorder untouched survivors through a corrupted before-state.
-            if (derived != after.pages) reject(OperationErrorCode.INTEGRITY_FAILED, "invalid_undo_metadata", entry.undoId)
-        }
+        val duplicate = try { LibraryUndoCodec.validateMembershipEdit(entry.action, entry.documentId, before, after) }
+        catch (_: IllegalArgumentException) { reject(OperationErrorCode.INTEGRITY_FAILED, "invalid_undo_metadata", entry.undoId) }
         return metadata.transaction {
             val doc = activeDocument(entry.documentId)
             if (doc.documentRevision != expectedDocumentRevision) throw Conflict(doc.documentRevision)
@@ -574,34 +577,10 @@ class RoomDocumentRepository @JvmOverloads constructor(private val metadata: Met
     }
 
     private fun membershipPointer(page: PageRow) = MembershipPointer(page.pageId, page.sourceId, page.state, page.ordinal, page.removedAt)
-    private fun encodeMembership(document: String, pages: List<MembershipPointer>): ByteArray {
-        fun canonical(value: JsonElement): JsonElement = when (value) {
-            is JsonObject -> JsonObject(value.entries.sortedBy { it.key }.associate { it.key to canonical(it.value) })
-            is JsonArray -> JsonArray(value.map(::canonical))
-            else -> value
-        }
-        return canonical(json.encodeToJsonElement(MembershipUndoState.serializer(), MembershipUndoState(document, pages.sortedBy { it.pageId }))).toString().toByteArray(Charsets.UTF_8)
-    }
+    private fun encodeMembership(document: String, pages: List<MembershipPointer>): ByteArray = LibraryUndoCodec.encodeMembership(document, pages)
 
-    private fun decodeMembership(bytes: ByteArray): MembershipUndoState {
-        try {
-            require(bytes.size in 1..524288)
-            val text = Charsets.UTF_8.newDecoder().onMalformedInput(CodingErrorAction.REPORT).onUnmappableCharacter(CodingErrorAction.REPORT).decode(ByteBuffer.wrap(bytes)).toString()
-            // Every string in this format is an opaque UUID or fixed state, so brackets inside quotes are forbidden by typed validation anyway. Bound nesting before asking the serializer to recurse on corrupted metadata.
-            var depth = 0
-            for (character in text) when (character) { '{', '[' -> { depth++; require(depth <= 8) }; '}', ']' -> { depth--; require(depth >= 0) } }
-            require(depth == 0)
-            val state = json.decodeFromString(MembershipUndoState.serializer(), text)
-            DocumentId(state.documentId); require(state.version == 1 && state.pages.size in 1..100 && state.pages.map { it.pageId }.toSet().size == state.pages.size)
-            for (page in state.pages) {
-                PageId(page.pageId); SourceId(page.sourceId)
-                require((page.state == "ACTIVE" && page.ordinal in 0..99 && page.removedAt == null) || (page.state == "REMOVED" && page.ordinal == null && page.removedAt != null))
-            }
-            val ordinals = state.pages.filter { it.state == "ACTIVE" }.map { checkNotNull(it.ordinal) }.sorted()
-            require(ordinals == ordinals.indices.toList() && bytes.contentEquals(encodeMembership(state.documentId, state.pages)))
-            return state
-        } catch (_: Exception) { reject(OperationErrorCode.INTEGRITY_FAILED, "invalid_undo_metadata") }
-    }
+    private fun decodeMembership(bytes: ByteArray): MembershipState = try { LibraryUndoCodec.decodeMembership(bytes) }
+    catch (_: IllegalArgumentException) { reject(OperationErrorCode.INTEGRITY_FAILED, "invalid_undo_metadata") }
 
     private fun prepare(pageId: String, recipe: Recipe, restoreRevision: Long? = null, draft: DraftEdit? = null): Prepared {
         // Raw scalar checks and their typed reads share a short snapshot. The recipe BLOB is bounded BEFORE Room's getBlob/getLong.toInt and detached before codec/capability work outside the lock.
@@ -777,15 +756,9 @@ class RoomDocumentRepository @JvmOverloads constructor(private val metadata: Met
     private fun updateDocument(row: DocumentRow) { if (q.updateDocument(row) != 1) reject(OperationErrorCode.INTEGRITY_FAILED, "document_unavailable", row.documentId) }
     private fun pointer(page: PageRow) = UndoPointer(page.pageId, page.sourceId, page.currentRecipeRevision)
     private fun recipeOwner(page: String, revision: Long): String = "recipe-v1/$page/$revision"
-    private fun encodeUndo(pages: List<UndoPointer>): ByteArray = json.encodeToString(RecipeUndoState.serializer(), RecipeUndoState(pages = pages)).toByteArray(Charsets.UTF_8)
-    private fun decodeUndo(bytes: ByteArray): RecipeUndoState {
-        if (bytes.size !in 1..524288) reject(OperationErrorCode.INTEGRITY_FAILED, "invalid_undo_metadata")
-        val state = try { json.decodeFromString(RecipeUndoState.serializer(), bytes.toString(Charsets.UTF_8)) } catch (_: Exception) { reject(OperationErrorCode.INTEGRITY_FAILED, "invalid_undo_metadata") }
-        if (state.version != 1 || state.pages.isEmpty() || state.pages.size > 100 || state.pages.map { it.pageId }.toSet().size != state.pages.size) reject(OperationErrorCode.INTEGRITY_FAILED, "invalid_undo_metadata")
-        try { for (page in state.pages) { PageId(page.pageId); SourceId(page.sourceId); require(page.recipeRevision >= 1) } }
-        catch (_: IllegalArgumentException) { reject(OperationErrorCode.INTEGRITY_FAILED, "invalid_undo_metadata") }
-        return state
-    }
+    private fun encodeUndo(pages: List<UndoPointer>): ByteArray = LibraryUndoCodec.encodeRecipe(pages)
+    private fun decodeUndo(bytes: ByteArray): RecipeState = try { LibraryUndoCodec.decodeRecipe(bytes) }
+    catch (_: IllegalArgumentException) { reject(OperationErrorCode.INTEGRITY_FAILED, "invalid_undo_metadata") }
     private fun next(value: Long): Long {
         if (value < 1) reject(OperationErrorCode.INTEGRITY_FAILED, "invalid_stored_revision")
         return try { Math.addExact(value, 1L) } catch (_: ArithmeticException) { reject(OperationErrorCode.RESOURCE_LIMIT, "revision_limit") }

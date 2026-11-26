@@ -112,9 +112,10 @@ class EditorPersistenceIntegrationTest {
     private class Fixture : AutoCloseable {
         private val base = InstrumentationRegistry.getInstrumentation().targetContext
         private val root = File(base.filesDir,"t09-editor-persistence-${UUID.randomUUID()}")
+        private val files = File(root, "files").apply { check(mkdirs()) }
         private val context = object : ContextWrapper(base) {
             override fun getApplicationContext(): Context = this
-            override fun getFilesDir(): File = File(root,"files")
+            override fun getFilesDir(): File = files
             override fun getDatabasePath(name: String): File = File(root,"databases/$name").also { it.parentFile!!.mkdirs() }
         }
         val png = Bitmap.createBitmap(intArrayOf(5,15,25,35,45,55).map { gray -> (0xff shl 24) or (gray shl 16) or (gray shl 8) or gray }.toIntArray(),3,2,Bitmap.Config.ARGB_8888).let { bitmap -> try { ByteArrayOutputStream().also { check(bitmap.compress(Bitmap.CompressFormat.PNG,100,it)) }.toByteArray() } finally { bitmap.recycle() } }

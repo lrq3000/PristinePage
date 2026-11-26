@@ -24,9 +24,11 @@ class JobLeaseTransactions @JvmOverloads constructor(private val metadata: Metad
                 val now = leaseClock()
                 // The bounded writer may still fail, expire or invalidate its own destination. Do not commit its domain changes unless the same attempt remains publishable at the final fence.
                 val job = JobLeaseFence.current(jobs, lease, now) ?: lostLease(lease)
-                if (jobs.updateLease(job.copy(state = "SUCCEEDED", leaseOwner = null, leaseUntil = null, updatedAt = auditClock()), lease.generation) != 1) lostLease(lease)
+                val succeeded = job.copy(state = "SUCCEEDED", leaseOwner = null, leaseUntil = null, updatedAt = auditClock())
+                if (jobs.updateLease(succeeded, lease.generation) != 1) lostLease(lease)
                 if (verifyMetadata != null) {
                     verifyMetadata()
+                    if (!sameJob(succeeded, jobs.job(lease.jobId.value) ?: lostLease(lease))) lostLease(lease)
                     // The success update cleared the live deadline; observe the pre-update lease after the readback.
                     if (JobLeaseFence.current(job, lease, leaseClock()) == null) lostLease(lease)
                 }

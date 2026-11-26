@@ -4,6 +4,8 @@ import app.pristinepage.core.ocr.OcrConfiguration
 import app.pristinepage.core.ocr.OcrError
 import app.pristinepage.core.ocr.OcrText
 import app.pristinepage.data.db.PristineDatabase
+import app.pristinepage.data.db.JobRow
+import app.pristinepage.data.library.LibrarySavedOcr
 import app.pristinepage.data.model.DocumentId
 import app.pristinepage.data.model.JobId
 import app.pristinepage.data.model.OperationError
@@ -22,7 +24,7 @@ import kotlinx.coroutines.withContext
 
 /** ID-only result port. FTS rows are candidates; opening a displayed hit requires a fresh check of the same saved input and producer. */
 internal class RoomOcrSearch(
-    database: PristineDatabase,
+    private val database: PristineDatabase,
     private val dispatcher: CoroutineDispatcher = Dispatchers.IO,
 ) {
     private val metadata = RoomMetadataAccess(database)
@@ -86,6 +88,49 @@ internal class RoomOcrSearch(
             TextSnapshot(text, producing.intent.configuration, producing.previousGeneration, binding)
         }
     }
+
+    /** Snapshot the actual producer and exact recognized text, not pending rerun settings or the FTS projection. */
+    internal fun captureForLibraryInTransaction(document: DocumentId, page: PageId, acceptedRevision: Long): LibrarySavedOcr? {
+        check(database.inTransaction())
+        require(acceptedRevision > 0)
+        val storedRevision = results.libraryResultRevision(page.value)
+        val pointer = pageWork.libraryResultPointer(page.value)
+        val resultId = pointer?.resultJobId
+        if (storedRevision == null && resultId == null && pointer?.projectionVersion == null) return null
+        if (storedRevision == null || storedRevision !in 1..acceptedRevision || pointer == null || resultId == null ||
+            pointer.projectionVersion != RoomOcrResults.PROJECTION_VERSION.toLong()
+        ) invalidLibraryOcr(page)
+        val id = try { JobId(resultId).also { JobId(pointer.jobId) } } catch (_: IllegalArgumentException) { invalidLibraryOcr(page) }
+        val (intent, job) = jobs.readProducerInTransaction(id, page) ?: invalidLibraryOcr(page)
+        val sameJob = pointer.jobId == resultId
+        if (intent.documentId != document || intent.input.recipeRevision != storedRevision || !job.isOcrProducer() ||
+            (sameJob && intent.generation != pointer.generation) || (!sameJob && intent.generation >= pointer.generation)
+        ) invalidLibraryOcr(page)
+        val producer = Producer(Hit(document, page, intent.sourceId, storedRevision, id), intent, job, !sameJob)
+        val text = selectVerbatim(producer)?.let(::decodeStoredOcrText) ?: invalidLibraryOcr(page)
+        if (storedRevision < acceptedRevision) {
+            val catalog = database.catalog()
+            if (catalog.recipeReadIsBounded(page.value, storedRevision) != true) invalidLibraryOcr(page)
+            val old = catalog.recipe(page.value, storedRevision) ?: invalidLibraryOcr(page)
+            if (old.recipeSha256 != intent.recipeSha256 || old.sourceId != intent.sourceId.value) invalidLibraryOcr(page)
+            return null // A real result for a superseded edition is not copied onto the accepted one.
+        }
+        if (!libraryInputMatches(intent)) invalidLibraryOcr(page)
+        return LibrarySavedOcr(id, intent, text, job.attempt, job.createdAt, job.updatedAt)
+    }
+
+    internal fun libraryInputMatches(intent: OcrJobInput): Boolean {
+        check(database.inTransaction())
+        if (work.isSavedInputInTransaction(intent)) return true
+        val document = intent.documentId.value
+        return pageWork.removedLibraryInputMatches(intent.input.pageId, document, intent.sourceId.value,
+            intent.input.recipeRevision, intent.recipeSha256, intent.input.sourcePixelSha256) &&
+            !metadata.isHiddenAtelierDraft(document)
+    }
+
+    private fun invalidLibraryOcr(page: PageId): Nothing = throw RepositoryFailure(
+        OperationError(OperationErrorCode.INTEGRITY_FAILED, false, "library_saved_ocr_invalid", page.value),
+    )
 
     suspend fun resolveTextExport(binding: TextBinding): ByteArray? = withContext(dispatcher) {
         val active = coroutineContext
@@ -160,7 +205,7 @@ internal class RoomOcrSearch(
     private fun invalidStatus(page: PageId): Nothing =
         throw RepositoryFailure(OperationError(OperationErrorCode.INTEGRITY_FAILED, false, "ocr_status_invalid", page.value))
 
-    private class Producer(val hit: Hit, val intent: OcrJobInput, val previousGeneration: Boolean)
+    private class Producer(val hit: Hit, val intent: OcrJobInput, val job: JobRow, val previousGeneration: Boolean)
 
     private fun checkedProducer(page: PageId): Producer? = try {
         verifyProducer(page)
@@ -176,17 +221,18 @@ internal class RoomOcrSearch(
         val sameJob = distinctProducer.value == current.job.jobId
         val (intent, job) = if (sameJob) current.intent to current.job else
             jobs.readProducerInTransaction(distinctProducer, page) ?: return null
-        if ((!sameJob && intent.generation >= current.intent.generation) ||
-            job.state != "SUCCEEDED" || job.attempt !in 1L..3L || job.leaseGeneration != job.attempt ||
-            job.leaseOwner != null || job.leaseUntil != null || job.errorCode != null ||
+        if ((!sameJob && intent.generation >= current.intent.generation) || !job.isOcrProducer() ||
             !work.isSavedInputInTransaction(intent)
         ) return null
         val config = intent.configuration
         if (!results.matchesProducerMetadata(page.value, intent.input.recipeRevision, intent.input.sourcePixelSha256,
                 config.engineId, config.engineVersion, config.layout.name)
         ) return null
-        return Producer(Hit(intent.documentId, page, intent.sourceId, intent.input.recipeRevision, distinctProducer), intent, !sameJob)
+        return Producer(Hit(intent.documentId, page, intent.sourceId, intent.input.recipeRevision, distinctProducer), intent, job, !sameJob)
     }
+
+    private fun JobRow.isOcrProducer(): Boolean = state == "SUCCEEDED" && attempt in 1L..3L &&
+        leaseGeneration == attempt && leaseOwner == null && leaseUntil == null && errorCode == null
 
     private fun pageId(value: String): PageId = try { PageId(value) }
     catch (_: IllegalArgumentException) {

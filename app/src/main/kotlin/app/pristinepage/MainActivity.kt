@@ -34,9 +34,12 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import app.pristinepage.capture.LibraryPickerBinding
 import app.pristinepage.capture.CaptureScreen
 import app.pristinepage.capture.PhotoImportKind
+import app.pristinepage.capture.PhotoImportRequest.Companion.restoreActivation
+import app.pristinepage.capture.PhotoImportRequest.Companion.saveActivation
 import app.pristinepage.capture.AtelierCaptureViewModel
 import app.pristinepage.capture.AtelierCaptureScreen
 import app.pristinepage.data.model.DocumentId
+import app.pristinepage.data.library.LibraryActivation
 import app.pristinepage.data.model.DocumentPage
 import app.pristinepage.data.model.DocumentSummary
 import app.pristinepage.data.model.ImportSessionId
@@ -48,6 +51,9 @@ import app.pristinepage.editor.EditorIdentity
 import app.pristinepage.editor.EditorViewModel
 import app.pristinepage.editor.PageEditorScreen
 import app.pristinepage.library.LibraryEvent
+import app.pristinepage.library.LibraryBackupPickerHost
+import app.pristinepage.library.LibraryBackupSettings
+import app.pristinepage.library.LibraryBackupViewModel
 import app.pristinepage.library.errorText
 import app.pristinepage.editor.BatchEditScreen
 import app.pristinepage.editor.BatchEditViewModel
@@ -58,7 +64,6 @@ import app.pristinepage.library.ApplicationLibraryActions
 import app.pristinepage.library.ImportLibraryViewModel
 import app.pristinepage.library.LibraryIdentity
 import app.pristinepage.library.AtelierLibraryScreen
-import app.pristinepage.library.AtelierThumbnailLoader
 import app.pristinepage.library.OriginalPagePreview
 import app.pristinepage.library.LibrarySession
 import app.pristinepage.library.ImportPhase
@@ -68,8 +73,9 @@ import app.pristinepage.ocr.OcrTextSaveHost
 import app.pristinepage.ocr.OcrTextSaveViewModel
 import app.pristinepage.image.preview.OriginalPreviewBitmap
 import app.pristinepage.image.preview.RenderedPreviewBitmap
-import app.pristinepage.image.preview.RenderedPreviewBitmapLoader
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withPermit
@@ -88,7 +94,7 @@ class MainActivity : ComponentActivity() {
             isAppearanceLightStatusBars = true
             isAppearanceLightNavigationBars = true
         }
-        val restored = try { restore(savedInstanceState) to restoreEditor(savedInstanceState) } catch (_: RuntimeException) {
+        val restored = try { restoreLibraryIdentity(savedInstanceState) to restoreEditorIdentity(savedInstanceState) } catch (_: RuntimeException) {
             // Invalid saved identity cannot invent a replacement request/destination. The explicit library action still discovers durable pending insertions without reopening temporary provider references.
             setContent { AppTheme { Column(Modifier.fillMaxSize().safeDrawingPadding().padding(24.dp)) {
                 Text(stringResource(R.string.error_session_expired))
@@ -105,43 +111,49 @@ class MainActivity : ComponentActivity() {
         val factory = object : ViewModelProvider.Factory {
             @Suppress("UNCHECKED_CAST") override fun <T : ViewModel> create(modelClass: Class<T>): T {
                 require(modelClass == ImportLibraryViewModel::class.java)
-                return ImportLibraryViewModel(ApplicationLibraryActions(applicationContext, app.savedOcrSignals::onPagesSaved, services::imports), restored) as T
+                return ImportLibraryViewModel(ApplicationLibraryActions(applicationContext, app.savedOcrSignals::onPagesSaved, services), restored) as T
             }
         }
         val retained = ViewModelProvider(this, factory)[ImportLibraryViewModel::class.java].session
         val editorFactory = object : ViewModelProvider.Factory {
             @Suppress("UNCHECKED_CAST") override fun <T : ViewModel> create(modelClass: Class<T>): T {
                 require(modelClass == EditorViewModel::class.java)
-                return EditorViewModel(services::imports, app.savedOcrSignals::onPagesSaved) as T
+                return EditorViewModel(services, app.savedOcrSignals::onPagesSaved) as T
             }
         }
         val editorOwner = ViewModelProvider(this, editorFactory)[EditorViewModel::class.java]
         val batchOwner = ViewModelProvider(this, object : ViewModelProvider.Factory {
             @Suppress("UNCHECKED_CAST") override fun <T : ViewModel> create(modelClass: Class<T>): T {
                 require(modelClass == BatchEditViewModel::class.java)
-                return BatchEditViewModel(services::imports, app.savedOcrSignals::onPagesSaved) as T
+                return BatchEditViewModel(services, app.savedOcrSignals::onPagesSaved, app.savedOcrSignals::requireStartupReconciliation) as T
             }
         })[BatchEditViewModel::class.java]
         val exportOwner = ViewModelProvider(this, object : ViewModelProvider.Factory {
             @Suppress("UNCHECKED_CAST") override fun <T : ViewModel> create(modelClass: Class<T>): T {
                 require(modelClass == AlbumExportViewModel::class.java)
-                return AlbumExportViewModel(app, services::imports) as T
+                 return AlbumExportViewModel(app, services) as T
             }
         })[AlbumExportViewModel::class.java]
         val textSave = ViewModelProvider(this, object : ViewModelProvider.Factory {
             @Suppress("UNCHECKED_CAST") override fun <T : ViewModel> create(modelClass: Class<T>): T {
                 require(modelClass == OcrTextSaveViewModel::class.java)
-                return OcrTextSaveViewModel(app) { services.imports().store.savedOcr } as T
+                 return OcrTextSaveViewModel(app, services) as T
             }
         })[OcrTextSaveViewModel::class.java]
+        val backup = ViewModelProvider(this, object : ViewModelProvider.Factory {
+            @Suppress("UNCHECKED_CAST") override fun <T : ViewModel> create(modelClass: Class<T>): T {
+                require(modelClass == LibraryBackupViewModel::class.java)
+                return LibraryBackupViewModel(services) as T
+            }
+        })[LibraryBackupViewModel::class.java].session
         val acquisition = ViewModelProvider(this, object : ViewModelProvider.Factory {
             @Suppress("UNCHECKED_CAST") override fun <T : ViewModel> create(modelClass: Class<T>): T {
                 require(modelClass == AtelierCaptureViewModel::class.java)
-                return AtelierCaptureViewModel(applicationContext, services::imports, app.savedOcrSignals::onPagesSaved) as T
+                return AtelierCaptureViewModel(applicationContext, services, app.savedOcrSignals::onPagesSaved) as T
             }
         })[AtelierCaptureViewModel::class.java]
         editor = editorOwner
-        if (editorOwner.state.value.identity == null) restoredEditor?.let { editorOwner.open(it.documentId.value, it.pageId.value) }
+        if (editorOwner.state.value.identity == null) restoredEditor?.let { editorOwner.open(it) }
         session = retained
         observing?.cancel(); picker?.close()
         val binding = LibraryPickerBinding(activityResultRegistry, retained)
@@ -150,12 +162,16 @@ class MainActivity : ComponentActivity() {
         observing = lifecycleScope.launch {
             repeatOnLifecycle(Lifecycle.State.STARTED) {
                 // A failed or unavailable earlier reconciliation may recover on the next foreground visit.
-                app.savedOcrSignals.onStartup()
+                launch {
+                    try {
+                        // Only the library owner initiates Room startup. The foreground OCR hint observes its verified default selection afterward.
+                        retained.state.first { it.recovery != null }.activation?.let(app.savedOcrSignals::onStartup)
+                    }
+                    catch (canceled: CancellationException) { throw canceled }
+                    catch (_: Exception) { /* Library startup owns the unavailable state. */ }
+                }
                 retained.state.collect { binding.synchronize() }
             }
-        }
-        val loadOriginal: suspend (String) -> OriginalPreviewBitmap = { source ->
-            services.imports().originalPreview(source)
         }
         setContent { AppTheme {
             val libraryState = rememberSaveableStateHolder()
@@ -164,103 +180,157 @@ class MainActivity : ComponentActivity() {
             val settings by app.atelierPreferences.settings.collectAsStateWithLifecycle()
             val host by editorOwner.state.collectAsStateWithLifecycle()
             val editing by editorOwner.session.collectAsStateWithLifecycle()
-            val library by retained.state.collectAsStateWithLifecycle()
+             val library by retained.state.collectAsStateWithLifecycle()
+              LaunchedEffect(library.activation) {
+                  backup.show(library.activation)
+                  textSave.show(library.activation)
+                  exportOwner.show(library.activation)
+              }
             val batch by batchOwner.state.collectAsStateWithLifecycle()
             val acquiring by acquisition.state.collectAsStateWithLifecycle()
-            val camera = library.request?.takeIf { it.kind == PhotoImportKind.CAMERA && library.phase == ImportPhase.WAITING_PICKER }
-            val atHome = !acquiring.open && batch.album == null && host.identity == null && camera == null && library.selectedId == null
-            LaunchedEffect(atHome) { if (!atHome) settingsPage = null }
+             val camera = library.request?.takeIf { it.kind == PhotoImportKind.CAMERA && library.phase == ImportPhase.WAITING_PICKER }
+             val atHome = !acquiring.open && batch.album == null && host.identity == null && camera == null && library.selectedId == null
+             BackHandler(enabled = atHome && settingsPage == null && library.restoringSelection) {
+                 retained.accept(LibraryEvent.LeaveHomeSearch)
+             }
+             LaunchedEffect(atHome) {
+                 if (!atHome) {
+                     backup.leaveSettings()
+                     settingsPage = null
+                 }
+             }
             fun leaveEditor() { editorOwner.closeEditor(); retained.accept(LibraryEvent.RefreshAlbum) }
-            LaunchedEffect(batch.savedDocument, batch.savedRevision, batch.undo) {
-                if (batch.savedDocument != null) retained.accept(LibraryEvent.RefreshAlbum)
+            fun refreshBatchAlbum(issuing: LibraryActivation, document: DocumentId) {
+                retained.refreshIssuedAlbum(issuing, document) { services.loadDefaultAlbum(issuing, document) }
             }
-            LaunchedEffect(acquiring.saved) {
+            LaunchedEffect(batch.savedDocument, batch.savedRevision, batch.issuingActivation) {
+                val issuing = batch.issuingActivation
+                val document = batch.savedDocument
+                if (issuing != null && document != null && batch.savedRevision != null) refreshBatchAlbum(issuing, document)
+            }
+            LaunchedEffect(acquiring.saved, acquiring.activation, library.activation) {
                 acquiring.saved?.let { album ->
-                    retained.accept(if (library.selectedId == album) LibraryEvent.RefreshAlbum else LibraryEvent.Open(album))
+                    if (library.activation == acquiring.activation) {
+                        retained.accept(if (library.selectedId == album) LibraryEvent.RefreshAlbum else LibraryEvent.Open(album))
+                    }
                     acquisition.acknowledgeSave()
                 }
             }
-            if (acquiring.open) AtelierCaptureScreen(acquiring, acquisition, activityResultRegistry, settings.showCameraGrid, window, loadOriginal,
-                loadQueueTile = { source -> services.imports().originalPreview(source, longEdge = 224) })
-            else if (batch.album != null) BatchEditScreen(batch, batchOwner, services::imports) { album, pages -> exportOwner.review(album, pages) }
+            if (acquiring.open) {
+                val draft = acquiring.draft
+                val issuing = checkNotNull(acquiring.activation)
+                AtelierCaptureScreen(acquiring, acquisition, activityResultRegistry, settings.showCameraGrid, window,
+                    loadOriginal = { source -> services.originalDefaultAtelier(issuing, checkNotNull(draft), source, 1024) },
+                    loadQueueTile = { source -> services.originalDefaultAtelier(issuing, checkNotNull(draft), source, 224) })
+            }
+            else if (batch.album != null) BatchEditScreen(batch, batchOwner, services,
+                 onReconcile = { issuing, album -> refreshBatchAlbum(issuing, album.document.documentId) }) { issuing, album, pages ->
+                 if (issuing == library.activation) exportOwner.review(issuing, album, pages)
+            }
             else if (host.identity == null && camera != null) key(camera.batchId) {
                 CaptureScreen(camera, { retained.accept(LibraryEvent.CancelImport) }, settings.showCameraGrid) { still ->
                     retained.submitCapture(LibraryEvent.PhotoResult(camera, still))
                 }
             }
             else if (atHome && settingsPage != null) {
-                val ocrReady by app.ocrRuntimeReady.collectAsStateWithLifecycle()
-                AtelierSettingsScreen(checkNotNull(settingsPage), app.atelierPreferences, ocrReady) { settingsPage = it }
+                 val ocrReady by app.ocrRuntimeReady.collectAsStateWithLifecycle()
+                 AtelierSettingsScreen(checkNotNull(settingsPage), app.atelierPreferences, ocrReady,
+                     libraryStorage = { LibraryBackupSettings(backup) }) {
+                     if (settingsPage == SettingsPage.LIBRARY_STORAGE && it != SettingsPage.LIBRARY_STORAGE) backup.leaveSettings()
+                     settingsPage = it
+                 }
             }
-            else if (host.identity == null) libraryState.SaveableStateProvider("atelier-library") {
-                val observeOcrPending = remember(app) { AlbumOcrPending.forSavedPage(app) { services.imports().store.savedOcr } }
-                val loadThumbnail: suspend (DocumentSummary, DocumentPage) -> RenderedPreviewBitmap = { album, tile ->
-                    // Lazy tiles retain only their small displays. Serialize expensive full-source decoding; the existing process-owned budget still governs every allocation.
-                    thumbnailPermit.withPermit {
-                        val graph = services.imports()
-                        AtelierThumbnailLoader(graph.store.editablePages::load, graph.renderer, RenderedPreviewBitmapLoader(graph.budget))
-                            .load(album, tile)
-                    }
-                }
-                AtelierLibraryScreen(retained, app.atelierPreferences, { services.imports().store.catalog.load(it) }, loadThumbnail,
-                     onBatch = { batchOwner.open(it) }, onSelectPages = batchOwner::open,
-                     onExport = { exportOwner.review(it, null) },
-                     batchUndo = batch.undo?.takeIf { batch.savedDocument == library.selectedId },
-                     undoBatch = batchOwner::undoSaved, closeBatchNotice = batchOwner::clearNotice,
-                      batchBusy = batch.saving, batchError = batch.error?.takeIf { batch.savedDocument == library.selectedId },
-                      observeOcrPending = observeOcrPending,
-                     thumbnailsCurrent = { album ->
-                         batch.savedDocument != album.documentId ||
-                             (!batch.saving && album.documentRevision >= (batch.savedRevision ?: 0L))
-                     },
-                       openAtelier = { title, target ->
-                           retained.accept(LibraryEvent.LeaveHomeSearch)
-                           acquisition.open(title, target)
-                       }, onSettings = {
-                           retained.accept(LibraryEvent.LeaveHomeSearch)
-                           settingsPage = SettingsPage.ROOT
-                       }) { document, page ->
-                    editorOwner.open(document.value, page.value)
-                }
+             else if (host.identity == null) libraryState.SaveableStateProvider("atelier-library") {
+                 val issuing = library.activation
+                 val observeOcrPending = remember(app, issuing) { issuing?.let { AlbumOcrPending.forSavedPage(app, it, services) } }
+                 val loadThumbnail: suspend (DocumentSummary, DocumentPage) -> RenderedPreviewBitmap = { album, tile ->
+                     // Lazy tiles retain only their small displays. Serialize expensive full-source decoding; the existing process-owned budget still governs every allocation.
+                     thumbnailPermit.withPermit {
+                         services.renderDefaultLibraryThumbnail(checkNotNull(issuing), album, tile)
+                     }
+                 }
+                 // Identical album/page IDs and revisions in a successor are not keys for an old display or in-flight effect.
+                 key(issuing) {
+                     AtelierLibraryScreen(
+                         retained, library, app.atelierPreferences, { services.loadDefaultAlbum(checkNotNull(issuing), it) }, loadThumbnail,
+                         onBatch = { activation, album -> batchOwner.open(activation, album) }, onSelectPages = batchOwner::open,
+                         onExport = { album -> issuing?.let { exportOwner.review(it, album, null) } },
+                         batchUndo = batch.undo?.takeIf { batch.savedDocument == library.selectedId && batch.issuingActivation == library.activation },
+                         undoBatch = batchOwner::undoSaved, closeBatchNotice = batchOwner::clearNotice,
+                         reconcileBatchUndo = {
+                             val activation = batch.issuingActivation
+                             val document = batch.savedDocument
+                             if (activation != null && document != null) refreshBatchAlbum(activation, document)
+                         },
+                         batchBusy = batch.saving && batch.issuingActivation == library.activation,
+                         batchError = batch.error?.takeIf { batch.savedDocument == library.selectedId && batch.issuingActivation == library.activation },
+                         batchUndoUnconfirmed = batch.undoUnconfirmed && batch.savedDocument == library.selectedId && batch.issuingActivation == library.activation,
+                         observeOcrPending = observeOcrPending,
+                         thumbnailsCurrent = { album ->
+                             batch.issuingActivation != library.activation || batch.savedDocument != album.documentId ||
+                                 (!batch.saving && album.documentRevision >= (batch.savedRevision ?: 0L))
+                         },
+                         openAtelier = { title, target ->
+                             retained.accept(LibraryEvent.LeaveHomeSearch)
+                             issuing?.let { acquisition.open(it, title, target) }
+                         }, onSettings = {
+                             retained.accept(LibraryEvent.LeaveHomeSearch)
+                             settingsPage = SettingsPage.ROOT
+                         },
+                     ) { document, page ->
+                         issuing?.let {
+                             editorOwner.open(EditorIdentity(document, page, it)) {
+                                 retained.accept(LibraryEvent.SelectPage(page))
+                             }
+                         }
+                     }
+                 }
             }
             else {
                 val selected = editing
-                val identity = host.identity
-                val album = library.document?.takeIf { it.document.documentId == identity?.documentId }
+                 val identity = host.identity
+                 val album = library.document?.takeIf { identity != null && it.document.documentId == identity.documentId && library.activation == identity.issuedAt }
+                 val loadEditorOriginal: suspend (String) -> OriginalPreviewBitmap = { source ->
+                     services.originalDefaultEditor(checkNotNull(identity), source)
+                 }
                 val orderedPages = album?.pages.orEmpty()
                 val index = orderedPages.indexOfFirst { it.pageId == identity?.pageId }
                 val fallback = orderedPages.getOrNull(index)
                 fun destination(offset: Int): (() -> Unit)? {
-                    val document = identity?.documentId ?: return null
+                     val issuing = identity ?: return null
                     if (index < 0) return null
                     val target = orderedPages.getOrNull(index + offset) ?: return null
                     return {
                         val current = editorOwner.session.value
                         if (current === selected && current != null && !current.state.value.let { it.dirty || it.saving || it.confirmExit || it.exitReady }) {
-                            retained.accept(LibraryEvent.SelectPage(target.pageId))
-                            editorOwner.open(document.value, target.pageId.value)
+                             editorOwner.open(issuing.copy(pageId = target.pageId)) {
+                                 retained.accept(LibraryEvent.SelectPage(target.pageId))
+                             }
                         }
                     }
                 }
                 if (selected != null) key(identity) {
-                    val savedOcr = remember(app) {
-                        SavedPageOcrReader(
-                            open = { services.imports().store.savedOcr },
+                     val issuing = checkNotNull(identity)
+                     val savedOcr = remember(app, issuing) {
+                         SavedPageOcrReader(
+                             readStatus = { page -> services.readDefaultEditorOcrStatus(issuing, page.recipeRevision) },
+                             readText = { page -> services.readDefaultEditorOcrText(issuing, page.recipeRevision) },
                             rerunInFlight = app.savedOcrSignals.rerunInFlight,
                             requestRerun = { observed, defaults ->
-                                app.savedOcrSignals.onRerun(
-                                    qualify = { app.savedOcr.resolveRerunConfiguration(observed.configuration, defaults) },
-                                    commit = { services.imports().store.savedOcr.requestRerun(observed, it) },
+                                 app.savedOcrSignals.onRerun(
+                                     qualify = { app.savedOcr.resolveRerunConfiguration(observed.configuration, defaults) },
+                                     activation = issuing.issuedAt,
+                                     commit = { services.rerunDefaultEditorOcr(issuing, observed, it) },
                                 )
                             },
-                            requestSave = textSave::save,
+                             requestSave = { textSave.save(issuing.issuedAt, it) },
                         )
                     }
-                     PageEditorScreen(loadOriginal = loadOriginal, savedOcr = savedOcr, showOcrDiagnostics = settings.ocrDiagnostics,
+                      PageEditorScreen(loadOriginal = loadEditorOriginal, savedOcr = savedOcr, showOcrDiagnostics = settings.ocrDiagnostics,
                         pageNumber = fallback?.ordinal?.plus(1), albumPageCount = orderedPages.size,
                         previousPage = destination(-1), nextPage = destination(1), originalOnLoadFailure = {
                             if (fallback != null) key(fallback) {
-                                OriginalPagePreview(fallback, loadOriginal)
+                                 OriginalPagePreview(fallback, loadEditorOriginal)
                             }
                         }).Content(selected, ::leaveEditor)
                 }
@@ -270,54 +340,92 @@ class MainActivity : ComponentActivity() {
                         Text(stringResource(if (host.loading) R.string.editor_opening else R.string.editor_heading))
                         host.error?.let { Text(errorText(it.code)) }
                         if (host.error != null && fallback != null) key(fallback) {
-                            OriginalPagePreview(fallback, loadOriginal)
+                             OriginalPagePreview(fallback, loadEditorOriginal)
                         }
                         Button(onClick = ::leaveEditor) { Text(stringResource(R.string.editor_back)) }
-                        if (host.error != null) Button(onClick = { host.identity?.let { editorOwner.open(it.documentId.value, it.pageId.value) } }) { Text(stringResource(R.string.editor_retry_load)) }
+                         if (host.error != null) Button(onClick = { host.identity?.let { editorOwner.open(it) } }) { Text(stringResource(R.string.editor_retry_load)) }
                     }
                 }
             }
             AlbumExportDialog(exportOwner)
-            OcrTextSaveHost(textSave, activityResultRegistry)
+             OcrTextSaveHost(textSave, activityResultRegistry)
+             LibraryBackupPickerHost(backup, activityResultRegistry, allowLaunch = atHome && settingsPage == SettingsPage.LIBRARY_STORAGE)
         } }
     }
 
     override fun onSaveInstanceState(outState: Bundle) {
         super.onSaveInstanceState(outState)
-        session?.identity()?.let { identity ->
-            outState.putBundle(SAVED, Bundle().apply {
-                identity.selected?.let { putString(SELECTED, it.value) }
-                identity.pending?.let { putString(PENDING, it.value) }
-                if (identity.pending != null) putString(ACQUISITION, identity.kind.name)
-                identity.selectedPage?.let { putString(PAGE, it.value) }
-            })
+        session?.let { owner ->
+            saveLibraryIdentity(outState, owner.identity(), owner.state.value.request?.canDeliver == true)
         }
-        editor?.state?.value?.identity?.let { identity ->
-            outState.putBundle(EDITOR, Bundle().apply { putString(SELECTED, identity.documentId.value); putString(PAGE, identity.pageId.value) })
-        }
+        editor?.state?.value?.identity?.let { saveEditorIdentity(outState, it) }
     }
 
     override fun onDestroy() { picker?.close(); picker = null; super.onDestroy() }
 
-    private companion object {
-        const val SAVED = "pristinepage.library.identity.v1"
-        const val SELECTED = "document"
-        const val PENDING = "batch"
-        const val ACQUISITION = "acquisition"
-        const val EDITOR = "pristinepage.editor.identity.v1"
-        const val PAGE = "page"
-        @Suppress("DEPRECATION") fun restoreEditor(saved: Bundle?): EditorIdentity? {
+    internal companion object {
+        private const val SAVED = "pristinepage.library.identity.v1"
+        private const val NAVIGATION = "pristinepage.library.navigation.v2"
+        private const val SELECTED = "document"
+        private const val PENDING = "batch"
+        private const val ACQUISITION = "acquisition"
+        private const val EDITOR = "pristinepage.editor.identity.v2"
+        private const val PAGE = "page"
+        fun saveEditorIdentity(out: Bundle, identity: EditorIdentity) {
+            out.putBundle(EDITOR, Bundle().apply {
+                putString(SELECTED, identity.documentId.value)
+                putString(PAGE, identity.pageId.value)
+                saveActivation(identity.issuedAt)
+            })
+        }
+        @Suppress("DEPRECATION") fun restoreEditorIdentity(saved: Bundle?): EditorIdentity? {
             val raw = saved?.get(EDITOR) ?: return null
             require(raw is Bundle)
             val document = raw.get(SELECTED) as? String ?: throw IllegalArgumentException("Invalid saved editor identity")
             val page = raw.get(PAGE) as? String ?: throw IllegalArgumentException("Invalid saved editor identity")
-            return EditorIdentity(DocumentId(document), PageId(page))
+            return EditorIdentity(DocumentId(document), PageId(page), requireNotNull(raw.restoreActivation()))
         }
-        @Suppress("DEPRECATION") fun restore(saved: Bundle?): LibraryIdentity {
-            val raw = saved?.get(SAVED) ?: return LibraryIdentity()
-            require(raw is Bundle)
-            fun id(key: String): String? = if (raw.containsKey(key)) (raw.get(key) as? String ?: throw IllegalArgumentException("Invalid saved identity")) else null
-            return LibraryIdentity(id(SELECTED)?.let(::DocumentId), id(PENDING)?.let(::ImportSessionId), id(PAGE)?.let(::PageId), id(ACQUISITION)?.let(PhotoImportKind::valueOf) ?: PhotoImportKind.GALLERY)
+        fun saveLibraryIdentity(out: Bundle, identity: LibraryIdentity, allowPendingResult: Boolean) {
+            val at = identity.selectedAt
+            val album = identity.selected
+            if (album != null && at != null) out.putBundle(NAVIGATION, Bundle().apply {
+                putString(SELECTED, album.value)
+                identity.selectedPage?.let { putString(PAGE, it.value) }
+                saveActivation(at)
+            })
+            out.putBundle(SAVED, Bundle().apply {
+                val pending = identity.pending
+                val issuedAt = identity.issuedAt
+                if (allowPendingResult && pending != null && issuedAt != null) {
+                    putString(PENDING, pending.value)
+                    putString(ACQUISITION, identity.kind.name)
+                    saveActivation(issuedAt)
+                }
+            })
+        }
+
+        @Suppress("DEPRECATION") fun restoreLibraryIdentity(saved: Bundle?): LibraryIdentity {
+            fun record(key: String): Bundle? {
+                val raw = saved?.get(key) ?: return null
+                require(raw is Bundle)
+                return raw
+            }
+            fun Bundle.id(key: String): String? =
+                if (containsKey(key)) (get(key) as? String ?: throw IllegalArgumentException("Invalid saved identity")) else null
+            val pendingState = record(SAVED)
+            val pending = pendingState?.id(PENDING)?.let(::ImportSessionId)
+            val issuedAt = pendingState?.restoreActivation()
+            val route = pendingState?.id(ACQUISITION)?.let(PhotoImportKind::valueOf)
+            require(issuedAt == null || (pending != null && route != null))
+            // Legacy unscoped result registrations are not restored. Room may still discover the exact pending batch for explicit abandonment.
+            val chooser = LibraryIdentity(pending = pending.takeIf { issuedAt != null },
+                kind = route ?: PhotoImportKind.GALLERY, issuedAt = issuedAt)
+            // Album navigation is optional. Its corruption cannot consume a valid independent Files registration.
+            return try {
+                val navigation = record(NAVIGATION) ?: return chooser
+                chooser.copy(selected = DocumentId(requireNotNull(navigation.id(SELECTED))),
+                    selectedPage = navigation.id(PAGE)?.let(::PageId), selectedAt = requireNotNull(navigation.restoreActivation()))
+            } catch (_: RuntimeException) { chooser }
         }
     }
 }

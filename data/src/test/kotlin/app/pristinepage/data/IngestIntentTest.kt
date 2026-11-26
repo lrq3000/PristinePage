@@ -24,6 +24,20 @@ class IngestIntentTest {
         val jobs = linkedMapOf<String, JobRow>()
         val blobs = catalog.blobs // One backing table for ingest and catalog/raw guards, as in the real Room database.
         val captureDays = linkedMapOf<String, Pair<String, Long?>>()
+        private val scanNameRows = linkedMapOf<String, Pair<String, String>>()
+        val scanNames = object : IngestScanNames {
+            override fun insert(page: String, document: String, mime: String, preferred: String?): String {
+                check(catalog.inTransaction)
+                val chosen = app.pristinepage.core.library.LibraryScanName.forIngest(
+                    preferred, page, mime, scanNameRows.values.filter { it.first == document }.map { it.second },
+                )
+                check(scanNameRows.putIfAbsent(page, document to chosen) == null)
+                return chosen
+            }
+
+            override fun matches(page: String, document: String, filename: String): Boolean =
+                scanNameRows[page] == (document to filename)
+        }
         var afterJobUpdate: (JobRow) -> Unit = {}
         var now = 1000L
         var rejectChildUpdate = false
@@ -47,11 +61,12 @@ class IngestIntentTest {
                 return minOf(limit.toLong(), retainedOtherDraftAttempts + retainedAtelierCopyAttempts(document.value)).toInt()
             }
             override fun <T> transaction(action: () -> T): T {
-                val s = sessions.toMap(); val f = files.toMap(); val j = jobs.toMap(); val b = blobs.toMap(); val dates = captureDays.toMap()
+                val s = sessions.toMap(); val f = files.toMap(); val j = jobs.toMap(); val b = blobs.toMap(); val dates = captureDays.toMap(); val names = scanNameRows.toMap()
                 return try { catalog.transaction(action) }
                 catch (failure: Throwable) {
                     sessions.clear(); sessions.putAll(s); files.clear(); files.putAll(f); jobs.clear(); jobs.putAll(j); blobs.clear(); blobs.putAll(b)
                     captureDays.clear(); captureDays.putAll(dates)
+                    scanNameRows.clear(); scanNameRows.putAll(names)
                     throw failure
                 }
             }

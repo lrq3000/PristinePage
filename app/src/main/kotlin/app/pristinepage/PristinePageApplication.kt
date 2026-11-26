@@ -37,7 +37,9 @@ class PristinePageApplication : Application() {
                 val settings = atelierPreferences.settings.value
                 SavedOcrApplication.Defaults(settings.ocrLanguages.map { it.packCode }, settings.ocrLayout)
             },
-            graph = { SavedOcrApplication.bind(services.imports()) },
+            graph = { SavedOcrApplication.bind(services, services.imports().activation) },
+            currentActivation = services::recordedDefaultActivation,
+            graphForActivation = { SavedOcrApplication.bind(services, it) },
         )
     }
     internal val savedOcrSignals by lazy {

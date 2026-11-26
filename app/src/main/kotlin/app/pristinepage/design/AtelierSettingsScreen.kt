@@ -36,10 +36,12 @@ internal enum class SettingsPage(val title: Int, val parent: SettingsPage?) {
     OCR(R.string.settings_ocr, ROOT),
     TITLE(R.string.carnet_title_template, HOME),
     OCR_LANGUAGES(R.string.settings_ocr_languages, OCR),
+    LIBRARY_STORAGE(R.string.settings_library_storage, ROOT),
 }
 
 @Composable
-internal fun AtelierSettingsScreen(page: SettingsPage, preferences: AtelierPreferences, ocrReady: Boolean, navigate: (SettingsPage?) -> Unit) {
+internal fun AtelierSettingsScreen(page: SettingsPage, preferences: AtelierPreferences, ocrReady: Boolean,
+    libraryStorage: (@Composable () -> Unit)? = null, navigate: (SettingsPage?) -> Unit) {
     val settings by preferences.settings.collectAsStateWithLifecycle()
     val back = { navigate(page.parent) }
     val ocrStatus = if (ocrReady) R.string.settings_ocr_offline else R.string.settings_ocr_not_ready
@@ -57,9 +59,11 @@ internal fun AtelierSettingsScreen(page: SettingsPage, preferences: AtelierPrefe
             Column(Modifier.weight(1f).fillMaxWidth().verticalScroll(rememberScrollState()).imePadding().padding(16.dp),
                 verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 when (page) {
-                    SettingsPage.ROOT -> listOf(SettingsPage.HOME, SettingsPage.CAMERA, SettingsPage.OCR).forEach {
-                        SettingsLink(it, navigate)
+                    SettingsPage.ROOT -> {
+                        listOf(SettingsPage.HOME, SettingsPage.CAMERA, SettingsPage.OCR).forEach { SettingsLink(it, navigate) }
+                        if (libraryStorage != null) SettingsLink(SettingsPage.LIBRARY_STORAGE, navigate)
                     }
+                    SettingsPage.LIBRARY_STORAGE -> libraryStorage?.invoke()
                     SettingsPage.HOME -> {
                         SettingsLink(SettingsPage.TITLE, navigate, tag = "carnet-title-template")
                         SettingsHeading(R.string.atelier_sort)

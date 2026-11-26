@@ -27,6 +27,7 @@ import app.pristinepage.data.db.OcrWorkMigration
 import app.pristinepage.data.db.SourceCaptureDayMigration
 import app.pristinepage.data.db.OcrTextPublicationMigration
 import app.pristinepage.data.db.OcrTextPublicationRetryMigration
+import app.pristinepage.data.db.LibraryScanNameMigration
 import app.pristinepage.data.db.PristineDatabase
 import app.pristinepage.data.files.SourceInspector
 import app.pristinepage.data.model.DocumentId
@@ -55,6 +56,7 @@ import app.pristinepage.data.repository.RoomOcrQueue
 import app.pristinepage.data.repository.RoomOcrResults
 import app.pristinepage.data.repository.RoomOcrSearch
 import app.pristinepage.data.repository.SavedOcrWork
+import app.pristinepage.data.library.RoomLibrarySavedOcr
 import app.pristinepage.data.repository.PrivateImportStore
 import app.pristinepage.data.repository.SourceInput
 import kotlinx.coroutines.async
@@ -90,13 +92,13 @@ class RoomOcrIndexIntegrationTest {
     private val context = instrumentation.targetContext
     @get:Rule val migration = MigrationTestHelper(instrumentation, PristineDatabase::class.java)
 
-    @Test fun populatedV1ToV6MigrateWithoutInventingWorkDatesOrConsentAndRetainTheIndexOnReopen() {
-        for (version in 1..6) {
+    @Test fun populatedV1ToV7MigrateWithoutInventingWorkDatesConsentOrNamesAndRetainTheIndexOnReopen() {
+        for (version in 1..7) {
             val name = "ocr-migration-${UUID.randomUUID()}"
             assertFalse(context.getDatabasePath(name).exists())
             fun open() = Room.databaseBuilder(context, PristineDatabase::class.java, name)
                 .addMigrations(AtelierDraftMigration, OcrIndexMigration, OcrWorkMigration, SourceCaptureDayMigration,
-                    OcrTextPublicationMigration, OcrTextPublicationRetryMigration).build()
+                    OcrTextPublicationMigration, OcrTextPublicationRetryMigration, LibraryScanNameMigration).build()
             migration.createDatabase(name, version).use { sql ->
                 seed(sql)
                 if (version >= 3) insertText(sql)
@@ -104,7 +106,7 @@ class RoomOcrIndexIntegrationTest {
             val database = open()
             try {
                 val sql = database.openHelper.writableDatabase
-                assertEquals(7, sql.version)
+                assertEquals(8, sql.version)
                 assertEquals("010203", sql.scalar("SELECT hex(canonicalRecipe) FROM RecipeRevision"))
                 assertEquals("Existing album", sql.scalar("SELECT title FROM Document"))
                 assertEquals("0", sql.scalar("SELECT COUNT(*) FROM OcrPageWork"))
@@ -112,6 +114,7 @@ class RoomOcrIndexIntegrationTest {
                 assertEquals(if (version >= 3) "1" else "0", sql.scalar("SELECT COUNT(*) FROM OcrResult"))
                 assertEquals("0", sql.scalar("SELECT COUNT(*) FROM SourceCaptureDay"))
                 assertEquals("0", sql.scalar("SELECT COUNT(*) FROM OcrTextPublication"))
+                assertEquals("0", sql.scalar("SELECT COUNT(*) FROM LibraryScanName"))
                 assertEquals("1", sql.scalar("SELECT COUNT(*) FROM SourceBlob"))
                 if (version < 3) insertText(sql)
                 assertEquals("1", sql.scalar("SELECT COUNT(*) FROM OcrResultFts WHERE OcrResultFts MATCH 'ecole'"))
@@ -502,6 +505,69 @@ class RoomOcrIndexIntegrationTest {
         assertNull(f.search.readText(document, page))
         f.results.publish(f.request, f.start(), OcrText(""))
         assertEquals("", f.search.readText(document, page)?.text?.value)
+    }
+
+    @Test fun savedOcrMovesIntoAFreshCatalogWithoutCopyingPendingWorkOrIndexTokens() = withOcrAttempts { f ->
+        val original = "  École\r\n東京都の領収書です\n"
+        val page = PageId(PAGE)
+        val document = DocumentId(DOCUMENT)
+        f.results.publish(f.request, f.start(), OcrText(original))
+        val pending = f.queueWithConfig(f.request.binding.configuration.copy(layout = OcrLayout.SPARSE_TEXT))
+        // An excluded successor has no authority over the terminal producer, even if its private payload is unreadable.
+        f.sql.execSQL("UPDATE Job SET input=X'00' WHERE jobId=?", arrayOf(pending.value))
+        f.sql.execSQL("UPDATE OcrResult SET indexedText='decoytoken'")
+        f.sql.beginTransaction()
+        val saved = try { checkNotNull(f.search.captureForLibraryInTransaction(document, page, 1)) }
+        finally { f.sql.endTransaction() }
+        assertEquals(f.request.jobId, saved.producerId)
+
+        val name = "ocr-library-catalog-${UUID.randomUUID()}.db"
+        val stage = Room.databaseBuilder(context, PristineDatabase::class.java, name).build()
+        try {
+            val sql = stage.openHelper.writableDatabase
+            seedQueuePage(sql)
+            RoomMetadataAccess(stage).transaction { RoomLibrarySavedOcr(stage).restoreInTransaction(saved) }
+            assertEquals("1", sql.scalar("SELECT COUNT(*) FROM Job"))
+            assertEquals("0", sql.scalar("SELECT COUNT(*) FROM SourceReference WHERE ownerType='JOB'"))
+            assertEquals("0", sql.scalar("SELECT COUNT(*) FROM Job WHERE jobId='${pending.value}'"))
+        } finally { stage.close() }
+        val reopened = Room.databaseBuilder(context, PristineDatabase::class.java, name).build()
+        try {
+            val search = RoomOcrSearch(reopened)
+            val hit = search.find("領収書", null, 10).hits.single()
+            assertEquals(page, hit.page)
+            assertEquals(f.request.jobId, hit.producingJob)
+            assertTrue(search.find("decoytoken", null, 10).hits.isEmpty())
+            val text = checkNotNull(search.readText(document, page, 1))
+            assertEquals(original, text.text.value)
+            assertEquals(f.request.binding.configuration, text.configuration)
+        } finally { reopened.close() }
+    }
+
+    @Test fun presentOcrWithUnreadableBytesCannotBeSilentlyOmittedFromTheBackup() = withOcrAttempts { f ->
+        f.results.publish(f.request, f.start(), OcrText("Verbatim control"))
+        f.sql.execSQL("UPDATE OcrResult SET verbatimText=CAST(X'61FF62' AS TEXT)")
+        f.sql.beginTransaction()
+        try {
+            val failure = assertThrows(RepositoryFailure::class.java) {
+                f.search.captureForLibraryInTransaction(DocumentId(DOCUMENT), PageId(PAGE), 1)
+            }
+            assertEquals(OperationErrorCode.INTEGRITY_FAILED, failure.error.code)
+        } finally { f.sql.endTransaction() }
+    }
+
+    @Test fun danglingOrMisnumberedOcrProvenanceDoesNotMasqueradeAsAnEmptyOrSupersededResult() = withOcrAttempts { f ->
+        f.results.publish(f.request, f.start(), OcrText("Verbatim control"))
+        for (change in listOf("DELETE FROM OcrResult", "UPDATE OcrResult SET recipeRevision=2")) {
+            f.sql.beginTransaction()
+            try {
+                f.sql.execSQL(change)
+                val failure = assertThrows(RepositoryFailure::class.java) {
+                    f.search.captureForLibraryInTransaction(DocumentId(DOCUMENT), PageId(PAGE), 1)
+                }
+                assertEquals(OperationErrorCode.INTEGRITY_FAILED, failure.error.code)
+            } finally { f.sql.endTransaction() }
+        }
     }
 
     @Test fun textExportObservationAllowsTheRetainedProducerButNeverAnUnseenReplacement() = withOcrAttempts(publicStore = true) { f ->

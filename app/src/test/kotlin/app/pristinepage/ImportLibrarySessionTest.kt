@@ -2,6 +2,7 @@ package app.pristinepage
 
 import app.pristinepage.capture.PhotoImportRequest
 import app.pristinepage.capture.PhotoImportKind
+import app.pristinepage.data.library.LibraryActivation
 import app.pristinepage.data.model.*
 import app.pristinepage.library.*
 import java.lang.reflect.InvocationTargetException
@@ -42,6 +43,60 @@ class ImportLibrarySessionTest {
         assertEquals(PhotoImportKind.FILES, session.state.value.request!!.kind)
         assertTrue(session.claimPickerLaunch(f.batch))
         assertFalse(session.claimPickerLaunch(f.batch))
+    }
+
+    @Test fun aFilesResultFromAnOlderActivationCannotFillTheSameBatchSlot() = runTest {
+        val f = Fixture()
+        val active = LibraryActivation("aaaaaaaa-aaaa-4aaa-8aaa-000000000001", 2)
+        f.issuing = active
+        val session = session(f, LibraryIdentity(f.first), this)
+        advanceUntilIdle()
+        session.accept(LibraryEvent.BeginFiles)
+        advanceUntilIdle()
+        val exact = checkNotNull(session.state.value.request)
+        assertEquals(active, exact.issuedAt)
+        val stale = PhotoImportRequest(exact.batchId, exact.kind, active.copy(number = 1))
+        session.accept(LibraryEvent.PickerFailed(stale))
+        session.accept(LibraryEvent.PhotoResult(stale, f.selected))
+        advanceUntilIdle()
+        assertEquals(0, f.deliveries)
+        assertTrue(f.canceled.isEmpty())
+        assertTrue(session.claimPickerLaunch(f.batch))
+        session.accept(LibraryEvent.PhotoResult(exact, f.selected))
+        advanceUntilIdle()
+        assertEquals(1, f.deliveries)
+    }
+
+    @Test fun aRefusedRestoredCallbackDoesNotRetryFailedStartupOrTrapTheAlbum() = runTest {
+        val f = Fixture()
+        val issued = LibraryActivation("aaaaaaaa-aaaa-4aaa-8aaa-000000000001", 1)
+        f.failStartup = true
+        f.callbackFailure = OperationError(OperationErrorCode.SOURCE_UNAVAILABLE, false, "library_activation_changed", null)
+        val session = session(f, LibraryIdentity(f.first, f.batch, kind = PhotoImportKind.FILES, issuedAt = issued), this)
+        advanceUntilIdle()
+        session.accept(LibraryEvent.PhotoResult(PhotoImportRequest(f.batch.value, PhotoImportKind.FILES, issued), f.selected))
+        advanceUntilIdle()
+        assertEquals("A late result must not bootstrap the library", 1, f.startups)
+        assertEquals("The stale UI registration must detach", null, session.state.value.request)
+        assertEquals("library_activation_changed", session.state.value.error?.safeMessageKey)
+        assertTrue(f.canceled.isEmpty())
+    }
+
+    @Test fun aTransientReadRefusalKeepsTheRestoredRequestButDefiniteStaleCancelDetachesIt() = runTest {
+        val f = Fixture()
+        val issued = LibraryActivation("aaaaaaaa-aaaa-4aaa-8aaa-000000000001", 1)
+        val session = session(f, LibraryIdentity(f.first, f.batch, kind = PhotoImportKind.FILES, issuedAt = issued), this)
+        advanceUntilIdle()
+        f.callbackFailure = OperationError(OperationErrorCode.STORAGE_FAILED, true, "library_selection_unavailable", null)
+        session.accept(LibraryEvent.CancelImport)
+        advanceUntilIdle()
+        assertEquals(f.batch, session.identity().pending)
+        assertEquals(ImportPhase.INTERRUPTED, session.state.value.phase)
+        f.callbackFailure = OperationError(OperationErrorCode.SOURCE_UNAVAILABLE, false, "library_activation_changed", null)
+        session.accept(LibraryEvent.CancelImport)
+        advanceUntilIdle()
+        assertNull(session.identity().pending)
+        assertTrue(f.canceled.isEmpty())
     }
 
     @Test fun cancelingCameraRefusesALateStillEvenAfterAnAlbumSwitch() = runTest {
@@ -163,6 +218,9 @@ class ImportLibrarySessionTest {
         val session = session(f, LibraryIdentity(f.first), this); advanceUntilIdle()
         assertEquals("Durable insertion must be discoverable without a saved BATCH", f.batch, session.identity().pending)
         assertEquals(ImportPhase.INTERRUPTED, session.state.value.phase); assertFalse(session.claimPickerLaunch(f.batch))
+        // Room can authorize abandonment, but did not issue this Activity's result registration.
+        session.accept(LibraryEvent.PhotoResult(checkNotNull(session.state.value.request), f.selected))
+        advanceUntilIdle()
         assertEquals(0, f.begins); assertEquals(0, f.deliveries)
         session.accept(LibraryEvent.CancelImport); advanceUntilIdle()
         assertNull(session.identity().pending); assertFalse(session.state.value.document!!.document.hasPendingImport)
@@ -373,12 +431,21 @@ class ImportLibrarySessionTest {
         private val docs = linkedMapOf(first to DocumentOverview(DocumentSummary(first, "First", 1, 0, false), emptyList()), second to DocumentOverview(DocumentSummary(second, "Second", 1, 0, false), emptyList()))
         var begins = 0; var deliveries = 0; var failBegin = false; var failList = false; var failCancel = false
         var begunDocument: DocumentId? = null
+        var issuing: LibraryActivation? = null
+        var callbackFailure: OperationError? = null
+        var failStartup = false
+        var startups = 0
         val selected = LibraryPhotoResult.Selected(listOf("content://fixture.documents/first", "content://fixture.documents/second"), 0)
         var block: CompletableDeferred<Unit>? = null; var commitBeforeWait = false; var startupBlock: CompletableDeferred<Unit>? = null
         var publishCompletedPage = false; var listBlock: CompletableDeferred<Unit>? = null
         val canceled = mutableListOf<ImportSessionId>()
         var outcomes: List<IngestResult> = listOf(committed(), IngestResult.Rejected(child2, OperationError(OperationErrorCode.UNSUPPORTED_FORMAT, false, "unsupported_source", child2.value)))
-        override suspend fun startup(): RecoveryReport { startupBlock?.await(); return RecoveryReport(0, 0, 0, 0, 0, emptyList()) }
+        override suspend fun startup(): RecoveryReport {
+            startups++
+            startupBlock?.await()
+            if (failStartup) throw RepositoryFailure(OperationError(OperationErrorCode.STORAGE_FAILED, true, "fixture_startup_unavailable", null))
+            return RecoveryReport(0, 0, 0, 0, 0, emptyList())
+        }
         override suspend fun list(after: DocumentId?, limit: Int): List<DocumentSummary> {
             listBlock?.await()
             if (failList) throw java.io.IOException("fixture-private title must not escape")
@@ -394,9 +461,10 @@ class ImportLibrarySessionTest {
         override suspend fun begin(document: DocumentSummary): PhotoImportRequest {
             assertTrue(document.documentId in docs)
             if (failBegin) throw RepositoryFailure(OperationError(OperationErrorCode.REVISION_CONFLICT, false, "document_revision_changed", first.value))
-            begins++; begunDocument = document.documentId; return PhotoImportRequest(batch.value)
+            begins++; begunDocument = document.documentId; return PhotoImportRequest(batch.value, issuedAt = issuing)
         }
         override suspend fun deliver(request: PhotoImportRequest, selection: LibraryPhotoResult): List<IngestResult> {
+            callbackFailure?.let { throw RepositoryFailure(it) }
             assertEquals(batch.value, request.batchId); deliveries++
             if (selection == LibraryPhotoResult.Canceled) return listOf(IngestResult.Rejected(batch, OperationError(OperationErrorCode.CANCELED, false, "photo_selection_canceled", batch.value)))
             assertEquals(selected, selection)
@@ -406,6 +474,7 @@ class ImportLibrarySessionTest {
             return outcomes
         }
         override suspend fun cancel(request: PhotoImportRequest) {
+            callbackFailure?.let { throw RepositoryFailure(it) }
             if (failCancel) throw RepositoryFailure(OperationError(OperationErrorCode.STORAGE_FAILED, true, "synthetic_cancel_io", request.batchId))
             canceled += ImportSessionId(request.batchId)
             docs[first] = docs.getValue(first).let { it.copy(document = it.document.copy(hasPendingImport = false)) }

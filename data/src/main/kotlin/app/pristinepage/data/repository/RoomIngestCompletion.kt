@@ -17,9 +17,10 @@ import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.withContext
 
 /** Only consumes an already MOVED, inspected source. Hash/readback is outside Room; visibility, ownership and journal/job completion share the subsequent short transaction. SourceStore still owns provider copy/admission/inspection/phase transitions; this helper neither performs nor claims them. */
-class RoomIngestCompletion @JvmOverloads constructor(private val metadata: MetadataAccess, private val sessions: ImportSessionQueries, private val journal: IngestPreparationQueries, private val sources: IngestCompletionQueries, private val jobs: JobLeaseQueries, private val files: SourceFiles, private val auditClock: () -> Long = System::currentTimeMillis, private val leaseClock: () -> Long = SystemClock::elapsedRealtime, private val dispatcher: CoroutineDispatcher = Dispatchers.IO, private val drafts: AtelierDraftDao? = null) : IngestCompletion, IngestReplay {
+class RoomIngestCompletion @JvmOverloads constructor(private val metadata: MetadataAccess, private val sessions: ImportSessionQueries, private val journal: IngestPreparationQueries, private val sources: IngestCompletionQueries, private val jobs: JobLeaseQueries, private val files: SourceFiles, private val auditClock: () -> Long = System::currentTimeMillis, private val leaseClock: () -> Long = SystemClock::elapsedRealtime, private val dispatcher: CoroutineDispatcher = Dispatchers.IO, private val drafts: AtelierDraftDao? = null, private val scanNames: IngestScanNames? = (metadata as? RoomMetadataAccess)?.libraryScanNames) : IngestCompletion, IngestReplay {
     constructor(database: PristineDatabase, files: SourceFiles) : this(RoomMetadataAccess(database), database.importSessions(), database.ingestPreparation(), database.ingestCompletion(), database.jobLeases(), files, drafts = database.atelierDrafts())
     private val completion = JobLeaseTransactions(metadata, jobs, auditClock, leaseClock)
+    private data class Publication(val result: IngestResult.Committed, val journal: FileTransactionRow, val filename: String?)
 
     override suspend fun commit(intent: IngestJournalIntent, lease: JobLease): IngestResult = process(intent, lease)
     override suspend fun replay(intent: IngestJournalIntent): IngestResult = process(intent, null)
@@ -41,10 +42,17 @@ class RoomIngestCompletion @JvmOverloads constructor(private val metadata: Metad
             coroutineContext.ensureActive()
             if (receipt != null) return@withContext metadata.transaction { replay(intent, before, receipt) }
             if (lease == null) return@withContext IngestResult.Pending(intent.sessionId, observed)
-            val verifyDate = if (seal.captureDate == null) null else {
+            lateinit var publication: Publication
+            val verifyMetadata = if (seal.captureDate == null && seal.schemaVersion != 3) null else {
                 {
                     coroutineContext.ensureActive()
                     verifyCaptureProjection(seal)
+                    publication.filename?.let { verifyScanName(intent, it) }
+                    val committed = readJournal(intent)
+                    val expected = publication.journal
+                    if (committed.copy(payload = expected.payload) != expected || !committed.payload.contentEquals(expected.payload)) {
+                        reject(OperationErrorCode.INTEGRITY_FAILED, "ingest_journal_changed", intent)
+                    }
                     coroutineContext.ensureActive()
                 }
             }
@@ -54,8 +62,9 @@ class RoomIngestCompletion @JvmOverloads constructor(private val metadata: Metad
                 checkTerminalOutcomes(live, intent)
                 if (live.state != "MOVED" || !sameJournal(live, before)) reject(OperationErrorCode.INTEGRITY_FAILED, "ingest_journal_changed", intent)
                 validateJob(intent, committed = false)
-                publish(intent, live, seal)
-            }, verifyDate)
+                publication = publish(intent, live, seal)
+                publication.result
+            }, verifyMetadata)
             if (result != null) return@withContext result
             // Another same-attempt call may have committed between preflight and the lease fence. Reuse its exact receipt, never rerun page writes after job success.
             metadata.transaction {
@@ -116,7 +125,7 @@ class RoomIngestCompletion @JvmOverloads constructor(private val metadata: Metad
         terminal(parent.state, parent.errorCode, intent)
     }
 
-    private fun publish(intent: IngestJournalIntent, row: FileTransactionRow, seal: IngestJournalSeal): IngestResult.Committed {
+    private fun publish(intent: IngestJournalIntent, row: FileTransactionRow, seal: IngestJournalSeal): Publication {
         val q = metadata.queries; val now = auditClock()
         val child = sessions.session(intent.sessionId.value) ?: reject(OperationErrorCode.SESSION_EXPIRED, "import_item_unavailable", intent)
         val parent = child.parentSessionId?.let(sessions::session) ?: reject(OperationErrorCode.SESSION_EXPIRED, "import_session_unavailable", intent)
@@ -149,6 +158,10 @@ class RoomIngestCompletion @JvmOverloads constructor(private val metadata: Metad
         val page = PageRow(intent.pageId.value, doc.documentId, intent.sourceId.value, 1, "ACTIVE", 200, null, now)
         val recipe = Recipe(geometry = GeometryRecipe.None(SourceBinding(inspection.sourcePixelHash, inspection.normalizedSize, inspection.conversionFingerprint)))
         q.insertPage(page)
+        val filename = if (seal.schemaVersion == 3) {
+            scanNames?.insert(page.pageId, page.documentId, inspection.mime, seal.preferredFilename)
+                ?: reject(OperationErrorCode.STORAGE_FAILED, "ingest_scan_name_unavailable", intent)
+        } else null
         q.insertRecipe(RecipeRevisionRow(page.pageId, 1, page.sourceId, recipe.schemaVersion, RecipeCodec.encode(recipe), RecipeCodec.hash(recipe), null, now))
         q.insertReference(SourceReferenceRow("PAGE", page.pageId, page.sourceId, now))
         q.insertReference(SourceReferenceRow("RECIPE_HISTORY", "recipe-v1/${page.pageId}/1", page.sourceId, now))
@@ -160,9 +173,10 @@ class RoomIngestCompletion @JvmOverloads constructor(private val metadata: Metad
         if (sessions.updateSession(child.copy(state = "COMMITTED", uriText = null, errorCode = null)) != 1) reject(OperationErrorCode.INTEGRITY_FAILED, "import_item_unavailable", intent)
         val finished = siblings.all { it.sessionId == child.sessionId || it.state in setOf("COMMITTED", "CANCELED", "FAILED", "QUARANTINED") }
         if (sessions.updateSession(parent.copy(expectedMembershipToken = ImportMembership.hash(finalPages), state = if (finished) "COMMITTED" else "RESERVED")) != 1) reject(OperationErrorCode.INTEGRITY_FAILED, "import_session_unavailable", intent)
-        val receipt = IngestJournalCommit(seal, revision)
-        if (sources.updateFileTransaction(row.copy(state = "COMMITTED", payload = IngestJournalCodec.encodeCommit(receipt), errorCode = null, updatedAt = now), "MOVED") != 1) reject(OperationErrorCode.INTEGRITY_FAILED, "ingest_journal_changed", intent)
-        return result(receipt)
+        val receipt = IngestJournalCommit(seal, revision, libraryFilename = filename)
+        val committedJournal = row.copy(state = "COMMITTED", payload = IngestJournalCodec.encodeCommit(receipt), errorCode = null, updatedAt = now)
+        if (sources.updateFileTransaction(committedJournal, "MOVED") != 1) reject(OperationErrorCode.INTEGRITY_FAILED, "ingest_journal_changed", intent)
+        return Publication(result(receipt), committedJournal, filename)
     }
 
     private fun replay(intent: IngestJournalIntent, before: FileTransactionRow, receipt: IngestJournalCommit): IngestResult.Committed {
@@ -170,6 +184,7 @@ class RoomIngestCompletion @JvmOverloads constructor(private val metadata: Metad
         if (live.state != "COMMITTED" || !sameJournal(live, before)) reject(OperationErrorCode.INTEGRITY_FAILED, "ingest_journal_changed", intent)
         // For v2, refuse a mismatched backing digest without materializing the SourceBlob row.
         verifyCaptureProjection(receipt.seal)
+        receipt.libraryFilename?.let { verifyScanName(intent, it) }
         val source = metadata.queries.source(intent.sourceId.value) ?: reject(OperationErrorCode.INTEGRITY_FAILED, "source_unavailable", intent)
         val blob = sources.sourceBlob(intent.sourceBlobId.value) ?: reject(OperationErrorCode.INTEGRITY_FAILED, "source_unavailable", intent)
         val page = metadata.queries.page(intent.pageId.value) ?: reject(OperationErrorCode.SESSION_EXPIRED, "import_page_unavailable", intent)
@@ -186,6 +201,12 @@ class RoomIngestCompletion @JvmOverloads constructor(private val metadata: Metad
         val date = seal.captureDate ?: return
         if (!sources.captureProjectionMatches(seal.intent.sourceBlobId.value, seal.sourceByteHash, date.epochDay))
             reject(OperationErrorCode.INTEGRITY_FAILED, "ingest_capture_date_mismatch", seal.intent)
+    }
+
+    private fun verifyScanName(intent: IngestJournalIntent, filename: String) {
+        if (scanNames?.matches(intent.pageId.value, intent.documentId.value, filename) != true) {
+            reject(OperationErrorCode.INTEGRITY_FAILED, "ingest_scan_name_mismatch", intent)
+        }
     }
 
     private fun result(receipt: IngestJournalCommit): IngestResult.Committed {

@@ -15,6 +15,20 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class AtelierAlbumPublicationTest {
+    @Test fun readOnlyPublicationRecoveryDoesNotRenderOrPublishAnUncommittedDraft() = runBlocking {
+        val f = Fixture()
+        val before = f.snapshot()
+        assertNull(f.observe())
+        assertEquals(before, f.snapshot())
+        assertEquals(0, f.renders)
+        val committed = f.publish()
+        val after = f.snapshot()
+        assertEquals(committed, f.observe())
+        f.rejected(OperationErrorCode.REVISION_CONFLICT) { f.observe(f.witnesses.reversed()) }
+        assertEquals(after, f.snapshot())
+        assertEquals(2, f.renders)
+    }
+
     @Test fun acquisitionSaveReturnsOnlyTheOrderedDestinationPagesEvenAfterReplay() = runBlocking {
         val f = Fixture()
         val staged = f.base.pageIds
@@ -215,6 +229,9 @@ class AtelierAlbumPublicationTest {
 
         suspend fun publish(witness: List<AtelierPageWitness> = witnesses, drafts: AtelierDraftDao = dao): AtelierPublicationReceipt =
             repository.publishAtelierDraft(drafts, id, 4L, witness, renderer)
+
+        suspend fun observe(witness: List<AtelierPageWitness> = witnesses): AtelierPublicationReceipt? =
+            repository.inspectAtelierPublication(dao, id, 4L, witness)
 
         suspend fun saveAcquisition(witness: List<AtelierPageWitness> = witnesses) = RoomEditablePages(access, q, Dispatchers.Unconfined).let { pages ->
             val sessions = RoomImportSessions(access, ImportSessionTest.Fixture(0), dispatcher = Dispatchers.Unconfined, drafts = dao)

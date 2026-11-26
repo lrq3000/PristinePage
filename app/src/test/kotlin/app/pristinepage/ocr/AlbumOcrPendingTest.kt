@@ -1,6 +1,7 @@
 package app.pristinepage.ocr
 
 import androidx.work.WorkInfo.State
+import app.pristinepage.data.library.LibraryActivation
 import app.pristinepage.data.model.JobId
 import app.pristinepage.data.model.PageId
 import app.pristinepage.data.repository.SavedOcrWork
@@ -21,6 +22,24 @@ class AlbumOcrPendingTest {
     private val page = PageId("00000000-0000-4000-8000-000000000101")
     private val original = SavedOcrWork.Target(page, JobId("00000000-0000-4000-8000-000000000102"))
     private val replacement = SavedOcrWork.Target(page, JobId("00000000-0000-4000-8000-000000000103"))
+
+    @Test fun aLateWakeCannotKeepPendingVisibleAfterItsIssuingActivationIsLost() = runTest {
+        val issuing = LibraryActivation("00000000-0000-4000-8000-000000000100", 1)
+        var current = issuing
+        val work = MutableStateFlow(listOf(State.ENQUEUED))
+        val visible = mutableListOf<AlbumOcrPending.State?>()
+        backgroundScope.launch {
+            AlbumOcrPending.observe(MutableStateFlow(original), isCurrent = { current == issuing }) { work }
+                .collect { visible.add(it) }
+        }
+        runCurrent()
+        assertEquals(AlbumOcrPending.State.QUEUED, visible.last())
+
+        current = issuing.copy(number = 2)
+        work.value = listOf(State.RUNNING)
+        runCurrent()
+        assertEquals(listOf(null, AlbumOcrPending.State.QUEUED, null), visible)
+    }
 
     @Test fun sameTargetStoreInvalidationCanRestartAFailedWakeObservation() = runTest {
         val targets = MutableSharedFlow<SavedOcrWork.Target?>(replay = 1)

@@ -135,6 +135,39 @@ class RoomAtelierDraftIntegrationTest {
         }
     }
 
+    @Test fun appendChecksCopiedNamesAfterWritingThePublicationReceipt() = runBlocking<Unit> {
+        RoomRepositoryIntegrationTest.Fixture().use { fixture ->
+            val db = fixture.database
+            val target = DocumentId(UUID.randomUUID().toString())
+            val draftId = UUID.randomUUID().toString()
+            val dao = db.atelierDrafts()
+            val metadata = RoomMetadataAccess(db)
+            metadata.transaction {
+                db.catalog().insertDocument(app.pristinepage.data.db.DocumentRow(target.value, "Target album", 1, "ACTIVE", 0, 0, null))
+                dao.insert(AtelierDraftRow(draftId, fixture.document.value, target.value, 1L, "EDITING", 3, 2, fixture.pages.first().value, null, 0))
+                fixture.pages.forEachIndexed { index, id ->
+                    val name = "Page${index + 1}.png"
+                    db.libraryScanNames().insert(app.pristinepage.data.db.LibraryScanNameRow(id.value, fixture.document.value, name, name.lowercase()))
+                }
+            }
+            val sql = db.openHelper.writableDatabase
+            sql.execSQL("""CREATE TRIGGER flip_append_name AFTER UPDATE OF state ON AtelierDraft
+                WHEN NEW.state='COMMITTED' BEGIN
+                UPDATE LibraryScanName SET filename='Wrong.png',comparisonKey='wrong.png'
+                WHERE pageId=(SELECT pageId FROM Page WHERE documentId='${target.value}' AND ordinal=1); END""")
+            val inputs = fixture.pages.map { AtelierPageWitness(it, 1, RecipeCodec.hash(fixture.turned(0))) }
+            val repository = RoomDocumentRepository(metadata, RecipeAdmission { _, _ -> null })
+            val renderer = object : RenderCoordinator {
+                override suspend fun render(request: RenderRequest) =
+                    RenderResult(request, RenderStatus.OK, RgbImage(3, 2, 9, ByteArray(18)), emptyList(), emptyList())
+            }
+            rejected(OperationErrorCode.INTEGRITY_FAILED) { repository.publishAtelierDraft(dao, draftId, 3, inputs, renderer) }
+            assertEquals("EDITING", dao.draft(draftId)?.state)
+            assertTrue(db.catalog().activePages(target.value).isEmpty())
+            assertEquals(2L, fixture.count("LibraryScanName"))
+        }
+    }
+
     @Test fun twoRetiredSingleCopyDraftsDoNotPreventStartingAnotherImport() = runBlocking<Unit> {
         withMemoryDatabase { db ->
             val metadata = RoomMetadataAccess(db)

@@ -109,6 +109,8 @@ private fun actionModifier() = Modifier.fillMaxWidth().heightIn(min = 48.dp)
     "draft_staging_full" -> stringResource(R.string.atelier_staging_full)
     "draft_staging_selection_limit" -> stringResource(R.string.atelier_staging_selection_limit)
     "draft_copy_limit" -> stringResource(R.string.atelier_draft_copy_limit)
+    "atelier_save_delivery_unconfirmed" -> stringResource(R.string.atelier_save_delivery_unconfirmed)
+    "atelier_save_not_found" -> stringResource(R.string.atelier_save_not_found)
     else -> errorText(error.code)
 }
 

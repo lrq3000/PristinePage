@@ -21,6 +21,9 @@ internal class OrdinaryExportLifetime(private val closeDatabase: () -> Unit) {
     suspend fun <T> retainSourceMetadata(block: suspend () -> T): T =
         retain(null, "source_metadata_store_closed", block)
 
+    suspend fun <T> retainLibraryBackup(block: suspend () -> T): T =
+        retain(null, "library_backup_store_closed", block)
+
     private suspend fun <T> retain(affectedId: String?, closedKey: String, block: suspend () -> T): T {
         synchronized(monitor) {
             if (closeClaimed) throw RepositoryFailure(OperationError(OperationErrorCode.STORAGE_FAILED, false, closedKey, affectedId))

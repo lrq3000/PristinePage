@@ -2,12 +2,18 @@
     <uses-permission android:name="android.permission.CAMERA" />
     <uses-permission android:name="android.permission.INTERNET" tools:node="remove" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" tools:node="remove" />
+    <!-- Library folder access is limited to the exact Android document-tree grant. -->
+    <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" tools:node="remove" />
+    <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" tools:node="remove" />
     <uses-feature android:name="android.hardware.camera.any" android:required="false" />
     <queries>
         <intent>
             <action android:name="android.intent.action.CREATE_DOCUMENT" />
             <category android:name="android.intent.category.OPENABLE" />
             <data android:mimeType="text/plain" />
+        </intent>
+        <intent>
+            <action android:name="android.intent.action.OPEN_DOCUMENT_TREE" />
         </intent>
         <provider android:authorities="com.android.externalstorage.documents;com.android.providers.downloads.documents" />
     </queries>

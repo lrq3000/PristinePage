@@ -52,13 +52,19 @@ import kotlinx.coroutines.launch
 
 /** Read only the chosen private panel. The view never combines a status and a separate result as if they were one snapshot. */
 class SavedPageOcrReader internal constructor(
-    private val open: suspend () -> SavedOcrWork,
+    private val readStatus: suspend (EditablePage) -> SavedOcrWork.PageStatus?,
+    private val readText: suspend (EditablePage) -> SavedOcrWork.ReadText?,
     internal val rerunInFlight: StateFlow<Boolean>,
     internal val requestRerun: suspend (SavedOcrWork.PageStatus, Boolean) -> RerunOutcome,
     internal val requestSave: ((SavedOcrWork.TextExportObservation) -> Boolean)? = null,
 ) {
-    internal suspend fun status(page: EditablePage) = open().readStatus(page.documentId, page.pageId, page.recipeRevision)
-    internal suspend fun text(page: EditablePage) = open().readText(page.documentId, page.pageId, page.recipeRevision)
+    internal constructor(open: suspend () -> SavedOcrWork, rerunInFlight: StateFlow<Boolean>,
+        requestRerun: suspend (SavedOcrWork.PageStatus, Boolean) -> RerunOutcome,
+    ) : this({ page -> open().readStatus(page.documentId, page.pageId, page.recipeRevision) },
+        { page -> open().readText(page.documentId, page.pageId, page.recipeRevision) }, rerunInFlight, requestRerun)
+
+    internal suspend fun status(page: EditablePage) = readStatus(page)
+    internal suspend fun text(page: EditablePage) = readText(page)
 }
 
 internal enum class SavedPageOcrPanel(val title: Int) { PROCESSING(R.string.ocr_processing_details), TEXT(R.string.ocr_text) }

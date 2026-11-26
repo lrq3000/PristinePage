@@ -136,9 +136,10 @@ class RenderCoordinatorIntegrationTest {
     private class Fixture(width: Int, height: Int, colors: IntArray) : AutoCloseable {
         private val base = InstrumentationRegistry.getInstrumentation().targetContext
         private val root = File(base.filesDir, "render-coordinator-${UUID.randomUUID()}")
+        private val files = File(root, "files").apply { check(mkdirs()) }
         private val context = object : ContextWrapper(base) {
             override fun getApplicationContext(): Context = this
-            override fun getFilesDir() = File(root, "files")
+            override fun getFilesDir() = files
             override fun getDatabasePath(name: String) = File(root, "databases/$name").also { it.parentFile!!.mkdirs() }
         }
         val budget = ApplicationImageBudget.create(64)

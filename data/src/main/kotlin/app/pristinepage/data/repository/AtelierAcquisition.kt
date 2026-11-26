@@ -53,9 +53,15 @@ class AtelierAcquisition internal constructor(
     suspend fun checkpoint(view: AtelierDraftView, page: PageId, expectedRevision: Long, recipe: Recipe, renderer: RenderCoordinator): SaveRecipeResult =
         documents.checkpointDraftRecipe(view.id, view.generation, page, expectedRevision, recipe, renderer)
     suspend fun save(view: AtelierDraftView, reviewed: List<EditablePage>, renderer: RenderCoordinator): AtelierSavedPages =
-        documents.publishAtelierDraft(rows, view.id, view.generation,
-            reviewed.map { AtelierPageWitness(it.pageId, it.recipeRevision, it.recipeHash) }, renderer)
+        documents.publishAtelierDraft(rows, view.id, view.generation, witnesses(reviewed), renderer)
             .let { AtelierSavedPages(it.document, it.saved) }
+
+    suspend fun inspectSaved(view: AtelierDraftView, reviewed: List<EditablePage>): AtelierSavedPages? =
+        documents.inspectAtelierPublication(rows, view.id, view.generation, witnesses(reviewed))
+            ?.let { AtelierSavedPages(it.document, it.saved) }
+
+    private fun witnesses(reviewed: List<EditablePage>) =
+        reviewed.map { AtelierPageWitness(it.pageId, it.recipeRevision, it.recipeHash) }
 
     private fun missing(): Nothing = throw RepositoryFailure(OperationError(OperationErrorCode.SESSION_EXPIRED, false, "draft_unavailable", null))
 }

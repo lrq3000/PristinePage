@@ -4,7 +4,7 @@ import kotlinx.serialization.EncodeDefault
 import kotlinx.serialization.ExperimentalSerializationApi
 import kotlinx.serialization.Serializable
 
-/** Private ownership metadata only. No title, provider URI, source filename, live decoder or pixel buffer belongs in a file seal. Codec admission enforces the supported version/attempt/byte bounds before persistence or recovery. */
+/** Private ownership metadata only. The intent, job input and diagnostics contain no provider filename. The v3 file seal may carry a bounded logical label, never a path or provider URI. */
 @Serializable data class IngestJournalIntent(val transactionId: TransactionId, val sessionId: ImportSessionId, val documentId: DocumentId, val pageId: PageId, val sourceBlobId: SourceBlobId, val sourceId: SourceId, val jobId: JobId, val attempt: Long, val schemaVersion: Int = 1)
 
 /** Presence records that the allowlisted projection was attempted. Null day is not a guessed date or an uninspected legacy source. */
@@ -18,7 +18,10 @@ import kotlinx.serialization.Serializable
     val byteCount: Long, val schemaVersion: Int = 1,
     // Absent only for v1. Omitting this default preserves the exact bytes of already-sealed attempts.
     @EncodeDefault(EncodeDefault.Mode.NEVER) val captureDate: SourceCaptureDate? = null,
+    @EncodeDefault(EncodeDefault.Mode.NEVER) val preferredFilename: String? = null,
 )
 
 /** Retains the original commit revision for exact result replay even after later document edits. It is written only with page/source/reference/journal completion, never inferred from a live current pointer. */
-@Serializable data class IngestJournalCommit(val seal: IngestJournalSeal, val documentRevision: Long, val schemaVersion: Int = seal.schemaVersion)
+@OptIn(ExperimentalSerializationApi::class)
+@Serializable data class IngestJournalCommit(val seal: IngestJournalSeal, val documentRevision: Long, val schemaVersion: Int = seal.schemaVersion,
+    @EncodeDefault(EncodeDefault.Mode.NEVER) val libraryFilename: String? = null)

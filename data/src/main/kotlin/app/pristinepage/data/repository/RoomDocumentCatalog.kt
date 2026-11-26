@@ -1,6 +1,5 @@
 package app.pristinepage.data.repository
 
-import app.pristinepage.core.pipeline.requireWellFormedUnicode
 import app.pristinepage.data.db.DocumentRow
 import app.pristinepage.data.model.*
 import java.text.Collator
@@ -131,8 +130,7 @@ class RoomDocumentCatalog @JvmOverloads constructor(private val metadata: Metada
 
     private fun validateDocument(row: DocumentRow, id: DocumentId) {
         require(row.documentId == id.value && row.documentRevision >= 1)
-        require(row.title.isNotEmpty() && row.title.length <= 160 && row.title == row.title.trim())
-        requireWellFormedUnicode(row.title)
+        requireStoredAlbumTitle(row.title)
         require(row.lifecycle in setOf("ACTIVE", "TOMBSTONED", "PURGING"))
         if (row.lifecycle != "ACTIVE") refuse(OperationErrorCode.SOURCE_UNAVAILABLE, "document_unavailable", id)
         require(row.deletedAt == null)

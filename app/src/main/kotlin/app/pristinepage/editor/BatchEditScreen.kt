@@ -22,15 +22,15 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.repeatOnLifecycle
-import app.pristinepage.ApplicationImports
+import app.pristinepage.ApplicationServices
 import app.pristinepage.R
 import app.pristinepage.core.geometry.GeometrySizing
 import app.pristinepage.core.pipeline.*
+import app.pristinepage.data.library.LibraryActivation
 import app.pristinepage.data.model.EditablePage
 import app.pristinepage.data.model.DocumentOverview
 import app.pristinepage.data.model.PageId
 import app.pristinepage.image.preview.RenderedPreviewBitmap
-import app.pristinepage.image.preview.RenderedPreviewBitmapLoader
 import app.pristinepage.library.errorText
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.awaitCancellation
@@ -40,8 +40,9 @@ import kotlinx.coroutines.sync.withPermit
 import kotlin.math.roundToInt
 
 @OptIn(ExperimentalLayoutApi::class)
-@Composable internal fun BatchEditScreen(host: BatchHost, owner: BatchEditViewModel, openGraph: suspend () -> ApplicationImports,
-    onExport: (DocumentOverview, Set<PageId>) -> Unit = { _, _ -> }) {
+@Composable internal fun BatchEditScreen(host: BatchHost, owner: BatchEditViewModel, services: ApplicationServices,
+    onReconcile: (LibraryActivation, DocumentOverview) -> Unit,
+    onExport: (LibraryActivation, DocumentOverview, Set<PageId>) -> Unit = { _, _, _ -> }) {
     val draft = owner.draft
     val selected = draft?.selection.orEmpty()
     val recipes = draft?.recipes.orEmpty()
@@ -55,7 +56,10 @@ import kotlin.math.roundToInt
     val canSetStrength = draft?.canSetAppearanceStrength == true
     fun exit() {
         if (host.saving) return
-        if (draft?.dirty == true && !host.uncertain) discard = true else owner.cancel()
+        if (host.uncertain) {
+            onReconcile(checkNotNull(host.issuingActivation), checkNotNull(host.album))
+            owner.cancel()
+        } else if (draft?.dirty == true) discard = true else owner.cancel()
     }
     BackHandler { exit() }
     Column(Modifier.fillMaxSize().safeDrawingPadding().padding(horizontal = 12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
@@ -85,7 +89,7 @@ import kotlin.math.roundToInt
                 Surface(shape = MaterialTheme.shapes.medium, tonalElevation = if (page.pageId in selected) 6.dp else 1.dp) {
                     Column(Modifier.toggleable(page.pageId in selected, enabled = enabled, role = Role.Checkbox,
                         onValueChange = { owner.edit { toggle(page.pageId); null } }).padding(6.dp)) {
-                        BatchPreview(page, recipe, draft?.previewGeneration(page.pageId) ?: 1L, openGraph, permit)
+                        BatchPreview(checkNotNull(host.issuingActivation), page, recipe, draft?.previewGeneration(page.pageId) ?: 1L, services, permit)
                         Row(verticalAlignment = Alignment.CenterVertically) {
                             Checkbox(page.pageId in selected, onCheckedChange = null)
                             Text(stringResource(R.string.page_number, index + 1))
@@ -123,7 +127,7 @@ import kotlin.math.roundToInt
             }
         }
         FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-            OutlinedButton(onClick = { host.album?.let { onExport(it, selected) } },
+            OutlinedButton(onClick = { host.album?.let { album -> host.issuingActivation?.let { onExport(it, album, selected) } } },
                 enabled = enabled && selected.isNotEmpty() && draft?.dirty == false,
                 modifier = Modifier.heightIn(min = 48.dp).testTag("album-export-selected")) {
                 Text(stringResource(R.string.album_export_selected))
@@ -172,30 +176,23 @@ import kotlin.math.roundToInt
     }
 }
 
-@Composable private fun BatchPreview(page: EditablePage, recipe: Recipe, generation: Long,
-    openGraph: suspend () -> ApplicationImports, permit: Semaphore) {
+@Composable private fun BatchPreview(issuedAt: LibraryActivation, page: EditablePage, recipe: Recipe, generation: Long,
+     services: ApplicationServices, permit: Semaphore) {
     val lifecycle = LocalLifecycleOwner.current
-    var image by remember(page, recipe, generation) { mutableStateOf<RenderedPreviewBitmap?>(null) }
-    var failed by remember(page, recipe, generation) { mutableStateOf(false) }
-    LaunchedEffect(page, recipe, generation, lifecycle) {
+    var image by remember(issuedAt, page, recipe, generation) { mutableStateOf<RenderedPreviewBitmap?>(null) }
+    var failed by remember(issuedAt, page, recipe, generation) { mutableStateOf(false) }
+    LaunchedEffect(issuedAt, page, recipe, generation, lifecycle) {
         lifecycle.repeatOnLifecycle(Lifecycle.State.STARTED) {
             var owned: RenderedPreviewBitmap? = null
             try {
                 failed = false
                 permit.withPermit {
-                    val graph = openGraph()
                     val output = GeometrySizing.output(recipe.geometry, RenderPurpose.PREVIEW, 192)
                     val request = RenderRequest(page.sourceId.value, recipe.geometry.source.sourcePixelHash, page.pageId.value,
                         page.recipeRevision, recipe, output, generation, null, FallbackPolicy.FAIL)
-                    graph.renderer.render(request).use { result ->
-                        if (result.request != request || result.status != RenderStatus.OK) {
-                            failed = true
-                        } else {
-                            owned = RenderedPreviewBitmapLoader(graph.budget).convert(result)
-                            coroutineContext.ensureActive()
-                            image = owned
-                        }
-                    }
+                    owned = services.renderDefaultBatchPreview(issuedAt, page, request)
+                    coroutineContext.ensureActive()
+                    image = owned
                 }
                 awaitCancellation()
             } catch (canceled: CancellationException) { throw canceled }

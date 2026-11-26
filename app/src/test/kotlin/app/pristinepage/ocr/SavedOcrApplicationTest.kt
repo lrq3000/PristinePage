@@ -4,6 +4,7 @@ import app.pristinepage.core.ocr.OcrConfiguration
 import app.pristinepage.core.ocr.OcrLanguagePack
 import app.pristinepage.core.ocr.OcrLanguagePacks
 import app.pristinepage.core.ocr.OcrLayout
+import app.pristinepage.data.library.LibraryActivation
 import app.pristinepage.data.model.DocumentId
 import app.pristinepage.data.model.JobId
 import app.pristinepage.data.model.PageId
@@ -19,17 +20,20 @@ class SavedOcrApplicationTest {
     private val config = OcrConfiguration("tesseract", 1, OcrLayout.AUTOMATIC,
         OcrLanguagePacks(listOf(OcrLanguagePack("fra", "1".repeat(64)), OcrLanguagePack("eng", "2".repeat(64)))))
     private val target = SavedOcrWork.Target(PageId("aaaaaaaa-aaaa-4aaa-8aaa-000000000001"), JobId("aaaaaaaa-aaaa-4aaa-8aaa-000000000002"))
+    private val activation = LibraryActivation("aaaaaaaa-aaaa-4aaa-8aaa-000000000003", 2)
+    private val wake = ActivationBoundOcrWake(activation, target)
     private val factory = SavedOcrPreparer.SessionFactory { _, _, _ -> error("Test does not open the native engine") }
     private val session = object : SavedOcrScheduling.QualifiedSession {
+        override val activation = (this@SavedOcrApplicationTest).activation
         override val canCreateJobs = true
         override suspend fun reconcilePage(document: DocumentId, page: PageId): SavedOcrWork.Target? = null
         override fun pendingPages() = emptyFlow<SavedOcrWork.Target>()
     }
 
     @Test fun dormantRuntimeDoesNotReadSettingsOrOpenTheLibraryOnEitherPath() = runBlocking {
-        val app = SavedOcrApplication({ null }, { error("Must not read Settings") }, { error("Must not open library") })
+        val app = SavedOcrApplication({ null }, { error("Must not read Settings") }, { error("Must not open library") }, { activation })
         assertNull(app.reconciliation())
-        assertNull(app.executeSavedOcr(target))
+        assertNull(app.executeSavedOcr(wake))
     }
 
     @Test fun queueUsesOrderedDefaultsButRefusesSilentModelSubstitution() = runBlocking {
@@ -67,6 +71,7 @@ class SavedOcrApplicationTest {
         val runtime = SavedOcrApplication.Runtime(factory) { _, _ -> error("Restart must not consult defaults") }
         val expectedTarget = target
         val graph = object : SavedOcrApplication.Graph {
+            override val activation = (this@SavedOcrApplicationTest).activation
             override fun reconcile(defaults: OcrConfiguration?): SavedOcrScheduling.QualifiedSession = error("Worker must not discover unrelated pages")
             override suspend fun execute(target: SavedOcrWork.Target, sessions: SavedOcrPreparer.SessionFactory): SavedOcrWork.Outcome {
                 assertEquals(expectedTarget, target)
@@ -74,8 +79,30 @@ class SavedOcrApplicationTest {
                 return SavedOcrWork.Outcome.PUBLISHED
             }
         }
-        val app = SavedOcrApplication({ runtime }, { error("Worker must not read Settings") }, { graph })
-        assertEquals(SavedOcrWork.Outcome.PUBLISHED, app.executeSavedOcr(target))
+        val app = SavedOcrApplication({ runtime }, { error("Worker must not read Settings") }, { graph }, { activation })
+        assertEquals(SavedOcrWork.Outcome.PUBLISHED, app.executeSavedOcr(wake))
+    }
+
+    @Test fun oldWakeWithIdenticalLibraryPageAndJobDoesNotOpenRuntimeOrGraph() = runBlocking {
+        val app = SavedOcrApplication({ error("Stale work touched the runtime") }, { error("Must not read Settings") },
+            { error("Stale work opened a graph") }, { activation })
+        assertNull(app.executeSavedOcr(wake.copy(activation = activation.copy(number = 1))))
+    }
+
+    @Test fun aSwitchDuringRuntimeResolutionDoesNotOpenTheNewGraphForAnOldWake() = runBlocking {
+        var recorded = activation
+        val runtime = SavedOcrApplication.Runtime(factory) { _, _ -> error("Must not consult defaults") }
+        val app = SavedOcrApplication(
+            { recorded = activation.copy(number = 3); runtime }, { error("Must not read Settings") },
+            { error("The obsolete wake opened the replacement graph") }, { recorded },
+        )
+        assertNull(app.executeSavedOcr(wake))
+    }
+
+    @Test fun anOldSavedPageSignalCannotOpenTheNewGraphOrVerifyPacks() = runBlocking {
+        val app = SavedOcrApplication({ error("A stale save touched the runtime") }, { error("Must not read Settings") },
+            { error("A stale save opened a graph") }, { activation })
+        assertNull(app.reconciliation(activation.copy(number = 1)))
     }
 
     @Test fun rerunWithSavedSettingsReverifiesExactPacksAndKeepsTheSavedLayout() = runBlocking {

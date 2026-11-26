@@ -2,6 +2,7 @@ package app.pristinepage.library
 
 import app.pristinepage.capture.PhotoImportRequest
 import app.pristinepage.capture.PhotoImportKind
+import app.pristinepage.data.library.LibraryActivation
 import app.pristinepage.data.model.*
 import app.pristinepage.data.repository.AlbumSearchQuery
 import java.time.ZoneId
@@ -26,7 +27,11 @@ import kotlinx.coroutines.sync.withLock
 
 /** Main-confined state owned by a lifecycle-retained scope, not by one Activity registration. IO is delegated to the existing Application graph; only opaque IDs are restorable. No selected provider reference enters StateFlow, a saved identity or an error. */
 class ImportLibrarySession(private val actions: LibraryActions, restored: LibraryIdentity, private val scope: CoroutineScope) : LibrarySession {
-    private val current = MutableStateFlow(LibraryState(selectedId = restored.selected, selectedPage = restored.selectedPage, request = restored.pending?.let { PhotoImportRequest(it.value, restored.kind) }, phase = restored.pending?.let { ImportPhase.INTERRUPTED }, canSearchAlbums = actions is SearchableLibraryActions, canSearchPages = actions is SearchablePageActions))
+    private var pendingSelection = restored.takeIf { it.selectedAt != null }
+    private val current = MutableStateFlow(LibraryState(selectedId = restored.selected.takeIf { restored.selectedAt == null },
+        selectedPage = restored.selectedPage.takeIf { restored.selectedAt == null }, request = restored.pending?.let { PhotoImportRequest(it.value, restored.kind, restored.issuedAt) },
+        phase = restored.pending?.let { ImportPhase.INTERRUPTED }, canSearchAlbums = actions is SearchableLibraryActions,
+        canSearchPages = actions is SearchablePageActions, restoringSelection = pendingSelection != null))
     override val state: StateFlow<LibraryState> = current.asStateFlow()
     private val initialization = Mutex()
     private var started = false
@@ -35,7 +40,8 @@ class ImportLibrarySession(private val actions: LibraryActions, restored: Librar
     private var copying: Job? = null
     private var metadataRead: Job? = null
     private var albumLocale = Locale.getDefault()
-    private var albumCursor: AlbumPosition? = null
+    private data class AlbumCursor(val issuedAt: LibraryActivation?, val position: AlbumPosition)
+    private var albumCursor: AlbumCursor? = null
     private var retryFirstAlbumPage = false
     private var pageCursor: (suspend () -> HomePageSearchPage)? = null
     private var pageWindows = 0
@@ -45,13 +51,19 @@ class ImportLibrarySession(private val actions: LibraryActions, restored: Librar
 
     init { refresh(true) }
 
-    override fun identity() = current.value.let { value -> LibraryIdentity(value.selectedId, value.request?.session, value.selectedPage, value.request?.kind ?: PhotoImportKind.GALLERY) }
+    override fun identity() = current.value.let { value ->
+        val waiting = pendingSelection.takeIf { navigation == 0L }
+        LibraryIdentity(waiting?.selected ?: value.selectedId, value.request?.session, waiting?.selectedPage ?: value.selectedPage,
+            value.request?.kind ?: PhotoImportKind.GALLERY, value.request?.issuedAt,
+            waiting?.selectedAt ?: value.activation.takeIf { value.selectedId != null })
+    }
 
-    override suspend fun observePageSearch(query: String) {
+    override suspend fun observePageSearch(query: String, issuedAt: LibraryActivation?) {
         val search = actions as? SearchablePageActions ?: return
         if (query.isBlank()) return
-        fun stillOnQuery() = current.value.let { it.selectedId == null && it.albumSearch == query }
-        search.pageSearchChanges(query).catch {
+        fun stillOnQuery() = current.value.let { it.activation == issuedAt && it.selectedId == null && it.albumSearch == query }
+        if (!stillOnQuery()) return
+        search.pageSearchChanges(query, issuedAt).catch {
             if (it is CancellationException) throw it
             // A failed observation does not disable an explicit query or refresh.
         }.conflate().collect {
@@ -61,7 +73,7 @@ class ImportLibrarySession(private val actions: LibraryActions, restored: Librar
                 if (pending !== metadataRead) continue
                 if (!stillOnQuery()) break
                 val token = metadataGeneration
-                refreshPageWindow(query, search) { token == metadataGeneration && stillOnQuery() }
+                refreshPageWindow(query, search, issuedAt) { token == metadataGeneration && stillOnQuery() }
                 if (token == metadataGeneration) break
             }
         }
@@ -69,7 +81,7 @@ class ImportLibrarySession(private val actions: LibraryActions, restored: Librar
 
     override fun claimPickerLaunch(batchId: ImportSessionId): Boolean {
         val value = current.value
-        if (value.request?.batchId != batchId.value || !value.launchPending || value.phase != ImportPhase.WAITING_PICKER) return false
+        if (value.request?.batchId != batchId.value || !value.request.canDeliver || !value.launchPending || value.phase != ImportPhase.WAITING_PICKER) return false
         current.value = value.copy(launchPending = false)
         return true
     }
@@ -78,6 +90,7 @@ class ImportLibrarySession(private val actions: LibraryActions, restored: Librar
         when (event) {
             is LibraryEvent.Open -> {
                 ++navigation
+                discardSelectionRestore()
                 val same = current.value.selectedId == event.id
                 current.value = current.value.copy(selectedId = event.id, selectedPage = current.value.selectedPage.takeIf { same }, document = null, loading = true, error = null,
                     results = if (same) current.value.results else emptyList(), resultBatch = current.value.resultBatch.takeIf { same })
@@ -90,6 +103,7 @@ class ImportLibrarySession(private val actions: LibraryActions, restored: Librar
             LibraryEvent.CloseAlbum -> {
                 if (current.value.request != null || current.value.preparingImport || current.value.renaming) return
                 ++navigation
+                discardSelectionRestore()
                 current.value = current.value.copy(selectedId = null, selectedPage = null, document = null, error = null, renameResult = null)
                 refresh(true)
             }
@@ -113,7 +127,10 @@ class ImportLibrarySession(private val actions: LibraryActions, restored: Librar
                 refresh(true, debounceSearch = text.isNotBlank())
             }
             is LibraryEvent.OpenPageMatch -> openPageMatch(event)
-            LibraryEvent.LeaveHomeSearch -> cancelOpeningHit()
+            LibraryEvent.LeaveHomeSearch -> {
+                cancelOpeningHit()
+                discardSelectionRestore()
+            }
             is LibraryEvent.RenameAlbum -> rename(event)
             LibraryEvent.ClearRenameResult -> if (!current.value.renaming) current.value = current.value.copy(renameResult = null)
             is LibraryEvent.NewDocument -> if (!current.value.loading && (!event.importAfterCreate || (!current.value.preparingImport && current.value.request == null))) {
@@ -137,7 +154,7 @@ class ImportLibrarySession(private val actions: LibraryActions, restored: Librar
             LibraryEvent.BeginCapture -> prepare(PhotoImportKind.CAMERA)
             is LibraryEvent.PhotoResult -> consume(event)
             LibraryEvent.CancelImport -> abandon(null)
-            is LibraryEvent.PickerFailed -> if (current.value.request?.batchId == event.request.batchId) abandon(OperationError(OperationErrorCode.PROVIDER_UNAVAILABLE, false, if (event.request.kind == PhotoImportKind.FILES) "files_picker_unavailable" else "gallery_unavailable", event.request.batchId))
+            is LibraryEvent.PickerFailed -> if (event.request.canDeliver && current.value.request?.matches(event.request) == true) abandon(OperationError(OperationErrorCode.PROVIDER_UNAVAILABLE, false, if (event.request.kind == PhotoImportKind.FILES) "files_picker_unavailable" else "gallery_unavailable", event.request.batchId))
         }
     }
 
@@ -145,9 +162,10 @@ class ImportLibrarySession(private val actions: LibraryActions, restored: Librar
         val hit = event.hit
         val token = metadataGeneration
         val nav = navigation
+        val issuedAt = current.value.activation
         fun eligible(): Boolean {
             val value = current.value
-            return token == metadataGeneration && nav == navigation && value.selectedId == null &&
+            return token == metadataGeneration && nav == navigation && value.activation == issuedAt && value.selectedId == null &&
                 !value.loading && !value.preparingImport && value.request == null
         }
         if (!eligible() || hit !in current.value.pageMatches) return
@@ -155,9 +173,7 @@ class ImportLibrarySession(private val actions: LibraryActions, restored: Librar
         val opening = hitNavigation
         fun currentHit() = opening == hitNavigation && eligible()
         openingHit = run(onFailure = { if (currentHit()) current.value = current.value.copy(pageSearchUnavailable = true) }) {
-            val overview = actions.load(hit.document)
-            if (overview.document.documentId != hit.document || overview.pages.none { it.pageId == hit.page } ||
-                !currentHit() || !hit.stillMatches()) return@run
+            val overview = actions.openPageHit(hit, issuedAt) ?: return@run
             currentCoroutineContext().ensureActive()
             if (!currentHit()) return@run
             ++navigation
@@ -170,6 +186,13 @@ class ImportLibrarySession(private val actions: LibraryActions, restored: Librar
         ++hitNavigation
         openingHit?.cancel()
         openingHit = null
+    }
+
+    /** Home is usable while a cold restore waits. A newer navigation decision must not dismiss Settings or take Back away from the user. */
+    private fun discardSelectionRestore() {
+        if (pendingSelection == null) return
+        pendingSelection = null
+        current.value = current.value.copy(restoringSelection = false)
     }
 
     private fun rename(event: LibraryEvent.RenameAlbum) {
@@ -209,7 +232,7 @@ class ImportLibrarySession(private val actions: LibraryActions, restored: Librar
         // Preparation admission is independent of navigation/loading and spans create through durable reservation. Never reread the visible destination after suspension or drop an existing durable request.
         check(current.value.preparingImport && current.value.request == null)
         val reserved = actions.begin(actions.load(target).document)
-        val request = PhotoImportRequest(reserved.batchId, kind)
+        val request = reserved.routedAs(kind)
         current.value = current.value.copy(request = request, launchPending = kind != PhotoImportKind.CAMERA, phase = ImportPhase.WAITING_PICKER, results = emptyList(), resultBatch = null, loading = false)
     }
 
@@ -219,7 +242,7 @@ class ImportLibrarySession(private val actions: LibraryActions, restored: Librar
 
     private fun consume(event: LibraryEvent.PhotoResult): Boolean {
         val value = current.value
-        if (value.request?.batchId != event.request.batchId || value.request.kind != event.request.kind || copying?.isActive == true || value.phase !in setOf(ImportPhase.WAITING_PICKER, ImportPhase.INTERRUPTED)) return false
+        if (value.request?.matches(event.request) != true || !event.request.canDeliver || copying?.isActive == true || value.phase !in setOf(ImportPhase.WAITING_PICKER, ImportPhase.INTERRUPTED)) return false
         if (event.request.kind == PhotoImportKind.CAMERA && value.phase != ImportPhase.WAITING_PICKER) return false
         val selection = when (val result = event.selection) {
             is LibraryPhotoResult.Selected -> result.copy(references = result.references.toList())
@@ -227,11 +250,13 @@ class ImportLibrarySession(private val actions: LibraryActions, restored: Librar
         }
         current.value = value.copy(phase = ImportPhase.COPYING, launchPending = false, error = null)
         // Install the real consumer handle before it can run/reenter Main. Presentation changes and unrelated errors cannot replace the Job which cancellation must join.
-        copying = run(start = CoroutineStart.LAZY, onFailure = { error ->
-            if (current.value.request?.batchId == event.request.batchId && current.value.phase == ImportPhase.COPYING) current.value = current.value.copy(phase = ImportPhase.INTERRUPTED, error = error, loading = false)
+        copying = run(start = CoroutineStart.LAZY, initialize = event.request.issuedAt == null, onFailure = { error ->
+            if (!detachStale(event.request, error) && current.value.request?.matches(event.request) == true && current.value.phase == ImportPhase.COPYING) {
+                current.value = current.value.copy(phase = ImportPhase.INTERRUPTED, error = error, loading = false)
+            }
         }) {
             val results = actions.deliver(event.request, selection)
-            if (current.value.request?.batchId == event.request.batchId && current.value.phase == ImportPhase.COPYING) {
+            if (current.value.request?.matches(event.request) == true && current.value.phase == ImportPhase.COPYING) {
                 val interrupted = results.any { it is IngestResult.Pending }
                 val canceled = results.isNotEmpty() && results.all { it is IngestResult.Rejected && it.error.code == OperationErrorCode.CANCELED }
                 // Outcomes are durable, but the displayed counts/order still precede this copy. Keep metadata visibly refreshing until loadSelected publishes the new snapshot; otherwise COMPLETE+idle can expose an empty pre-import overview.
@@ -248,8 +273,8 @@ class ImportLibrarySession(private val actions: LibraryActions, restored: Librar
         if (current.value.phase == ImportPhase.CANCELING) return
         val consumer = copying
         current.value = current.value.copy(phase = ImportPhase.CANCELING, launchPending = false)
-        run(onFailure = { error ->
-            if (current.value.request?.batchId == request.batchId && current.value.phase == ImportPhase.CANCELING) {
+        run(initialize = request.issuedAt == null, onFailure = { error ->
+            if (!detachStale(request, error) && current.value.request?.matches(request) == true && current.value.phase == ImportPhase.CANCELING) {
                 // Only failure of this abandonment can restore retry admission. A metadata read failure has no authority over consumer or cancellation lifetime.
                 current.value = current.value.copy(phase = if (consumer?.isActive == true) ImportPhase.COPYING else ImportPhase.INTERRUPTED, loading = false, error = error)
             }
@@ -261,8 +286,38 @@ class ImportLibrarySession(private val actions: LibraryActions, restored: Librar
                 if (error.code == OperationErrorCode.SESSION_EXPIRED && error.safeMessageKey == "import_session_unavailable" && error.affectedId == request.batchId) error else throw failure
             }
             consumer?.cancelAndJoin()
-            if (current.value.request?.batchId == request.batchId) current.value = current.value.copy(request = null, phase = if (unavailable == null) ImportPhase.CANCELED else null, error = unavailable ?: reason, loading = true)
+            if (current.value.request?.matches(request) == true) current.value = current.value.copy(request = null, phase = if (unavailable == null) ImportPhase.CANCELED else null, error = unavailable ?: reason, loading = true)
             refresh(true).join()
+        }
+    }
+
+    /** Detach only invalidated presentation authority. A transient storage/selection error must not discard the user's pending request. */
+    private fun detachStale(request: PhotoImportRequest, error: OperationError): Boolean {
+        if (error.retryable || error.safeMessageKey != "library_activation_changed" || current.value.request?.matches(request) != true) return false
+        current.value = current.value.copy(request = null, launchPending = false, phase = null, loading = false, error = error)
+        return true
+    }
+
+    /** Reconcile a retained command with only the issuing album; no normal startup, provider callback or successor lookup. */
+    internal fun refreshIssuedAlbum(issuedAt: LibraryActivation, id: DocumentId, read: suspend () -> DocumentOverview) {
+        if (current.value.activation != issuedAt || current.value.selectedId != id) return
+        val nav = navigation
+        val token = ++metadataGeneration
+        fun stillCurrent() = token == metadataGeneration && nav == navigation &&
+            current.value.let { it.activation == issuedAt && it.selectedId == id }
+        metadataRead?.cancel()
+        current.value = current.value.copy(loading = true, error = null)
+        metadataRead = run(initialize = false, onFailure = { error -> if (stillCurrent()) failed(error) }) {
+            val document = read()
+            currentCoroutineContext().ensureActive()
+            if (!stillCurrent()) return@run
+            if (document.document.documentId != id) {
+                throw RepositoryFailure(OperationError(OperationErrorCode.INTEGRITY_FAILED, false, "album_refresh_identity_changed", id.value))
+            }
+            current.value = current.value.let { value ->
+                value.copy(document = document, loading = false,
+                    selectedPage = value.selectedPage?.takeIf { page -> document.pages.any { it.pageId == page } })
+            }
         }
     }
 
@@ -270,29 +325,31 @@ class ImportLibrarySession(private val actions: LibraryActions, restored: Librar
         cancelOpeningHit()
         val token = ++metadataGeneration
         metadataRead?.cancel()
-        val selected = current.value.selectedId
         val nav = navigation
         current.value = current.value.copy(loading = true)
         return run(onFailure = { error -> if (token == metadataGeneration && nav == navigation) failed(error) }) {
             if (debounceSearch) delay(220)
             if (includeList) reload(reset, token)
-            loadSelected(selected, nav, token)
+            if (token == metadataGeneration && nav == navigation) loadSelected(current.value.selectedId, nav, token)
         }.also { metadataRead = it }
     }
 
     private suspend fun reload(reset: Boolean, token: Long) {
         val value = current.value
+        val issuedAt = value.activation
+        fun stillCurrent() = token == metadataGeneration && current.value.activation == issuedAt
         val search = (actions as? SearchableLibraryActions)?.takeIf { value.albumSearch.isNotBlank() }
         if (search != null) {
-            reloadSearch(reset, token, value, search)
+            reloadSearch(reset, value, search, ::stillCurrent)
             return
         }
         val ordered = actions as? OrderedLibraryActions
         if (ordered != null) {
-            val cursor = if (reset) null else albumCursor
-            val page = ordered.listAlbums(value.albumOrder, albumLocale, cursor, 50)
-            if (token == metadataGeneration) {
-                albumCursor = page.next
+            val cursor = if (reset) null else albumPosition(issuedAt)
+            val page = ordered.listAlbums(value.albumOrder, albumLocale, cursor, 50, issuedAt)
+            currentCoroutineContext().ensureActive()
+            if (stillCurrent()) {
+                albumCursor = page.next?.let { AlbumCursor(issuedAt, it) }
                 // A remote/concurrent writer may move an album across cursors. Avoid duplicate lazy keys even before the next explicit refresh.
                 val albums = if (reset) page.albums else (current.value.documents + page.albums).distinctBy { it.documentId }
                 current.value = current.value.copy(documents = owned(albums), hasMore = page.next != null)
@@ -301,32 +358,38 @@ class ImportLibrarySession(private val actions: LibraryActions, restored: Librar
         }
         val after = if (reset) null else current.value.documents.lastOrNull()?.documentId
         val documents = actions.list(after, 50)
-        if (token == metadataGeneration) current.value = current.value.copy(documents = owned(if (reset) documents else current.value.documents + documents), hasMore = documents.size == 50)
+        if (stillCurrent()) current.value = current.value.copy(documents = owned(if (reset) documents else current.value.documents + documents), hasMore = documents.size == 50)
     }
 
-    private suspend fun reloadSearch(reset: Boolean, token: Long, value: LibraryState, search: SearchableLibraryActions) {
+    private fun albumPosition(issuedAt: LibraryActivation?): AlbumPosition? = albumCursor?.let {
+        check(it.issuedAt == issuedAt) { "Album cursor belongs to another activation" }
+        it.position
+    }
+
+    private suspend fun reloadSearch(reset: Boolean, value: LibraryState, search: SearchableLibraryActions, stillCurrent: () -> Boolean) {
         val firstAlbum = reset || retryFirstAlbumPage
-        val afterAlbum = if (firstAlbum) null else albumCursor
+        val afterAlbum = if (firstAlbum) null else albumPosition(value.activation)
         if (firstAlbum || afterAlbum != null) try {
-            val found = search.searchAlbums(AlbumSearchQuery(value.albumSearch, searchZone), value.albumOrder, albumLocale, afterAlbum, 50)
-            if (token != metadataGeneration) return
-            albumCursor = found.next
+            val found = search.searchAlbums(AlbumSearchQuery(value.albumSearch, searchZone), value.albumOrder, albumLocale, afterAlbum, 50, value.activation)
+            currentCoroutineContext().ensureActive()
+            if (!stillCurrent()) return
+            albumCursor = found.next?.let { AlbumCursor(value.activation, it) }
             retryFirstAlbumPage = false
             val albums = (if (firstAlbum) emptyList() else current.value.documents) + found.albums
             current.value = current.value.copy(documents = owned(albums.distinctBy { it.documentId }), albumSearchUnavailable = false)
         } catch (canceled: CancellationException) { throw canceled }
         catch (_: Exception) {
-            if (token != metadataGeneration) return
+            if (!stillCurrent()) return
             retryFirstAlbumPage = firstAlbum
             current.value = current.value.copy(documents = if (reset) emptyList() else current.value.documents, albumSearchUnavailable = true)
         }
-        reloadSearchPages(reset, value, actions as? SearchablePageActions) { token == metadataGeneration }
+        reloadSearchPages(reset, value, actions as? SearchablePageActions, stillCurrent)
     }
 
-    private suspend fun refreshPageWindow(query: String, search: SearchablePageActions, currentRead: () -> Boolean) {
+    private suspend fun refreshPageWindow(query: String, search: SearchablePageActions, issuedAt: LibraryActivation?, currentRead: () -> Boolean) {
         val hits = mutableListOf<HomePageSearchHit>()
         val extent = pageWindows.coerceAtLeast(1)
-        var next: (suspend () -> HomePageSearchPage)? = { search.searchPages(query) }
+        var next: (suspend () -> HomePageSearchPage)? = { search.searchPages(query, issuedAt) }
         var windows = 0
         try {
             while (windows < extent) {
@@ -334,6 +397,7 @@ class ImportLibrarySession(private val actions: LibraryActions, restored: Librar
                 val found = read()
                 currentCoroutineContext().ensureActive()
                 if (!currentRead()) return
+                requireIssuedHits(found, issuedAt)
                 hits += found.hits
                 next = found.next
                 ++windows
@@ -354,11 +418,12 @@ class ImportLibrarySession(private val actions: LibraryActions, restored: Librar
     }
 
     private suspend fun reloadSearchPages(reset: Boolean, value: LibraryState, pageActions: SearchablePageActions?, currentRead: () -> Boolean) {
-        val next: (suspend () -> HomePageSearchPage)? = if (reset) pageActions?.let { { it.searchPages(value.albumSearch) } } else pageCursor
+        val next: (suspend () -> HomePageSearchPage)? = if (reset) pageActions?.let { { it.searchPages(value.albumSearch, value.activation) } } else pageCursor
         if (next != null) try {
             val found = next()
             currentCoroutineContext().ensureActive()
             if (!currentRead()) return
+            requireIssuedHits(found, value.activation)
             val hits = (if (reset) emptyList() else current.value.pageMatches) + found.hits
             publishPageWindow(hits, found.next, if (reset) 1 else pageWindows + 1)
         } catch (canceled: CancellationException) { throw canceled }
@@ -372,23 +437,50 @@ class ImportLibrarySession(private val actions: LibraryActions, restored: Librar
         if (currentRead()) current.value = current.value.copy(hasMore = retryFirstAlbumPage || albumCursor != null || pageCursor != null)
     }
 
+    private fun requireIssuedHits(page: HomePageSearchPage, issuedAt: LibraryActivation?) {
+        // The compatibility test port can supply unscoped hits, but an explicitly foreign hit cannot populate this window or advance it.
+        check(page.hits.none { it.issuedAt != null && it.issuedAt != issuedAt }) { "Search results belong to another activation" }
+    }
+
     private suspend fun loadSelected(id: DocumentId?, nav: Long, token: Long) {
-        val document = id?.let { actions.load(it) }
-        if (token != metadataGeneration || nav != navigation || current.value.selectedId != id) return
+        val issuedAt = current.value.activation
+        fun stillCurrent() = token == metadataGeneration && nav == navigation &&
+            current.value.let { it.selectedId == id && it.activation == issuedAt }
+        val document = id?.let { if (issuedAt != null) actions.loadIssued(it, issuedAt) else actions.load(it) }
+        if (!stillCurrent()) return
         val discover = id != null && document?.document?.hasPendingImport == true && current.value.request == null && !current.value.preparingImport
-        val pending = if (discover) actions.activeImport(id) ?: throw RepositoryFailure(OperationError(OperationErrorCode.INTEGRITY_FAILED, false, "pending_import_identity_missing", id.value)) else null
-        if (token == metadataGeneration && nav == navigation && current.value.selectedId == id) {
+        val pending = if (discover) {
+            (if (issuedAt != null) actions.activeIssuedImport(id, issuedAt) else actions.activeImportRequest(id))
+                ?: throw RepositoryFailure(OperationError(OperationErrorCode.INTEGRITY_FAILED, false, "pending_import_identity_missing", id.value))
+        } else null
+        if (stillCurrent()) {
             // Read the newest Main-confined choice after IO. A refresh started before a tap must not restore its older captured selection; membership is still revalidated against this returned overview.
             val value = current.value.copy(selectedPage = current.value.selectedPage?.takeIf { page -> document?.pages?.any { it.pageId == page } == true })
-            current.value = if (pending != null && value.request == null) value.copy(document = document, loading = false, request = PhotoImportRequest(pending.value), launchPending = false, phase = ImportPhase.INTERRUPTED)
+            current.value = if (pending != null && value.request == null) value.copy(document = document, loading = false, request = pending, launchPending = false, phase = ImportPhase.INTERRUPTED)
             else value.copy(document = document, loading = false)
         }
     }
 
-    private fun run(onFailure: (OperationError) -> Unit = ::failed, start: CoroutineStart = CoroutineStart.DEFAULT, action: suspend () -> Unit): Job = scope.launch(start = start) {
+    private fun run(onFailure: (OperationError) -> Unit = ::failed, start: CoroutineStart = CoroutineStart.DEFAULT,
+        initialize: Boolean = true, action: suspend () -> Unit): Job = scope.launch(start = start) {
         try {
-            initialization.withLock {
-                if (!started) { val report = actions.startup(); current.value = current.value.copy(recovery = report); started = true }
+            // Scoped callbacks enter the activation-checked adapter directly; only ordinary UI startup may bootstrap an unrecorded store.
+            if (initialize) initialization.withLock {
+                if (!started) {
+                    val opened = actions.openLibrary()
+                    currentCoroutineContext().ensureActive()
+                    var value = current.value.copy(recovery = opened.report, activation = opened.activation, restoringSelection = false)
+                    pendingSelection?.takeIf { navigation == 0L && it.selectedAt == opened.activation }?.let {
+                        value = value.copy(selectedId = it.selected, selectedPage = it.selectedPage)
+                    }
+                    pendingSelection = null
+                    val picker = value.request
+                    if (opened.activation != null && picker?.issuedAt != null && picker.issuedAt != opened.activation && value.phase == ImportPhase.INTERRUPTED) {
+                        value = value.copy(request = null, phase = null, launchPending = false)
+                    }
+                    current.value = value
+                    started = true
+                }
             }
             action()
         } catch (canceled: CancellationException) { throw canceled }

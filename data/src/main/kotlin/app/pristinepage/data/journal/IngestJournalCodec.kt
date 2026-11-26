@@ -1,6 +1,7 @@
 package app.pristinepage.data.journal
 
 import app.pristinepage.core.pipeline.requireSha256
+import app.pristinepage.core.library.LibraryScanName
 import app.pristinepage.data.model.IngestJournalIntent
 import app.pristinepage.data.model.IngestJournalSeal
 import app.pristinepage.data.model.IngestJournalCommit
@@ -13,7 +14,7 @@ import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
 
-/** Ingest metadata is canonical UTF-8 JSON with sorted keys. V2 adds only a typed capture-date projection to the seal and corresponding commit; v1 bytes and intent identity stay unchanged. Recovery accepts only the exact encoding we write, never last-key-wins or lenient ownership reinterpretation. */
+/** Canonical UTF-8 JSON. V2 adds a capture-date projection; v3 carries requested and allocated logical filenames without changing the intent, v1 or v2 bytes. Reject noncanonical encodings before recovery consumes them. */
 object IngestJournalCodec {
     private const val MAX_BYTES = 524288
     private val json = Json { encodeDefaults = true; ignoreUnknownKeys = false }
@@ -41,6 +42,8 @@ object IngestJournalCodec {
     @JvmStatic fun encodeCommit(commit: IngestJournalCommit): ByteArray {
         validate(commit.seal)
         require(commit.schemaVersion == commit.seal.schemaVersion && commit.documentRevision >= 1) { "Unsupported ingest commit" }
+        require((commit.schemaVersion == 3) == (commit.libraryFilename != null))
+        commit.libraryFilename?.let(LibraryScanName::comparisonKey)
         return encode(IngestJournalCommit.serializer(), commit)
     }
 
@@ -59,11 +62,13 @@ object IngestJournalCodec {
     private fun validate(seal: IngestJournalSeal) {
         validate(seal.intent)
         val supported = when (seal.schemaVersion) {
-            1 -> seal.captureDate == null
-            2 -> seal.captureDate != null
+            1 -> seal.captureDate == null && seal.preferredFilename == null
+            2 -> seal.captureDate != null && seal.preferredFilename == null
+            3 -> true
             else -> false
         }
         require(supported && seal.byteCount in 1..104857600L) { "Unsupported ingest seal" }
+        seal.preferredFilename?.let(LibraryScanName::comparisonKey)
         requireSha256(seal.sourceByteHash)
     }
 

@@ -6,6 +6,7 @@ import java.util.concurrent.Callable
 
 /** SQLite/Room owns rollback and writer serialization; this does not pretend that source-file moves are part of the same atomic transaction. */
 class RoomMetadataAccess(private val database: PristineDatabase) : MetadataAccess {
+    internal val libraryScanNames by lazy { RoomLibraryScanNames(database.libraryScanNames()) }
     override val queries: CatalogQueries get() = database.catalog()
     override fun <T> transaction(action: () -> T): T = database.runInTransaction(Callable { action() })
     override fun isHiddenAtelierDraft(documentId: String): Boolean {

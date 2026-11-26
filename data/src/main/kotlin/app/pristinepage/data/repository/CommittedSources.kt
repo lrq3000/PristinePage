@@ -9,6 +9,23 @@ import java.io.File
 /** Private immutable original plus its recorded normalization, not a page/current-recipe view. This value is process-private, never serialized into UI messages, WorkManager Data or external URIs. Caller retains an existing page/history/job/snapshot owner through consumption; loading does not acquire a GC lease or authorize reclamation. */
 class CommittedSource(val sourceId: SourceId, val sourceBlobId: SourceBlobId, val sourceByteHash: String, val byteCount: Long, val inspection: SourceInspection, val file: File) {
     init { requireSha256(sourceByteHash); require(byteCount in 1..104857600L) }
+
+    fun binding() = CommittedSourceBinding(sourceId, sourceBlobId, sourceByteHash, byteCount, inspection)
+}
+
+/** Exact retained original metadata without a file locator or capability. */
+data class CommittedSourceBinding(
+    val sourceId: SourceId, val sourceBlobId: SourceBlobId, val sourceByteHash: String, val byteCount: Long,
+    val inspection: SourceInspection,
+) {
+    init { requireSha256(sourceByteHash); require(byteCount in 1..104857600L) }
+}
+
+/** The reader admits the exact retained source (and a producer's exact binding when supplied) before lending one verified file. It calls [read] once in scope, propagates callback failure, and may refuse after the callback if access, identity or cleanup cannot be verified. Neither the file nor handles may escape. */
+fun interface ScopedCommittedOriginals {
+    suspend fun withOriginal(
+        sourceId: SourceId, expected: ExportSourceBinding?, read: suspend (CommittedSourceBinding, File) -> Unit,
+    )
 }
 
 fun interface CommittedSources {

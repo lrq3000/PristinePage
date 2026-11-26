@@ -24,13 +24,93 @@ import org.junit.runner.RunWith
 /** Current SourceStore and real Android Room/private filesystem. Provider bytes/normalized inspection are synthetic; these four bytes are not a PNG. Close/reopen is not process death, this is not decoder/provider acceptance, and no retained database/file is deleted. */
 @RunWith(AndroidJUnit4::class)
 class RoomSourceIngestIntegrationTest {
+    @Test fun missingFallbackNameRefusesReplayWithoutReopeningTheOriginalProvider() = runBlocking {
+        Fixture().use { f ->
+            val child = f.reserve().single()
+            val saved = f.store.ingest(f.reference, child) as IngestResult.Committed
+            val intent = checkNotNull(RoomIngestLookup(f.database).find(child))
+            val sql = f.database.openHelper.writableDatabase
+            sql.query("SELECT filename FROM LibraryScanName WHERE pageId=?", arrayOf(saved.pageId.value)).use {
+                assertTrue(it.moveToFirst())
+                assertEquals("Scan ${saved.pageId.value}.png", it.getString(0))
+            }
+            sql.execSQL("DELETE FROM LibraryScanName WHERE pageId=?", arrayOf(saved.pageId.value))
+            val refused = f.store.ingest(f.reference, child) as IngestResult.Rejected
+            assertEquals("ingest_scan_name_mismatch", refused.error.safeMessageKey)
+            assertEquals(1, f.opened)
+            assertArrayEquals(f.bytes, f.files.finalFile(intent.sourceBlobId.value).readBytes())
+        }
+    }
+
+    @Test fun modifiedTerminalJobOrReceiptCannotAcknowledgeIngest() = runBlocking {
+        for (mutation in listOf(
+            "UPDATE Job SET state='FAILED' WHERE jobId=NEW.jobId",
+            "UPDATE FileTransaction SET payload=X'00' WHERE kind='INGEST' AND state='COMMITTED'",
+        )) Fixture().use { f ->
+            f.sourceDisplayName = "Test.png"
+            val child = f.reserve().single()
+            f.database.openHelper.writableDatabase.execSQL("""CREATE TRIGGER flip_terminal_ingest AFTER UPDATE OF state ON Job
+                WHEN NEW.state='SUCCEEDED' BEGIN $mutation; END""")
+            val result = f.store.ingest(f.reference, child)
+            assertFalse(result is IngestResult.Committed)
+            val intent = checkNotNull(RoomIngestLookup(f.database).find(child))
+            assertEquals("MOVED", f.database.ingestPreparation().fileTransaction(intent.transactionId.value)?.state)
+            assertEquals("RUNNING", f.database.jobLeases().job(intent.jobId.value)?.state)
+            assertEquals(0L, f.count("Page"))
+            assertEquals(0L, f.count("LibraryScanName"))
+            assertArrayEquals(f.bytes, f.files.finalFile(intent.sourceBlobId.value).readBytes())
+        }
+    }
+
+    @Test fun aLateDocumentWriteCannotChangeADuplicateNameAndCommitTheNewPage() = runBlocking {
+        Fixture().use { f ->
+            f.sourceDisplayName = "One.png"
+            val child = f.reserve().single()
+            val original = f.store.ingest(f.reference, child) as IngestResult.Committed
+            val sql = f.database.openHelper.writableDatabase
+            sql.execSQL("""CREATE TRIGGER flip_duplicate_name AFTER UPDATE OF documentRevision ON Document
+                BEGIN UPDATE LibraryScanName SET filename='Wrong.png',comparisonKey='wrong.png' WHERE pageId!='${original.pageId.value}'; END""")
+            val command = RoomDocumentRepository(RoomMetadataAccess(f.database), RecipeAdmission { _, _ -> null })
+            val result = command.duplicatePage(original.pageId, original.documentRevision) as DocumentMutationResult.Rejected
+            assertEquals(OperationErrorCode.INTEGRITY_FAILED, result.error.code)
+            assertEquals(1L, f.count("Page"))
+            assertEquals(1L, f.count("LibraryScanName"))
+            assertEquals(2L, f.count("SourceReference"))
+            assertEquals(0L, f.count("UndoEntry"))
+        }
+    }
+
+    @Test fun durableLogicalNamesAreAllocatedInAlbumOrderWithoutMovingOrChangingOriginals() = runBlocking {
+        Fixture().use { f ->
+            f.sourceDisplayName = "Report.PNG"
+            val (first, second) = f.reserve(count = 2)
+            val a = f.store.ingest(f.reference, first) as IngestResult.Committed
+            f.sourceDisplayName = "report.png"
+            val b = f.store.ingest(f.reference, second) as IngestResult.Committed
+            f.reopen()
+            val sql = f.database.openHelper.readableDatabase
+            val names = sql.query("""SELECT filename FROM LibraryScanName JOIN Page USING(pageId,documentId) ORDER BY ordinal""").use {
+                buildList { while (it.moveToNext()) add(it.getString(0)) }
+            }
+            assertEquals(listOf("Report.PNG", "report (2).png"), names)
+            f.sourceDisplayName = "different.png"
+            assertEquals(a, f.store.ingest(f.reference, first))
+            assertEquals(b, f.store.ingest(f.reference, second))
+            assertEquals(2, f.opened)
+            listOf(first, second).forEach { id ->
+                val intent = RoomIngestLookup(f.database).find(id)!!
+                assertArrayEquals(f.bytes, f.files.finalFile(intent.sourceBlobId.value).readBytes())
+            }
+        }
+    }
+
     @Test fun currentSourceStoreCommitsReopensAndReplaysWithoutProviderOrDuplicatePins() = runBlocking {
         Fixture().use { f ->
             val child = f.reserve().single()
             val first = f.store.ingest(f.reference, child) as IngestResult.Committed
             val intent = RoomIngestLookup(f.database).find(child)!!
             assertEquals(0L, f.count("SourceCaptureDay"))
-            // A later projection must not retroactively change or invalidate a v1 ingest receipt.
+            // A later projection must not retroactively change a receipt which never recorded a date.
             f.database.openHelper.writableDatabase.execSQL("INSERT INTO SourceCaptureDay VALUES (?,?,19782)",
                 arrayOf(intent.sourceBlobId.value, first.sourceByteHash))
             assertEquals(1, f.opened); assertEquals(1, f.closed)
@@ -180,17 +260,20 @@ class RoomSourceIngestIntegrationTest {
 
     internal class Fixture(private val enableRetry: Boolean = false, directorySync: DirectorySync? = null,
         private val captureDate: SourceCaptureDate? = null,
+        val bytes: ByteArray = byteArrayOf(1, 2, 3, 4),
     ) : AutoCloseable {
         private val context: Context = InstrumentationRegistry.getInstrumentation().context
         private val name = "t03-ingest-${UUID.randomUUID()}.db"
         val root = File(context.filesDir, "t03-ingest-${UUID.randomUUID()}")
         val files = if (directorySync == null) SourceFiles(root) else SourceFiles(root, directorySync)
-        val bytes = byteArrayOf(1, 2, 3, 4)
+        private val fixtureSha = java.security.MessageDigest.getInstance("SHA-256").digest(bytes)
+            .joinToString("") { "%02x".format(it.toInt() and 255) }
         val reference = Uri.parse("content://fixture.documents/synthetic-source")
         val owners = LocalOperationOwners()
         var opened = 0; var closed = 0
         var inspectionFailure: RepositoryFailure? = null
         var providerFailure: RuntimeException? = null
+        var sourceDisplayName: String? = null
         var database = open()
             private set
         val document = runBlocking { RoomDocumentRepository(RoomMetadataAccess(database), RecipeAdmission { _, _ -> null }).createDocument("Synthetic ingest integration") }
@@ -208,14 +291,21 @@ class RoomSourceIngestIntegrationTest {
 
         private fun open() = Room.databaseBuilder(context, PristineDatabase::class.java, name).build()
         private fun store(): SourceStore {
-            val provider = SourceInput { bound ->
-                assertFalse(database.inTransaction()); assertEquals(reference.toString(), bound); opened++
-                providerFailure?.let { throw it }
-                object : ByteArrayInputStream(bytes) { override fun close() { closed++; super.close() } }
+            val provider = object : SourceInput {
+                override fun open(boundReference: String): ByteArrayInputStream {
+                    assertFalse(database.inTransaction()); assertEquals(reference.toString(), boundReference); opened++
+                    providerFailure?.let { throw it }
+                    return object : ByteArrayInputStream(bytes) { override fun close() { closed++; super.close() } }
+                }
+                override suspend fun suggestedDisplayName(boundReference: String): String? {
+                    assertFalse(database.inTransaction())
+                    assertEquals(reference.toString(), boundReference)
+                    return sourceDisplayName
+                }
             }
             val normalizedInspector = SourceInspector { file, hash ->
                 assertFalse(database.inTransaction()); assertEquals(opened, closed)
-                assertArrayEquals(bytes, file.readBytes()); assertEquals("9f64a747e1b97f131fabb6b447296c9b6f0201e79fb3c5356e6c77e89b6a806a", hash)
+                assertArrayEquals(bytes, file.readBytes()); assertEquals(fixtureSha, hash)
                 inspectionFailure?.let { throw it }
                 SourceInspection("image/png", PixelSize(3, 2), PixelSize(3, 2), 1, null, "synthetic-v1", "a".repeat(64))
             }
@@ -229,7 +319,7 @@ class RoomSourceIngestIntegrationTest {
         }
         fun reopen() { database.close(); database = open(); store = store() }
         fun count(table: String): Long {
-            require(table in setOf("Page", "Source", "SourceBlob", "RecipeRevision", "SourceReference", "SourceCaptureDay"))
+            require(table in setOf("Page", "Source", "SourceBlob", "RecipeRevision", "SourceReference", "SourceCaptureDay", "LibraryScanName", "UndoEntry"))
             return database.openHelper.readableDatabase.query("SELECT COUNT(*) FROM $table").use { cursor -> check(cursor.moveToFirst()); cursor.getLong(0) }
         }
         fun assertForeignKeys() { database.openHelper.readableDatabase.query("PRAGMA foreign_key_check").use { cursor -> assertFalse(cursor.moveToFirst()) } }
