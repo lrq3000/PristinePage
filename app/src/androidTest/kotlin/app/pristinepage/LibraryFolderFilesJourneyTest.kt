@@ -29,7 +29,9 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.test.assertIsEnabled
 import androidx.compose.ui.test.assertIsNotEnabled
+import androidx.compose.ui.test.hasAnyAncestor
 import androidx.compose.ui.test.hasClickAction
+import androidx.compose.ui.test.hasContentDescription
 import androidx.compose.ui.test.hasTestTag
 import androidx.compose.ui.test.hasText
 import androidx.compose.ui.test.isEnabled
@@ -84,6 +86,8 @@ import java.io.ByteArrayOutputStream
 import java.io.File
 import java.io.IOException
 import java.io.OutputStream
+import java.nio.file.Files
+import java.nio.file.StandardOpenOption.CREATE_NEW
 import java.security.MessageDigest
 import java.util.UUID
 import java.util.concurrent.CountDownLatch
@@ -258,8 +262,12 @@ class LibraryFolderFilesJourneyTest {
         assertEquals(ocrBefore, settingsFixtureOcr(app, page.pageId.value))
     }
 
-    @Test fun mainSettingsOpensAnExistingLibraryAndReturnsToTheUnchangedDefault() {
-        check(InstrumentationRegistry.getArguments().getString("librarySettingsOpenFixture") == "fresh") {
+    @Test fun mainSettingsOpensAnExistingLibraryAndReturnsToTheUnchangedDefault() = mainSettingsJourney(applyEdit = false)
+
+    @Test fun mainSettingsAppliesOneSelectedEditAndReopensTheSamePage() = mainSettingsJourney(applyEdit = true)
+
+    private fun mainSettingsJourney(applyEdit: Boolean) {
+        check(InstrumentationRegistry.getArguments().getString("librarySettingsOpenFixture") == if (applyEdit) "apply" else "fresh") {
             "This journey requires an independently admitted synthetic app graph"
         }
         val instrumentation = InstrumentationRegistry.getInstrumentation()
@@ -267,7 +275,7 @@ class LibraryFolderFilesJourneyTest {
         val folder = settingsFixtureFolder()
         val graph = runBlocking { app.services.imports() }
         val initial = graph.activation
-        assertEquals(1L, initial.number)
+        assertEquals(if (applyEdit) 3L else 1L, initial.number)
         assertTrue(runBlocking { graph.store.catalog.list(null, 2) }.isEmpty())
         val witness = LibraryIndependentRootGrants
         val before = witness.inventory(app)
@@ -299,7 +307,8 @@ class LibraryFolderFilesJourneyTest {
             location?.activation?.libraryId == "9e940d7b-76c7-45ea-b5e4-0ad86f26ea13" &&
                 location.activation.number > initial.number && !storage.state.value.busy
         }
-        val selected = checkNotNull(storage.state.value.location).activation
+        var selected = checkNotNull(storage.state.value.location).activation
+        assertEquals(initial.number + 1, selected.number)
         val retained = witness.inventory(app)
         assertEquals(1, retained.size)
         val exact = Uri.parse(retained.keys.single())
@@ -313,16 +322,67 @@ class LibraryFolderFilesJourneyTest {
         val page = runBlocking { app.services.loadLibraryAlbum(selected, album).pages.single() }
         val pageTag = "original-page-${page.pageId.value}"
         compose.waitUntil(20_000) { enabled(pageTag) }
-        compose.onNodeWithTag(pageTag).performClick()
-        compose.waitUntil(20_000) { editor.session.value?.preview?.value?.display != null }
-        assertEquals(EditorIdentity(album, page.pageId, selected), editor.state.value.identity)
-        compose.onNodeWithTag("editor-tool-original").performClick()
-        compose.waitUntil(20_000) {
-            editor.session.value?.preview?.value?.let { it.view == EditorView.ORIGINAL && !it.previous && it.display != null } == true
+        fun openPage() {
+            compose.onNodeWithTag(pageTag).performClick()
+            compose.waitUntil(20_000) { editor.session.value?.preview?.value?.display != null }
+            assertEquals(EditorIdentity(album, page.pageId, selected), editor.state.value.identity)
         }
-        compose.runOnUiThread {
-            val original = checkNotNull(editor.session.value?.preview?.value?.display).bitmap
-            assertEquals(0xff637b89.toInt(), original.getPixel(2, 1))
+        fun checkOriginal() {
+            compose.onNodeWithTag("editor-tool-original").performClick()
+            compose.waitUntil(20_000) {
+                editor.session.value?.preview?.value?.let { it.view == EditorView.ORIGINAL && !it.previous && it.display != null } == true
+            }
+            compose.runOnUiThread {
+                val original = checkNotNull(editor.session.value?.preview?.value?.display).bitmap
+                assertEquals(0xff637b89.toInt(), original.getPixel(2, 1))
+            }
+        }
+        openPage()
+        checkOriginal()
+        if (applyEdit) {
+            compose.onNodeWithTag("editor-tool-shape").performClick()
+            compose.onNodeWithTag("editor-shape-perspective").performScrollTo().performClick()
+            val frame = hasAnyAncestor(hasTestTag("atelier-frame-canvas")) and
+                hasContentDescription(app.getString(R.string.editor_original_description))
+            compose.waitUntil(20_000) { compose.onAllNodes(frame, useUnmergedTree = true).fetchSemanticsNodes().size == 1 }
+            compose.onNode(frame, useUnmergedTree = true).performScrollTo().assertIsDisplayed()
+            compose.onNodeWithTag("editor-back").performClick()
+            compose.onNodeWithTag("editor-discard-exit").performClick()
+            compose.waitUntil(15_000) { editor.session.value == null && enabled(pageTag) }
+            openPage()
+            val live = checkNotNull(editor.session.value)
+            assertEquals(2L, live.state.value.page?.recipeRevision)
+            compose.onNodeWithTag("editor-tool-rotate").performClick()
+            compose.onNodeWithTag("editor-rotate").performScrollTo().performClick()
+            compose.onNodeWithTag("editor-apply").assertIsNotEnabled()
+            compose.runOnUiThread { compose.activity.qualifySelectedApplyForTest(EditorIdentity(album, page.pageId, selected)) }
+            compose.onNodeWithTag("editor-apply").assertIsEnabled().performClick() // One save; uncertain delivery does not authorize a second tap.
+            compose.waitUntil(45_000) { !live.state.value.saving }
+            val accepted = live.state.value
+            assertEquals(null, accepted.error)
+            assertFalse(accepted.dirty)
+            assertEquals(3L, accepted.page?.recipeRevision)
+            assertEquals(2, accepted.page?.recipe?.geometry?.outputQuarterTurns)
+            selected = selected.copy(number = selected.number + 1)
+            assertEquals(EditorIdentity(album, page.pageId, selected), editor.state.value.identity)
+            assertEquals(selected, runBlocking { app.services.storageLocation().activation })
+            val pointer = File(app.filesDir.canonicalFile, "library-settings/active-library")
+            check(pointer.length() in 1..320)
+            val record = File(app.filesDir.canonicalFile, "library-settings-apply-pointer-$folder")
+            Files.write(record.toPath(), pointer.readBytes(), CREATE_NEW)
+            compose.onNodeWithTag("editor-back").performClick()
+            compose.waitUntil(15_000) { editor.session.value == null && enabled(pageTag) }
+            openPage()
+            val reopened = checkNotNull(editor.session.value?.state?.value?.page)
+            assertEquals(accepted.page, reopened)
+            val result = checkNotNull(editor.session.value?.preview?.value)
+            assertEquals(EditorView.RESULT, result.view)
+            assertFalse(result.previous)
+            val rendered = checkNotNull(result.display)
+            assertEquals(3L, rendered.request.recipeRevision)
+            assertEquals(reopened.recipe, rendered.request.recipe)
+            compose.runOnUiThread { assertEquals(0xff637b89.toInt(), rendered.bitmap.getPixel(0, 0)) }
+            checkOriginal()
         }
         compose.onNodeWithTag("editor-back").performClick()
         compose.waitUntil(15_000) { editor.state.value.identity == null && enabled(pageTag) }
@@ -338,7 +398,7 @@ class LibraryFolderFilesJourneyTest {
         compose.waitUntil(20_000) {
             val location = storage.state.value.location
             location?.folderLabel == null && location?.activation?.libraryId == initial.libraryId &&
-                location.activation.number > selected.number && !storage.state.value.busy
+                location.activation.number == selected.number + 1 && !storage.state.value.busy
         }
         val returned = checkNotNull(storage.state.value.location).activation
         val backup = compose.runOnUiThread { ViewModelProvider(compose.activity)[LibraryBackupViewModel::class.java].session }

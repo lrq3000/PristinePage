@@ -87,6 +87,14 @@ class MainActivity : ComponentActivity() {
     private var observing: Job? = null
     private var session: LibrarySession? = null
     private var editor: EditorViewModel? = null
+    private var selectedApplyQualification by mutableStateOf<EditorIdentity?>(null)
+
+    /** Same-process instrumentation only. No intent, restored state or preference may bypass the selected Save settlement gate. */
+    internal fun qualifySelectedApplyForTest(identity: EditorIdentity) {
+        check(applicationInfo.flags and android.content.pm.ApplicationInfo.FLAG_DEBUGGABLE != 0)
+        check(selectedApplyQualification == null && editor?.state?.value?.identity == identity)
+        selectedApplyQualification = identity
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -335,8 +343,9 @@ class MainActivity : ComponentActivity() {
                     }
                 }
                 if (selected != null) key(identity) {
-                     val issuing = checkNotNull(identity)
-                      val defaultEditor = library.activation == issuing.issuedAt && !library.selectedFolder
+                      val issuing = checkNotNull(identity)
+                       val editorActivationCurrent = library.activation == issuing.issuedAt && !library.reconnect
+                       val defaultEditor = editorActivationCurrent && !library.selectedFolder
                       val savedOcr = remember(app, issuing, defaultEditor) {
                           if (!defaultEditor) null else SavedPageOcrReader(
                              readStatus = { page -> services.readDefaultEditorOcrStatus(issuing, page.recipeRevision) },
@@ -353,7 +362,7 @@ class MainActivity : ComponentActivity() {
                         )
                     }
                        PageEditorScreen(loadOriginal = loadEditorOriginal, savedOcr = savedOcr, showOcrDiagnostics = settings.ocrDiagnostics,
-                         allowSave = defaultEditor,
+                          allowSave = defaultEditor || editorActivationCurrent && selectedApplyQualification == issuing,
                         pageNumber = fallback?.ordinal?.plus(1), albumPageCount = orderedPages.size,
                         previousPage = destination(-1), nextPage = destination(1), originalOnLoadFailure = {
                             if (fallback != null) key(fallback) {

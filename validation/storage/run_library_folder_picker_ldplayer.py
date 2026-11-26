@@ -84,11 +84,14 @@ BACKUP_CASE = "app.pristinepage.LibraryFolderFilesJourneyTest#defaultLibraryExpo
 SETTINGS_BACKUP_CASE = "app.pristinepage.LibraryFolderFilesJourneyTest#settingsPublishesOneBackupOfTheSyntheticDefaultLibrary"
 SETTINGS_PICKER_CASE = "app.pristinepage.LibraryFolderFilesJourneyTest#settingsOpensAndCancelsFilesWithoutStartingABackup"
 MAIN_SETTINGS_OPEN_CASE = "app.pristinepage.LibraryFolderFilesJourneyTest#mainSettingsOpensAnExistingLibraryAndReturnsToTheUnchangedDefault"
+MAIN_SETTINGS_APPLY_CASE = "app.pristinepage.LibraryFolderFilesJourneyTest#mainSettingsAppliesOneSelectedEditAndReopensTheSamePage"
 SETTINGS_OPEN_CANCELED_GUEST = "agent-pristinepage-tree-d5eac64d59bd"
 SETTINGS_OPEN_CANCELED_RUN = "picker-adapter-library-tree-14e34a5f3966"
 SETTINGS_OPEN_NAVIGATION_RUN = "picker-adapter-library-tree-244aa1a50b23"
 SETTINGS_OPEN_NAVIGATION_MANIFEST = "77783b3e16115c3441f36071f91d1e377ae6dc615a1038a6b8083c9fcbe8b9fc"
 SETTINGS_OPEN_MENU_MANIFEST = "a0aa2831e567babf6319c43825e1b17cfa01b5159adc7d38a9eaa16ac80d74ff"
+SETTINGS_OPEN_PASS_RUN = "picker-adapter-library-tree-ac053d11fb43"
+SETTINGS_OPEN_PASS_MANIFEST = "332fd154cb07ef0a27352d32bf0a6a0d888178e32e5ba3c05a58cfd05798e44c"
 SETTINGS_OPEN_REFUSALS = {
     SETTINGS_OPEN_NAVIGATION_MANIFEST: (SETTINGS_OPEN_NAVIGATION_RUN, "synthetic folder", "Documents / android:id/title", None),
     SETTINGS_OPEN_MENU_MANIFEST: ("picker-adapter-library-tree-0d2c964e72ee", "root drawer",
@@ -247,6 +250,13 @@ def select_settings_picker_case(args):
 def select_main_settings_open(args):
     reuse = getattr(args, "settings_open_reuse", False)
     retry = getattr(args, "settings_open_retry", None)
+    apply = getattr(args, "settings_apply", None)
+    if apply is not None:
+        identity = {"settings_apply", "previous", "commit", "app_sha", "test_sha", "guest"}
+        need(apply == SETTINGS_OPEN_PASS_MANIFEST and args.guest == SETTINGS_OPEN_CANCELED_GUEST and
+             len(args.previous or ()) == 2 and not any(value for name, value in vars(args).items() if name not in identity),
+             "Require the standalone selected Apply continuation")
+        return MAIN_SETTINGS_APPLY_CASE
     error = "MainActivity Settings Open requires a standalone fresh synthetic app graph"
     if not args.settings_open:
         need(not reuse and retry is None, error)
@@ -557,13 +567,42 @@ def verify_settings_open_navigation_failure(raw, guest, previous, digest):
 
 
 def require_initial_settings_pointer(pointer, leaves):
-    fields = pointer.splitlines()
-    body = "\n".join(fields[:-1]) + "\n"
     # The first confirmed departure creates default-origin. Any such record or an unexplained stage disqualifies this pre-selection retry.
-    need(len(fields) == 6 and fields[0] == "pristinepage-active-library-v1" and re.fullmatch(UUID_TEXT, fields[1]) and
-         fields[2:5] == ["1", "-", "-"] and leaves == ["active-library"] and
-         pointer == body + sha256(body.encode("ascii")).hexdigest() + "\n",
+    need(default_settings_pointer_id(pointer, 1) and leaves == ["active-library"],
          "The retained graph is not the unchanged initial Default library")
+
+
+def default_settings_pointer_id(record, activation):
+    fields = record.splitlines()
+    body = "\n".join(fields[:-1]) + "\n"
+    if (len(fields) == 6 and fields[0] == "pristinepage-active-library-v1" and re.fullmatch(UUID_TEXT, fields[1]) and
+            fields[2:5] == [str(activation), "-", "-"] and record == body + sha256(body.encode("ascii")).hexdigest() + "\n"):
+        return fields[1]
+    return None
+
+
+def require_returned_settings_pointer(pointer, origin, activation):
+    identity = default_settings_pointer_id(origin, 1)
+    need(identity and default_settings_pointer_id(pointer, activation) == identity,
+         "The retained graph is not the exact returned Default library")
+    return identity
+
+
+def verify_settings_open_success(raw, guest, previous):
+    anchor = settings_run_anchors(raw, SETTINGS_OPEN_PASS_MANIFEST)
+    artifacts, claim, shutdown, fixture = (json.loads(anchor(leaf)) for leaf in
+                                          ("artifacts.json", "claim.json", "shutdown.json", "settings-open-fixture.json"))
+    need(guest == claim["name"] == artifacts["guest"] and artifacts["mainSettingsOpen"] is True and
+         artifacts["mainSettingsOpenRetry"] == SETTINGS_OPEN_MENU_MANIFEST and
+         claim["generation"] == shutdown["generation"] and claim["runtime_processes"] == shutdown["originalProcesses"] and
+         shutdown["ownedShutdownVerified"] is True and shutdown["storageDeleted"] is False and
+         {p: proof["sha256"] for p, proof in artifacts["proof"].items()} == previous and
+         json.loads(anchor("outcomes.json")) == {"passed": [MAIN_SETTINGS_OPEN_CASE], "failed": [], "installedSha256": previous} and
+         json.loads(anchor("preservation.json")) == {"externalFixtureUnchanged": True, "persistedGrantCount": 0} and
+         read_results(anchor("instrumentation.txt"), (MAIN_SETTINGS_OPEN_CASE,)) == ([MAIN_SETTINGS_OPEN_CASE], []) and
+         re.fullmatch(r"PristinePage-tree-[a-f0-9]{12}", fixture["folder"]),
+         "No exact completed read-only Settings Open and Return")
+    return claim, fixture
 
 
 def verify_settings_retry_evidence(raw, expected_sha, guest, previous):
@@ -1336,6 +1375,57 @@ def verify_selected_recipe_catalog(catalog, predecessor, original_digest):
         return fingerprint
 
 
+def verify_settings_apply_destination(run, adb, destination, fixture, inventory, default_id):
+    """Independently reopen the actual closed successor; the instrumentation only qualifies the foreground acknowledgment."""
+    baseline, = (leaf for leaf in inventory if leaf.startswith("generations/"))
+    initial_text = (fixture / baseline).read_text(encoding="ascii")
+    initial = initial_text.splitlines()
+    published = set(adb("shell", "ls", "-A", "-1", f"{destination}/generations").splitlines())
+    children = published - {baseline.split("/", 1)[1]}
+    need(len(published) == 2 and len(children) == 1, "Apply must publish exactly one new generation")
+    marker_name, = children
+    match = re.fullmatch(rf"({UUID_TEXT})\.complete", marker_name)
+    need(match, "Apply published an invalid generation name")
+    operation = match[1]
+    marker_leaf, catalog_leaf = f"generations/{marker_name}", f"catalogs/{operation}.sqlite"
+    marker = read_selected_history_record(lambda *args: adb("shell", *args), f"{destination}/{marker_leaf}", 256)
+    fields = marker.splitlines()
+    need(len(initial) == len(fields) == 7 and fields[:5] == [initial[0], initial[1], operation, initial[2], initial[4]] and
+         re.fullmatch(r"[1-9][0-9]{0,6}", fields[5]) and int(fields[5]) <= 2 * 1024 * 1024 and
+         re.fullmatch(r"[a-f0-9]{64}", fields[6]), "Apply did not publish the exact direct successor")
+    stage = f"merge-staging-{operation}"
+    verify_unchanged_settings_destination(adb, destination, inventory | {
+        marker_leaf: sha256(marker.encode("ascii")).hexdigest(), catalog_leaf: fields[6]}, backup_name=stage)
+    need(not adb("shell", "ls", "-A", "-1", f"{destination}/{stage}").strip() and
+         adb("shell", "stat", "-c", "%s", f"{destination}/{catalog_leaf}").strip() == fields[5],
+         "The foreground edit left incomplete staging")
+    catalog = run.path("settings-apply-catalog.sqlite")
+    adb("pull", f"{destination}/{catalog_leaf}", catalog, timeout=20)
+    need(catalog.stat().st_size == int(fields[5]) and sha(catalog) == fields[6], "The readback catalog differs from the marker")
+    original, _, _ = synthetic_scan()
+    recipe = verify_selected_recipe_catalog(catalog, fixture / f"catalogs/{initial[2]}.sqlite", original)
+    def private(*args):
+        return adb("shell", "run-as", APP, *args)
+    root = "files/library-settings"
+    selected = read_selected_history_record(private, f"files/library-settings-apply-pointer-{destination.rsplit('/', 1)[1]}", 320)
+    attempt = f"files/catalog-recipe-attempts-v1/{operation}"
+    receipt = read_bound_recipe_evidence(adb, "files", attempt, destination, initial_text, marker, fields[6],
+                                         advanced=True, issuing=4, captured_pointer=selected)
+    spend = read_selected_history_record(private, f"files/catalog-revision-spends/{operation}.spent", 1024)
+    need(spend == "pristinepage-catalog-revision-spent-v1\n" + initial_text + marker, "Apply lost the catalog revision spend")
+    extras = {"catalog.sqlite", "recipe-edit.intent", "recipe-edit.complete", "recipe-edit.catalog-owner"}
+    leaves = set(private("ls", "-A", "-1", attempt).splitlines())
+    moves = verify_library_move_spends(adb, attempt, leaves - extras, {
+        catalog_leaf: (int(fields[5]), fields[6]), marker_leaf: (len(marker.encode("ascii")), sha256(marker.encode("ascii")).hexdigest())})
+    pointer = read_selected_history_record(private, f"{root}/active-library", 320)
+    origin = read_selected_history_record(private, f"{root}/default-origin", 320)
+    need(require_returned_settings_pointer(pointer, origin, 6) == default_id, "Apply did not return to the same Default library")
+    run.save(run.path("settings-apply-readback.json"), dict(generation=operation, predecessor=initial[2],
+             catalogSha256=fields[6], recipeSha256=recipe, originalInventoryUnchanged=True, selectedActivation=5,
+             receiptSha256=receipt, revisionSpendSha256=sha256(spend.encode("ascii")).hexdigest(), moveSpends=moves,
+             returnedActivation=6), durable=True)
+
+
 def require_selected_recipe_predecessor(installed, expected_pair, ordinary, expected_ordinary, grants, expected_grants):
     need(installed == expected_pair and ordinary == expected_ordinary and grants == expected_grants,
          "The selected edit predecessor APKs, private state or persisted grants changed")
@@ -1406,7 +1496,7 @@ def recipe_private_scopes(adb):
     return {leaf for leaf in text.splitlines() if leaf.startswith("library-")}
 
 
-def verify_bound_recipe_receipt(intent, completion, old_marker, new_marker, pointer, grant, *, advanced=False):
+def verify_bound_recipe_receipt(intent, completion, old_marker, new_marker, pointer, grant, *, advanced=False, issuing=2):
     error = "The bound recipe receipt does not match its active binding and exact catalogs"
     def checked(fields, text):
         body = "\n".join(fields[:-1]) + "\n"
@@ -1415,11 +1505,11 @@ def verify_bound_recipe_receipt(intent, completion, old_marker, new_marker, poin
     active_marker, marker_text = (new, new_marker) if advanced else (old, old_marker)
     active, access, observed = (value.splitlines() for value in (pointer, grant, intent))
     need(len(old) == len(new) == 7 and len(active) == 7 and len(access) == 5 and len(observed) == 19 and
-         active[:3] == ["pristinepage-active-library-v2", old[1], "3" if advanced else "2"] and active[4] == active_marker[2] and
+         active[:3] == ["pristinepage-active-library-v2", old[1], str(issuing + int(advanced))] and active[4] == active_marker[2] and
          re.fullmatch(UUID_TEXT, active[3]) and access[:3] == ["pristinepage-library-grant-v1", active[3], "3"] and
          access[3].startswith("content://com.android.externalstorage.documents/tree/") and
          checked(active, pointer) and checked(access, grant) and active[5] == sha256((grant + marker_text).encode("ascii")).hexdigest() and
-         observed[:4] == ["pristinepage-recipe-edit-intent-v1", "2", active[3], sha256((grant + old_marker).encode("ascii")).hexdigest()] and
+         observed[:4] == ["pristinepage-recipe-edit-intent-v1", str(issuing), active[3], sha256((grant + old_marker).encode("ascii")).hexdigest()] and
          re.fullmatch(r"[a-f0-9]{64}", observed[4]) and intent == "\n".join(observed[:5]) + "\n" + old_marker + new_marker and
          completion == f"pristinepage-recipe-edit-complete-v1\n{sha256(intent.encode('ascii')).hexdigest()}\n", error)
     return active[3], sha256(completion.encode("ascii")).hexdigest()
@@ -1441,18 +1531,18 @@ def require_bound_recovery_writer(trace, serial, folder, operation):
          "The trace did not record the sole spent bound writer")
 
 
-def read_bound_recipe_evidence(adb, private, attempt, left, predecessor, successor, catalog_digest, *, advanced=False):
+def read_bound_recipe_evidence(adb, private, attempt, left, predecessor, successor, catalog_digest, *, advanced=False, issuing=2, captured_pointer=None):
     def app_files(*args):
         return adb("shell", "run-as", APP, *args)
     settings = f"{private}/library-settings"
-    pointer = read_selected_history_record(app_files, f"{settings}/active-library", 320)
+    pointer = captured_pointer if captured_pointer is not None else read_selected_history_record(app_files, f"{settings}/active-library", 320)
     fields = pointer.splitlines()
     need(len(fields) == 7 and re.fullmatch(UUID_TEXT, fields[3]), "The bound recipe receipt has no exact grant identifier")
     grant_id = fields[3]
     grant = read_selected_history_record(app_files, f"{settings}/folder-grants/{grant_id}", 4352)
     intent = read_selected_history_record(app_files, f"{attempt}/recipe-edit.intent", 1024)
     completion = read_selected_history_record(app_files, f"{attempt}/recipe-edit.complete", 256)
-    _, receipt_digest = verify_bound_recipe_receipt(intent, completion, predecessor, successor, pointer, grant, advanced=advanced)
+    _, receipt_digest = verify_bound_recipe_receipt(intent, completion, predecessor, successor, pointer, grant, advanced=advanced, issuing=issuing)
     require_bound_recipe_grant_destination(grant.splitlines()[3], left)
     previous_id = predecessor.splitlines()[2]
     catalog = f"{attempt}/catalog.sqlite"
@@ -2089,6 +2179,7 @@ def run(args):
     settings_open = select_main_settings_open(args)
     reuse_empty_settings = args.settings_open_reuse
     retry_open = args.settings_open_retry
+    apply_open = args.settings_apply
     absent_before_install = args.fresh or reuse_empty_settings
     need(absent_before_install != bool(args.previous), "Choose first admission or an exact retained predecessor pair")
     picker_case = select_settings_picker_case(args)
@@ -2254,6 +2345,13 @@ def run(args):
                  not (raw.parent / f"settings-retry-spent-{retry_open}.json").exists(),
                  "Only an unspent, test-only Settings Open continuation is admitted")
             open_retry = verify_settings_open_navigation_failure(prior, args.guest, previous, retry_open)
+        if apply_open:
+            prior = raw.parent / SETTINGS_OPEN_PASS_RUN
+            need(all(Path(path).resolve().parent == prior.resolve() for path in args.previous) and
+                 all(hashes[p] != previous[p] for p in built) and
+                 not (raw.parent / f"settings-retry-spent-{apply_open}.json").exists(),
+                 "Only the unspent checked Apply successor pair is admitted")
+            open_retry = verify_settings_open_success(prior, args.guest, previous)
         if advanced_recipe:
             from run_bound_recipe_readback_ldplayer import WRITER, WRITER_SHA256, readback
             writer = raw.parent / WRITER
@@ -2617,7 +2715,7 @@ def run(args):
         json.dumps(dict(proof=proof, source=args.commit, fixture=files, previous=previous, guest=args.guest,
                         settingsCancel=args.settings_retry, settingsPriorFailure=args.settings_prior_failure,
                          settingsCompleted=args.settings_recover, mainSettingsOpen=bool(settings_open),
-                         mainSettingsOpenRetry=retry_open, backupDeliveryDeath=death_operation,
+                         mainSettingsOpenRetry=retry_open, mainSettingsApply=apply_open, backupDeliveryDeath=death_operation,
                         backupDeathRetry=args.backup_death_retry, backupDeathReceiptOnly=death_receipt,
                         treeAncestryHandoff=ancestry_resume, backupPreMarker=before_marker,
                         backupPreMarkerHandoff=pre_marker_handoff, independentRoots=bool(independent_cases),
@@ -2634,7 +2732,7 @@ def run(args):
     def admit_independent(record):
         if open_retry:
             claim, _ = open_retry
-            run_name = SETTINGS_OPEN_REFUSALS[retry_open][0]
+            run_name = SETTINGS_OPEN_PASS_RUN if apply_open else SETTINGS_OPEN_REFUSALS[retry_open][0]
             manifest = raw.parent / run_name / f"{run_name}-final-manifest.json"
             need(record["generation"] == claim["generation"] and record["shutdown_processes"] == claim["runtime_processes"] and
                  Path(record["runtime_evidence"]).resolve() == manifest.resolve(),
@@ -2668,6 +2766,7 @@ def run(args):
     independent_preservation = ()
     recipe_outcome = None
     recipe_preservation = ()
+    check_prior_apply_fixture = None
     print(f"Runtime evidence: {raw.relative_to(ROOT)}", flush=True)
     try:
         wait_for_allocator(run, lambda: run.prepare(args.fresh, None, args.fresh), before_claim=True)
@@ -2725,15 +2824,24 @@ def run(args):
             need(installed == previous, "The exact Settings Open predecessor APK pair was not installed")
             require_cold_backup_app(adb)
             need(not read_app_persisted_grants(adb), "The navigation refusal left a retained grant")
-            def read_initial_pointer():
+            def read_default_pointer():
                 path = "files/library-settings"
-                leaves = adb("shell", "run-as", APP, "ls", "-A", "-1", path).splitlines()
-                pointer = adb("shell", "run-as", APP, "cat", f"{path}/active-library")
-                require_initial_settings_pointer(pointer, leaves)
+                def private(*argv):
+                    return adb("shell", "run-as", APP, *argv)
+                pointer = read_selected_history_record(private, f"{path}/active-library", 320)
+                if apply_open:
+                    origin = read_selected_history_record(private, f"{path}/default-origin", 320)
+                    return require_returned_settings_pointer(pointer, origin, 3)
+                require_initial_settings_pointer(pointer, private("ls", "-A", "-1", path).splitlines())
                 return pointer
-            initial_pointer = read_initial_pointer()
+            initial_pointer = read_default_pointer()
             _, old_fixture = open_retry
-            verify_unchanged_settings_destination(adb, f"/sdcard/Documents/{old_fixture['folder']}", old_fixture["inventory"])
+            def verify_prior_settings_fixture():
+                recheck_target(run, ns)
+                verify_unchanged_settings_destination(adb, f"/sdcard/Documents/{old_fixture['folder']}", old_fixture["inventory"])
+            verify_prior_settings_fixture()
+            if apply_open:
+                check_prior_apply_fixture = verify_prior_settings_fixture
         elif independent_derived:
             verify_independent_derived_installed(installed, previous)
         elif not absent_before_install:
@@ -2931,35 +3039,57 @@ def run(args):
             need(re.fullmatch(r"[A-Za-z0-9_.+:/,-]{12,256}", fingerprint), "Missing exact Android build fingerprint")
             policy = f"android-imagedecoder-v2/api28/{sha256(fingerprint.encode()).hexdigest()[:16]}/srgb-straight-white-exif-v1"
             if open_retry:
-                need(read_initial_pointer() == initial_pointer, "The initial Default pointer changed during test APK replacement")
+                need(read_default_pointer() == initial_pointer, "The Default pointer changed during APK replacement")
                 need(policy == old_fixture["conversion"], "The retained scan no longer matches the native conversion")
+            if retry_open:
                 folder, inventory = old_fixture["folder"], old_fixture["inventory"]
             else:
-                need("library-settings" not in recipe_private_scopes(adb), "The fresh MainActivity graph already has an active pointer")
+                if not apply_open:
+                    need("library-settings" not in recipe_private_scopes(adb), "The fresh MainActivity graph already has an active pointer")
                 inventory = make_fixture(fixture, with_scan=True, conversion=policy)
                 folder = "PristinePage-tree-" + uuid.uuid4().hex[:12]
             destination = f"/sdcard/Documents/{folder}"
             run.save(run.path("settings-open-fixture.json"), dict(folder=folder, inventory=inventory, conversion=policy), durable=True)
-            if not open_retry:
+            if not retry_open:
                 adb("shell", "mkdir", "-p", "/sdcard/Documents")
                 stage_synthetic_files(adb, fixture, destination, inventory)
             verify_unchanged_settings_destination(adb, destination, inventory)
             recheck_target(run, ns)
-            if retry_open:
-                spend_settings_retry(raw.parent, retry_open, dict(guest=args.guest, candidate=prefix, destination=folder))
+            if retry_open or apply_open:
+                spend_settings_retry(raw.parent, retry_open or apply_open, dict(guest=args.guest, candidate=prefix, destination=folder))
             try:
                 output = adb("shell", "am", "instrument", "-w", "-r", "-e", "class", settings_open,
-                             "-e", "libraryFixtureFolder", folder, "-e", "librarySettingsOpenFixture", "fresh", RUNNER, timeout=220)
+                             "-e", "libraryFixtureFolder", folder, "-e", "librarySettingsOpenFixture", "apply" if apply_open else "fresh",
+                             RUNNER, timeout=260)
                 run.path("instrumentation.txt").write_text(output, encoding="utf-8")
                 passed, failed = read_results(output, (settings_open,))
-                run.save(run.path("outcomes.json"), dict(passed=passed, failed=failed, installedSha256=hashes), durable=True)
+                run.save(run.path("junit-outcomes.json" if apply_open else "outcomes.json"),
+                         dict(passed=passed, failed=failed, installedSha256=hashes), durable=True)
             finally:
                 recheck_target(run, ns)
-                verify_unchanged_settings_destination(adb, destination, inventory)
+                if apply_open:
+                    for leaf, digest in inventory.items():
+                        path = f"{destination}/{leaf}"
+                        need(adb("shell", "sha256sum", path).split() == [digest, path], "The foreground edit changed a predecessor file")
+                    # Preserve the exact durable boundary even when JUnit stops before a foreground acknowledgment or final Return.
+                    pointer = read_selected_history_record(lambda *argv: adb("shell", "run-as", APP, *argv),
+                                                           "files/library-settings/active-library", 320)
+                    markers = adb("shell", "ls", "-A", "-1", f"{destination}/generations").splitlines()
+                    run.save(run.path("settings-apply-boundary.json"), dict(pointerSha256=sha256(pointer.encode("ascii")).hexdigest(),
+                             pointerActivation=pointer.splitlines()[2], generationMarkers=markers), durable=True)
+                else:
+                    verify_unchanged_settings_destination(adb, destination, inventory)
                 grant_count = len(read_app_persisted_grants(adb))
-                run.save(run.path("preservation.json"), dict(externalFixtureUnchanged=True, persistedGrantCount=grant_count), durable=True)
+                run.save(run.path("preservation.json"), dict(externalFixtureUnchanged=True, persistedGrantCount=grant_count)
+                         if not apply_open else dict(predecessorFilesUnchanged=True, persistedGrantCount=grant_count), durable=True)
             need(failed or grant_count == 0, "The successful journey did not restore the starting grant inventory")
-            print(f"MainActivity Settings Open: {len(passed)} passed, {len(failed)} failed.", flush=True)
+            if apply_open and not failed:
+                verify_settings_apply_destination(run, adb, destination, fixture, inventory, initial_pointer)
+                check_prior_apply_fixture()
+                run.save(run.path("outcomes.json"),
+                         dict(passed=passed, failed=[], readOnlyFixtureUnchanged=True, installedSha256=hashes), durable=True)
+                check_prior_apply_fixture = None
+            print(f"MainActivity Settings {'Apply' if apply_open else 'Open'}: {len(passed)} passed, {len(failed)} failed.", flush=True)
             return bool(failed)
         if selected_recipe:
             if args.fresh:
@@ -3210,6 +3340,8 @@ def run(args):
         return bool(failed)
     finally:
         try:
+            if check_prior_apply_fixture:
+                check_prior_apply_fixture()
             if recipe_preservation:
                 finish_pre_marker_outcome(recipe_outcome, recipe_preservation,
                                           lambda value: run.save(run.path("outcomes.json"), value, durable=True), label="Selected Files edit")
@@ -3251,6 +3383,7 @@ if __name__ == "__main__":
     parser.add_argument("--settings-open", action="store_true", help="Open a complete synthetic library from the real MainActivity Settings and return to Default on a fresh app guest")
     parser.add_argument("--settings-open-reuse", action="store_true", help="Reclaim only the canceled Settings guest that stopped before its first APK install")
     parser.add_argument("--settings-open-retry", metavar="NAVIGATION_MANIFEST_SHA", help="Retry only the anchored preselection failure on its unchanged Default and synthetic folder")
+    parser.add_argument("--settings-apply", metavar="OPEN_PASS_MANIFEST_SHA", help="Exercise one foreground selected recipe edit on an independent synthetic folder")
     parser.add_argument("--settings-recover", metavar="COMPLETED_MANIFEST_SHA", help="Read the existing Settings receipt after a cold launch; never open a picker")
     parser.add_argument("--backup-delivery-death", action="store_true", help="One isolated native process death after commit but before delivery; never replay")
     parser.add_argument("--backup-pre-marker", action="store_true",
