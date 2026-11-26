@@ -94,6 +94,63 @@ class LibraryNamedPublicationTest {
         assertFalse(Files.exists(store.final))
     }
 
+    @Test fun aVisibilityGuardRunsAfterTheDurableSpendAndCannotRunDuringReadOnlyRecovery() {
+        val store = fixture()
+        val expected = checkNotNull(store.readStage())
+        var checked = 0
+        val publication = LibraryNamedPublication(store)
+        val refused = assertFailsWith<IOException> {
+            publication.commit(expected, reconcileOnly = false, requireVisibility = {
+                assertTrue(store.spent)
+                assertEquals(0, store.moves)
+                checked++
+                throw IOException("The issuing root is no longer current")
+            })
+        }
+        assertEquals("The issuing root is no longer current", refused.message)
+        assertEquals(1, checked)
+        assertFalse(Files.exists(store.final))
+        assertFailsWith<IOException> { publication.commit(expected, reconcileOnly = true, requireVisibility = { checked++ }) }
+        assertEquals(1, checked)
+        assertEquals(0, store.moves)
+        assertContentEquals(original, Files.readAllBytes(store.stage))
+    }
+
+    @Test fun aFinalNameCreatedDuringTheSpendCannotReachTheGuardOrMove() {
+        val store = fixture()
+        val expected = checkNotNull(store.readStage())
+        store.afterSpend = { Files.write(store.final, original) }
+        assertFailsWith<IOException> {
+            LibraryNamedPublication(store).commit(expected, false, requireVisibility = { error("The final name is occupied") })
+        }
+        assertEquals(0, store.moves)
+        assertContentEquals(original, Files.readAllBytes(store.stage))
+        assertContentEquals(original, Files.readAllBytes(store.final))
+    }
+
+    @Test fun cancellationObservedWhenTheVisibilityGuardReturnsWithholdsTheMove() {
+        val store = fixture()
+        val expected = checkNotNull(store.readStage())
+        var canceled = false
+        val publication = LibraryNamedPublication(store) { if (canceled) throw CancellationException() }
+        assertFailsWith<CancellationException> { publication.commit(expected, false, requireVisibility = { canceled = true }) }
+        assertTrue(store.spent)
+        assertEquals(0, store.moves)
+        assertFalse(Files.exists(store.final))
+        assertContentEquals(original, Files.readAllBytes(store.stage))
+    }
+
+    @Test fun successfulReconciliationDoesNotRequestNewVisibilityAuthority() {
+        val store = fixture().apply { loseResponse = true }
+        val expected = checkNotNull(store.readStage())
+        val publication = LibraryNamedPublication(store)
+        assertFailsWith<IOException> { publication.commit(expected, false, requireVisibility = {}) }
+        publication.commit(expected, true, requireVisibility = { error("Reconciliation cannot request write authority") })
+        assertEquals(1, store.moves)
+        assertEquals(listOf("stage", "target"), store.barriers)
+        assertContentEquals(original, Files.readAllBytes(store.final))
+    }
+
     @Test fun reconciliationRejectsAnUnrelatedFinalEvenWhenTheStageNameIsAbsentAndBytesMatch() {
         val store = fixture()
         val expected = checkNotNull(store.readStage())
@@ -120,14 +177,17 @@ class LibraryNamedPublicationTest {
         var failFinalBarrier = false
         var replaceOnBarrier = false
         var afterStage: () -> Unit = {}
+        var afterSpend: () -> Unit = {}
         val barriers = mutableListOf<String>()
         private var authorizationConsumed = false
+        val spent: Boolean get() = authorizationConsumed
 
         override fun readStage() = read(stage).also { afterStage() }
         override fun readFinal() = read(final).also { finalReads++ }
         override fun consumeMoveAuthorization() {
             if (authorizationConsumed) throw IOException("Synthetic attempt already consumed")
             authorizationConsumed = true
+            afterSpend()
         }
         override fun moveOnce() {
             moves++

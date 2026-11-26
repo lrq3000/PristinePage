@@ -25,8 +25,8 @@ internal class LibraryNamedPublication(private val store: Store, private val che
         fun syncFinalParent()
     }
 
-    /** The caller binds the exact staged proof and both parents before requesting mutation. Reconciliation only verifies and syncs; the adapter must refuse if it no longer has an identity anchor it can trust. */
-    fun commit(expected: FileProof, reconcileOnly: Boolean) {
+    /** The caller binds the exact staged proof and both parents before requesting mutation. An optional read-only guard runs after the spend, immediately before visibility. Reconciliation only verifies and syncs. */
+    fun commit(expected: FileProof, reconcileOnly: Boolean, requireVisibility: (() -> Unit)? = null) {
         checkpoint()
         if (!reconcileOnly) {
             if (observation(store::readStage) != expected || observation(store::readFinal) != null) {
@@ -34,6 +34,13 @@ internal class LibraryNamedPublication(private val store: Store, private val che
             }
             store.consumeMoveAuthorization()
             checkpoint()
+            if (requireVisibility != null) {
+                if (observation(store::readStage) != expected || observation(store::readFinal) != null) {
+                    throw IOException("The staged library file or final name changed before visibility")
+                }
+                requireVisibility()
+                checkpoint()
+            }
             // A thrown result can have moved the file. Only an independently authorized reconciliation can acknowledge it later.
             store.moveOnce()
         }

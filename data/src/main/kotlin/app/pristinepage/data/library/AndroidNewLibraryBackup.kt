@@ -29,12 +29,12 @@ internal class AndroidNewLibraryBackup private constructor(
 
     override fun open(id: ObjectId) = open(objects, id.sha256)
 
-    override fun create(id: ObjectId, write: (OutputStream) -> Unit) = publish(objects, id.sha256, id, write)
+    override fun create(id: ObjectId, write: (OutputStream) -> Unit) = publish(objects, id.sha256, id, write = write)
 
     override fun openCatalog(generation: LibraryGeneration) = open(catalogs, "${generation.id}.sqlite")
 
     override fun createCatalog(generation: LibraryGeneration, write: (OutputStream) -> Unit) =
-        publish(catalogs, "${generation.id}.sqlite", generation.catalog, write)
+        publish(catalogs, "${generation.id}.sqlite", generation.catalog, write = write)
 
     override fun openMarker(generation: LibraryGeneration) = open(generations, "${generation.id}.complete")
 
@@ -92,7 +92,9 @@ internal class AndroidNewLibraryBackup private constructor(
         }
     }
 
-    private fun publish(parent: Directory, name: String, wanted: ObjectId, write: (OutputStream) -> Unit) {
+    private fun publish(parent: Directory, name: String, wanted: ObjectId, requireVisibility: (() -> Unit)? = null,
+        write: (OutputStream) -> Unit,
+    ) {
         val leaf = Leaf(parent.id, name)
         if (acknowledged.containsKey(leaf) || find(parent, name) != null || find(stage, name) != null) {
             throw IOException("The new library file would replace an existing name")
@@ -122,7 +124,7 @@ internal class AndroidNewLibraryBackup private constructor(
                 override fun syncStageParent() = sync(stage)
                 override fun syncFinalParent() = sync(parent)
             }, checkpoint)
-            publisher.commit(proof, reconcileOnly = false)
+            publisher.commit(proof, reconcileOnly = false, requireVisibility = requireVisibility)
             acknowledged[leaf] = identity
         }
     }
