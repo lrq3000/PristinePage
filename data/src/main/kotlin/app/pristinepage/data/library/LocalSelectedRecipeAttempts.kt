@@ -64,6 +64,23 @@ internal class LocalSelectedRecipeAttempts(
     } catch (_: IOException) { false }
     catch (_: DirectoryIteratorException) { false }
 
+    fun settleRecordedAdoption(
+        intent: LocalLibraryRecipeEditJournal.Intent,
+        adopted: LocalSelectedLibraryAuthority.Selected.Folder,
+        readCurrent: () -> LocalSelectedLibraryAuthority.Selected?,
+        requireOwner: () -> Unit,
+    ): Boolean {
+        fun requireAdopted() {
+            requireOwner()
+            if (readCurrent() != adopted) unavailable()
+            requireOwner()
+        }
+        val settled = settleAdopted(intent, adopted, ::requireAdopted)
+        // A cleanup error may itself have been a pointer/lease refusal. Do not return a stale adoption as merely pending cleanup.
+        requireAdopted()
+        return settled
+    }
+
     fun archiveReclaimed(
         intent: LocalLibraryRecipeEditJournal.Intent,
         adopted: LocalSelectedLibraryAuthority.Selected.Folder,

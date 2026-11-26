@@ -281,7 +281,7 @@ class AndroidLibraryStartup(context: Context) {
         expectedRevision, admission, edit, {}) { _, _, result, _, _ -> result }
 
     sealed interface SelectedRecipeSave {
-        data class Activated(val activation: LibraryActivation, val saved: SaveRecipeResult.Saved) : SelectedRecipeSave
+        data class Activated(val activation: LibraryActivation, val saved: SaveRecipeResult.Saved, val cleanupPending: Boolean) : SelectedRecipeSave
         data class Refused(val result: SaveRecipeResult) : SelectedRecipeSave
     }
 
@@ -304,7 +304,8 @@ class AndroidLibraryStartup(context: Context) {
                         // Notify the caller while the exact pointer proof is still held, before later provider checks or dispatcher delivery.
                         onPointerVerified(it.activation())
                     })
-                SelectedRecipeSave.Activated(next.activation(), result.projection)
+                val settled = reader.settleLiveRecipeAdoption(result, lease, next, authority)
+                SelectedRecipeSave.Activated(next.activation(), result.projection, cleanupPending = !settled)
             }
         }
     }

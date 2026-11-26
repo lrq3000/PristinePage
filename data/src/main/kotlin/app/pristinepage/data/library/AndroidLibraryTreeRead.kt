@@ -278,7 +278,9 @@ class AndroidLibraryTreeRead(context: Context, private val scratchDirectory: Fil
         beforePointerReplace: () -> Unit = {},
     ): LibraryActivation? = reconcileInterruptedRecipe(issuedAt, advancePointer = true, expectedBinding, beforePointerReplace)?.activation
 
-    private data class RecipeReconciliation(val generation: LibraryGeneration, val activation: LibraryActivation?)
+    private data class RecipeReconciliation(
+        val generation: LibraryGeneration, val activation: LibraryActivation?, val intent: LocalLibraryRecipeEditJournal.Intent,
+    )
 
     private suspend fun reconcileInterruptedRecipe(
         issuedAt: LibraryActivation, advancePointer: Boolean,
@@ -302,7 +304,7 @@ class AndroidLibraryTreeRead(context: Context, private val scratchDirectory: Fil
                 lane.requireCurrent(files)
                 if (authority.read() != expected) throw UnsettledSelectedRecipeEdit()
             }
-            withReadBackend(tree, scratchDirectory, ::requireSelection, bindAcrossChecks = true) { backend, read, checkpoint ->
+            val reconciliation = withReadBackend(tree, scratchDirectory, ::requireSelection, bindAcrossChecks = true) { backend, read, checkpoint ->
                 backend.requireWritableAccess()
                 backend.openRootDirectory().use { held ->
                     val root = AndroidLibraryDescriptorAncestry.observe(held)
@@ -324,7 +326,7 @@ class AndroidLibraryTreeRead(context: Context, private val scratchDirectory: Fil
                     ) throw UnsettledSelectedRecipeEdit()
                     val attempt = files.resolve("catalog-recipe-attempts-v1").resolve(observed.id)
                     val private = LocalLibraryDirectory(files.toFile())
-                    fun requireRecordedEdit() {
+                    fun requireRecordedEdit(): LocalLibraryRecipeEditJournal.Intent {
                         requireRoot()
                         try {
                             val ownedAttempt = canonicalLibraryDirectory(attempt.toFile(), files)
@@ -333,9 +335,10 @@ class AndroidLibraryTreeRead(context: Context, private val scratchDirectory: Fil
                                 proof.intent.rootSha256 != recipeRootKey(tree.toString(), root)
                             ) throw IOException("The interrupted edit has no exact private completion")
                             private.requireAndroidRevisionSpend(predecessor, observed, ::requireSelection, checkpoint)
+                            return proof.intent
                         } catch (failure: IOException) { throw UnsettledSelectedRecipeEdit(failure) }
                     }
-                    requireRecordedEdit()
+                    val intent = requireRecordedEdit()
                     readCatalog(read, observed, checkpoint) { _, _ -> Unit }
                     fun requireDestination(checkRetainedCatalog: Boolean) {
                         requireRecordedEdit()
@@ -351,12 +354,21 @@ class AndroidLibraryTreeRead(context: Context, private val scratchDirectory: Fil
                         requireDestination(checkRetainedCatalog = false)
                         expected.selection.identity.let { LibraryActivation(it.libraryId, it.activation) }
                     }
-                    RecipeReconciliation(observed, activation)
+                    RecipeReconciliation(observed, activation, intent)
                 }.also {
                     requireSelection()
                     backend.requireWritableAccess()
                 }
             }
+            if (expectedBinding != null && reconciliation?.activation != null) {
+                // Real Reconnect consumes only the child this attempt already adopted and closed. Debug pointer-only witnesses remain unchanged.
+                val checkpoint = { coroutineContext.ensureActive() }
+                androidRecipeAttempts(files, checkpoint).settleRecordedAdoption(reconciliation.intent, expected, authority::read) {
+                    checkpoint()
+                    lane.requireCurrent(files)
+                }
+            }
+            reconciliation
         }
     }
 
@@ -409,6 +421,18 @@ class AndroidLibraryTreeRead(context: Context, private val scratchDirectory: Fil
             backend.requireWritableAccess()
             checkpoint()
             activated
+        }
+    }
+
+    internal suspend fun settleLiveRecipeAdoption(
+        edit: SelectedRecipeEdit.Completed, lease: SelectedLibraryWriteLease,
+        adopted: LocalSelectedLibraryAuthority.Selected.Folder, authority: LocalSelectedLibraryAuthority,
+    ): Boolean = withContext(Dispatchers.IO) {
+        val files = app.filesDir.toPath().toRealPath()
+        val checkpoint = { coroutineContext.ensureActive() }
+        androidRecipeAttempts(files, checkpoint).settleRecordedAdoption(edit.receipt.intent, adopted, authority::read) {
+            checkpoint()
+            edit.requireIssuingLease(lease, files)
         }
     }
 
@@ -1077,10 +1101,14 @@ internal open class LibraryTreeUnavailable(message: String) : IOException(messag
 internal class UnsettledSelectedRecipeEdit(cause: Throwable? = null) : IOException("The selected edit could not be settled", cause)
 
 internal fun androidRecipeEditJournal(attempt: File, checkpoint: () -> Unit = {}): LocalLibraryRecipeEditJournal =
-    LocalLibraryRecipeEditJournal(attempt, checkpoint = checkpoint, nodeIdentity = { path, _ ->
-        try { Os.lstat(path.toString()).let { it.st_dev to it.st_ino } }
-        catch (failure: ErrnoException) { throw IOException("The private recipe edit evidence cannot be identified", failure) }
-    })
+    LocalLibraryRecipeEditJournal(attempt, checkpoint = checkpoint, nodeIdentity = { path, _ -> androidRecipeNode(path) })
+
+private fun androidRecipeAttempts(files: Path, checkpoint: () -> Unit) =
+    LocalSelectedRecipeAttempts(files, checkpoint = checkpoint, nodeIdentity = { path, _ -> androidRecipeNode(path) })
+
+private fun androidRecipeNode(path: Path): Pair<Long, Long> =
+    try { Os.lstat(path.toString()).let { it.st_dev to it.st_ino } }
+    catch (failure: ErrnoException) { throw IOException("The private recipe edit evidence cannot be identified", failure) }
 
 /** Register before calling the synchronous resolver. The caller owns any returned descriptor while checking cancellation. */
 internal suspend fun <T> withLibraryProviderSignal(block: (CancellationSignal) -> T): T =

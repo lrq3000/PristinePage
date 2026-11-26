@@ -496,6 +496,37 @@ class LocalLibraryRecipeEditJournalTest {
         assertEquals(active, attempts(files).find(next.id))
     }
 
+    @Test fun settlementRechecksTheActualPointerAfterAcknowledgmentBeforeUnlinking() {
+        val files = roots.newFolder().canonicalFile
+        val active = attempts(files).requireNew(next.id)
+        Files.createDirectory(active.parent)
+        Files.createDirectory(active)
+        active.resolve("catalog.sqlite").toFile().writeBytes(staged)
+        val authority = LocalSelectedLibraryAuthority(roots.newFolder().canonicalFile, sync)
+        val initial = Selection(Location.Default, Identity(library, 1))
+        assertEquals(true, authority.initializeDefault(initial))
+        val original = Selection(Location.Folder(grant.grantId, prior.id), Identity(library, 2))
+        val issuing = LocalSelectedLibraryAuthority.Selected.Folder(authority.chooseFolder(initial, original, grant, prior), grant, prior)
+        val intent = LocalLibraryRecipeEditJournal.Intent(issuing, "c".repeat(64), next)
+        val journal = journal(active.toFile())
+        journal.start(intent) {}.recordAfterProviderClosure(next)
+        val adopted = authority.advanceVerifiedFolderGeneration(issuing, next) {}
+        val terminal = active.resolve("recipe-edit.adopted")
+        var departed = false
+        val disturbed = attempts(files, DirectorySync { path ->
+            if (!departed && path.toPath() == active && Files.exists(terminal)) {
+                authority.returnToDefault(adopted.selection) {}
+                departed = true
+            }
+            true
+        })
+        assertFailsWith<IOException> { disturbed.settleRecordedAdoption(intent, adopted, authority::read) {} }
+        assertEquals(true, departed)
+        assertEquals(true, Files.isSameFile(active.resolve("catalog.sqlite"), active.resolve("recipe-edit.catalog-owner")))
+        assertEquals(LocalLibraryRecipeEditJournal.Phase.ACKNOWLEDGED, journal.inspect(intent))
+        assertEquals(active, attempts(files).find(next.id))
+    }
+
     private fun reclaimedAttempt(withSpend: Boolean = false): Triple<File, java.nio.file.Path, LocalLibraryRecipeEditJournal.Intent> {
         val files = roots.newFolder().canonicalFile
         val active = attempts(files).requireNew(next.id)
