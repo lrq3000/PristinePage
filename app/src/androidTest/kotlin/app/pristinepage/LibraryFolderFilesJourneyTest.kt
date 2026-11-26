@@ -117,7 +117,7 @@ class LibraryFolderFilesJourneyTest {
         val rule = if (description.methodName in setOf("endsProcessAfterPayloadBeforeTheCompletionMarker", "persistsIndependentFilesRootsAndAnchor",
                  "separatesIndependentlySelectedRootsWithoutAParentGrant", "selectedFilesMergeAppendsOnlyTheMissingOriginalAndKeepsItsPredecessor",
                  "selectedFilesMergeCanAppendTwiceWithoutReusingAnOlderStage", "endsProcessAfterSelectedAppendCompletionBeforeDelivery",
-                 "oneFilesSelectionPublishesOnlyAClosedEditedCatalog"))
+                 "oneFilesSelectionPublishesOnlyAClosedEditedCatalog", "selectedRecipeReceiptBindsTheExactIssuingActivation"))
             interruptionCompose else compose
         rule.apply(next, description)
     }
@@ -833,6 +833,58 @@ class LibraryFolderFilesJourneyTest {
             }
             assertFalse(File(files, "library-settings").exists())
             assertFalse(files.walkTopDown().any { it.name == "original.bin" })
+        }
+    }
+
+    @Test fun selectedRecipeReceiptBindsTheExactIssuingActivation() {
+        val operation = requireNotNull(InstrumentationRegistry.getArguments().getString("librarySelectedAppendOperation"))
+        require(UUID.fromString(operation).toString() == operation)
+        withIndependentFilesSelections(chooseAnchor = false, writableDestination = true, singleDestination = true) { app, folder, selections, before ->
+            val tree = selections.single()
+            val files = File(app.filesDir.canonicalFile, "library-selected-editor-$operation").apply { check(mkdir()) }
+            val isolated = object : ContextWrapper(app) {
+                override fun getApplicationContext(): Context = this
+                override fun getFilesDir(): File = files
+            }
+            val scratch = File(files, "scratch").apply { check(mkdir()) }
+            val witness = LibraryDescriptorAncestryWitness
+            val album = DocumentId("aaaaaaaa-aaaa-4aaa-8aaa-000000000001")
+            runBlocking {
+                val activation = witness.seedRecipeEditBinding(isolated, scratch, tree)
+                val startup = AndroidLibraryStartup(isolated)
+                val page = startup.useSelectedCatalog(scratch) { _, catalog -> catalog.load(album).pages.single() }
+                val activePointer = File(files, "library-settings/active-library")
+                val expectedPointer = activePointer.readBytes().toList()
+                val stale = activation.copy(number = activation.number - 1)
+                val unused = File(files, "never-open-this-scratch")
+                val forbidProvider = object : ContextWrapper(isolated) {
+                    override fun getApplicationContext(): Context = this
+                    override fun getContentResolver(): ContentResolver = error("Refused edit or private inspection attempted provider access")
+                }
+                assertEquals("library_activation_changed", (runCatching {
+                    witness.publishBoundRecipeEdit(forbidProvider, unused, stale, operation, album, page.pageId, 2, 2)
+                }.exceptionOrNull() as RepositoryFailure).error.safeMessageKey)
+                assertFalse(unused.exists())
+                assertFalse(File(files, "catalog-recipe-attempts-v1").exists())
+                val child = witness.publishBoundRecipeEdit(isolated, scratch, activation, operation, album, page.pageId, 2, 2)
+                assertEquals(operation, child.generationId)
+                assertEquals(activation, child.issuedAt)
+                assertEquals(page.pageId, child.page)
+                assertEquals(3L, child.revision)
+                assertTrue(child.reopenWithoutProvider(forbidProvider))
+                val spent = runCatching {
+                    witness.publishBoundRecipeEdit(forbidProvider, unused, activation, operation, album, page.pageId, 2, 2)
+                }.exceptionOrNull()
+                assertTrue(spent is IOException)
+                assertEquals("The catalog revision attempt is already spent", spent?.message)
+                assertEquals(expectedPointer, activePointer.readBytes().toList())
+                assertEquals(operation, AndroidLibraryTreeRead(isolated, scratch).verify(tree).generationId)
+                val staged = File(files, "catalog-recipe-attempts-v1/$operation")
+                assertTrue(File(staged, "recipe-edit.intent").isFile)
+                assertTrue(File(staged, "recipe-edit.complete").isFile)
+                assertEquals(before + (tree.toString() to (true to true)), LibraryIndependentRootGrants.inventory(app))
+                LibraryIndependentRootGrants.refuseParentAccess(app, folder)
+            }
         }
     }
 

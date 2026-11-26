@@ -11,7 +11,7 @@ import shutil
 import sqlite3
 import subprocess
 import sys
-from urllib.parse import quote
+from urllib.parse import quote, unquote
 import uuid
 
 from make_library_folder_picker_fixture import make_fixture, synthetic_scan
@@ -37,6 +37,8 @@ SELECTED_REPEAT_CASE = "app.pristinepage.LibraryFolderFilesJourneyTest#selectedF
 SELECTED_DEATH_CASE = "app.pristinepage.LibraryFolderFilesJourneyTest#endsProcessAfterSelectedAppendCompletionBeforeDelivery"
 SELECTED_DEATH_RECOVERY_CASE = "app.pristinepage.LibrarySelectedAppendDeathRecoveryTest#coldProcessInspectsCompletedSelectedAppendWithoutReplay"
 SELECTED_RECIPE_CASE = "app.pristinepage.LibraryFolderFilesJourneyTest#oneFilesSelectionPublishesOnlyAClosedEditedCatalog"
+BOUND_RECIPE_CASE = "app.pristinepage.LibraryFolderFilesJourneyTest#selectedRecipeReceiptBindsTheExactIssuingActivation"
+DETACHED_RECIPE_PASSED = "4217fc17c82f844e6b261c59d3aba864bdc2fca24900d610f863070d760078f3"
 SELECTED_RECIPE_BASELINE = "6e8a2b6c8dfdc36c323c548667045688a0f7a5024386e610c5616892708ff794"
 SELECTED_RECIPE_BOOT_REFUSAL = "3eebda9fc80c090ec377221082f6e715af1c232066bf425daf1cb4108474e7e9"
 SELECTED_RECIPE_FRESH_GUEST_KEY = "824a07547898a7b9bc91be9de2c5c25de8131ab7f49b8abfc48d90855a54d2dc"
@@ -1269,7 +1271,59 @@ def recipe_private_scopes(adb):
     return {leaf for leaf in text.splitlines() if leaf.startswith("library-")}
 
 
-def exercise_selected_recipe_edit(run, adb, ns, raw, fixture, files, hashes, *, fresh=False):
+def verify_bound_recipe_receipt(intent, completion, old_marker, new_marker, pointer, grant):
+    error = "The bound recipe receipt does not match its active binding and exact catalogs"
+    def checked(fields, text):
+        body = "\n".join(fields[:-1]) + "\n"
+        return text == body + sha256(body.encode("ascii")).hexdigest() + "\n"
+    old = old_marker.splitlines()
+    active, access, observed = (value.splitlines() for value in (pointer, grant, intent))
+    need(len(old) == 7 and len(active) == 7 and len(access) == 5 and len(observed) == 19 and
+         active[:3] == ["pristinepage-active-library-v2", old[1], "2"] and active[4] == old[2] and
+         re.fullmatch(UUID_TEXT, active[3]) and access[:3] == ["pristinepage-library-grant-v1", active[3], "3"] and
+         access[3].startswith("content://com.android.externalstorage.documents/tree/") and
+         checked(active, pointer) and checked(access, grant) and active[5] == sha256((grant + old_marker).encode("ascii")).hexdigest() and
+         observed[:4] == ["pristinepage-recipe-edit-intent-v1", active[2], active[3], active[5]] and
+         re.fullmatch(r"[a-f0-9]{64}", observed[4]) and intent == "\n".join(observed[:5]) + "\n" + old_marker + new_marker and
+         completion == f"pristinepage-recipe-edit-complete-v1\n{sha256(intent.encode('ascii')).hexdigest()}\n", error)
+    return active[3], sha256(completion.encode("ascii")).hexdigest()
+
+
+def preserve_detached_recipe(adb, files, attempt, readback):
+    folder, operation = attempt["folder"], attempt["operation"]
+    children = independent_fixture_children(folder)
+    parent = f"/sdcard/Documents/{folder}"
+    need(operation == readback["generation"] and re.fullmatch(UUID_TEXT, operation), "The detached edit predecessor changed")
+    need(adb("shell", "ls", "-A", "-1", parent).splitlines() == sorted(children), "The detached edit parent changed")
+    left, right = (f"{parent}/{name}" for name in children)
+    verify_unchanged_settings_destination(adb, right, files)
+    marker, catalog, stage = f"generations/{operation}.complete", f"catalogs/{operation}.sqlite", f"merge-staging-{operation}"
+    text = read_selected_history_record(lambda *args: adb("shell", *args), f"{left}/{marker}", 256)
+    need(text.splitlines()[2:4] == [operation, readback["predecessor"]] and
+         text.splitlines()[-2:] == [str(readback["catalogBytes"]), readback["catalogSha256"]], "The detached edit marker changed")
+    marker_hash = sha256(text.encode("ascii")).hexdigest()
+    verify_unchanged_settings_destination(adb, left, files | {marker: marker_hash, catalog: readback["catalogSha256"]}, backup_name=stage)
+    nodes = attempt["before"]
+    need(set(nodes) == set(files) | {"objects", "catalogs", "generations"}, "The earlier detached fixture identity inventory changed")
+    for leaf, expected in nodes.items():
+        actual = adb("shell", "stat", "-c", "%d:%i:%s", f"{left}/{leaf}").strip()
+        need((actual if "/" in leaf else actual.rsplit(":", 1)[0]) == expected, "The earlier detached fixture node was replaced")
+    need(not adb("shell", "ls", "-A", "-1", f"{left}/{stage}").strip(), "The detached edit stage changed")
+    scope = f"files/library-selected-editor-{operation}"
+    private = f"{scope}/catalog-recipe-attempts-v1/{operation}"
+    def app_files(*args):
+        return adb("shell", "run-as", APP, *args)
+    spend = read_selected_history_record(app_files, f"{scope}/catalog-revision-spends/{operation}.spent", 1024)
+    catalog_copy = f"{private}/catalog.sqlite"
+    names = set(app_files("ls", "-A", "-1", private).splitlines())
+    need(app_files("sha256sum", catalog_copy).split() == [readback["catalogSha256"], catalog_copy] and
+         sha256(spend.encode("ascii")).hexdigest() == readback["revisionSpendSha256"] and
+         verify_library_move_spends(adb, private, names - {"catalog.sqlite"},
+             {catalog: (readback["catalogBytes"], readback["catalogSha256"]), marker: (len(text.encode("ascii")), marker_hash)}) ==
+         readback["moveSpends"], "The detached edit private evidence changed")
+
+
+def exercise_selected_recipe_edit(run, adb, ns, raw, fixture, files, hashes, *, fresh=False, bound=False):
     """One picker and one new operation; preserve an ambiguous result rather than rerunning it."""
     folder = "PristinePage-tree-" + uuid.uuid4().hex[:12]
     operation = str(uuid.uuid4())
@@ -1304,12 +1358,14 @@ def exercise_selected_recipe_edit(run, adb, ns, raw, fixture, files, hashes, *, 
     run.save(run.path("selected-recipe-attempt.json"), {"folder": folder, "operation": operation, "before": before}, durable=True)
     try:
         admit()
-        authority = sha256(f"selected-recipe-fresh-v1:{ns['NAME']}".encode("ascii")).hexdigest() if fresh else SELECTED_RECIPE_BASELINE
+        authority = (DETACHED_RECIPE_PASSED if bound else sha256(f"selected-recipe-fresh-v1:{ns['NAME']}".encode("ascii")).hexdigest()
+                     if fresh else SELECTED_RECIPE_BASELINE)
         spend_settings_retry(raw.parent, authority, dict(operation=operation, destination=folder, kind="selected-recipe-edit"))
-        output = adb("shell", "am", "instrument", "-w", "-r", "-e", "class", SELECTED_RECIPE_CASE,
+        case = BOUND_RECIPE_CASE if bound else SELECTED_RECIPE_CASE
+        output = adb("shell", "am", "instrument", "-w", "-r", "-e", "class", case,
                      "-e", "libraryFixtureFolder", folder, "-e", "librarySelectedAppendOperation", operation, RUNNER, timeout=190)
         run.path("selected-recipe-instrumentation.txt").write_text(output, encoding="utf-8")
-        passed, failed = read_results(output, (SELECTED_RECIPE_CASE,))
+        passed, failed = read_results(output, (case,))
         if not failed:
             if fresh:
                 verify_fresh_recipe_scope(initial_private, recipe_private_scopes(adb), scope)
@@ -1336,11 +1392,32 @@ def exercise_selected_recipe_edit(run, adb, ns, raw, fixture, files, hashes, *, 
             leaves = set(app_files("ls", "-A", "-1", attempt).splitlines())
             staged_catalog = f"{attempt}/catalog.sqlite"
             need(app_files("sha256sum", staged_catalog).split() == [fields[6], staged_catalog], "The private closed catalog differs")
-            move_spends = verify_library_move_spends(adb, attempt, leaves - {"catalog.sqlite"},
+            extras = {"catalog.sqlite"}
+            receipt_digest = None
+            if bound:
+                settings = f"{private}/library-settings"
+                pointer = read_selected_history_record(app_files, f"{settings}/active-library", 320)
+                fields_active = pointer.splitlines()
+                need(len(fields_active) == 7 and re.fullmatch(UUID_TEXT, fields_active[3]),
+                     "The bound recipe receipt has no exact grant identifier")
+                grant_id = fields_active[3]
+                grant = read_selected_history_record(app_files, f"{settings}/folder-grants/{grant_id}", 4352)
+                intent = read_selected_history_record(app_files, f"{attempt}/recipe-edit.intent", 1024)
+                completion = read_selected_history_record(app_files, f"{attempt}/recipe-edit.complete", 256)
+                _, receipt_digest = verify_bound_recipe_receipt(intent, completion, initial, marker, pointer, grant)
+                need(unquote(grant.splitlines()[3].split("/tree/", 1)[1]) == "primary:" + left.removeprefix("/sdcard/"),
+                     "The receipt did not bind the exact Files-selected synthetic folder")
+                need(read_selected_history_record(app_files, f"{settings}/folder-verifications/{grant_id}-{prior[2]}", 256) == initial and
+                     app_files("stat", "-c", "%d:%i", staged_catalog).strip() ==
+                     app_files("stat", "-c", "%d:%i", f"{attempt}/recipe-edit.catalog-owner").strip(),
+                     "The bound recipe receipt lost the original binding or staged catalog owner")
+                extras.update(("recipe-edit.intent", "recipe-edit.complete", "recipe-edit.catalog-owner"))
+            move_spends = verify_library_move_spends(adb, attempt, leaves - extras,
                 {catalog_leaf: (int(fields[5]), fields[6]), marker_leaf: (len(marker.encode("ascii")), marker_hash)})
             run.save(run.path("selected-recipe-readback.json"), {"generation": operation, "predecessor": prior[2],
                 "catalogSha256": fields[6], "catalogBytes": int(fields[5]), "recipeSha256": recipe, "originalCopies": 0,
-                "revisionSpendSha256": sha256(spend.encode("ascii")).hexdigest(), "moveSpends": move_spends}, durable=True)
+                "revisionSpendSha256": sha256(spend.encode("ascii")).hexdigest(), "moveSpends": move_spends,
+                "boundReceiptSha256": receipt_digest}, durable=True)
         return {"passed": passed, "failed": failed, "installedSha256": hashes}
     finally:
         recheck_target(run, ns)
@@ -1880,7 +1957,10 @@ def run(args):
              "Pre-marker death needs an exact retained guest and a standalone invocation")
     independent_derived = args.independent_roots_derived
     selected_append = args.selected_root_append
-    selected_recipe = args.selected_recipe_edit
+    bound_recipe = args.selected_bound_recipe_edit
+    selected_recipe = args.selected_recipe_edit or bound_recipe
+    need(not bound_recipe or not (args.selected_recipe_edit or args.fresh or args.selected_recipe_boot_retry),
+         "Bound recipe edit requires a standalone released detached-edit guest")
     if selected_recipe and args.fresh:
         need(sha256(args.guest.encode("ascii")).hexdigest() == SELECTED_RECIPE_FRESH_GUEST_KEY,
              "Fresh selected edit requires its exact admitted guest name")
@@ -1964,6 +2044,7 @@ def run(args):
     recipe_interrupted = None
     recipe_interrupted_expected = None
     recipe_retained = None
+    bound_baseline = None
     protect_interrupted = None
     death_authority = CAPACITY_PASSED if before_marker else args.backup_death_retry or SETTINGS_COLD_MANIFEST
     death_operation = str(uuid.uuid4()) if args.backup_delivery_death or before_marker else None
@@ -1980,7 +2061,19 @@ def run(args):
                  "The predecessor must be the retained evidence file for this package")
             previous[package] = sha(path)
             exact_apk(path, previous[package], stage, package == TEST)
-        if selected_recipe:
+        if bound_recipe:
+            old = raw.parent / "picker-adapter-library-tree-5e7909463a3e"
+            need({Path(file).resolve().parent for file in args.previous} == {old.resolve()} and
+                 not (raw.parent / f"settings-retry-spent-{DETACHED_RECIPE_PASSED}.json").exists(),
+                 "The bound edit requires the exact detached predecessor and an unspent admission")
+            pinned = settings_run_anchors(old, DETACHED_RECIPE_PASSED)
+            recipe_baseline = json.loads(pinned("claim.json"))
+            artifact = json.loads(pinned("artifacts.json"))
+            need(artifact["selectedRecipeFresh"] and artifact["guest"] == recipe_baseline["name"] == args.guest and
+                 json.loads(pinned("outcomes.json")) == {"passed": [SELECTED_RECIPE_CASE], "failed": [], "installedSha256": previous},
+                 "The exact detached predecessor did not pass on this app guest")
+            bound_baseline = artifact["fixture"], json.loads(pinned("selected-recipe-attempt.json")), json.loads(pinned("selected-recipe-readback.json"))
+        elif selected_recipe:
             old = raw.parent / "picker-adapter-library-tree-e569733fb1fa"
             need({Path(file).resolve().parent for file in args.previous} == {old.resolve()} and
                  not (raw.parent / f"settings-retry-spent-{SELECTED_RECIPE_BASELINE}.json").exists(),
@@ -2295,6 +2388,7 @@ def run(args):
                          independentRootsDerived=independent_derived, selectedRootAppend=append_operation, selectedRepeat=repeat_operation,
                           selectedDeath=selected_death, selectedDeathReadOnly=bool(selected_death_retained), selectedRecipe=selected_recipe,
                           selectedRecipeBootRetry=bool(recipe_boot_retry), selectedRecipeFresh=selected_recipe and args.fresh,
+                          selectedBoundRecipe=bound_recipe,
                          appendInterveningRelease=append_release, appendHostRecovery=append_host_recovery, incomingFixture=received)),
         encoding="utf-8",
     )
@@ -2380,7 +2474,16 @@ def run(args):
         elif not args.fresh:
             check_installed_pair(installed, previous, hashes)
         run.save(run.path("installed-before.json"), installed, durable=True)
-        if recipe_baseline:
+        if bound_baseline:
+            require_cold_backup_app(adb)
+            def check_bound_predecessor():
+                recheck_target(run, ns)
+                need(not read_app_persisted_grants(adb) and "library-settings" not in recipe_private_scopes(adb),
+                     "The bound recipe fixture changed the ordinary active binding or persisted grants")
+                preserve_detached_recipe(adb, *bound_baseline)
+            check_bound_predecessor()
+            recipe_preservation = (check_bound_predecessor,)
+        elif recipe_baseline:
             old_folder, old_operation, old_files, old_incoming, _ = recipe_interrupted
             require_cold_backup_app(adb)
             repeat, legacy, expected = recipe_retained
@@ -2559,7 +2662,7 @@ def run(args):
                     need(not read_app_persisted_grants(adb), "The fresh selected edit left a persisted grant")
                 check_fresh_recipe_grants()
                 recipe_preservation = (check_fresh_recipe_grants,)
-            recipe_outcome = exercise_selected_recipe_edit(run, adb, ns, raw, fixture, files, hashes, fresh=args.fresh)
+            recipe_outcome = exercise_selected_recipe_edit(run, adb, ns, raw, fixture, files, hashes, fresh=args.fresh, bound=bound_recipe)
             return bool(recipe_outcome["failed"])
         if death_receipt:
             recheck_target(run, ns)
@@ -2878,6 +2981,8 @@ if __name__ == "__main__":
                         help="Publish one closed catalog-only edit through a single Files grant on an admitted app guest")
     parser.add_argument("--selected-recipe-boot-retry", action="store_true",
                         help="Permit one retry on the exact released guest after its pinned boot-only refusal")
+    parser.add_argument("--selected-bound-recipe-edit", action="store_true",
+                        help="Record one active-binding recipe receipt on the exact released detached-edit guest without advancing the pointer")
     parser.add_argument("--provider-capacity", action="store_true",
                         help="Verify the real Files capacity gate with an unattainable synthetic requirement and no publication")
     parser.add_argument("--settings-retry", metavar="CANCEL_MANIFEST_SHA", help="Permit one new confirmation on the exact retained, independently canceled fixture")

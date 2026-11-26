@@ -2,6 +2,7 @@ package app.pristinepage.data.library
 
 import android.content.Context
 import android.net.Uri
+import app.pristinepage.core.pipeline.Recipe
 import app.pristinepage.data.model.DocumentId
 import app.pristinepage.data.model.EditablePage
 import app.pristinepage.data.model.OperationError
@@ -11,6 +12,7 @@ import app.pristinepage.data.model.RepositoryFailure
 import app.pristinepage.data.model.requireOpaqueId
 import app.pristinepage.data.repository.DocumentCatalog
 import app.pristinepage.data.repository.EditablePages
+import app.pristinepage.data.repository.RecipeAdmission
 import app.pristinepage.data.repository.ScopedCommittedOriginals
 import java.io.File
 import java.io.IOException
@@ -64,6 +66,31 @@ class AndroidLibraryStartup(context: Context) {
         scratchDirectory: File, issuedAt: LibraryActivation, documentId: DocumentId, pageId: PageId,
     ): EditablePage = useRecordedWorkingLibrary(scratchDirectory, issuedAt) { _, _, _, editable ->
         editable.load(documentId, pageId)
+    }
+
+    /** Durable provider publication only. The caller must still advance the exact current private binding before delivering a Save. */
+    internal suspend fun publishSelectedRecipeEdit(
+        scratchDirectory: File, issuedAt: LibraryActivation, operation: String, document: DocumentId, page: PageId,
+        expectedRevision: Long, admission: RecipeAdmission, edit: (Recipe) -> Recipe,
+    ): AndroidLibraryTreeRead.SelectedRecipeEdit {
+        val (authority, loaded) = readSelection(allowBootstrap = false) ?: folderNotSelected()
+        if (loaded.activation() != issuedAt) {
+            throw RepositoryFailure(OperationError(OperationErrorCode.SOURCE_UNAVAILABLE, false, "library_activation_changed", null))
+        }
+        val selected = when (loaded) {
+            is LocalSelectedLibraryAuthority.Selected.Folder -> loaded
+            is LocalSelectedLibraryAuthority.Selected.Default -> folderNotSelected()
+            is LocalSelectedLibraryAuthority.Selected.Reconnect -> reconnect()
+        }
+        if (selected.grant.returnedModes != 3) reconnect()
+        fun requireSelected() {
+            if (authority.read() != selected) reconnect()
+        }
+        val reader = AndroidLibraryTreeRead(app, scratchDirectory)
+        return try {
+            reader.appendBoundRecipeEdit(selected, operation, document, page, expectedRevision, admission, ::requireSelected, edit)
+        } catch (_: LibraryTreeUnavailable) { reconnect() }
+        catch (_: ExactLibraryWriteAccessUnavailable) { reconnect() }
     }
 
     private suspend fun <T : Any> useRecordedWorkingLibrary(

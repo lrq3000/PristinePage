@@ -8,6 +8,8 @@ import app.pristinepage.data.model.PageId
 import app.pristinepage.data.repository.RecipeAdmission
 import java.io.File
 import java.util.UUID
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 
 /** Debug instrumentation bridge. It does not validate a grant, hold topology stable, or authorize mutation. */
 object LibraryDescriptorAncestryWitness {
@@ -82,6 +84,42 @@ object LibraryDescriptorAncestryWitness {
 
     suspend fun verifyRecipeEditTarget(reader: AndroidLibraryTreeRead, tree: Uri): AndroidLibraryTreeRead.Verified =
         reader.verifyRecipeEditTarget(tree)
+
+    suspend fun seedRecipeEditBinding(context: Context, scratch: File, tree: Uri): LibraryActivation = withContext(Dispatchers.IO) {
+        val reader = AndroidLibraryTreeRead(context, scratch)
+        val generation = reader.confirmedRecipePredecessor(reader.verifyRecipeEditTarget(tree))
+        val grant = LibraryFolderGrantRecord(UUID.randomUUID().toString(), tree.toString(), 3)
+        val authority = LocalLibrarySettingsBootstrap(context.filesDir.canonicalFile).open()
+        val prior = (authority.read() as LocalSelectedLibraryAuthority.Selected.Default).selection
+        val identity = ActiveLibraryFence.Identity(generation.libraryId, prior.identity.activation + 1)
+        val selected = ActiveLibraryFence.Selection(ActiveLibraryFence.Location.Folder(grant.grantId, generation.id), identity)
+        authority.chooseFolder(prior, selected, grant, generation)
+        LibraryActivation(identity.libraryId, identity.activation)
+    }
+
+    class BoundRecipeReceipt internal constructor(
+        val generationId: String, val issuedAt: LibraryActivation, val page: PageId, val revision: Long,
+        private val intent: LocalLibraryRecipeEditJournal.Intent,
+    ) {
+        suspend fun reopenWithoutProvider(context: Context): Boolean = withContext(Dispatchers.IO) {
+            val attempt = File(context.filesDir.canonicalFile, "catalog-recipe-attempts-v1/$generationId")
+            androidRecipeEditJournal(attempt).inspect(intent) == LocalLibraryRecipeEditJournal.Phase.COMPLETED
+        }
+    }
+
+    suspend fun publishBoundRecipeEdit(
+        context: Context, scratch: File, issuedAt: LibraryActivation, operation: String, document: DocumentId, page: PageId,
+        expectedRevision: Long, turns: Int,
+    ): BoundRecipeReceipt {
+        val result = AndroidLibraryStartup(context).publishSelectedRecipeEdit(scratch, issuedAt, operation, document, page,
+            expectedRevision, RecipeAdmission { _, _ -> null }) { previous ->
+            previous.copy(geometry = previous.geometry.withOutputQuarterTurns(turns))
+        } as AndroidLibraryTreeRead.SelectedRecipeEdit.Completed
+        val intent = result.receipt.intent
+        val identity = intent.binding.selection.identity
+        return BoundRecipeReceipt(intent.successor.id, LibraryActivation(identity.libraryId, identity.activation),
+            result.projection.pageId, result.projection.recipeRevision, intent)
+    }
 
     suspend fun appendSelectedRecipeEdit(
         context: Context, scratch: File, operation: String, verified: AndroidLibraryTreeRead.Verified,

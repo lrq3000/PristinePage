@@ -142,7 +142,7 @@ class AndroidLibraryWritableFolder(context: Context) {
 
         fun requireExactAccess() {
             checkpoint()
-            if (!AndroidLibraryTreeRead.hasTrustedLocalProvider(app)) throw IOException("The exact library folder is not writable")
+            if (!AndroidLibraryTreeRead.hasTrustedLocalProvider(app)) throw ExactLibraryWriteAccessUnavailable()
             val granted = when (access) {
                 Access.PERSISTED -> resolver.persistedUriPermissions.any {
                     it.isReadPermission && it.isWritePermission && it.uri.toString() == tree.toString()
@@ -151,7 +151,7 @@ class AndroidLibraryWritableFolder(context: Context) {
                 Access.LIVE_FILES_RESULT -> app.checkUriPermission(tree, Process.myPid(), Process.myUid(),
                     Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION) == PackageManager.PERMISSION_GRANTED
             }
-            if (!granted) throw IOException("The exact library folder is not writable")
+            if (!granted) throw ExactLibraryWriteAccessUnavailable()
             checkpoint()
         }
 
@@ -168,3 +168,5 @@ class AndroidLibraryWritableFolder(context: Context) {
         }
     }
 }
+
+internal class ExactLibraryWriteAccessUnavailable : IOException("The exact library folder is not writable")

@@ -21,6 +21,25 @@ from run_local_ocr_guest import read_boot_serial
 
 
 class LibraryFolderPickerRunnerTest(unittest.TestCase):
+    def test_bound_recipe_receipt_does_not_accept_mismatched_activation_or_catalog(self):
+        from run_library_folder_picker_ldplayer import verify_bound_recipe_receipt
+        library, prior, child, grant_id = map(self._uuid, (1, 2, 3, 4))
+        old_marker = f"pristinepage-library-v1\n{library}\n{prior}\n-\n8\n512\n{'a' * 64}\n"
+        new_marker = f"pristinepage-library-v1\n{library}\n{child}\n{prior}\n8\n512\n{'b' * 64}\n"
+        uri = "content://com.android.externalstorage.documents/tree/primary%3ADocuments%2FSynthetic"
+        def signed(body):
+            return body + sha256(body.encode("ascii")).hexdigest() + "\n"
+        grant = signed(f"pristinepage-library-grant-v1\n{grant_id}\n3\n{uri}\n")
+        grant_hash = sha256((grant + old_marker).encode("ascii")).hexdigest()
+        pointer = signed(f"pristinepage-active-library-v2\n{library}\n2\n{grant_id}\n{prior}\n{grant_hash}\n")
+        intent = f"pristinepage-recipe-edit-intent-v1\n2\n{grant_id}\n{grant_hash}\n{'d' * 64}\n{old_marker}{new_marker}"
+        completion = f"pristinepage-recipe-edit-complete-v1\n{sha256(intent.encode('ascii')).hexdigest()}\n"
+        verify_bound_recipe_receipt(intent, completion, old_marker, new_marker, pointer, grant)
+        for bad in (intent.replace("\n2\n", "\n3\n", 1), intent.replace("b" * 64, "c" * 64)):
+            forged = f"pristinepage-recipe-edit-complete-v1\n{sha256(bad.encode('ascii')).hexdigest()}\n"
+            with self.assertRaisesRegex(RuntimeError, "bound recipe receipt"):
+                verify_bound_recipe_receipt(bad, forged, old_marker, new_marker, pointer, grant)
+
     def test_fresh_recipe_witness_requires_only_its_own_new_private_scope(self):
         from run_library_folder_picker_ldplayer import verify_fresh_recipe_scope
         scope = "library-selected-editor-7bde9de8-6e8e-4a84-9ec3-25a58670daeb"
