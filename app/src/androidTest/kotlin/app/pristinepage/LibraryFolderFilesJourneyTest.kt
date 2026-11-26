@@ -1008,7 +1008,8 @@ class LibraryFolderFilesJourneyTest {
                     interruptionCompose.onNodeWithTag(pageTag).assertIsEnabled().performClick()
                     assertEquals(editor, clicked.get())
                 } finally {
-                    interruptionCompose.runOnUiThread { interruptionCompose.activity.setContent {} }
+                    // Stopping the host is a real lifecycle barrier. A newly requested empty composition can still leave an in-flight thumbnail that has not reserved its bitmap yet.
+                    interruptionCompose.activityRule.scenario.moveToState(androidx.lifecycle.Lifecycle.State.CREATED)
                     owner.cancelAndJoin()
                     interruptionCompose.waitUntil(15_000) { services.budget.usedBytes == 0L }
                 }
