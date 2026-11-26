@@ -1136,6 +1136,17 @@ class LibraryFolderFilesJourneyTest {
                 assertTrue(File(staged, "recipe-edit.complete").isFile)
                 assertEquals(before + (tree.toString() to (true to true)), LibraryIndependentRootGrants.inventory(app))
                 LibraryIndependentRootGrants.refuseParentAccess(app, folder)
+                // The retained bound-only case deliberately leaves the predecessor active for its existing host oracle.
+                if (InstrumentationRegistry.getArguments().getString("libraryRecoverSelectedRecipePointer") == "true") {
+                    val advanced = witness.recoverInterruptedRecipeSuccessor(isolated, scratch, activation)
+                    assertEquals(activation.copy(number = activation.number + 1), advanced)
+                    val current = checkNotNull(advanced)
+                    val reopened = AndroidLibraryStartup(isolated).loadSelectedEditablePage(scratch, current, album, page.pageId)
+                    assertEquals(child.revision, reopened.recipeRevision)
+                    assertEquals(2, reopened.recipe.geometry.outputQuarterTurns)
+                    assertEquals(null, witness.recoverInterruptedRecipeSuccessor(isolated, scratch, current))
+                    assertEquals(before + (tree.toString() to (true to true)), LibraryIndependentRootGrants.inventory(app))
+                }
             }
         }
     }

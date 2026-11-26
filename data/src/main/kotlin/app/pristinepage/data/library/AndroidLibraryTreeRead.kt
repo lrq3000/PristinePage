@@ -268,21 +268,32 @@ class AndroidLibraryTreeRead(context: Context, private val scratchDirectory: Fil
         }
     }
 
-    /** Scope a cold read to the exact selected folder and one completed direct successor. Does not advance the pointer or replay anything. */
-    internal suspend fun observeInterruptedRecipeSuccessor(issuedAt: LibraryActivation): LibraryGeneration? = withContext(Dispatchers.IO) {
+    /** Scope a cold read to the exact selected folder and one completed direct successor. */
+    internal suspend fun observeInterruptedRecipeSuccessor(issuedAt: LibraryActivation): LibraryGeneration? =
+        reconcileInterruptedRecipe(issuedAt, advancePointer = false)?.generation
+
+    /** Recover only the private pointer under the current Files grant. Never reissue the write or deliver an editor Save result. */
+    internal suspend fun recoverInterruptedRecipeSuccessor(issuedAt: LibraryActivation): LibraryActivation? =
+        reconcileInterruptedRecipe(issuedAt, advancePointer = true)?.activation
+
+    private data class RecipeReconciliation(val generation: LibraryGeneration, val activation: LibraryActivation?)
+
+    private suspend fun reconcileInterruptedRecipe(issuedAt: LibraryActivation, advancePointer: Boolean): RecipeReconciliation? = withContext(Dispatchers.IO) {
         val files = app.filesDir.toPath().toRealPath()
         withSelectedLibraryWriteLane(files) { lane ->
             val authority = LocalLibrarySettingsBootstrap(files.toFile()).openExisting() ?: throw UnsettledSelectedRecipeEdit()
             val binding = authority.read() as? LocalSelectedLibraryAuthority.Selected.Folder ?: throw UnsettledSelectedRecipeEdit()
+            val issuing = binding.selection.identity
+            if (LibraryActivation(issuing.libraryId, issuing.activation) != issuedAt || binding.grant.returnedModes != 3) {
+                throw UnsettledSelectedRecipeEdit()
+            }
+            var expected = binding
             val tree = Uri.parse(binding.grant.exactUri)
             val predecessor = binding.expectedGeneration
             fun requireSelection() {
                 coroutineContext.ensureActive()
                 lane.requireCurrent(files)
-                val identity = binding.selection.identity
-                if (LibraryActivation(identity.libraryId, identity.activation) != issuedAt ||
-                    binding.grant.returnedModes != 3 || authority.read() != binding
-                ) throw UnsettledSelectedRecipeEdit()
+                if (authority.read() != expected) throw UnsettledSelectedRecipeEdit()
             }
             withReadBackend(tree, scratchDirectory, ::requireSelection, bindAcrossChecks = true) { backend, read, checkpoint ->
                 backend.requireWritableAccess()
@@ -292,6 +303,8 @@ class AndroidLibraryTreeRead(context: Context, private val scratchDirectory: Fil
                         requireSelection()
                         backend.requireWritableAccess()
                         backend.rebindRoot(root)
+                        // Rebinding uses read access and can outlast loss of the write mode. Recheck both modes after it.
+                        backend.requireWritableAccess()
                     }
                     val observed = read.observeTip(predecessor)
                     if (observed == predecessor) {
@@ -317,10 +330,21 @@ class AndroidLibraryTreeRead(context: Context, private val scratchDirectory: Fil
                     }
                     requireRecordedEdit()
                     readCatalog(read, observed, checkpoint) { _, _ -> Unit }
-                    requireRecordedEdit()
-                    read.requireCurrent(observed, predecessor, verifyRetainedCatalog = true)
-                    requireRoot()
-                    observed
+                    fun requireDestination(checkRetainedCatalog: Boolean) {
+                        requireRecordedEdit()
+                        read.requireCurrent(observed, predecessor, verifyRetainedCatalog = checkRetainedCatalog)
+                        requireRoot()
+                    }
+                    requireDestination(checkRetainedCatalog = true)
+                    val activation = if (!advancePointer) null else {
+                        expected = authority.advanceOrReadVerifiedFolderGeneration(binding, observed) {
+                            // Do not carry a detached observation across the pointer swap. Rebind the current grant, tip and private evidence.
+                            requireDestination(checkRetainedCatalog = true)
+                        }
+                        requireDestination(checkRetainedCatalog = false)
+                        expected.selection.identity.let { LibraryActivation(it.libraryId, it.activation) }
+                    }
+                    RecipeReconciliation(observed, activation)
                 }.also {
                     requireSelection()
                     backend.requireWritableAccess()

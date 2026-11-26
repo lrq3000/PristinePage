@@ -126,6 +126,9 @@ object LibraryDescriptorAncestryWitness {
     suspend fun observeInterruptedRecipeSuccessor(context: Context, scratch: File, issuedAt: LibraryActivation): String? =
         AndroidLibraryTreeRead(context, scratch).observeInterruptedRecipeSuccessor(issuedAt)?.id
 
+    suspend fun recoverInterruptedRecipeSuccessor(context: Context, scratch: File, issuedAt: LibraryActivation): LibraryActivation? =
+        AndroidLibraryTreeRead(context, scratch).recoverInterruptedRecipeSuccessor(issuedAt)
+
     suspend fun saveAndAdvanceSelectedRecipe(
         context: Context, scratch: File, issuedAt: LibraryActivation, operation: String, document: DocumentId, page: PageId,
         expectedRevision: Long, turns: Int,
