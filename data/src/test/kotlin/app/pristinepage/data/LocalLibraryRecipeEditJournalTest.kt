@@ -7,14 +7,17 @@ import app.pristinepage.data.library.ActiveLibraryFence.Selection
 import app.pristinepage.data.library.LibraryFolderGrantRecord
 import app.pristinepage.data.library.LibraryGeneration
 import app.pristinepage.data.library.LibraryObjectTransfer.ObjectId
+import app.pristinepage.data.library.LocalLibraryDirectory
 import app.pristinepage.data.library.LocalLibraryRecipeEditJournal
 import app.pristinepage.data.library.LocalSelectedLibraryAuthority
+import app.pristinepage.data.library.LocalSelectedRecipeAttempts
 import java.io.File
 import java.io.IOException
 import java.nio.file.Files
 import java.nio.file.StandardCopyOption.REPLACE_EXISTING
 import java.nio.file.attribute.FileTime
 import java.security.MessageDigest
+import java.util.UUID
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
@@ -343,6 +346,143 @@ class LocalLibraryRecipeEditJournalTest {
         assertEquals(altered.toList(), stage.readBytes().toList())
     }
 
+    @Test fun archiveMovesOnlyTheExactReclaimedAttemptAndKeepsItsReplayFence() {
+        val files = roots.newFolder().canonicalFile.toPath()
+        val attempts = attempts(files.toFile())
+        val active = attempts.requireNew(next.id)
+        Files.createDirectory(active.parent)
+        Files.createDirectory(active)
+        active.resolve("catalog.sqlite").toFile().writeBytes(staged)
+        val intent = LocalLibraryRecipeEditJournal.Intent(binding(3), "c".repeat(64), next)
+        val adopted = binding(4, predecessor = next)
+        val journal = journal(active.toFile())
+        journal.start(intent) {}.recordAfterProviderClosure(next)
+        journal.acknowledgeAdopted(intent, adopted) {}
+        assertFailsWith<IOException> { attempts.archiveReclaimed(intent, adopted) {} }
+        assertEquals(active, attempts.find(next.id))
+        journal.reclaimAdoptedCatalog(intent, adopted) {}
+        val retained = active.toFile().listFiles()!!.associate { it.name to it.readBytes().toList() }
+        val archived = attempts.archiveReclaimed(intent, adopted) {}
+        assertFalse(Files.exists(active))
+        assertEquals(retained, archived.toFile().listFiles()!!.associate { it.name to it.readBytes().toList() })
+        val cold = attempts(files.toFile())
+        assertEquals(archived, cold.find(next.id))
+        assertEquals(archived, cold.archiveReclaimed(intent, adopted) {})
+        assertFailsWith<IOException> { cold.requireNew(next.id) }
+        Files.createDirectory(active)
+        assertFailsWith<IOException> { cold.find(next.id) }
+        assertEquals(retained, archived.toFile().listFiles()!!.associate { it.name to it.readBytes().toList() })
+    }
+
+    @Test fun activeAndArchivedAttemptsAreBoundedSeparately() {
+        val files = roots.newFolder().canonicalFile.toPath()
+        val attempts = attempts(files.toFile())
+        val active = attempts.requireNew(next.id).parent
+        Files.createDirectory(active)
+        repeat(4) { Files.createDirectory(active.resolve(UUID.randomUUID().toString())) }
+        assertFailsWith<IOException> { attempts.requireNew(next.id) }
+        val other = roots.newFolder().canonicalFile
+        val history = Files.createDirectory(other.toPath().resolve("catalog-recipe-acknowledged-v1"))
+        repeat(128) { Files.createDirectory(history.resolve(UUID.randomUUID().toString())) }
+        assertFailsWith<IOException> { attempts(other).requireNew(next.id) }
+    }
+
+    @Test fun aRevisionSpendAloneStillRefusesAnAbsentAttemptId() {
+        val files = roots.newFolder().canonicalFile
+        LocalLibraryDirectory(files, sync).spendCatalogRevision(prior, next) {}
+        assertEquals(null, attempts(files).find(next.id))
+        assertFailsWith<IOException> { attempts(files).requireNew(next.id) }
+    }
+
+    @Test fun aFailedArchiveBarrierCannotReadmitTheMovedOperation() {
+        val files = roots.newFolder().canonicalFile
+        val attempts = attempts(files)
+        val active = attempts.requireNew(next.id)
+        Files.createDirectory(active.parent)
+        Files.createDirectory(active)
+        active.resolve("catalog.sqlite").toFile().writeBytes(staged)
+        val intent = LocalLibraryRecipeEditJournal.Intent(binding(3), "c".repeat(64), next)
+        val adopted = binding(4, predecessor = next)
+        val journal = journal(active.toFile())
+        journal.start(intent) {}.recordAfterProviderClosure(next)
+        journal.acknowledgeAdopted(intent, adopted) {}
+        journal.reclaimAdoptedCatalog(intent, adopted) {}
+        val withoutBarrier = attempts(files, DirectorySync { Files.exists(active) })
+        assertFailsWith<IOException> { withoutBarrier.archiveReclaimed(intent, adopted) {} }
+        assertFalse(Files.exists(active))
+        assertFailsWith<IOException> { withoutBarrier.requireNew(next.id) }
+        val archived = attempts.archiveReclaimed(intent, adopted) {}
+        assertEquals(archived, attempts.find(next.id))
+        assertFailsWith<IOException> { attempts.requireNew(next.id) }
+    }
+
+    @Test fun aFailedArchiveBarrierDoesNotReleaseAVisibleSlotForAnotherOperation() {
+        val (files, active, intent) = reclaimedAttempt()
+        repeat(3) { Files.createDirectory(active.parent.resolve(UUID.randomUUID().toString())) }
+        val another = UUID.randomUUID().toString()
+        val unavailable = attempts(files, DirectorySync { Files.exists(active) })
+        assertFailsWith<IOException> { unavailable.archiveReclaimed(intent, binding(4, predecessor = next)) {} }
+        assertFalse(Files.exists(active))
+        assertFailsWith<IOException> { unavailable.requireNew(another) }
+        assertEquals(active.parent.resolve(another), attempts(files).requireNew(another))
+    }
+
+    @Test fun aChangeDuringTheFinalJournalBarrierCannotSatisfyReclaimedEvidence() {
+        for (spill in listOf(false, true)) {
+            val (_, active, intent) = reclaimedAttempt(withSpend = true)
+            val leaf = active.toFile().listFiles()!!.single { it.name.endsWith(".spent") }
+            var synced = 0
+            val disturbed = journal(active.toFile(), DirectorySync { path ->
+                if (path.toPath() == active && ++synced == 2) {
+                    if (spill) Files.createLink(active.resolve(".pristinepage-retained.part"), active.resolve("recipe-edit.adopted"))
+                    else leaf.writeText("same sized spend edit")
+                }
+                true
+            })
+            assertFailsWith<IOException> { disturbed.reclaimedEvidence(intent) }
+        }
+    }
+
+    @Test fun replacingTheEmptyActiveNamespaceDuringArchiveReadbackRefusesAcknowledgment() {
+        val (files, active, intent) = reclaimedAttempt()
+        val archived = files.toPath().resolve("catalog-recipe-acknowledged-v1").resolve(next.id)
+        var replaced = false
+        val disturbed = attempts(files, DirectorySync { path ->
+            if (!replaced && path.toPath() == archived) {
+                Files.move(active.parent, files.toPath().resolve("preserved-active"))
+                Files.createDirectory(active.parent)
+                Files.getFileAttributeView(active.parent, java.nio.file.attribute.BasicFileAttributeView::class.java)
+                    .setTimes(null, null, FileTime.fromMillis(1_600_000_000_000))
+                replaced = true
+            }
+            true
+        })
+        assertFailsWith<IOException> { disturbed.archiveReclaimed(intent, binding(4, predecessor = next)) {} }
+        assertEquals(true, replaced)
+        assertEquals(archived, attempts(files).find(next.id))
+    }
+
+    private fun reclaimedAttempt(withSpend: Boolean = false): Triple<File, java.nio.file.Path, LocalLibraryRecipeEditJournal.Intent> {
+        val files = roots.newFolder().canonicalFile
+        val active = attempts(files).requireNew(next.id)
+        Files.createDirectory(active.parent)
+        Files.createDirectory(active)
+        active.resolve("catalog.sqlite").toFile().writeBytes(staged)
+        val intent = LocalLibraryRecipeEditJournal.Intent(binding(3), "c".repeat(64), next)
+        val adopted = binding(4, predecessor = next)
+        val writer = journal(active.toFile())
+        val live = writer.start(intent) {}
+        if (withSpend) {
+            val key = MessageDigest.getInstance("SHA-256").digest(next.catalogPath.toByteArray(Charsets.US_ASCII))
+                .joinToString("") { "%02x".format(it.toInt() and 255) }
+            active.resolve("$key.spent").toFile().writeText("same sized spend old!")
+        }
+        live.recordAfterProviderClosure(next)
+        writer.acknowledgeAdopted(intent, adopted) {}
+        writer.reclaimAdoptedCatalog(intent, adopted) {}
+        return Triple(files, active, intent)
+    }
+
     private fun binding(number: Long, owner: LibraryFolderGrantRecord = grant,
         predecessor: LibraryGeneration = prior): LocalSelectedLibraryAuthority.Selected.Folder {
         val selection = Selection(Location.Folder(owner.grantId, predecessor.id), Identity(library, number))
@@ -353,6 +493,9 @@ class LocalLibraryRecipeEditJournalTest {
 
     private fun journal(attempt: File, barrier: DirectorySync = sync) =
         LocalLibraryRecipeEditJournal(attempt, barrier, nodeIdentity = { _, attrs -> attrs.fileKey() ?: attrs.creationTime() })
+
+    private fun attempts(files: File, barrier: DirectorySync = sync) =
+        LocalSelectedRecipeAttempts(files.toPath(), barrier, nodeIdentity = { _, attrs -> attrs.fileKey() ?: attrs.creationTime() })
 
     private fun fixture(): Pair<File, LocalLibraryRecipeEditJournal.Intent> {
         val attempt = roots.newFolder().canonicalFile.resolve(next.id).apply { check(mkdir()) }

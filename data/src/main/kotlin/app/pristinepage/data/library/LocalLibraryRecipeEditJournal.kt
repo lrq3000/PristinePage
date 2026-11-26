@@ -151,6 +151,43 @@ internal class LocalLibraryRecipeEditJournal(
         requireCurrent()
     }
 
+    /** Proof for the bounded archive; a lingering stage, even a linked record spill, stays in the live inventory. */
+    fun reclaimedEvidence(intent: Intent): Map<String, Pair<Any, List<Byte>>> {
+        val before = inspectOwned(intent, null)?.takeIf { it.phase == Phase.ACKNOWLEDGED && CATALOG !in it.nodes } ?: invalid()
+        val leaves = before.nodes.keys - "."
+        fun requireInventory() {
+            val actual = Files.newDirectoryStream(root).use { stream ->
+                stream.asSequence().take(leaves.size + 1).map { it.fileName.toString() }.toSet()
+            }
+            if (actual != leaves || before.nodes.any { (name, key) -> identity(root.resolve(name).normalize()) != key }) invalid()
+        }
+        fun snapshot(): Map<String, Pair<Any, List<Byte>>> {
+            requireInventory()
+            return before.nodes.mapValues { (name, key) ->
+                if (name == ".") key to emptyList() else {
+                    val path = root.resolve(name)
+                    val bytes = Files.newInputStream(path, NOFOLLOW_LINKS).use { input ->
+                        val buffer = ByteArray(MAX_INTENT_BYTES + 1)
+                        var count = 0
+                        while (count < buffer.size) {
+                            checkpoint()
+                            val n = input.read(buffer, count, buffer.size - count)
+                            if (n < 0) break
+                            if (n == 0) invalid()
+                            count += n
+                        }
+                        if (count !in 1..MAX_INTENT_BYTES) invalid()
+                        buffer.copyOf(count).toList()
+                    }
+                    key to bytes
+                }
+            }.also { requireInventory() }
+        }
+        val proof = snapshot()
+        if (inspectOwned(intent, null) != before || snapshot() != proof) invalid()
+        return proof
+    }
+
     /** Reconstruct a private observation for the exact issuing selection. This does not return a live receipt or prove current provider bytes. */
     fun observeForRecovery(binding: LocalSelectedLibraryAuthority.Selected.Folder): Observation {
         requireAttemptDirectory()
