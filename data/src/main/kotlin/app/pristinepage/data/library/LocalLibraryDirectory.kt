@@ -73,6 +73,36 @@ internal class LocalLibraryDirectory(root: File, private val directorySync: Dire
     fun catalogRevisionSpendByteCount(predecessor: LibraryGeneration, successor: LibraryGeneration): Int =
         catalogRevisionSpendBytes(predecessor, successor).size
 
+    /** Observe a private spend under the caller's exclusive lane and held nodes; no provider, pointer, or write authority follows. */
+    fun requireRecordedCatalogRevision(predecessor: LibraryGeneration, successor: LibraryGeneration,
+        checkpoint: () -> Unit = {}, hold: (Path, (requireNodes: () -> Unit, syncParents: () -> Unit, openHeld: () -> InputStream) -> Unit) -> Unit,
+    ) {
+        val expected = catalogRevisionSpendBytes(predecessor, successor)
+        val leaf = readPath(catalogRevisionSpend(successor.id))
+        fun refused(): Nothing = throw IOException("The catalog revision spend does not match its durable record")
+        fun requireBytes(openHeld: () -> InputStream) {
+            // Both reads consume only a bounded canonical record plus an EOF probe from the admitted node.
+            openHeld().buffered(expected.size + 1).use {
+                for (byte in expected) {
+                    checkpoint()
+                    if (it.read() != byte.toInt().and(255)) refused()
+                }
+                if (it.read() != -1) refused()
+            }
+        }
+        hold(leaf) { requireNodes, syncParents, openHeld ->
+            checkpoint()
+            requireNodes()
+            requireBytes(openHeld)
+            requireNodes()
+            syncParents()
+            requireNodes()
+            requireBytes(openHeld)
+            requireNodes()
+            checkpoint()
+        }
+    }
+
     private fun catalogRevisionSpendBytes(predecessor: LibraryGeneration, successor: LibraryGeneration): ByteArray =
         CATALOG_REVISION_SPEND_HEADER.toByteArray(Charsets.US_ASCII) + predecessor.encode() + successor.encode()
 

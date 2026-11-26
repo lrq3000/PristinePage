@@ -16,6 +16,7 @@ import java.io.InputStream
 import java.io.OutputStream
 import java.nio.file.Files
 import java.nio.file.Path
+import java.nio.file.StandardCopyOption.REPLACE_EXISTING
 import java.security.MessageDigest
 import java.nio.file.StandardOpenOption.CREATE_NEW
 import java.nio.file.StandardOpenOption.WRITE
@@ -156,6 +157,74 @@ class LibraryCatalogPublicationTest {
         assertTrue(local.journal.rootPath.resolve("catalog-revision-spends/${generation.id}.spent").toFile().isFile)
         assertFalse(local.catalog.exists())
         assertFalse(local.marker.exists())
+    }
+
+    @Test fun revisionSpendReadbackRequiresBothExactMarkersAndNeverCreatesEvidence() {
+        val local = localRevisionFixture()
+        val leaf = local.journal.rootPath.resolve("catalog-revision-spends/${generation.id}.spent")
+        assertThrows(IOException::class.java) { requireRevisionSpend(local.journal, local.prior, generation) }
+        assertFalse(leaf.toFile().exists())
+        local.journal.spendCatalogRevision(local.prior, generation) {}
+        requireRevisionSpend(local.journal, local.prior, generation)
+        val otherPrior = local.prior.copy(catalog = local.prior.catalog.copy(sha256 = "d".repeat(64)))
+        assertThrows(IOException::class.java) { requireRevisionSpend(local.journal, otherPrior, generation) }
+        val otherChild = generation.copy(catalog = generation.catalog.copy(sha256 = "e".repeat(64)))
+        assertThrows(IOException::class.java) { requireRevisionSpend(local.journal, local.prior, otherChild) }
+    }
+
+    @Test fun revisionSpendReadbackRefusesWhenItsDirectoryBarrierLosesTheExactRecord() {
+        var replace = false
+        var record: File? = null
+        val barrier = DirectorySync {
+            if (replace && it.name == "catalog-revision-spends") {
+                checkNotNull(record).appendText("unexpected")
+                replace = false
+            }
+            true
+        }
+        val local = localRevisionFixture(journalSync = barrier)
+        record = local.journal.rootPath.resolve("catalog-revision-spends/${generation.id}.spent").toFile()
+        local.journal.spendCatalogRevision(local.prior, generation) {}
+        replace = true
+        assertThrows(IOException::class.java) { requireRevisionSpend(local.journal, local.prior, generation, barrier) }
+        assertFalse(replace)
+        assertTrue(record.readText().endsWith("unexpected"))
+    }
+
+    @Test fun revisionSpendReadbackRefusesAnIdenticalReplacementDuringTheBarrier() {
+        var replacement: Path? = null
+        lateinit var leaf: Path
+        val barrier = DirectorySync {
+            if (it.name == "catalog-revision-spends") replacement?.let { staged ->
+                Files.move(staged, leaf, REPLACE_EXISTING)
+                replacement = null
+            }
+            true
+        }
+        val local = localRevisionFixture(journalSync = barrier)
+        leaf = local.journal.rootPath.resolve("catalog-revision-spends/${generation.id}.spent")
+        local.journal.spendCatalogRevision(local.prior, generation) {}
+        val expected = Files.readAllBytes(leaf)
+        replacement = Files.createTempFile(local.journal.rootPath, "replacement-", ".spent").also { Files.write(it, expected) }
+        assertThrows(IOException::class.java) {
+            requireRevisionSpend(local.journal, local.prior, generation, barrier)
+        }
+        assertNull(replacement)
+        assertArrayEquals(expected, Files.readAllBytes(leaf))
+    }
+
+    private fun requireRevisionSpend(journal: LocalLibraryDirectory, prior: LibraryGeneration, next: LibraryGeneration,
+        barrier: DirectorySync = DirectorySync { true },
+    ) = journal.requireRecordedCatalogRevision(prior, next) { leaf, read ->
+        // Windows JVM lacks directory fsync; a test hard link keeps the original leaf's identity observable through the synthetic barrier.
+        val anchor = Files.createLink(temporary.newFolder().toPath().resolve("anchor"), leaf)
+        fun requireLeaf() {
+            if (!Files.isSameFile(anchor, leaf)) throw IOException("The private spend node was replaced")
+        }
+        fun syncParents() {
+            if (!barrier.sync(leaf.parent.toFile()) || !barrier.sync(journal.rootPath.toFile())) throw IOException("The test barrier failed")
+        }
+        read(::requireLeaf, ::syncParents) { Files.newInputStream(anchor) }
     }
 
     @Test fun localRevisionRequiresTheExactTipAndExcludesACompetingWriteLane() {
