@@ -52,7 +52,8 @@ class AndroidLibraryStartup(context: Context) {
     fun recordedDefaultActivationOnIo(): LibraryActivation? =
         (readSelectionOnIo(allowBootstrap = false)?.selected as? LocalSelectedLibraryAuthority.Selected.Default)?.activation()
 
-    data class Location(val activation: LibraryActivation, val folderLabel: String?, val needsReconnect: Boolean)
+    data class Location(val activation: LibraryActivation, val folderLabel: String?, val needsReconnect: Boolean,
+        val selectedRecipeWritable: Boolean = false)
 
     /** Read the remembered location without opening Room, acquiring a grant, or assuming that a known folder is currently usable. */
     suspend fun location(): Location {
@@ -64,7 +65,7 @@ class AndroidLibraryStartup(context: Context) {
                 val tree = Uri.parse(state.grant.exactUri)
                 val leaf = AndroidLibraryTreeRead.localTreeDocumentId(tree)?.substringAfter(':') ?: ""
                 val granted = withContext(Dispatchers.IO) { canUseRecordedGrant(state.grant) }
-                Location(state.activation(), leaf, !granted)
+                Location(state.activation(), leaf, !granted, selectedRecipeWritable = granted && state.grant.returnedModes == 3)
             }
         }
     }

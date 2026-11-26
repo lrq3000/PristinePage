@@ -14,7 +14,7 @@ import java.time.ZoneId
 import java.util.Locale
 
 data class LibraryStartup(val report: RecoveryReport, val activation: LibraryActivation? = null,
-    val selectedFolder: Boolean = false, val reconnect: Boolean = false)
+    val selectedFolder: Boolean = false, val reconnect: Boolean = false, val selectedRecipeWritable: Boolean = false)
 
 /** Immediate foreground commands against the existing Application-owned store. These ports carry no Activity, live bitmap, private path or persistable-grant promise. Real adapter delegates to the already tested repositories/controller. */
 interface LibraryActions {
@@ -119,7 +119,16 @@ data class LibraryState(
     val restoringSelection: Boolean = false,
     val selectedFolder: Boolean = false,
     val reconnect: Boolean = false,
+    val selectedRecipeWritable: Boolean = false,
+    val recipeWriteNeedsReconnect: Boolean = false,
 ) {
+    /** Presentation eligibility only: the selected writer checks the grant, physical root and pointer again at use. */
+    internal fun canApplyRecipe(issuedAt: LibraryActivation): Boolean =
+        activation == issuedAt && !reconnect && (!selectedFolder || selectedRecipeWritable && !recipeWriteNeedsReconnect)
+
+    internal val settingsReconnectAt: LibraryActivation?
+        get() = activation.takeIf { reconnect || selectedFolder && recipeWriteNeedsReconnect }
+
     // Keep transient search input (which can contain a private quote) out of incidental diagnostics.
     override fun toString() = "LibraryState(loading=$loading, albumCount=${documents.size}, hasMore=$hasMore, phase=$phase)"
 }

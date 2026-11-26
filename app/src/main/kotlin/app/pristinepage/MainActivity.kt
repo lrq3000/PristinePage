@@ -87,14 +87,6 @@ class MainActivity : ComponentActivity() {
     private var observing: Job? = null
     private var session: LibrarySession? = null
     private var editor: EditorViewModel? = null
-    private var selectedApplyQualification by mutableStateOf<EditorIdentity?>(null)
-
-    /** Same-process instrumentation only. No intent, restored state or preference may bypass the selected Save settlement gate. */
-    internal fun qualifySelectedApplyForTest(identity: EditorIdentity) {
-        check(applicationInfo.flags and android.content.pm.ApplicationInfo.FLAG_DEBUGGABLE != 0)
-        check(selectedApplyQualification == null && editor?.state?.value?.identity == identity)
-        selectedApplyQualification = identity
-    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -128,7 +120,7 @@ class MainActivity : ComponentActivity() {
         val editorFactory = object : ViewModelProvider.Factory {
             @Suppress("UNCHECKED_CAST") override fun <T : ViewModel> create(modelClass: Class<T>): T {
                 require(modelClass == EditorViewModel::class.java)
-                 return EditorViewModel(services, app.savedOcrSignals::onPagesSaved) { before, after ->
+                 return EditorViewModel(services, app.savedOcrSignals::onPagesSaved, retained::invalidateSelectedRecipeWritability) { before, after ->
                      retained.reloadAfterLibraryChange(before.issuedAt,
                          LibraryIdentity(selected = after.documentId, selectedPage = after.pageId, selectedAt = after.issuedAt))
                  } as T
@@ -178,8 +170,19 @@ class MainActivity : ComponentActivity() {
         val binding = LibraryPickerBinding(activityResultRegistry, retained)
         picker = binding
         binding.synchronize()
-        observing = lifecycleScope.launch {
-            repeatOnLifecycle(Lifecycle.State.STARTED) {
+         observing = lifecycleScope.launch {
+             launch {
+                 repeatOnLifecycle(Lifecycle.State.RESUMED) {
+                     retained.refreshSelectedRecipeWritability { activation ->
+                         try {
+                             val current = services.storageLocation()
+                             current.activation == activation && current.selectedRecipeWritable
+                         } catch (canceled: CancellationException) { throw canceled }
+                         catch (_: Exception) { false }
+                     }
+                 }
+             }
+             repeatOnLifecycle(Lifecycle.State.STARTED) {
                 // A failed or unavailable earlier reconciliation may recover on the next foreground visit.
                 launch {
                     try {
@@ -263,7 +266,7 @@ class MainActivity : ComponentActivity() {
                  val ocrReady by app.ocrRuntimeReady.collectAsStateWithLifecycle()
                  AtelierSettingsScreen(checkNotNull(settingsPage), app.atelierPreferences, ocrReady,
                       libraryStorage = {
-                           LibraryStorageSettings(storage, backup, library.activation, library.activation.takeIf { library.reconnect })
+                            LibraryStorageSettings(storage, backup, library.activation, library.settingsReconnectAt)
                       }) {
                       if (storageState.busy) return@AtelierSettingsScreen
                       if (settingsPage == SettingsPage.LIBRARY_STORAGE && it != SettingsPage.LIBRARY_STORAGE) storage.cancelReview()
@@ -362,7 +365,7 @@ class MainActivity : ComponentActivity() {
                         )
                     }
                        PageEditorScreen(loadOriginal = loadEditorOriginal, savedOcr = savedOcr, showOcrDiagnostics = settings.ocrDiagnostics,
-                          allowSave = defaultEditor || editorActivationCurrent && selectedApplyQualification == issuing,
+                           allowSave = library.canApplyRecipe(issuing.issuedAt),
                         pageNumber = fallback?.ordinal?.plus(1), albumPageCount = orderedPages.size,
                         previousPage = destination(-1), nextPage = destination(1), originalOnLoadFailure = {
                             if (fallback != null) key(fallback) {

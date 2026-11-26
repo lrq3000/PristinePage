@@ -21,10 +21,11 @@ data class EditorHostState(val identity: EditorIdentity? = null, val loading: Bo
 class EditorViewModel(
     private val services: ApplicationServices,
     private val onPagesSaved: (LibraryActivation, DocumentId, List<PageId>) -> Unit,
+    private val onSelectedWriteRefused: (LibraryActivation) -> Unit = {},
     private val onActivationRefreshed: (EditorIdentity, EditorIdentity) -> Unit,
 ) : ViewModel() {
     constructor(services: ApplicationServices, onPagesSaved: (LibraryActivation, DocumentId, List<PageId>) -> Unit) :
-        this(services, onPagesSaved, { _, _ -> })
+        this(services, onPagesSaved, onActivationRefreshed = { _, _ -> })
 
     private val current = MutableStateFlow<EditorSession?>(null)
     val session: StateFlow<EditorSession?> = current.asStateFlow()
@@ -83,7 +84,14 @@ class EditorViewModel(
                             // Refresh the catalogue without inventing an adoption when only the publication was spent.
                             onActivationRefreshed(issuing, issuing.copy(issuedAt = verified ?: issuing.issuedAt))
                         }
-                        val (activation, result) = services.saveLibraryEditorPage(issuing, expectedRevision, recipe, delivery)
+                        val (activation, result) = try {
+                            services.saveLibraryEditorPage(issuing, expectedRevision, recipe, delivery)
+                        } catch (failure: RepositoryFailure) {
+                            if (usesSelectedFolder && failure.error.safeMessageKey == "library_reconnect_required") {
+                                onSelectedWriteRefused(issuing.issuedAt)
+                            }
+                            throw failure
+                        }
                         return EditorSaveCandidate(result, requireOwner = ::requireOwner, onAbandoned = delivery::abandon, onAccepted = {
                             if (activation != issuing.issuedAt) {
                                 val next = issuing.copy(issuedAt = activation)

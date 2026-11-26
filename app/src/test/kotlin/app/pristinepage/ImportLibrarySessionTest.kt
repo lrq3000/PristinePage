@@ -9,6 +9,7 @@ import java.lang.reflect.InvocationTargetException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.test.TestScope
 import kotlinx.coroutines.test.advanceUntilIdle
@@ -66,6 +67,55 @@ class ImportLibrarySessionTest {
         session.accept(LibraryEvent.PhotoResult(exact, f.selected))
         advanceUntilIdle()
         assertEquals(1, f.deliveries)
+    }
+
+    @Test fun selectedRecipeApplyRequiresTheVerifiedWritableCurrentPresentation() = runTest {
+        val f = Fixture()
+        val original = LibraryActivation("aaaaaaaa-aaaa-4aaa-8aaa-000000000001", 2)
+        val advanced = original.copy(number = 3)
+        var opened = LibraryStartup(f.startup(), original, selectedFolder = true)
+        val actions = object : LibraryActions by f {
+            override suspend fun openLibrary() = opened
+        }
+        val session = ImportLibrarySession(actions, LibraryIdentity(), this)
+        advanceUntilIdle()
+        assertFalse(session.state.value.canApplyRecipe(original))
+        opened = LibraryStartup(f.startup(), advanced, selectedFolder = true, selectedRecipeWritable = true)
+        session.reloadAfterLibraryChange(original)
+        assertFalse(session.state.value.canApplyRecipe(advanced))
+        advanceUntilIdle()
+        assertTrue(session.state.value.canApplyRecipe(advanced))
+        assertFalse(session.state.value.canApplyRecipe(original))
+
+        val checking = CompletableDeferred<Boolean>()
+        val check = launch { session.refreshSelectedRecipeWritability { checkIt ->
+            assertEquals(advanced, checkIt)
+            checking.await()
+        } }
+        runCurrent()
+        assertFalse(session.state.value.canApplyRecipe(advanced))
+        session.invalidateSelectedRecipeWritability(advanced)
+        checking.complete(true)
+        check.join()
+        assertFalse(session.state.value.canApplyRecipe(advanced))
+        session.refreshSelectedRecipeWritability { error("An observed provider refusal requires full presentation verification") }
+        assertFalse(session.state.value.canApplyRecipe(advanced))
+        assertEquals(advanced, session.state.value.settingsReconnectAt)
+        session.reloadAfterLibraryChange(advanced)
+        advanceUntilIdle()
+        assertTrue(session.state.value.canApplyRecipe(advanced))
+        assertNull(session.state.value.settingsReconnectAt)
+        session.refreshSelectedRecipeWritability { it == advanced }
+        assertTrue(session.state.value.canApplyRecipe(advanced))
+        session.refreshSelectedRecipeWritability { false }
+        assertFalse(session.state.value.canApplyRecipe(advanced))
+
+        val unavailable = advanced.copy(number = 4)
+        opened = LibraryStartup(f.startup(), unavailable, selectedFolder = true, reconnect = true)
+        session.reloadAfterLibraryChange(advanced)
+        advanceUntilIdle()
+        assertTrue(session.state.value.reconnect)
+        assertFalse(session.state.value.canApplyRecipe(unavailable))
     }
 
     @Test fun aVerifiedCutoverClearsTheOldAlbumAndRefusesItsLateMetadataEvenWithTheSameIds() = runTest {

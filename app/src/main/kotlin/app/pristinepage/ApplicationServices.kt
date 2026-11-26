@@ -141,7 +141,7 @@ class ApplicationServices(context: Context, internal val budget: ImageAllocation
         return try {
             withSelectedLibraryLane {
                 libraryStartup.useIssuedSelectedCatalog(selectedLibraryScratch(), activation) { _, _ ->
-                    LibraryStartup(report, activation, selectedFolder = true)
+                     LibraryStartup(report, activation, selectedFolder = true, selectedRecipeWritable = location.selectedRecipeWritable)
                 }
             }
         } catch (failure: RepositoryFailure) {

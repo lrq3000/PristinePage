@@ -273,6 +273,9 @@ class LibraryFolderFilesJourneyTest {
 
     @Test fun mainSettingsAppliesOneSelectedEditAndReopensTheSamePage() = mainSettingsJourney(applyEdit = true)
 
+    @Test fun mainSettingsAppliesAndSettlesASelectedEditWithoutTestEnablement() =
+        mainSettingsJourney(applyEdit = true, ordinaryApply = true)
+
     @Test fun mainSettingsReconnectsAnInterruptedEditWithoutRepublishingIt() =
         mainSettingsJourney(applyEdit = false, reconnectEdit = true)
 
@@ -375,10 +378,10 @@ class LibraryFolderFilesJourneyTest {
         }
     }
 
-    private fun mainSettingsJourney(applyEdit: Boolean, reconnectEdit: Boolean = false) {
+    private fun mainSettingsJourney(applyEdit: Boolean, reconnectEdit: Boolean = false, ordinaryApply: Boolean = false) {
         val args = InstrumentationRegistry.getArguments()
-        check(!(applyEdit && reconnectEdit))
-        val mode = if (reconnectEdit) "reconnect-edit" else if (applyEdit) "apply" else "fresh"
+        check(!(applyEdit && reconnectEdit) && (!ordinaryApply || applyEdit))
+        val mode = if (ordinaryApply) "ordinary-apply" else if (reconnectEdit) "reconnect-edit" else if (applyEdit) "apply" else "fresh"
         check(args.getString("librarySettingsOpenFixture") == mode) {
             "This journey requires an independently admitted synthetic app graph"
         }
@@ -387,7 +390,7 @@ class LibraryFolderFilesJourneyTest {
         val folder = settingsFixtureFolder()
         val graph = runBlocking { app.services.imports() }
         val initial = graph.activation
-        assertEquals(if (reconnectEdit) 6L else if (applyEdit) 3L else 1L, initial.number)
+        assertEquals(if (ordinaryApply) 9L else if (reconnectEdit) 6L else if (applyEdit) 3L else 1L, initial.number)
         assertTrue(runBlocking { graph.store.catalog.list(null, 2) }.isEmpty())
         val witness = LibraryIndependentRootGrants
         val before = witness.inventory(app)
@@ -529,7 +532,7 @@ class LibraryFolderFilesJourneyTest {
             compose.onNodeWithTag("editor-tool-rotate").performClick()
             compose.onNodeWithTag("editor-rotate").performScrollTo().performClick()
             assertTrue(checkNotNull(editor.session.value).state.value.dirty)
-            compose.onNodeWithTag("editor-apply").assertIsNotEnabled()
+            compose.onNodeWithTag("editor-apply").assertIsEnabled()
         }
         if (applyEdit) {
             compose.onNodeWithTag("editor-tool-shape").performClick()
@@ -546,8 +549,6 @@ class LibraryFolderFilesJourneyTest {
             assertEquals(2L, live.state.value.page?.recipeRevision)
             compose.onNodeWithTag("editor-tool-rotate").performClick()
             compose.onNodeWithTag("editor-rotate").performScrollTo().performClick()
-            compose.onNodeWithTag("editor-apply").assertIsNotEnabled()
-            compose.runOnUiThread { compose.activity.qualifySelectedApplyForTest(EditorIdentity(album, page.pageId, selected)) }
             compose.onNodeWithTag("editor-apply").assertIsEnabled().performClick() // One save; uncertain delivery does not authorize a second tap.
             compose.waitUntil(45_000) { !live.state.value.saving }
             val accepted = live.state.value
@@ -562,6 +563,11 @@ class LibraryFolderFilesJourneyTest {
             check(pointer.length() in 1..320)
             val record = File(app.filesDir.canonicalFile, "library-settings-apply-pointer-$folder")
             Files.write(record.toPath(), pointer.readBytes(), CREATE_NEW)
+            if (ordinaryApply) {
+                val operation = pointer.readLines()[4].also { check(UUID.fromString(it).toString() == it) }
+                assertFalse(File(app.filesDir, "catalog-recipe-attempts-v1/$operation").exists())
+                assertTrue(File(app.filesDir, "catalog-recipe-acknowledged-v1/$operation/recipe-edit.adopted").isFile)
+            }
             compose.onNodeWithTag("editor-back").performClick()
             compose.waitUntil(15_000) { editor.session.value == null && enabled(pageTag) }
             openPage()

@@ -46,6 +46,7 @@ class ImportLibrarySession(private val actions: LibraryActions, restored: Librar
     private var pageCursor: (suspend () -> HomePageSearchPage)? = null
     private var pageWindows = 0
     private var hitNavigation = 0L
+    private var selectedWriteCheck = 0L
     private var openingHit: Job? = null
     private var searchZone = ZoneId.systemDefault()
 
@@ -55,6 +56,7 @@ class ImportLibrarySession(private val actions: LibraryActions, restored: Librar
     internal fun reloadAfterLibraryChange(expected: LibraryActivation, reopen: LibraryIdentity? = null) {
         val previous = current.value
         if (previous.activation != expected) return
+        ++selectedWriteCheck
         ++navigation
         ++metadataGeneration
         cancelOpeningHit()
@@ -72,6 +74,29 @@ class ImportLibrarySession(private val actions: LibraryActions, restored: Librar
         current.value = LibraryState(albumOrder = previous.albumOrder, canSearchAlbums = actions is SearchableLibraryActions,
             canSearchPages = actions is SearchablePageActions, restoringSelection = reopen != null)
         refresh(reset = true)
+    }
+
+    internal fun invalidateSelectedRecipeWritability(expected: LibraryActivation) {
+        val visible = current.value
+        if (visible.activation != expected || !visible.selectedFolder) return
+        ++selectedWriteCheck
+        // Matching Android grant metadata cannot clear an observed provider/root refusal.
+        current.value = visible.copy(selectedRecipeWritable = false, recipeWriteNeedsReconnect = true)
+    }
+
+    /** Refresh only the mutable grant capability; preserve the album, page, and any unsaved editor draft. */
+    internal suspend fun refreshSelectedRecipeWritability(verify: suspend (LibraryActivation) -> Boolean) {
+        val initial = current.value
+        val activation = initial.activation ?: return
+        if (!initial.selectedFolder || initial.settingsReconnectAt != null) return
+        val check = ++selectedWriteCheck
+        current.value = initial.copy(selectedRecipeWritable = false)
+        val writable = verify(activation)
+        currentCoroutineContext().ensureActive()
+        val now = current.value
+        if (check == selectedWriteCheck && now.activation == activation && now.selectedFolder && !now.reconnect) {
+            current.value = now.copy(selectedRecipeWritable = writable)
+        }
     }
 
     override fun identity() = current.value.let { value ->
@@ -513,7 +538,8 @@ class ImportLibrarySession(private val actions: LibraryActions, restored: Librar
                     val opened = actions.openLibrary()
                     currentCoroutineContext().ensureActive()
                     var value = current.value.copy(recovery = opened.report, activation = opened.activation, restoringSelection = false,
-                        selectedFolder = opened.selectedFolder, reconnect = opened.reconnect, loading = !opened.reconnect,
+                         selectedFolder = opened.selectedFolder, reconnect = opened.reconnect, loading = !opened.reconnect,
+                         selectedRecipeWritable = opened.selectedRecipeWritable,
                         canSearchPages = !opened.selectedFolder && actions is SearchablePageActions)
                     pendingSelection?.takeIf { !opened.reconnect && navigation == 0L && it.selectedAt == opened.activation }?.let {
                         value = value.copy(selectedId = it.selected, selectedPage = it.selectedPage)

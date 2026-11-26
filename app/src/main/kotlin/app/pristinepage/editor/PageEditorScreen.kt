@@ -244,6 +244,7 @@ class PageEditorScreen(
                 Text(when (it.safeMessageKey) {
                     "editor_save_attempt_unconfirmed" -> stringResource(R.string.editor_save_attempt_unconfirmed)
                     "editor_save_delivery_unconfirmed" -> stringResource(R.string.editor_save_delivery_unconfirmed)
+                    "library_reconnect_required" -> stringResource(R.string.editor_library_reconnect_required)
                     else -> errorText(it.code)
                 }, color = MaterialTheme.colorScheme.error)
                 if (state.page == null) Button(onClick = session::retryLoad, modifier = control("editor-retry-load")) { Text(stringResource(R.string.editor_retry_load)) }
