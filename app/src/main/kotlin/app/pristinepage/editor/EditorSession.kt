@@ -23,6 +23,7 @@ class EditorSession @JvmOverloads constructor(documentId: String, pageId: String
 ) : AutoCloseable {
     private val document = DocumentId(documentId)
     private val selected = PageId(pageId)
+    private val usesSelectedFolder = (actions as? SelectedEditorActions)?.usesSelectedFolder == true
     private val current = MutableStateFlow(EditorState())
     val state: StateFlow<EditorState> = current.asStateFlow()
     private val scheduler = PreviewScheduler(renderer, scope, converter)
@@ -331,7 +332,7 @@ class EditorSession @JvmOverloads constructor(documentId: String, pageId: String
 
     private fun renderDraft() {
         cancelGeometryAnalysis()
-        if (closed || !active) return
+        if (closed || !active || previewBindingSuspended(current.value)) return
         val page = current.value.page ?: return
         val draft = current.value.draft ?: return
         val view = current.value.view
@@ -349,6 +350,7 @@ class EditorSession @JvmOverloads constructor(documentId: String, pageId: String
     }
 
     fun retryPreview() { if (editable() != null) renderDraft() }
+    internal fun previewBindingSuspended(state: EditorState): Boolean = state.saveNeedsReopen || usesSelectedFolder && state.saving
     fun setActive(value: Boolean) {
         if (closed || active == value) return
         active = value
@@ -386,19 +388,25 @@ class EditorSession @JvmOverloads constructor(documentId: String, pageId: String
         val page = checkNotNull(current.value.page)
         val draft = edits.current
         current.value = current.value.copy(saving = true, error = null, confirmExit = false)
+        if (usesSelectedFolder) invalidatePreviewBinding()
         saving = scope.launch {
+            var pending: EditorSaveCandidate? = null
             try {
-                val result = actions.save(page.pageId, page.recipeRevision, draft)
+                val candidate = ((actions as? SelectedEditorActions)?.prepareSave(page.pageId, page.recipeRevision, draft)
+                    ?: EditorSaveCandidate(actions.save(page.pageId, page.recipeRevision, draft))).also { pending = it }
                 currentCoroutineContext().ensureActive()
                 if (closed) return@launch
-                when (result) {
+                when (val result = candidate.result) {
                     is SaveRecipeResult.Saved -> {
                         if (result.pageId != page.pageId || result.recipeRevision <= page.recipeRevision || result.documentRevision <= page.documentRevision || result.recipeHash != RecipeCodec.hash(draft)) {
+                            candidate.close()
                             saveFailed(OperationError(OperationErrorCode.INTEGRITY_FAILED, false, "editor_save_identity_mismatch", selected.value)); return@launch
                         }
-                        edits.accept()
-                        current.value = current.value.copy(page = page.copy(documentRevision = result.documentRevision, recipeRevision = result.recipeRevision, recipeHash = result.recipeHash, recipe = draft), saving = false)
-                        updateDraft()
+                        candidate.accept {
+                            edits.accept()
+                            current.value = current.value.copy(page = page.copy(documentRevision = result.documentRevision, recipeRevision = result.recipeRevision, recipeHash = result.recipeHash, recipe = draft), saving = false)
+                            updateDraft()
+                        }
                         sendCommittedOcrHint(document, listOf(result.pageId), onPagesSaved)
                         if (andBack) exit() else renderDraft()
                     }
@@ -406,12 +414,26 @@ class EditorSession @JvmOverloads constructor(documentId: String, pageId: String
                     is SaveRecipeResult.Rejected -> saveFailed(result.error)
                 }
             } catch (canceled: CancellationException) { throw canceled }
-            catch (failure: RepositoryFailure) { saveFailed(failure.error) }
-            catch (_: Exception) { saveFailed(OperationError(OperationErrorCode.STORAGE_FAILED, true, "editor_save_failed", selected.value)) }
+            catch (failure: RepositoryFailure) { pending?.close(); saveFailed(failure.error) }
+            catch (_: Exception) { pending?.close(); saveFailed(OperationError(OperationErrorCode.STORAGE_FAILED, true, "editor_save_failed", selected.value)) }
+            finally { pending?.close() }
         }
     }
 
-    private fun saveFailed(error: OperationError) { if (!closed) current.value = current.value.copy(saving = false, error = error) }
+    private fun saveFailed(error: OperationError) {
+        if (closed) return
+        if (current.value.saveNeedsReopen) return
+        current.value = current.value.copy(saving = false, error = error)
+        if (current.value.saveNeedsReopen) invalidatePreviewBinding()
+        else if (usesSelectedFolder) renderDraft()
+    }
+
+    internal fun invalidatePreviewBinding() {
+        cancelGeometryAnalysis()
+        scheduler.clear()
+    }
+
+    internal fun reportUnconfirmedSave() = saveFailed(SelectedEditorSaveDelivery.Unconfirmed(selected).error)
     internal fun showNavigationRefusal(error: OperationError) {
         if (!closed && !current.value.saving && !current.value.saveNeedsReopen) current.value = current.value.copy(error = error)
     }

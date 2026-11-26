@@ -38,6 +38,7 @@ import app.pristinepage.data.model.RepositoryFailure
 import app.pristinepage.data.model.SaveRecipeResult
 import app.pristinepage.data.model.UndoId
 import app.pristinepage.editor.EditorIdentity
+import app.pristinepage.editor.SelectedEditorSaveDelivery
 import app.pristinepage.data.files.SourceInspector
 import app.pristinepage.data.repository.PrivateImportStore
 import app.pristinepage.data.repository.ImportSessionLifecycle
@@ -278,18 +279,25 @@ class ApplicationServices(context: Context, internal val budget: ImageAllocation
         } finally { provisional?.close() }
     }
 
-    internal suspend fun saveLibraryEditorPage(identity: EditorIdentity, revision: Long, recipe: Recipe): Pair<LibraryActivation, SaveRecipeResult> {
+    internal suspend fun saveLibraryEditorPage(identity: EditorIdentity, revision: Long, recipe: Recipe,
+        delivery: SelectedEditorSaveDelivery,
+    ): Pair<LibraryActivation, SaveRecipeResult> {
         val active = storageLocation()
         if (active.activation != identity.issuedAt) activationChanged()
         if (active.folderLabel == null) return identity.issuedAt to saveDefaultEditorPage(identity, revision, recipe)
-        return withSelectedLibraryLane {
-            when (val result = libraryStartup.advanceSelectedRecipeEdit(selectedLibraryScratch(), identity.issuedAt,
-                java.util.UUID.randomUUID().toString(), identity.documentId, identity.pageId, revision, ClassicalRecipeAdmission()) { recipe }) {
-                is AndroidLibraryStartup.SelectedRecipeSave.Refused -> identity.issuedAt to result.result
-                is AndroidLibraryStartup.SelectedRecipeSave.Activated -> {
-                    val reopen = libraryStartup.loadSelectedEditablePage(selectedLibraryScratch(), result.activation, identity.documentId, identity.pageId)
-                    if (reopen.recipeRevision != result.saved.recipeRevision || reopen.recipeHash != result.saved.recipeHash) activationChanged()
-                    result.activation to result.saved
+        return delivery.run {
+            withSelectedLibraryLane {
+                val scratch = selectedLibraryScratch()
+                when (val result = libraryStartup.advanceSelectedRecipeEdit(scratch, identity.issuedAt,
+                    java.util.UUID.randomUUID().toString(), identity.documentId, identity.pageId, revision, ClassicalRecipeAdmission(),
+                    onPublicationStarted = ::publicationStarted, onPointerVerified = ::pointerVerified) { recipe }) {
+                    is AndroidLibraryStartup.SelectedRecipeSave.Refused -> identity.issuedAt to result.result
+                    is AndroidLibraryStartup.SelectedRecipeSave.Activated -> {
+                        val reopen = libraryStartup.loadSelectedEditablePage(scratch, result.activation, identity.documentId, identity.pageId)
+                        if (reopen.recipeRevision != result.saved.recipeRevision || reopen.recipeHash != result.saved.recipeHash ||
+                            reopen.documentRevision != result.saved.documentRevision) activationChanged()
+                        result.activation to result.saved
+                    }
                 }
             }
         }

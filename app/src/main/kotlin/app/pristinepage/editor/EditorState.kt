@@ -9,6 +9,37 @@ interface EditorActions {
     suspend fun save(pageId: PageId, expectedRevision: Long, recipe: Recipe): SaveRecipeResult
 }
 
+/** Foreground editor for a folder whose private activation changes when a new accepted generation is saved. */
+internal interface SelectedEditorActions : EditorActions {
+    val usesSelectedFolder: Boolean
+    suspend fun prepareSave(pageId: PageId, expectedRevision: Long, recipe: Recipe): EditorSaveCandidate =
+        EditorSaveCandidate(save(pageId, expectedRevision, recipe))
+}
+
+/** Main-confined obligation for a result that may have persisted. Closing an unaccepted candidate reports lost delivery once. */
+internal class EditorSaveCandidate(
+    val result: SaveRecipeResult,
+    private val requireOwner: () -> Unit = {},
+    private val onAccepted: () -> Unit = {},
+    private val onAbandoned: () -> Unit = {},
+) : AutoCloseable {
+    private var settled = false
+
+    fun accept(updateDraft: () -> Unit) {
+        check(!settled)
+        requireOwner()
+        updateDraft()
+        onAccepted()
+        settled = true
+    }
+
+    override fun close() {
+        if (settled) return
+        settled = true
+        onAbandoned()
+    }
+}
+
 /** Only supported immutable metadata belongs here. Image owners remain in the selected-preview scheduler; saved state may carry opaque IDs, never these pixels, provider references or private paths. */
 data class EditorState(val page: EditablePage? = null, val draft: Recipe? = null, val loading: Boolean = true, val saving: Boolean = false, val dirty: Boolean = false, val canUndo: Boolean = false, val canRedo: Boolean = false, val confirmExit: Boolean = false, val exitReady: Boolean = false, val error: OperationError? = null, val view: EditorView = EditorView.RESULT)
 

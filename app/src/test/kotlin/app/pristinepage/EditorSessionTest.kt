@@ -150,10 +150,13 @@ class EditorSessionTest {
         assertEquals(issue, s.error)
         assertEquals(7L, s.page!!.recipeRevision)
         assertTrue(s.field("Dirty"))
+        assertEquals(f.renderer.outputs.size, f.renderer.releases)
+        val before = f.renderer.requests.size
         s.edit(rotated)
         s.command("apply")
         s.command("applyAndBack")
         advanceUntilIdle()
+        assertEquals(before, f.renderer.requests.size)
         assertEquals(1, f.saves.size)
         assertEquals(rotated, s.draft)
         assertFalse(s.field("ExitReady"))

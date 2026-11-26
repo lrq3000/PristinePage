@@ -257,7 +257,7 @@ class PageEditorScreen(
                 val page = state.page
                 val frame = it.geometry
                 val seed = guidedStep == 0 && !seedAttempted && page?.recipeRevision == 1L && frame is GeometryRecipe.None
-                if (page != null && loadOriginal != null &&
+                if (!session.previewBindingSuspended(state) && page != null && loadOriginal != null &&
                     (frame is GeometryRecipe.Perspective || frame is GeometryRecipe.ManualCurve || frame is GeometryRecipe.ManualCurveFourSides ||
                         frame is GeometryRecipe.Bezier || seed)) {
                     AtelierFrameCanvas(page.sourceId.value, frame, editable, loadOriginal, session, bezierSelection,
