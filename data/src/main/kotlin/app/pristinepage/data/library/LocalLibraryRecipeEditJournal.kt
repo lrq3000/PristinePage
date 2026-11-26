@@ -122,6 +122,35 @@ internal class LocalLibraryRecipeEditJournal(
         requireCurrent()
     }
 
+    /** Reclaim only the two private names of the exact adopted catalog. Neither a permission loss nor partial deletion can renew authority. */
+    fun reclaimAdoptedCatalog(intent: Intent, adopted: LocalSelectedLibraryAuthority.Selected.Folder, requireCurrent: () -> Unit) {
+        if (adopted != intent.adoptedSelection()) invalid()
+        requireCurrent()
+        val before = inspectOwned(intent, null)?.takeIf { it.phase == Phase.ACKNOWLEDGED } ?: invalid()
+        val retained = before.nodes - CATALOG_LINKS
+        fun requireExactState(links: Set<String>) {
+            requireCurrent()
+            requireAttempt(intent)
+            requireSidecarsAbsent()
+            directory.verifyExportStage(intent.successor, checkpoint)
+            if (readPhase(intent) != before.phase || catalogLinks() != links ||
+                evidence(intent, before.phase, includeIntent = true, ownedStage = null, catalogLinks = links).nodes !=
+                retained + before.nodes.filterKeys { it in links }) invalid()
+        }
+        if (CATALOG in before.nodes) {
+            requireExactState(CATALOG_LINKS)
+            directory.requireClosedCatalogOwner(CATALOG_OWNER)
+            requireCurrent()
+            Files.delete(root.resolve(CATALOG_OWNER))
+            // Only this uninterrupted invocation knows the surviving catalog still names the inode admitted as a pair.
+            requireExactState(setOf(CATALOG))
+            requireCurrent()
+            Files.delete(root.resolve(CATALOG))
+        }
+        if (inspectOwned(intent, null) != Evidence(before.phase, retained) || catalogLinks().isNotEmpty()) invalid()
+        requireCurrent()
+    }
+
     /** Reconstruct a private observation for the exact issuing selection. This does not return a live receipt or prove current provider bytes. */
     fun observeForRecovery(binding: LocalSelectedLibraryAuthority.Selected.Folder): Observation {
         requireAttemptDirectory()
@@ -136,11 +165,18 @@ internal class LocalLibraryRecipeEditJournal(
     private fun inspectOwned(intent: Intent, ownedStage: Path?): Evidence? {
         requireAttempt(intent)
         val observed = readPhase(intent) ?: return null
-        val exact = evidence(intent, observed, includeIntent = true, ownedStage)
-        requireStage(intent)
+        val links = catalogLinks()
+        fun requireCatalogState() {
+            if (links != catalogLinks()) invalid()
+            if (links == CATALOG_LINKS) requireStage(intent)
+            else if (observed == Phase.ACKNOWLEDGED && links.isEmpty()) requireSidecarsAbsent()
+            else invalid()
+        }
+        val exact = evidence(intent, observed, includeIntent = true, ownedStage, links)
+        requireCatalogState()
         directory.forceExportJournal()
-        requireStage(intent)
-        if (readPhase(intent) != observed || evidence(intent, observed, includeIntent = true, ownedStage) != exact) invalid()
+        requireCatalogState()
+        if (readPhase(intent) != observed || evidence(intent, observed, includeIntent = true, ownedStage, links) != exact) invalid()
         return exact
     }
 
@@ -165,13 +201,15 @@ internal class LocalLibraryRecipeEditJournal(
     }
 
     /** Never adopt an unlinked spill. The exclusive file writer supplies only its own pending inode before link. */
-    private fun evidence(intent: Intent, phase: Phase, includeIntent: Boolean, ownedStage: Path?): Evidence {
+    private fun evidence(intent: Intent, phase: Phase, includeIntent: Boolean, ownedStage: Path?,
+        catalogLinks: Set<String> = CATALOG_LINKS,
+    ): Evidence {
         val records = buildList {
             if (includeIntent) add(RecipeEditRecord.INTENT.leaf)
             if (phase != Phase.INTENT_ONLY) add(RecipeEditRecord.COMPLETED.leaf)
             if (phase == Phase.ACKNOWLEDGED) add(RecipeEditRecord.ADOPTED.leaf)
         }
-        val known = (setOf("catalog.sqlite", CATALOG_OWNER) + records).toMutableSet()
+        val known = (catalogLinks + records).toMutableSet()
         val allowedSpends = if (includeIntent) listOf(intent.successor.catalogPath, "generations/${intent.successor.id}.complete")
             .map { "${backupSha256(it.toByteArray(Charsets.US_ASCII))}.spent" }.toSet() else emptySet()
         var count = 0
@@ -192,6 +230,8 @@ internal class LocalLibraryRecipeEditJournal(
         }
         return Evidence(phase, known.associateWith { identity(root.resolve(it)) } + ("." to identity(root)))
     }
+
+    private fun catalogLinks() = CATALOG_LINKS.filterNot { Files.notExists(root.resolve(it), NOFOLLOW_LINKS) }.toSet()
 
     private fun identity(path: Path): Any {
         val attrs = Files.readAttributes(path, BasicFileAttributes::class.java, NOFOLLOW_LINKS)
@@ -275,7 +315,9 @@ internal class LocalLibraryRecipeEditJournal(
     private fun invalid(): Nothing = throw IOException("The selected recipe edit evidence is not exact")
 
     private companion object {
+        const val CATALOG = "catalog.sqlite"
         const val CATALOG_OWNER = "recipe-edit.catalog-owner"
+        val CATALOG_LINKS = setOf(CATALOG, CATALOG_OWNER)
         const val MAX_INTENT_BYTES = 1024
     }
 }

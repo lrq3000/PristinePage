@@ -249,6 +249,100 @@ class LocalLibraryRecipeEditJournalTest {
         assertEquals(true, replaced)
     }
 
+    @Test fun reclaimRemovesOnlyTheAcknowledgedCatalogPairAndCanReopenAfterBothUnlinks() {
+        val (attempt, intent) = fixture()
+        val owner = attempt.resolve("recipe-edit.catalog-owner")
+        val stage = attempt.resolve("catalog.sqlite")
+        val adopted = binding(4, predecessor = next)
+        val live = journal(attempt)
+        val pending = live.start(intent) {}
+        val key = MessageDigest.getInstance("SHA-256").digest(next.catalogPath.toByteArray(Charsets.US_ASCII))
+            .joinToString("") { "%02x".format(it.toInt() and 255) }
+        attempt.resolve("$key.spent").writeText("Opaque spend fixture retained by reclamation")
+        pending.recordAfterProviderClosure(next)
+        assertFailsWith<IOException> { live.reclaimAdoptedCatalog(intent, adopted) {} }
+        live.acknowledgeAdopted(intent, adopted) {}
+        val records = attempt.listFiles()!!.filter { it != stage && it != owner }.associate { it.name to it.readBytes().toList() }
+        assertFailsWith<IOException> { live.reclaimAdoptedCatalog(intent, binding(5, predecessor = next)) {} }
+        assertEquals(true, Files.isSameFile(stage.toPath(), owner.toPath()))
+        live.reclaimAdoptedCatalog(intent, adopted) {}
+        journal(attempt).reclaimAdoptedCatalog(intent, adopted) {}
+        assertEquals(records, attempt.listFiles()!!.associate { it.name to it.readBytes().toList() })
+        assertEquals(LocalLibraryRecipeEditJournal.Phase.ACKNOWLEDGED, journal(attempt).inspect(intent))
+    }
+
+    @Test fun reclaimNeverDeletesTheLoneCatalogAfterAnInterruptedUnlink() {
+        val (attempt, intent) = fixture()
+        val adopted = binding(4, predecessor = next)
+        val owner = attempt.resolve("recipe-edit.catalog-owner")
+        val stage = attempt.resolve("catalog.sqlite")
+        val live = journal(attempt)
+        live.start(intent) {}.recordAfterProviderClosure(next)
+        live.acknowledgeAdopted(intent, adopted) {}
+        assertFailsWith<IOException> {
+            live.reclaimAdoptedCatalog(intent, adopted) {
+                if (!owner.exists()) throw IOException("The binding ended after unlinking the owner")
+            }
+        }
+        assertFalse(owner.exists())
+        assertEquals(staged.toList(), stage.readBytes().toList())
+        assertFailsWith<IOException> { journal(attempt).reclaimAdoptedCatalog(intent, adopted) {} }
+        assertEquals(staged.toList(), stage.readBytes().toList())
+    }
+
+    @Test fun reclaimRequiresAConfirmedBarrierEvenAfterBothNamesAreGone() {
+        val (attempt, intent) = fixture()
+        val adopted = binding(4, predecessor = next)
+        val stage = attempt.resolve("catalog.sqlite")
+        journal(attempt).start(intent) {}.recordAfterProviderClosure(next)
+        journal(attempt).acknowledgeAdopted(intent, adopted) {}
+        val failed = journal(attempt, DirectorySync { stage.exists() })
+        assertFailsWith<IOException> { failed.reclaimAdoptedCatalog(intent, adopted) {} }
+        assertFalse(stage.exists())
+        assertFailsWith<IOException> { failed.reclaimAdoptedCatalog(intent, adopted) {} }
+        journal(attempt).reclaimAdoptedCatalog(intent, adopted) {}
+        assertEquals(LocalLibraryRecipeEditJournal.Phase.ACKNOWLEDGED, journal(attempt).inspect(intent))
+    }
+
+    @Test fun reclaimChecksTheAdoptedBindingAgainAfterCheckpointedEvidenceReads() {
+        val (attempt, intent) = fixture()
+        val adopted = binding(4, predecessor = next)
+        val owner = attempt.resolve("recipe-edit.catalog-owner")
+        val stage = attempt.resolve("catalog.sqlite")
+        val setup = journal(attempt)
+        setup.start(intent) {}.recordAfterProviderClosure(next)
+        setup.acknowledgeAdopted(intent, adopted) {}
+        var authorityChecks = 0
+        var active = true
+        val writer = LocalLibraryRecipeEditJournal(attempt, sync, checkpoint = {
+            if (authorityChecks > 1) active = false
+        }, nodeIdentity = { _, attrs -> attrs.fileKey() ?: attrs.creationTime() })
+        assertFailsWith<IOException> {
+            writer.reclaimAdoptedCatalog(intent, adopted) {
+                if (!active) throw IOException("The selection changed during evidence readback")
+                authorityChecks++
+            }
+        }
+        assertEquals(true, Files.isSameFile(stage.toPath(), owner.toPath()))
+    }
+
+    @Test fun reclaimPreservesAnInPlaceReplacementOfTheLastCatalogLink() {
+        val (attempt, intent) = fixture()
+        val adopted = binding(4, predecessor = next)
+        val owner = attempt.resolve("recipe-edit.catalog-owner")
+        val stage = attempt.resolve("catalog.sqlite")
+        val writer = journal(attempt)
+        writer.start(intent) {}.recordAfterProviderClosure(next)
+        writer.acknowledgeAdopted(intent, adopted) {}
+        val altered = staged.copyOf().also { it[it.lastIndex] = (it.last().toInt() xor 1).toByte() }
+        assertFailsWith<IOException> {
+            writer.reclaimAdoptedCatalog(intent, adopted) {
+                if (!owner.exists()) stage.writeBytes(altered)
+            }
+        }
+        assertEquals(altered.toList(), stage.readBytes().toList())
+    }
+
     private fun binding(number: Long, owner: LibraryFolderGrantRecord = grant,
         predecessor: LibraryGeneration = prior): LocalSelectedLibraryAuthority.Selected.Folder {
         val selection = Selection(Location.Folder(owner.grantId, predecessor.id), Identity(library, number))
