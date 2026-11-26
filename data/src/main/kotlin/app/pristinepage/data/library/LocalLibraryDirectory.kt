@@ -128,9 +128,12 @@ internal class LocalLibraryDirectory(root: File, private val directorySync: Dire
     fun createExportRecord(record: ExportRecord, bytes: ByteArray, beforeLink: () -> Unit) =
         create(record.nameOnDisk, beforeLink = beforeLink) { it.write(bytes) }
 
-    fun requireAndForceExportStage(generation: LibraryGeneration, checkpoint: () -> Unit) {
+    fun requireAndForceExportStage(generation: LibraryGeneration, checkpoint: () -> Unit) =
+        requireAndForceClosedCatalog(generation, checkpoint)
+
+    fun requireAndForceClosedCatalog(generation: LibraryGeneration, checkpoint: () -> Unit) {
         val stage = readPath("catalog.sqlite")
-        if (!presentRegularFile(stage)) throw IOException("Private backup catalog is missing")
+        if (!presentRegularFile(stage)) throw IOException("Private closed catalog is missing")
         FileChannel.open(stage, READ, WRITE, NOFOLLOW_LINKS).use {
             generation.verifyCatalog(Channels.newInputStream(it), checkpoint)
             it.force(true)
@@ -144,20 +147,24 @@ internal class LocalLibraryDirectory(root: File, private val directorySync: Dire
             .use { generation.verifyCatalog(it, checkpoint) }
 
     /** The private owner name starts as an exclusive hard link to the actual staged inode, not a second catalog copy. */
-    fun anchorExportStage() {
+    fun anchorExportStage() = anchorClosedCatalog("export.catalog.owner")
+
+    fun anchorClosedCatalog(ownerLeaf: String) {
         val stage = readPath("catalog.sqlite")
-        val owner = readPath("export.catalog.owner")
-        if (!presentRegularFile(stage)) throw IOException("Private backup catalog is missing")
+        val owner = readPath(ownerLeaf)
+        if (!presentRegularFile(stage)) throw IOException("Private closed catalog is missing")
         Files.createLink(owner, stage)
         forceExportJournal()
-        requireExportStageOwner()
+        requireClosedCatalogOwner(ownerLeaf)
     }
 
-    fun requireExportStageOwner() {
+    fun requireExportStageOwner() = requireClosedCatalogOwner("export.catalog.owner")
+
+    fun requireClosedCatalogOwner(ownerLeaf: String) {
         val stage = readPath("catalog.sqlite")
-        val owner = readPath("export.catalog.owner")
+        val owner = readPath(ownerLeaf)
         if (!presentRegularFile(stage) || !presentRegularFile(owner) || !Files.isSameFile(stage, owner)) {
-            throw IOException("The private backup catalog has no exact attempt owner")
+            throw IOException("The closed catalog has no exact attempt owner")
         }
     }
 
@@ -240,6 +247,15 @@ internal class LocalLibraryDirectory(root: File, private val directorySync: Dire
         forceDirectory(paths.root)
         forceDirectory(checkNotNull(paths.root.parentFile))
     }
+
+    enum class RecipeEditRecord(val leaf: String) { INTENT("recipe-edit.intent"), COMPLETED("recipe-edit.complete") }
+
+    fun openRecipeEditRecord(record: RecipeEditRecord) = open(record.leaf)
+
+    fun createRecipeEditRecord(record: RecipeEditRecord, bytes: ByteArray,
+        recordIdentity: (Path) -> Any, requireOwner: (Path?) -> Unit,
+    ) = create(record.leaf, privateSupport = true, beforeStage = { requireOwner(null) },
+        recordIdentity = recordIdentity, verifyRecordLink = requireOwner) { it.write(bytes) }
 
     /** Private grant records never cross a library export or accept a destination path from a provider. */
     fun createFolderGrant(record: LibraryFolderGrantRecord) =
@@ -399,7 +415,8 @@ internal class LocalLibraryDirectory(root: File, private val directorySync: Dire
     }
 
     private fun create(relativePath: String, privateSupport: Boolean = false, beforeLink: () -> Unit = {},
-        beforeStage: () -> Unit = {}, write: (OutputStream) -> Unit,
+        beforeStage: () -> Unit = {}, recordIdentity: ((Path) -> Any)? = null,
+        verifyRecordLink: ((Path) -> Unit)? = null, write: (OutputStream) -> Unit,
     ) {
         val file = paths.beneath(relativePath)
         val destination = file.toPath()
@@ -415,9 +432,17 @@ internal class LocalLibraryDirectory(root: File, private val directorySync: Dire
             channel.force(true)
         }
         // The exclusive link makes the closed stage visible without replacing any existing leaf. A backend without this primitive refuses rather than copying into the final name.
+        val forced = recordIdentity?.invoke(stage)
         beforeLink()
+        verifyRecordLink?.invoke(stage)
+        if (recordIdentity != null && recordIdentity(stage) != forced) {
+            throw IOException("The closed private record changed before publication")
+        }
         Files.createLink(destination, stage)
         forceDirectory(parent)
+        if (recordIdentity != null &&
+            (recordIdentity(stage) != forced || recordIdentity(destination) != forced || !Files.isSameFile(stage, destination))
+        ) throw IOException("The durable private record no longer names its forced inode")
         // A failed write, close or sync keeps its exact stage as recovery evidence. Once durable, unlink only this attempt's temporary name; never remove the final name.
         try { Files.deleteIfExists(stage) } catch (_: IOException) { /* The verified object remains usable. */ }
     }
