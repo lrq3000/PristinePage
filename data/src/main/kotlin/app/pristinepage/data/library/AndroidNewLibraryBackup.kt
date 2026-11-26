@@ -3,8 +3,6 @@ package app.pristinepage.data.library
 import android.os.ParcelFileDescriptor
 import android.provider.DocumentsContract.Document
 import android.system.Os
-import android.system.OsConstants
-import app.pristinepage.core.io.transferExactBytes
 import app.pristinepage.data.library.AndroidLibraryWritableFolder.WritableTree
 import app.pristinepage.data.library.LibraryObjectTransfer.ObjectId
 import java.io.IOException
@@ -14,18 +12,17 @@ import java.security.MessageDigest
 /** One newly created backup child, one active staged file, and no append, retry, overwrite or delete authority. */
 internal class AndroidNewLibraryBackup private constructor(
     private val provider: WritableTree,
-    private val selected: Directory,
-    private val root: Directory,
-    private val stage: Directory,
-    private val objects: Directory,
-    private val catalogs: Directory,
-    private val generations: Directory,
-    private val journal: LocalLibraryMoveAuthorization,
+    private val selected: HeldLibraryDirectory,
+    private val root: HeldLibraryDirectory,
+    private val stage: HeldLibraryDirectory,
+    private val objects: HeldLibraryDirectory,
+    private val catalogs: HeldLibraryDirectory,
+    private val generations: HeldLibraryDirectory,
+    journal: LocalLibraryMoveAuthorization,
 ) : LibraryObjectTransfer.Store, LibraryCatalogPublication.Store {
-    private val checkpoint = provider.checkpoint
-    private data class Directory(val id: String, val descriptor: ParcelFileDescriptor, val identity: Pair<Long, Long>)
     private data class Leaf(val parent: String, val name: String)
     private val acknowledged = mutableMapOf<Leaf, Pair<Long, Long>>()
+    private val leafWriter = AndroidLibraryLeafWriter(provider, selected, root, stage, journal, ::find, ::sync)
 
     override fun open(id: ObjectId) = open(objects, id.sha256)
 
@@ -76,14 +73,14 @@ internal class AndroidNewLibraryBackup private constructor(
         provider.requireExactAccess()
     }
 
-    private fun open(parent: Directory, name: String): ParcelFileDescriptor.AutoCloseInputStream? {
+    private fun open(parent: HeldLibraryDirectory, name: String): ParcelFileDescriptor.AutoCloseInputStream? {
         requireBound(parent)
         val identity = acknowledged[Leaf(parent.id, name)]
         // The folder started empty and this writer never resumes an existing folder. The move independently proves absence in the provider listing before it writes.
         if (identity == null) return null
         val input = ParcelFileDescriptor.AutoCloseInputStream(provider.open("${parent.id}/$name", "r"))
         try {
-            if (fileIdentity(input) != identity) throw IOException("The published library file identity changed")
+            if (leafWriter.fileIdentity(input) != identity) throw IOException("The published library file identity changed")
             provider.requireExactAccess()
             return input
         } catch (failure: Throwable) {
@@ -92,86 +89,26 @@ internal class AndroidNewLibraryBackup private constructor(
         }
     }
 
-    private fun publish(parent: Directory, name: String, wanted: ObjectId, requireVisibility: (() -> Unit)? = null,
-        write: (OutputStream) -> Unit,
-    ) {
+    private fun publish(parent: HeldLibraryDirectory, name: String, wanted: ObjectId, write: (OutputStream) -> Unit) {
         val leaf = Leaf(parent.id, name)
-        if (acknowledged.containsKey(leaf) || find(parent, name) != null || find(stage, name) != null) {
-            throw IOException("The new library file would replace an existing name")
-        }
-        val id = provider.create(stage.id, "application/octet-stream", name)
-        if (find(stage, name) != id) throw IOException("The provider staging file is not at the expected name")
-        val staged = ParcelFileDescriptor.AutoCloseInputStream(provider.open(id, "r"))
-        staged.use { anchor ->
-            val identity = fileIdentity(anchor)
-            // "w" may truncate before the descriptor can be checked. Never overwrite even a replacement of the isolated staged name.
-            ParcelFileDescriptor.AutoCloseOutputStream(provider.open(id, "rw")).use { output ->
-                if (regularIdentity(output.fd, requireEmpty = true) != identity) throw IOException("The library staging writer changed files")
-                write(output)
-                checkpoint()
-                output.flush()
-                Os.fsync(output.fd)
-            }
-            val proof = proof(anchor, wanted)
-            sync(stage)
-            val key = backupSha256("${parent.id.substringAfterLast('/')}/$name".toByteArray(Charsets.US_ASCII))
-            val parents = backupSha256(listOf(selected, root, stage, parent).joinToString("\n") { "${it.id}\t${it.identity}" }.toByteArray())
-            val publisher = LibraryNamedPublication(object : LibraryNamedPublication.Store {
-                override fun readStage() = observe(stage, name, wanted, anchor)
-                override fun readFinal() = observe(parent, name, wanted, anchor)
-                override fun consumeMoveAuthorization() = journal.consume(key, parents, proof)
-                override fun moveOnce() = provider.move(id, stage.id, parent.id)
-                override fun syncStageParent() = sync(stage)
-                override fun syncFinalParent() = sync(parent)
-            }, checkpoint)
-            publisher.commit(proof, reconcileOnly = false, requireVisibility = requireVisibility)
-            acknowledged[leaf] = identity
-        }
+        if (acknowledged.containsKey(leaf)) throw IOException("The new library file would replace an existing name")
+        acknowledged[leaf] = leafWriter.publish(parent, name, wanted, write = write)
     }
 
-    private fun observe(parent: Directory, name: String, expected: ObjectId, anchor: ParcelFileDescriptor.AutoCloseInputStream): LibraryNamedPublication.FileProof? {
-        val id = find(parent, name) ?: return null
-        ParcelFileDescriptor.AutoCloseInputStream(provider.open(id, "r")).use {
-            if (fileIdentity(anchor) != fileIdentity(it)) throw IOException("The moved library file did not retain its staged identity")
-            return proof(it, expected)
-        }
-    }
-
-    private fun proof(input: ParcelFileDescriptor.AutoCloseInputStream, expected: ObjectId): LibraryNamedPublication.FileProof {
-        val before = fileIdentity(input)
-        transferExactBytes(input, null, expected.byteCount, expected.sha256, checkpoint)
-        if (fileIdentity(input) != before) throw IOException("The library file identity changed during readback")
-        provider.requireExactAccess()
-        return LibraryNamedPublication.FileProof("${before.first}:${before.second}", expected.sha256, expected.byteCount)
-    }
-
-    private fun fileIdentity(input: ParcelFileDescriptor.AutoCloseInputStream) = regularIdentity(input.fd)
-
-    private fun regularIdentity(fd: java.io.FileDescriptor, requireEmpty: Boolean = false): Pair<Long, Long> {
-        checkpoint()
-        val stat = Os.fstat(fd)
-        if (!OsConstants.S_ISREG(stat.st_mode) || stat.st_ino <= 0 || stat.st_nlink != 1L || stat.st_dev != root.identity.first ||
-            (requireEmpty && stat.st_size != 0L)
-        ) {
-            throw IOException("The library file has no exclusive regular-file identity")
-        }
-        return stat.st_dev to stat.st_ino
-    }
-
-    private fun find(parent: Directory, name: String): String? {
+    private fun find(parent: HeldLibraryDirectory, name: String): String? {
         requireBound(parent)
         return exactChild(provider, parent.id, name, false, namespaceLimit(parent))
     }
 
-    private fun namespaceLimit(parent: Directory) = if (parent == objects) RoomLibrarySavedCatalog.MAX_PAGES else 4
+    private fun namespaceLimit(parent: HeldLibraryDirectory) = if (parent == objects) RoomLibrarySavedCatalog.MAX_PAGES else 4
 
-    private fun requireBound(directory: Directory) {
+    private fun requireBound(directory: HeldLibraryDirectory) {
         provider.requireDirectory(selected.id, selected.descriptor)
         if (directory != selected) provider.requireDirectory(root.id, root.descriptor)
         if (directory != selected && directory != root) provider.requireDirectory(directory.id, directory.descriptor)
     }
 
-    private fun sync(directory: Directory) {
+    private fun sync(directory: HeldLibraryDirectory) {
         requireBound(directory)
         Os.fsync(directory.descriptor.fileDescriptor)
         provider.requireExactAccess()
@@ -188,15 +125,15 @@ internal class AndroidNewLibraryBackup private constructor(
         ): T {
             val seenIdentities = privateIdentities.toMutableSet()
             var device: Long? = null
-            fun <R> directory(id: String, body: (Directory) -> R): R = provider.openDirectory(id).use {
+            fun <R> directory(id: String, body: (HeldLibraryDirectory) -> R): R = provider.openDirectory(id).use {
                 val identity = provider.directoryIdentity(it)
                 if ((device != null && device != identity.first) || !seenIdentities.add(identity)) {
                     throw IOException("The library backup directory topology is invalid")
                 }
                 device = identity.first
-                body(Directory(id, it, identity))
+                body(HeldLibraryDirectory(id, it, identity))
             }
-            fun child(parent: Directory, leaf: String, limit: Int): String {
+            fun child(parent: HeldLibraryDirectory, leaf: String, limit: Int): String {
                 provider.requireDirectory(parent.id, parent.descriptor)
                 if (exactChild(provider, parent.id, leaf, true, limit) != null) throw IOException("The backup folder name already exists")
                 val created = provider.create(parent.id, Document.MIME_TYPE_DIR, leaf)

@@ -13,7 +13,7 @@ from unittest.mock import patch
 from run_library_folder_picker_ldplayer import (
     check_fixture_root, read_backup_delivery_death, recheck_target, require_independent_manifests, select_backup_case, select_backup_death_picker_case, select_independent_roots, select_provider_capacity, select_settings_picker_case, select_settings_recovery_case, select_tree_ancestry, settings_completed_destination, spend_settings_retry, verify_released_independent_guest,
     finish_pre_marker_outcome, independent_fixture_children, read_independent_grant_record, retry_pre_marker_checksum, verify_ancestry_cold_handoff, verify_ancestry_grant_refusal, verify_backup_death_control, verify_backup_death_intent, verify_backup_receipt_only, verify_pre_marker_handoff, verify_pre_marker_read_refusal, verify_settings_catalog, verify_settings_ocr, verify_settings_retry_evidence,
-    verify_independent_derived_installed, verify_derived_receipt,
+    verify_independent_derived_installed, verify_derived_receipt, verify_selected_append_catalog,
 )
 from run_local_ocr_guest import read_boot_serial
 
@@ -25,6 +25,37 @@ class LibraryFolderPickerRunnerTest(unittest.TestCase):
         for enabled, mixed in ((False, False), (True, True)):
             with self.assertRaisesRegex(RuntimeError, "standalone"):
                 select_independent_roots(enabled, mixed, derived=True)
+
+    def test_selected_append_needs_the_standalone_derived_lane(self):
+        case = "app.pristinepage.LibraryFolderFilesJourneyTest#selectedFilesMergeAppendsOnlyTheMissingOriginalAndKeepsItsPredecessor"
+        self.assertEqual((case,), select_independent_roots(True, False, derived=True, append=True))
+        for enabled, mixed, derived in ((False, False, True), (True, True, True), (True, False, False)):
+            with self.assertRaisesRegex(RuntimeError, "standalone"):
+                select_independent_roots(enabled, mixed, derived=derived, append=True)
+
+    def test_selected_append_host_oracle_rejects_missing_recipe_history(self):
+        with TemporaryDirectory(prefix="pristinepage-append-catalog-test-") as temporary:
+            path = Path(temporary) / "catalog.sqlite"
+            with closing(sqlite3.connect(path)) as db:
+                db.executescript("""
+                    CREATE TABLE Document(documentId, title);
+                    CREATE TABLE Page(pageId, documentId, sourceId, ordinal, currentRecipeRevision);
+                    CREATE TABLE LibraryScanName(pageId, filename);
+                    CREATE TABLE Source(sourceId, sourceBlobId);
+                    CREATE TABLE SourceBlob(sourceBlobId, byteSha256);
+                    CREATE TABLE RecipeRevision(pageId, recipeRevision, parentRevision);
+                    INSERT INTO Document VALUES(1,'Synthetic folder test');
+                    INSERT INTO Page VALUES(9,1,7,0,2),(2,1,8,1,2);
+                    INSERT INTO LibraryScanName VALUES(9,'Synthetic.png'),(2,'Additional synthetic.png');
+                    INSERT INTO Source VALUES(7,17),(8,18);
+                    INSERT INTO SourceBlob VALUES(17,'old'),(18,'incoming');
+                    INSERT INTO RecipeRevision VALUES(9,1,NULL),(9,2,1),(2,1,NULL),(2,2,1);
+                """)
+                verify_selected_append_catalog(path, "old", "incoming")
+                db.execute("DELETE FROM RecipeRevision WHERE pageId=2 AND recipeRevision=1")
+                db.commit()
+                with self.assertRaisesRegex(RuntimeError, "recipe history"):
+                    verify_selected_append_catalog(path, "old", "incoming")
 
     def test_derived_roots_refuses_even_the_candidate_as_preinstalled_baseline(self):
         predecessor = {"app": "a", "test": "b"}

@@ -633,9 +633,43 @@ class LibraryFolderFilesJourneyTest {
         }
     }
 
-    private fun withIndependentFilesSelections(chooseAnchor: Boolean,
+    @Test fun selectedFilesMergeAppendsOnlyTheMissingOriginalAndKeepsItsPredecessor() {
+        val args = InstrumentationRegistry.getArguments()
+        val operation = UUID.fromString(requireNotNull(args.getString("librarySelectedAppendOperation"))).toString()
+        val expectedMissing = requireNotNull(args.getString("librarySelectedAppendBytes")).toLong()
+        check(expectedMissing in 70_000..71_000)
+        withIndependentFilesSelections(chooseAnchor = false, writableDestination = true) { app, folder, selected, before ->
+            fun requireAuthority() {
+                val expected = before + mapOf(selected[0].toString() to (true to true), selected[1].toString() to (true to false))
+                assertEquals(expected, LibraryIndependentRootGrants.inventory(app))
+                LibraryIndependentRootGrants.refuseParentAccess(app, folder)
+            }
+            val scratch = File(app.filesDir.canonicalFile, "tree-read-${UUID.randomUUID()}").apply { check(mkdir()) }
+            runBlocking {
+                val witness = LibraryDescriptorAncestryWitness
+                val inputs = witness.verifyPairWithSharedOwner(app, scratch, selected[0], selected[1], ::requireAuthority)
+                assertEquals(selected, inputs.map { it.tree })
+                assertTrue(inputs.all { it.albums == 1 && it.scans == 1 })
+                val plan = witness.estimateMerge(app, scratch, inputs[0], inputs[1], ::requireAuthority)
+                assertEquals(listOf("Synthetic.png", "Additional synthetic.png"), plan.names)
+                assertEquals(0, plan.matchedOriginals)
+                assertEquals(expectedMissing, plan.missingBytes)
+                assertEquals(operation, witness.publishMerge(app, scratch, operation, inputs[0], inputs[1], ::requireAuthority))
+                val reopened = witness.verifyPairWithSharedOwner(app, scratch, selected[0], selected[1], ::requireAuthority)
+                assertEquals(operation, reopened[0].generationId)
+                assertEquals(1, reopened[0].albums)
+                assertEquals(2, reopened[0].scans)
+                assertEquals(inputs[1].generationId, reopened[1].generationId)
+                assertEquals(1, reopened[1].scans)
+            }
+            requireAuthority()
+        }
+    }
+
+    private fun withIndependentFilesSelections(chooseAnchor: Boolean, writableDestination: Boolean = false,
         use: (Context, String, List<Uri>, Map<String, Pair<Boolean, Boolean>>) -> Unit,
     ) {
+        check(!writableDestination || !chooseAnchor)
         val instrumentation = InstrumentationRegistry.getInstrumentation()
         val app = instrumentation.targetContext.applicationContext
         val folder = requireNotNull(InstrumentationRegistry.getArguments().getString("libraryFixtureFolder"))
@@ -659,11 +693,12 @@ class LibraryFolderFilesJourneyTest {
         witness.requireNewRecord(app, folder)
         witness.refuseEffectiveWrite(app, all)
         val selected = ArrayList<Uri>(paths.size)
+        fun expectedModes() = selected.mapIndexed { index, uri -> uri.toString() to (true to (writableDestination && index == 0)) }.toMap()
         var handedOff = false
         try {
             for ((index, path) in (if (chooseAnchor) paths else paths.take(2)).withIndex()) {
                 val result = AtomicReference<ActivityResult>()
-                val platform = LibraryFolderPickerContract()
+                val platform = LibraryFolderPickerContract(writable = writableDestination && index == 0)
                 val (picker, launcher) = interruptionCompose.runOnUiThread {
                     val host = interruptionCompose.activity
                     val intent = platform.createIntent(host, Unit).putExtra(DocumentsContract.EXTRA_INITIAL_URI,
@@ -687,11 +722,13 @@ class LibraryFolderFilesJourneyTest {
                     val picked = platform.parseResult(raw.resultCode, raw.data) as? LibraryFolderPickerContract.Picked
                         ?: error("Files did not return the expected synthetic tree")
                     check(picked.uri in witness.spellings(path))
-                    check(witness.inventory(app) == before + selected.associate { it.toString() to (true to false) })
+                    check(witness.inventory(app) == before + expectedModes())
                     // Remember the exact previously absent URI before the platform persistence call; reconcile on failure.
                     selected += picked.uri
-                    assertEquals(picked.uri, LibraryFolderGrantHandoff(app).persistRead(picked))
-                    check(witness.inventory(app) == before + selected.associate { it.toString() to (true to false) })
+                    val handoff = LibraryFolderGrantHandoff(app)
+                    val exact = if (writableDestination && index == 0) handoff.persistWrite(picked) else handoff.persistRead(picked)
+                    assertEquals(picked.uri, exact)
+                    check(witness.inventory(app) == before + expectedModes())
                 } catch (failure: Throwable) {
                     if (result.get() == null && instrumentation.uiAutomation.rootInActiveWindow?.packageName?.toString() == picker) {
                         try {
@@ -713,7 +750,15 @@ class LibraryFolderFilesJourneyTest {
             handedOff = chooseAnchor
         } finally {
             if (!handedOff) {
-                witness.releaseReadDelta(app, selected) { assertEquals(before, witness.inventory(app)) }
+                try {
+                    val destination = selected.firstOrNull()
+                    if (writableDestination && destination != null && witness.inventory(app)[destination.toString()]?.second == true) {
+                        // This URI was absent from the entire prior inventory and only this exact synthetic picker asked for its write mode.
+                        app.contentResolver.releasePersistableUriPermission(destination, Intent.FLAG_GRANT_WRITE_URI_PERMISSION)
+                    }
+                } finally {
+                    witness.releaseReadDelta(app, selected) { assertEquals(before, witness.inventory(app)) }
+                }
             }
         }
     }

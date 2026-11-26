@@ -32,6 +32,7 @@ ANCESTRY_GRANT_CASE = "app.pristinepage.LibraryFolderFilesJourneyTest#persistsEx
 ANCESTRY_COLD_CASE = "app.pristinepage.LibraryProviderAncestryColdTest#provesManagedAncestryWithoutEffectiveWrite"
 INDEPENDENT_GRANT_CASE = "app.pristinepage.LibraryFolderFilesJourneyTest#persistsIndependentFilesRootsAndAnchor"
 INDEPENDENT_DERIVED_CASE = "app.pristinepage.LibraryFolderFilesJourneyTest#separatesIndependentlySelectedRootsWithoutAParentGrant"
+SELECTED_APPEND_CASE = "app.pristinepage.LibraryFolderFilesJourneyTest#selectedFilesMergeAppendsOnlyTheMissingOriginalAndKeepsItsPredecessor"
 INDEPENDENT_COLD_CASE = "app.pristinepage.LibraryProviderAncestryColdTest#twoIndependentFilesRootsRequireDisjointPhysicalAncestry"
 INDEPENDENT_CHILDREN = ("Library-Left", "Library-Right")
 WORKING_CASE = "app.pristinepage.LibraryFolderFilesJourneyTest#populatingAWorkingRoomCatalogDoesNotMaterializeTheOriginal"
@@ -100,6 +101,7 @@ INDEPENDENT_GRANTS_RETAINED = "f8d8e889ef209c4aaba178c9737d16881ee3afb362cd67ec6
 INDEPENDENT_COLD_PASSED = "10354effa50ebdf210c7d4d8b5d1fd2709a9388b779414518c2674ffc309095b"
 INDEPENDENT_DERIVED_PASSED = "550461e2206a8f887853ded659da4a494215144c64ba53f14f22a5212d3ccdd9"
 INDEPENDENT_SHARED_READER_PASSED = "8fbc16be139aa19e4e81d73e2c48ebf0e41199ba42500cfcbcf0df5a47b15081"
+INDEPENDENT_CLOSED_DRY_RUN_PASSED = "8730d1669c0f61f82d07eb2ee8d4bcd3d3bd762fed8e73317660e0e640a478db"
 UUID_TEXT = r"[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}"
 BACKUP_ORIGINAL = "ebd602840377a3b3cf763cb6828fee67861ff77c444e8fe5894457ef6d99a24d"
 OCR_ACTIVATION_CASES = tuple(f"app.pristinepage.ocr.OcrWorkManagerIntegrationTest#{method}" for method in (
@@ -241,13 +243,14 @@ def select_provider_capacity(enabled, mixed):
     return CAPACITY_CASE
 
 
-def select_independent_roots(enabled, mixed, *, derived=False):
+def select_independent_roots(enabled, mixed, *, derived=False, append=False):
+    need(not append or (enabled and derived and not mixed), "Selected library append requires the retained standalone derived lane")
     need(not derived or (enabled and not mixed), "Derived Files roots require a retained read-only standalone invocation")
     if not enabled:
         return ()
     need(not mixed, "Actual independent Files roots require a retained read-only standalone invocation")
     if derived:
-        return (INDEPENDENT_DERIVED_CASE,)
+        return (SELECTED_APPEND_CASE if append else INDEPENDENT_DERIVED_CASE,)
     return INDEPENDENT_GRANT_CASE, INDEPENDENT_COLD_CASE
 
 
@@ -530,6 +533,78 @@ def stage_synthetic_files(adb, fixture, destination, files):
     for relative in files:
         adb("push", fixture / relative, f"{destination}/{relative}")
     verify_unchanged_settings_destination(adb, destination, files)
+
+
+def exercise_selected_append(run, adb, ns, raw, guest_root, folder, files, received, hashes, operation, missing, missing_bytes):
+    left, right = (f"{guest_root}/{name}" for name in independent_fixture_children(folder))
+    verify_unchanged_settings_destination(adb, left, files)
+    verify_unchanged_settings_destination(adb, right, received)
+    require_cold_backup_app(adb)
+    need("library-selected-merge-v1" not in adb("shell", "run-as", APP, "ls", "-A", "-1", "files").splitlines(),
+         "A retained selected append must never be repeated")
+    status = run.path("independent-roots-grants.json")
+    run.save(status, {"fixture": folder, "state": "cleanup-unconfirmed"}, durable=True)
+    try:
+        recheck_target(run, ns)
+        output = adb("shell", "am", "instrument", "-w", "-r", "-e", "class", SELECTED_APPEND_CASE,
+                     "-e", "libraryFixtureFolder", folder, "-e", "librarySelectedAppendOperation", operation,
+                     "-e", "librarySelectedAppendBytes", str(missing_bytes), RUNNER, timeout=190)
+        run.path("independent-roots-append-instrumentation.txt").write_text(output, encoding="utf-8")
+        passed, failed = read_results(output, (SELECTED_APPEND_CASE,))
+        if not failed:
+            marker_path = f"generations/{operation}.complete"
+            catalog_path = f"catalogs/{operation}.sqlite"
+            baseline_path, = (name for name in files if name.startswith("generations/"))
+            baseline = adb("shell", "cat", f"{left}/{baseline_path}").splitlines()
+            marker_text = adb("shell", "cat", f"{left}/{marker_path}")
+            marker = marker_text.splitlines()
+            need(len(baseline) == 7 and len(marker) == 7 and
+                 marker[:5] == [baseline[0], baseline[1], operation, baseline[2], baseline[4]] and
+                 marker[5].isdigit() and 0 < int(marker[5]) <= 2 * 1024 * 1024 and re.fullmatch(r"[a-f0-9]{64}", marker[6]),
+                 "The selected append did not publish one exact successor")
+            verify_unchanged_settings_destination(adb, left, files | {
+                marker_path: sha256(marker_text.encode("ascii")).hexdigest(), catalog_path: marker[6], f"objects/{missing}": missing,
+            }, backup_name="merge-staging")
+            need(not adb("shell", "ls", "-A", "-1", f"{left}/merge-staging").strip(), "The selected append retained a staged provider file")
+            need(adb("shell", "stat", "-c", "%s", f"{left}/{catalog_path}").strip() == marker[5],
+                 "The selected append catalog extent differs from its marker")
+            catalog = raw / "selected-append-catalog.sqlite"
+            adb("pull", f"{left}/{catalog_path}", catalog, timeout=20)
+            need(catalog.stat().st_size == int(marker[5]) and sha(catalog) == marker[6], "The pulled selected append catalog changed")
+            verify_selected_append_catalog(catalog, synthetic_scan()[0], missing)
+            run.save(run.path("selected-append-readback.json"), {
+                "generation": operation, "predecessor": baseline[2], "catalogSha256": marker[6],
+                "catalogBytes": int(marker[5]), "missingBytes": missing_bytes, "copiedObjectSha256": missing,
+            }, durable=True)
+            run.save(status, {"fixture": folder, "state": "prior-inventory-restored"}, durable=True)
+        return {"passed": passed, "failed": failed, "installedSha256": hashes}
+    finally:
+        recheck_target(run, ns)
+        need(adb("shell", "ls", "-A", "-1", guest_root).splitlines() == sorted(independent_fixture_children(folder)),
+             "The selected append changed its synthetic parent")
+        verify_unchanged_settings_destination(adb, right, received)
+        # Even a failed move may have published a child. Preserve all evidence; never replay to force a passing result.
+        for relative, digest in files.items():
+            leaf = f"{left}/{relative}"
+            need(adb("shell", "sha256sum", leaf).split() == [digest, leaf],
+                 "The selected append changed predecessor or unreferenced fixture bytes")
+
+
+def verify_selected_append_catalog(catalog, destination_digest, incoming_digest):
+    with closing(sqlite3.connect(catalog.resolve().as_uri() + "?mode=ro", uri=True)) as db:
+        rows = db.execute("""
+            SELECT d.title, n.filename, p.ordinal, b.byteSha256, p.currentRecipeRevision, r.recipeRevision, r.parentRevision
+            FROM Document d JOIN Page p USING(documentId) JOIN LibraryScanName n USING(pageId)
+            JOIN Source s USING(sourceId) JOIN SourceBlob b USING(sourceBlobId) JOIN RecipeRevision r ON p.pageId=r.pageId
+            ORDER BY p.ordinal, r.recipeRevision LIMIT 5
+        """).fetchall()
+        need(rows == [
+            ("Synthetic folder test", "Synthetic.png", 0, destination_digest, 2, 1, None),
+            ("Synthetic folder test", "Synthetic.png", 0, destination_digest, 2, 2, 1),
+            ("Synthetic folder test", "Additional synthetic.png", 1, incoming_digest, 2, 1, None),
+            ("Synthetic folder test", "Additional synthetic.png", 1, incoming_digest, 2, 2, 1),
+        ] and db.execute("SELECT count(*) FROM Document").fetchone() == (1,),
+            "The actual selected append catalog lost the album order, originals or full recipe history")
 
 
 def exercise_independent_roots(run, adb, ns, guest_root, folder, files, hashes, prior_folder, retained_record=None, *, derived=False):
@@ -1037,12 +1112,13 @@ def run(args):
                       args.settings_prior_failure)),
              "Pre-marker death needs an exact retained guest and a standalone invocation")
     independent_derived = args.independent_roots_derived
+    selected_append = args.selected_root_append
     independent_cases = select_independent_roots(args.independent_roots,
         any((args.fresh, args.backup_delivery_death, args.backup_death_retry, death_receipt, death_picker_case,
              ancestry_cases, before_marker, capacity_case, picker_case, recovery_case, backup_case, args.probe_write,
              args.ocr_activation, args.working_catalog, args.probe_directory, args.activation, args.selected_catalog,
               args.activation_compatibility, args.expect_home, args.settings_retry, args.settings_prior_failure)),
-        derived=independent_derived)
+         derived=independent_derived, append=selected_append)
     need(args.independent_roots_retry is None or (independent_cases and args.independent_roots_retry == INDEPENDENT_FIRST_PICKER_REFUSAL),
          "Only the exact first independent-root chooser refusal can be retried")
     independent_handoff = args.independent_roots_handoff
@@ -1093,6 +1169,7 @@ def run(args):
     protect_interrupted = None
     death_authority = CAPACITY_PASSED if before_marker else args.backup_death_retry or SETTINGS_COLD_MANIFEST
     death_operation = str(uuid.uuid4()) if args.backup_delivery_death or before_marker else None
+    append_operation = str(uuid.uuid4()) if selected_append else None
     need(args.backup_death_retry is None or (death_operation and args.backup_death_retry == BACKUP_DIRECT_CONTROL_PASS),
          "Retry requires the exact new no-write batch receipt")
     if args.previous:
@@ -1114,12 +1191,16 @@ def run(args):
             recovery_pair = previous
             if args.independent_roots_retry or independent_handoff or independent_derived:
                 if independent_derived:
-                    latest = settings_run_anchors(root, INDEPENDENT_SHARED_READER_PASSED)
+                    latest = settings_run_anchors(root, INDEPENDENT_CLOSED_DRY_RUN_PASSED if selected_append else INDEPENDENT_SHARED_READER_PASSED)
                     folder, contents, prior_pair = verify_derived_receipt(latest, args.guest, previous)
                     need(read_results(latest("independent-roots-derived-instrumentation.txt"), (INDEPENDENT_DERIVED_CASE,)) ==
                          ([INDEPENDENT_DERIVED_CASE], []), "The exact derived predecessor did not pass its instrumented case")
                     prior_derived.append((folder, contents))
                     independent_claim = json.loads(latest("claim.json"))
+                    if selected_append:
+                        shared = settings_run_anchors(raw.parent / "picker-adapter-library-tree-620643f16b20", INDEPENDENT_SHARED_READER_PASSED)
+                        folder, contents, prior_pair = verify_derived_receipt(shared, args.guest, prior_pair)
+                        prior_derived.append((folder, contents))
                     derived = settings_run_anchors(raw.parent / "picker-adapter-library-tree-c402147a3b32", INDEPENDENT_DERIVED_PASSED)
                     folder, contents, prior_pair = verify_derived_receipt(derived, args.guest, prior_pair)
                     prior_derived.append((folder, contents))
@@ -1336,6 +1417,14 @@ def run(args):
     original = None if args.ocr_activation or recovery_case or death_receipt else synthetic_scan()[0]
     if original:
         need(files.get(f"objects/{original}") == original, "The populated Files fixture lacks its exact original")
+    alternate_fixture = raw / "synthetic-incoming"
+    received = make_fixture(alternate_fixture, with_scan=True, alternate_scan=True) if selected_append else None
+    missing, missing_bytes = (None, None)
+    if selected_append:
+        missing, payload, _ = synthetic_scan(alternate=True)
+        missing_bytes = len(payload)
+        need(f"objects/{missing}" not in files and received[f"objects/{missing}"] == missing,
+             "The selected append fixture must have one exact missing original")
     (raw / f"{prefix}-artifacts.json").write_text(
         json.dumps(dict(proof=proof, source=args.commit, fixture=files, previous=previous, guest=args.guest,
                         settingsCancel=args.settings_retry, settingsPriorFailure=args.settings_prior_failure,
@@ -1344,7 +1433,7 @@ def run(args):
                         treeAncestryHandoff=ancestry_resume, backupPreMarker=before_marker,
                         backupPreMarkerHandoff=pre_marker_handoff, independentRoots=bool(independent_cases),
                         independentRootsRetry=args.independent_roots_retry, independentRootsHandoff=independent_handoff,
-                        independentRootsDerived=independent_derived)),
+                         independentRootsDerived=independent_derived, selectedRootAppend=append_operation, incomingFixture=received)),
         encoding="utf-8",
     )
     ns = load_allocator(ROOT, args.guest, raw, "pristinepage-tree-" + os.environ["OPENCODE_SESSION_ID"])
@@ -1558,12 +1647,17 @@ def run(args):
             guest_root = f"/sdcard/Documents/{folder}"
             if not independent_retained:
                 adb("shell", "mkdir", guest_root)
-                for name in independent_fixture_children(folder):
-                    stage_synthetic_files(adb, fixture, f"{guest_root}/{name}", files)
-            independent_outcome = exercise_independent_roots(run, adb, ns, guest_root, folder, files, hashes,
-                                                            independent_prior[0] if independent_prior else None,
-                                                            independent_retained[2] if independent_retained else None,
-                                                            derived=independent_derived)
+                for index, name in enumerate(independent_fixture_children(folder)):
+                    incoming = selected_append and index == 1
+                    stage_synthetic_files(adb, alternate_fixture if incoming else fixture, f"{guest_root}/{name}", received if incoming else files)
+            if selected_append:
+                independent_outcome = exercise_selected_append(run, adb, ns, raw, guest_root, folder, files, received,
+                                                               hashes, append_operation, missing, missing_bytes)
+            else:
+                independent_outcome = exercise_independent_roots(run, adb, ns, guest_root, folder, files, hashes,
+                                                                independent_prior[0] if independent_prior else None,
+                                                                independent_retained[2] if independent_retained else None,
+                                                                derived=independent_derived)
             return bool(independent_outcome["failed"])
         if ancestry_resume or pre_marker_handoff:
             guest_root = retained_pre_marker[0] if pre_marker_handoff else retained_ancestry[0]
@@ -1774,7 +1868,9 @@ if __name__ == "__main__":
     parser.add_argument("--independent-roots-handoff", metavar="GRANTED_MANIFEST_SHA",
                         help="Continue only the first cold read of the exact retained Files selections")
     parser.add_argument("--independent-roots-derived", action="store_true",
-                        help="With --independent-roots, select only two roots and verify ancestry without a parent grant")
+                         help="With --independent-roots, select only two roots and verify ancestry without a parent grant")
+    parser.add_argument("--selected-root-append", action="store_true",
+                        help="With standalone derived roots, append one missing original to the fresh synthetic destination")
     parser.add_argument("--provider-capacity", action="store_true",
                         help="Verify the real Files capacity gate with an unattainable synthetic requirement and no publication")
     parser.add_argument("--settings-retry", metavar="CANCEL_MANIFEST_SHA", help="Permit one new confirmation on the exact retained, independently canceled fixture")

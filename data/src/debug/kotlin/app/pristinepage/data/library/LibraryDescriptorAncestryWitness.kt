@@ -53,6 +53,10 @@ object LibraryDescriptorAncestryWitness {
             estimate.requiredBytes, albums.sumOf { album -> album.pages.sumOf { it.revisionCount } })
     }
 
+    suspend fun publishMerge(context: Context, scratch: File, operation: String, destination: Catalog, incoming: Catalog,
+        requireAuthority: () -> Unit,
+    ): String = RoomSelectedLibraryMerge(context, scratch).append(operation, destination.input, incoming.input, requireAuthority).id
+
     fun requireSameIdentity(held: ParcelFileDescriptor, reopened: ParcelFileDescriptor) {
         check(AndroidLibraryDescriptorAncestry.observe(held) == AndroidLibraryDescriptorAncestry.observe(reopened)) {
             "The reopened directory descriptor does not match its held identity and mount"

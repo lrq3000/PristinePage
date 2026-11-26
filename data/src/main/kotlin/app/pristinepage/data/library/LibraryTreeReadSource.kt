@@ -132,12 +132,12 @@ internal class LibraryTreeReadSource(private val rootId: String, private val bac
         return result
     }
 
-    private companion object {
+    internal companion object {
         const val MAX_ROOT_ENTRIES = 2_048
         const val MAX_GENERATION_ENTRIES = 2 * LibraryGenerationChain.MAX_MARKERS
         // Includes retained objects from preceding catalogs; excess entries require an explicitly qualified maintenance policy.
         const val MAX_OBJECT_ENTRIES = 16_384
-        const val MAX_BINDING_TEXT = 4L * 1024 * 1024
-        val OBJECT_NAME = Regex("[0-9a-f]{64}")
+        private const val MAX_BINDING_TEXT = 4L * 1024 * 1024
+        private val OBJECT_NAME = Regex("[0-9a-f]{64}")
     }
 }

@@ -80,7 +80,11 @@ class AndroidLibraryTreeRead(context: Context, private val scratchDirectory: Fil
     internal data class MergePlan(val destination: PairInput, val incoming: PairInput, val candidate: LibraryCatalogMerge.Candidate)
 
     private class PairedOriginals(val destination: LibraryTreeReadSource, val incoming: LibraryTreeReadSource,
-        val requireCurrent: () -> Unit, val checkpoint: () -> Unit, val availableDestinationBytes: () -> Long)
+        val requireCurrent: () -> Unit, val checkpoint: () -> Unit, val availableDestinationBytes: () -> Long,
+        val destinationIdentity: AndroidLibraryDescriptorAncestry.Observation,
+        val incomingIdentity: AndroidLibraryDescriptorAncestry.Observation,
+        val writableDestination: () -> AndroidLibraryWritableFolder.WritableTree,
+    )
 
     /** Produce only a detached plan. Check byte equivalence and missing objects in the final admitted pair after private staging. */
     internal suspend fun planMerge(operationId: String, destination: PairInput, incoming: PairInput,
@@ -116,7 +120,46 @@ class AndroidLibraryTreeRead(context: Context, private val scratchDirectory: Fil
         project: (PairMember, PairMember) -> T,
     ): T = withVerifiedPairOriginals(left, right, requireAuthority) { a, b, _ -> project(a, b) }
 
+    /** Runs the commit under the same held roots, grants and provider owner used for admission. The ordinary reader stays immutable. */
+    internal suspend fun appendMerge(plan: MergePlan, generation: LibraryGeneration, scratch: Path,
+        journal: LocalLibraryMergeJournal, spend: LocalLibraryMoveAuthorization, requireAuthority: () -> Unit,
+        verifyReopened: (File) -> Unit,
+    ): LibraryGeneration = withVerifiedPairOriginals(plan.destination, plan.incoming, requireAuthority, appended = generation) { left, right, pair ->
+        val writable = pair.writableDestination()
+        fun requireRoots() {
+            pair.requireCurrent()
+            writable.requireExactAccess()
+        }
+        fun rootKey(member: PairMember, observation: AndroidLibraryDescriptorAncestry.Observation) =
+            backupSha256("pristinepage-selected-root-v1\n${member.tree}\n$observation".toByteArray(Charsets.UTF_8))
+        val intent = LibraryMergeIntent(rootKey(left, pair.destinationIdentity), rootKey(right, pair.incomingIdentity),
+            left.generation, right.generation, generation)
+        val maximum = RoomLibraryCatalogReader.MAX_PORTABLE_BYTES
+        val metadata = generation.catalog.byteCount + 16L * 1024 * (plan.candidate.catalog.originals.size + 8L)
+        if (scratch.toFile().usableSpace < maximum) throw IOException("Not enough private space to reopen the merged library")
+        writable.guarded {
+            AndroidSelectedLibraryDestination.use(writable, pair.destinationIdentity, scratch, spend, generation, ::requireRoots) { target ->
+                val originalNames = plan.candidate.catalog.originals.mapTo(HashSet()) { it.byteSha256 }
+                target.requireReady(originalNames)
+                val available = pair.availableDestinationBytes()
+                val estimated = LibraryMergePayloads.estimate(plan.candidate, left.snapshot.originals, right.snapshot.originals,
+                    target::open, pair.incoming::open, ::requireRoots, metadata, available, pair.checkpoint)
+                if (pair.availableDestinationBytes() < estimated.requiredBytes) throw IOException("Not enough space for the library transfer")
+                requireRoots()
+                if (target.generationInventory(pair.checkpoint).tip != intent.destination) throw IOException("The destination generation changed")
+                if (pair.incoming.generationInventory(pair.checkpoint).tip != intent.incoming) throw IOException("The incoming generation changed")
+                if (journal.reopen(generation.id, pair.checkpoint) != null) throw IOException("The selected library append was already attempted")
+                journal.publish(intent, pair.checkpoint)
+                target.requireReady(originalNames)
+                LibraryMergePublication(target, pair.incoming, scratch, ::requireRoots, pair.checkpoint)
+                    .publish(intent, LibraryMergeIntent.Resume.WRITE_MISSING, plan.candidate, left.snapshot.originals, right.snapshot.originals,
+                        pair.availableDestinationBytes(), metadata, { journal.openStage(generation.id) }, verifyReopened)
+            }
+        }
+    }
+
     private suspend fun <T : Any> withVerifiedPairOriginals(left: PairInput, right: PairInput, requireAuthority: () -> Unit,
+        appended: LibraryGeneration? = null,
         project: (PairMember, PairMember, PairedOriginals) -> T,
     ): T = withContext(Dispatchers.IO) {
         LibraryProviderAttempt.runOwned { owner ->
@@ -160,11 +203,20 @@ class AndroidLibraryTreeRead(context: Context, private val scratchDirectory: Fil
                                     leftRead.requireCurrent(verifiedLeft.generation)
                                     rightRead.requireCurrent(verifiedRight.generation)
                                     requireCurrent()
-                                }
-                                requireBothTips()
-                                val projected = project(verifiedLeft, verifiedRight, PairedOriginals(leftObjects, rightObjects, ::requireCurrent,
-                                    checkpoint, { availableBytes(heldLeft) }))
-                                requireBothTips()
+                                 }
+                                 requireBothTips()
+                                 val projected = project(verifiedLeft, verifiedRight, PairedOriginals(leftObjects, rightObjects, ::requireCurrent,
+                                     checkpoint, { availableBytes(heldLeft) }, leftIdentity, rightIdentity, {
+                                         AndroidLibraryWritableFolder.WritableTree(app, left.tree, a, signal, checkpoint,
+                                             AndroidLibraryWritableFolder.Access.PERSISTED)
+                                     }))
+                                 if (appended == null) requireBothTips() else {
+                                     requireCurrent()
+                                     val replacement = backupRead(LibraryTreeReadSource(a, first), scratch, checkpoint)
+                                     replacement.requireCurrent(appended)
+                                     rightRead.requireCurrent(verifiedRight.generation)
+                                     requireCurrent()
+                                 }
                                 projected
                             }
                         }

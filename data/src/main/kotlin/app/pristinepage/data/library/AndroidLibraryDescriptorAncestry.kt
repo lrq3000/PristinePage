@@ -96,6 +96,14 @@ internal object AndroidLibraryDescriptorAncestry {
 
     data class Observation(val mount: Long, val identity: Identity)
 
+    /** Compare the actual immediate parent to its held descriptor, not to an ID derived from its displayed name. */
+    fun requireDirectChild(child: ParcelFileDescriptor, parent: ParcelFileDescriptor) {
+        val expected = observe(parent)
+        val leaf = observe(child)
+        if (leaf.identity == expected.identity || !leaf.sameFilesystem(expected)) unavailable()
+        withParent(child) { if (observe(it) != expected || observe(parent) != expected) unavailable() }
+    }
+
     private fun Observation.sameFilesystem(other: Observation) = mount == other.mount && identity.device == other.identity.device
 
     // Follow only the live directory descriptor, subject to normal OS permissions; never resolve a URI or enumerate the observed ancestor.
