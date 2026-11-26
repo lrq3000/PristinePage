@@ -694,6 +694,8 @@ The pointer consumer first failed at the missing data entry. Independent review 
 
 Reviewed pointer recovery compiled strictly offline with the native fixture and passed 38 focused JVM cases. The final behavior is not enabled from Settings or startup. Before connecting it, native evidence must distinguish old pointer with exact completed child, already advanced pointer, and intent-only or permission loss. Prefer a single future batch on an exclusively reusable compatible guest, with the neutral direct Files hint first qualified as a no-write control. An active unrelated claim, a durable unconfirmed state, or disk below the applicable preflight is not bypassable; preserve both retained disks and all APK/fixture evidence.
 
+Resource checkpoint on the local pointer-recovery candidate: the shared host volume dropped to 6.36 GiB free, below the 8 GiB build floor, the 12 GiB retained-run floor plus exact APK retention (about 12.21 GiB with the last pair), and the 16 GiB fresh-run floor plus exact retention (about 16.21 GiB). Both named app guests now show verified stopped-and-released records, with no live session claim; release alone does not establish package or fixture compatibility. No further build, guest start, evidence deletion, merge or push. Recheck free space and exact eligible guest/package state before the next batch.
+
 ### Current coordination: transition to `main`
 
 - [x] Operator approved the local fast-forward and `main`-based PR/handoff cadence; see [operational authority](OPERATIONAL_PLAN.md) and [queue rules](PARALLEL_EXECUTION_PLAN.md#coordination). Earlier branch/base references below describe their historical claims.
