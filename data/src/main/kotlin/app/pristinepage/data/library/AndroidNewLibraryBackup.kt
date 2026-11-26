@@ -19,6 +19,7 @@ internal class AndroidNewLibraryBackup private constructor(
     private val catalogs: HeldLibraryDirectory,
     private val generations: HeldLibraryDirectory,
     journal: LocalLibraryMoveAuthorization,
+    private val requireOwner: () -> Unit,
 ) : LibraryObjectTransfer.Store, LibraryCatalogPublication.Store {
     private data class Leaf(val parent: String, val name: String)
     private val acknowledged = mutableMapOf<Leaf, Pair<Long, Long>>()
@@ -92,7 +93,8 @@ internal class AndroidNewLibraryBackup private constructor(
     private fun publish(parent: HeldLibraryDirectory, name: String, wanted: ObjectId, write: (OutputStream) -> Unit) {
         val leaf = Leaf(parent.id, name)
         if (acknowledged.containsKey(leaf)) throw IOException("The new library file would replace an existing name")
-        acknowledged[leaf] = leafWriter.publish(parent, name, wanted, write = write)
+        acknowledged[leaf] = leafWriter.publish(parent, name, wanted, requireStage = requireOwner,
+            requireVisibility = requireOwner, write = write)
     }
 
     private fun find(parent: HeldLibraryDirectory, name: String): String? {
@@ -105,7 +107,10 @@ internal class AndroidNewLibraryBackup private constructor(
     private fun requireBound(directory: HeldLibraryDirectory) {
         provider.requireDirectory(selected.id, selected.descriptor)
         if (directory != selected) provider.requireDirectory(root.id, root.descriptor)
-        if (directory != selected && directory != root) provider.requireDirectory(directory.id, directory.descriptor)
+        if (directory != selected && directory != root) {
+            provider.requireDirectory(directory.id, directory.descriptor)
+            if (selected == root) AndroidLibraryDescriptorAncestry.requireDirectChild(directory.descriptor, root.descriptor)
+        }
     }
 
     private fun sync(directory: HeldLibraryDirectory) {
@@ -119,8 +124,10 @@ internal class AndroidNewLibraryBackup private constructor(
 
         /** Nothing can write until capacity and the caller's private durable operation are acknowledged on this held parent. */
         fun <T> create(
-            provider: WritableTree, name: String, required: Long, privateIdentities: Set<Pair<Long, Long>>,
+            provider: WritableTree, name: String?, required: Long, privateIdentities: Set<Pair<Long, Long>>,
             journal: LocalLibraryMoveAuthorization, recordIntent: (Pair<Long, Long>) -> Unit,
+            requireEmptyRoot: (HeldLibraryDirectory) -> Unit = {},
+            requireOwner: () -> Unit = {},
             block: (AndroidNewLibraryBackup, Long) -> T,
         ): T {
             val seenIdentities = privateIdentities.toMutableSet()
@@ -136,6 +143,7 @@ internal class AndroidNewLibraryBackup private constructor(
             fun child(parent: HeldLibraryDirectory, leaf: String, limit: Int): String {
                 provider.requireDirectory(parent.id, parent.descriptor)
                 if (exactChild(provider, parent.id, leaf, true, limit) != null) throw IOException("The backup folder name already exists")
+                requireOwner()
                 val created = provider.create(parent.id, Document.MIME_TYPE_DIR, leaf)
                 if (exactChild(provider, parent.id, leaf, true, limit) != created) throw IOException("The new backup directory could not be verified")
                 Os.fsync(parent.descriptor.fileDescriptor)
@@ -145,19 +153,31 @@ internal class AndroidNewLibraryBackup private constructor(
             return directory(provider.root) { selected ->
                 val available = provider.capacity(selected.id, selected.descriptor)
                 if (available < required) throw BackupCapacityBeforePublication()
+                if (name == null) {
+                    requireEmptyRoot(selected)
+                    if (provider.children(selected.id, 1).isNotEmpty()) throw IOException("The selected folder is not empty")
+                    AndroidLibraryDescriptorAncestry.requirePhysicallyEmpty(selected.descriptor)
+                }
                 recordIntent(selected.identity)
-                directory(child(selected, name, 2_048)) { root ->
+                fun build(root: HeldLibraryDirectory): T =
                     directory(child(root, "objects", 4)) { objects ->
                         directory(child(root, "catalogs", 4)) { catalogs ->
                             directory(child(root, "generations", 4)) { markers ->
                                 directory(child(root, STAGING, 4)) { stage ->
-                                    val backup = AndroidNewLibraryBackup(provider, selected, root, stage, objects, catalogs, markers, journal)
+                                    if (name == null) for (directory in listOf(objects, catalogs, markers, stage)) {
+                                        AndroidLibraryDescriptorAncestry.requireDirectChild(directory.descriptor, root.descriptor)
+                                    }
+                                    val backup = AndroidNewLibraryBackup(provider, selected, root, stage, objects, catalogs, markers, journal, requireOwner)
                                     block(backup, available)
                                 }
                             }
                         }
                     }
-                }
+                if (name == null) {
+                    requireEmptyRoot(selected)
+                    AndroidLibraryDescriptorAncestry.requirePhysicallyEmpty(selected.descriptor)
+                    build(selected)
+                } else directory(child(selected, name, 2_048), ::build)
             }
         }
 

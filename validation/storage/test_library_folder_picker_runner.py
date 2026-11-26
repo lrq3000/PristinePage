@@ -9,17 +9,545 @@ from subprocess import TimeoutExpired, run
 from tempfile import TemporaryDirectory
 import unittest
 from unittest.mock import patch
+from make_library_folder_picker_fixture import synthetic_scan
 
 from run_library_folder_picker_ldplayer import (
     check_fixture_root, read_backup_delivery_death, recheck_target, require_independent_manifests, select_backup_case, select_backup_death_picker_case, select_independent_roots, select_provider_capacity, select_settings_picker_case, select_settings_recovery_case, select_tree_ancestry, settings_completed_destination, spend_settings_retry, verify_released_independent_guest,
     finish_pre_marker_outcome, independent_fixture_children, read_independent_grant_record, retry_pre_marker_checksum, verify_ancestry_cold_handoff, verify_ancestry_grant_refusal, verify_backup_death_control, verify_backup_death_intent, verify_backup_receipt_only, verify_pre_marker_handoff, verify_pre_marker_read_refusal, verify_settings_catalog, verify_settings_ocr, verify_settings_retry_evidence,
     verify_independent_derived_installed, verify_derived_receipt, verify_selected_append_catalog, verify_released_append_guest,
-    stage_independent_fixture_pair, verify_selected_append_host_refusal,
+    stage_independent_fixture_pair, verify_selected_append_host_refusal, verify_selected_append_records, select_selected_repeat,
+    verify_released_selected_repeat_guest, parse_app_persisted_grants, require_same_repeat_grants, verify_library_move_spend,
 )
 from run_local_ocr_guest import read_boot_serial
 
 
 class LibraryFolderPickerRunnerTest(unittest.TestCase):
+    def test_main_settings_open_admits_only_a_standalone_fresh_graph(self):
+        from run_library_folder_picker_ldplayer import MAIN_SETTINGS_OPEN_CASE, select_main_settings_open
+        exact = Namespace(settings_open=True, fresh=True, previous=None, settings_backup=False, probe_write=False)
+        self.assertEqual(MAIN_SETTINGS_OPEN_CASE, select_main_settings_open(exact))
+        self.assertIsNone(select_main_settings_open(Namespace(settings_open=False)))
+        for changed in ({"fresh": False}, {"previous": ["retained"]}, {"settings_backup": True}, {"probe_write": True}):
+            with self.assertRaisesRegex(RuntimeError, "standalone fresh"):
+                select_main_settings_open(Namespace(**(vars(exact) | changed)))
+
+    def test_main_settings_open_can_use_the_exact_canceled_guest_before_first_install(self):
+        from run_library_folder_picker_ldplayer import MAIN_SETTINGS_OPEN_CASE, SETTINGS_OPEN_CANCELED_GUEST, select_main_settings_open
+        exact = Namespace(settings_open=True, settings_open_reuse=True, guest=SETTINGS_OPEN_CANCELED_GUEST,
+                          fresh=False, previous=None)
+        self.assertEqual(MAIN_SETTINGS_OPEN_CASE, select_main_settings_open(exact))
+        for changed in ({"guest": "different"}, {"fresh": True}, {"previous": ["earlier.apk"]},
+                        {"settings_open": False}, {"probe_write": True}):
+            with self.assertRaisesRegex(RuntimeError, "standalone fresh"):
+                select_main_settings_open(Namespace(**(vars(exact) | changed)))
+
+    def test_main_settings_open_retry_requires_its_exact_preselection_failure_and_pair(self):
+        from run_library_folder_picker_ldplayer import MAIN_SETTINGS_OPEN_CASE, SETTINGS_OPEN_CANCELED_GUEST, SETTINGS_OPEN_NAVIGATION_MANIFEST, SETTINGS_OPEN_MENU_MANIFEST, select_main_settings_open
+        exact = Namespace(settings_open=True, fresh=False, settings_open_retry=SETTINGS_OPEN_NAVIGATION_MANIFEST,
+                          guest=SETTINGS_OPEN_CANCELED_GUEST, previous=["app.apk", "test.apk"])
+        self.assertEqual(MAIN_SETTINGS_OPEN_CASE, select_main_settings_open(exact))
+        self.assertEqual(MAIN_SETTINGS_OPEN_CASE, select_main_settings_open(
+            Namespace(**(vars(exact) | {"settings_open_retry": SETTINGS_OPEN_MENU_MANIFEST}))))
+        for changed in ({"settings_open_retry": "f" * 64}, {"guest": "other"}, {"previous": None},
+                        {"settings_open_reuse": True}, {"fresh": True}, {"backup_export": True}):
+            with self.assertRaisesRegex(RuntimeError, "standalone fresh"):
+                select_main_settings_open(Namespace(**(vars(exact) | changed)))
+
+    def test_main_settings_open_retry_rejects_an_advanced_or_uncertain_pointer(self):
+        from run_library_folder_picker_ldplayer import require_initial_settings_pointer
+        def encoded(body):
+            return body + sha256(body.encode("ascii")).hexdigest() + "\n"
+        header = "pristinepage-active-library-v1\nb3d000d6-44ce-48f8-a66d-5737add1db3c\n"
+        initial = encoded(header + "1\n-\n-\n")
+        require_initial_settings_pointer(initial, ["active-library"])
+        for pointer, leaves in ((encoded(header + "3\n-\n-\n"), ["active-library"]),
+                                (initial, ["active-library", "default-origin"]),
+                                (initial[:-3] + "ff\n", ["active-library"]), ("", [])):
+            with self.assertRaisesRegex(RuntimeError, "unchanged initial Default"):
+                require_initial_settings_pointer(pointer, leaves)
+
+    def test_main_settings_apply_can_only_continue_the_exact_read_only_witness(self):
+        from run_library_folder_picker_ldplayer import (MAIN_SETTINGS_APPLY_CASE, SETTINGS_APPLY_NAVIGATION_MANIFEST,
+            SETTINGS_OPEN_CANCELED_GUEST, SETTINGS_OPEN_PASS_MANIFEST, select_main_settings_open)
+        exact = Namespace(settings_open=False, fresh=False, settings_apply=SETTINGS_OPEN_PASS_MANIFEST,
+                          guest=SETTINGS_OPEN_CANCELED_GUEST, previous=["app.apk", "test.apk"])
+        self.assertEqual(MAIN_SETTINGS_APPLY_CASE, select_main_settings_open(exact))
+        self.assertEqual(MAIN_SETTINGS_APPLY_CASE, select_main_settings_open(
+            Namespace(**(vars(exact) | {"settings_apply_retry": SETTINGS_APPLY_NAVIGATION_MANIFEST}))))
+        for changed in ({"settings_apply": "f" * 64}, {"guest": "other"}, {"previous": None},
+                        {"settings_apply_retry": "f" * 64}, {"settings_open": True}, {"fresh": True}, {"probe_write": True}):
+            with self.assertRaisesRegex(RuntimeError, "standalone selected Apply"):
+                select_main_settings_open(Namespace(**(vars(exact) | changed)))
+
+    def test_main_settings_apply_requires_exact_returned_default_and_origin(self):
+        from run_library_folder_picker_ldplayer import require_returned_settings_pointer
+        def encoded(library, activation):
+            body = f"pristinepage-active-library-v1\n{library}\n{activation}\n-\n-\n"
+            return body + sha256(body.encode("ascii")).hexdigest() + "\n"
+        default = "b3d000d6-44ce-48f8-a66d-5737add1db3c"
+        require_returned_settings_pointer(encoded(default, 3), encoded(default, 1), 3)
+        for pointer, origin in ((encoded(default, 1), encoded(default, 1)),
+                                (encoded(default, 3), encoded(default, 3)),
+                                (encoded(default, 3), encoded("b3d000d7" + default[8:], 1))):
+            with self.assertRaisesRegex(RuntimeError, "exact returned Default"):
+                require_returned_settings_pointer(pointer, origin, 3)
+
+    def test_main_settings_apply_refuses_an_unrelated_or_changed_cold_grant(self):
+        from run_library_folder_picker_ldplayer import require_settings_apply_grants
+        folder = "PristinePage-tree-6795e2ab4479"
+        exact = (("content://com.android.externalstorage.documents/tree/home%3A" + folder, True,
+                  "com.android.externalstorage", 3),)
+        require_settings_apply_grants(exact, exact, folder)
+        for observed in ((), (exact[0][:3] + (1,),), (exact[0][:1] + (False,) + exact[0][2:],),
+                         (("content://com.android.externalstorage.documents/tree/home%3Aother", *exact[0][1:]),)):
+            with self.assertRaisesRegex(RuntimeError, "exact retained grant"):
+                require_settings_apply_grants(observed, exact, folder)
+
+    def test_settings_apply_refuses_unsettled_private_writes_even_with_an_unchanged_pointer(self):
+        from run_library_folder_picker_ldplayer import require_settings_apply_private_absence
+        folder = "PristinePage-tree-ef264581e55a"
+        stable = ["active-library", "default-origin"]
+        require_settings_apply_private_absence(["library-settings"], stable, folder)
+        for files, settings in (
+            (["library-settings", "catalog-recipe-attempts-v1"], stable),
+            (["library-settings", "catalog-revision-spends"], stable),
+            (["library-settings", f"library-settings-apply-pointer-{folder}"], stable),
+            (["library-settings"], stable + [".active-library-test.pending"]),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "earlier selected recipe attempt"):
+                require_settings_apply_private_absence(files, settings, folder)
+
+    def test_settings_apply_failure_readback_does_not_hide_other_boundaries(self):
+        from run_library_folder_picker_ldplayer import collect_settings_apply_boundary
+        def refusal():
+            raise RuntimeError("predecessor hash refused")
+        boundary = collect_settings_apply_boundary(False, {
+            "predecessorFilesUnchanged": refusal,
+            "pointerActivation": lambda: "3",
+            "generationMarkers": lambda: ["only-predecessor.complete"],
+            "persistedGrantCount": lambda: 1,
+        })
+        self.assertEqual(boundary, {
+            "instrumentationTerminated": False, "observationErrors": {"predecessorFilesUnchanged": "RuntimeError"},
+            "pointerActivation": "3", "generationMarkers": ["only-predecessor.complete"], "persistedGrantCount": 1,
+        })
+
+    def test_cutover_continuation_accepts_only_an_unlaunched_observer_on_the_exact_installed_pair(self):
+        from run_selected_folder_open_ldplayer import CONTROLS_CASE, CUTOVER_CASE, PREVIEW_PASS_SHA, verify_unlaunched_cutover
+        pair = {"app.pristinepage.debug": "a" * 64, "app.pristinepage.debug.test": "b" * 64}
+        guest, serial, folder = "test-guest", "emulator-5556", "PristinePage-tree-1234567890ab"
+        record = {"source": "c" * 40, "predecessor": PREVIEW_PASS_SHA, "guest": guest, "reusedReadFixture": True, "previous": {}}
+        transcript = (f"INSTRUMENTATION_STATUS: class={CONTROLS_CASE.split('#')[0]}\n"
+                      f"INSTRUMENTATION_STATUS: test={CONTROLS_CASE.split('#')[1]}\n"
+                      "INSTRUMENTATION_STATUS_CODE: 1\n"
+                      f"INSTRUMENTATION_STATUS: class={CONTROLS_CASE.split('#')[0]}\n"
+                      f"INSTRUMENTATION_STATUS: test={CONTROLS_CASE.split('#')[1]}\n"
+                      "INSTRUMENTATION_STATUS_CODE: 0\nINSTRUMENTATION_RESULT: stream=\nOK (1 test)\nINSTRUMENTATION_CODE: -1\n")
+        command = ["adb", "-s", serial, "shell", "am", "instrument", "-w", "-r", "-e", "class",
+                   CONTROLS_CASE, "-e", "libraryFixtureFolder", folder,
+                   "app.pristinepage.debug.test/androidx.test.runner.AndroidJUnitRunner"]
+        trace = [
+            {"argv": command, "exit": 0, "stdout": transcript},
+            {"argv": ["adb", "-s", serial, "shell", "pidof", *pair], "exit": 0, "stdout": "4058\n"},
+        ]
+        verify_unlaunched_cutover(record, guest, serial, folder, record["source"], {}, pair, pair, transcript, trace)
+        for changed in (trace + [{"argv": ["adb", "instrument", CUTOVER_CASE]}],
+                        trace[:1], [trace[0], trace[1] | {"stdout": ""}],
+                        trace + [{"argv": ["adb", "push", "payload"]}]):
+            with self.assertRaisesRegex(RuntimeError, "unlaunched cutover"):
+                verify_unlaunched_cutover(record, guest, serial, folder, record["source"], {}, pair, pair, transcript, changed)
+        with self.assertRaisesRegex(RuntimeError, "unlaunched cutover"):
+            verify_unlaunched_cutover(record, guest, serial, folder, record["source"], {}, pair,
+                                     pair | {"app.pristinepage.debug.test": "d" * 64}, transcript, trace)
+
+    def test_read_only_preview_batch_refuses_a_spent_or_incomplete_predecessor(self):
+        from run_selected_folder_open_ldplayer import CASE, TEARDOWN_STOP_SHA, verify_preview_pass
+        pair = {"app.pristinepage.debug": "a" * 64, "app.pristinepage.debug.test": "b" * 64}
+        record = {"predecessor": TEARDOWN_STOP_SHA, "guest": "test-guest", "reusedReadFixture": True}
+        outcome = {"passed": [CASE], "failed": [], "installedSha256": pair}
+        preservation = dict(externalFixturesUnchanged=True, advancedReceiptUnchanged=True,
+                            persistedGrantCount=0, ordinaryPointerAbsent=True)
+        trace = [{"argv": ["adb", "-s", "emulator-5556", "shell", "am", "instrument", "-e", "class", CASE]}]
+        verify_preview_pass(record, "test-guest", pair, outcome, preservation, trace)
+        for incompatible in (outcome | {"failed": [CASE]}, outcome | {"installedSha256": {}}, outcome | {"passed": []}):
+            with self.assertRaisesRegex(RuntimeError, "selected preview predecessor"):
+                verify_preview_pass(record, "test-guest", pair, incompatible, preservation, trace)
+        with self.assertRaisesRegex(RuntimeError, "selected preview predecessor"):
+            verify_preview_pass(record, "test-guest", pair, outcome, preservation, trace + [{"argv": ["adb", "push", "x", "y"]}])
+
+    def test_selected_open_teardown_retry_requires_exact_read_only_predecessor(self):
+        from run_selected_folder_open_ldplayer import CASE, STAGING_STOP_SHA, verify_teardown_failure
+        folder = "PristinePage-tree-1234567890ab"
+        pair = {"app.pristinepage.debug": "a" * 64, "app.pristinepage.debug.test": "b" * 64}
+        claim = {"name": "test-guest", "serial": "emulator-5556", "ownership_history": [{"generation": "previous"}]}
+        record = {"predecessor": STAGING_STOP_SHA, "previous": pair, "guest": claim["name"], "reusedReadFixture": True}
+        outcome = {"passed": [], "failed": [CASE], "installedSha256": pair}
+        preservation = dict(externalFixturesUnchanged=True, advancedReceiptUnchanged=True,
+                            persistedGrantCount=0, ordinaryPointerAbsent=True)
+        transcript = ("java.lang.AssertionError: expected:<0> but was:<56>\n"
+                      "LibraryFolderFilesJourneyTest.kt:1023")
+        trace = [{"argv": ["adb", "-s", claim["serial"], "shell", "am", "instrument", "-w", "-r",
+                          "-e", "class", CASE, "-e", "libraryFixtureFolder", folder,
+                          "app.pristinepage.debug.test/androidx.test.runner.AndroidJUnitRunner"], "exit": 0}]
+        verify_teardown_failure(record, claim, "previous", folder, pair, outcome, preservation, transcript, trace)
+        for wrong in ([*trace, {"argv": ["adb", "push", "unknown", "fixture"]}],
+                      [trace[0] | {"argv": [*trace[0]["argv"][:-2], "unverified", trace[0]["argv"][-1]]}]):
+            with self.assertRaisesRegex(RuntimeError, "teardown predecessor"):
+                verify_teardown_failure(record, claim, "previous", folder, pair, outcome, preservation, transcript, wrong)
+        with self.assertRaisesRegex(RuntimeError, "teardown predecessor"):
+            verify_teardown_failure(record, claim, "previous", folder, pair, outcome, preservation, "unrelated exception", trace)
+
+    def test_native_preview_fixture_changes_only_the_recorded_pixel_binding(self):
+        fingerprint = "android-imagedecoder-v2/api28/0123456789abcdef/srgb-straight-white-exif-v1"
+        old_digest, old_payload, old_rows = synthetic_scan()
+        digest, payload, rows = synthetic_scan(conversion=fingerprint)
+        self.assertEqual((old_digest, old_payload), (digest, payload))
+        self.assertEqual(old_rows[0], rows[0])
+        self.assertIn(f"'{fingerprint}'", rows[1])
+        self.assertIn("2981671c3ce9d742ecd1d6fc560562bffcd8d79a7522c91b859dadf108fa4cf2", rows[1])
+        self.assertNotEqual(old_rows[-2], rows[-2])
+        with self.assertRaises(ValueError):
+            synthetic_scan(conversion="not a native policy")
+
+    def test_bound_recipe_receipt_does_not_accept_mismatched_activation_or_catalog(self):
+        from run_library_folder_picker_ldplayer import verify_bound_recipe_receipt
+        library, prior, child, grant_id = map(self._uuid, (1, 2, 3, 4))
+        old_marker = f"pristinepage-library-v1\n{library}\n{prior}\n-\n8\n512\n{'a' * 64}\n"
+        new_marker = f"pristinepage-library-v1\n{library}\n{child}\n{prior}\n8\n512\n{'b' * 64}\n"
+        uri = "content://com.android.externalstorage.documents/tree/primary%3ADocuments%2FSynthetic"
+        def signed(body):
+            return body + sha256(body.encode("ascii")).hexdigest() + "\n"
+        grant = signed(f"pristinepage-library-grant-v1\n{grant_id}\n3\n{uri}\n")
+        grant_hash = sha256((grant + old_marker).encode("ascii")).hexdigest()
+        pointer = signed(f"pristinepage-active-library-v2\n{library}\n2\n{grant_id}\n{prior}\n{grant_hash}\n")
+        intent = f"pristinepage-recipe-edit-intent-v1\n2\n{grant_id}\n{grant_hash}\n{'d' * 64}\n{old_marker}{new_marker}"
+        completion = f"pristinepage-recipe-edit-complete-v1\n{sha256(intent.encode('ascii')).hexdigest()}\n"
+        verify_bound_recipe_receipt(intent, completion, old_marker, new_marker, pointer, grant)
+        activated_hash = sha256((grant + new_marker).encode("ascii")).hexdigest()
+        activated = signed(f"pristinepage-active-library-v2\n{library}\n3\n{grant_id}\n{child}\n{activated_hash}\n")
+        verify_bound_recipe_receipt(intent, completion, old_marker, new_marker, activated, grant, advanced=True)
+        for wrong in (pointer, activated.replace(f"\n{child}\n", f"\n{prior}\n"), activated.replace("\n3\n", "\n4\n")):
+            with self.assertRaisesRegex(RuntimeError, "bound recipe receipt"):
+                verify_bound_recipe_receipt(intent, completion, old_marker, new_marker, wrong, grant, advanced=True)
+        for bad in (intent.replace("\n2\n", "\n3\n", 1), intent.replace("b" * 64, "c" * 64)):
+            forged = f"pristinepage-recipe-edit-complete-v1\n{sha256(bad.encode('ascii')).hexdigest()}\n"
+            with self.assertRaisesRegex(RuntimeError, "bound recipe receipt"):
+                verify_bound_recipe_receipt(bad, forged, old_marker, new_marker, pointer, grant)
+
+    def test_bound_recipe_grant_names_the_exact_child_in_either_files_root(self):
+        from run_library_folder_picker_ldplayer import require_bound_recipe_grant_destination
+        left = "/sdcard/Documents/PristinePage-tree-1234567890ab/Library-Left-1234567890ab"
+        prefix = "content://com.android.externalstorage.documents/tree/"
+        child = "PristinePage-tree-1234567890ab%2FLibrary-Left-1234567890ab"
+        for exact in ("home%3A" + child, "primary%3ADocuments%2F" + child):
+            require_bound_recipe_grant_destination(prefix + exact, left)
+        for wrong in ("home%3A" + child.replace("Left", "Right"), "home%3ADocuments%2F" + child,
+                      "home%3A" + child + "?copy=1", "home%3A" + child.replace("%2F", "/"),
+                      "primary%3A" + child):
+            with self.subTest(wrong=wrong), self.assertRaisesRegex(RuntimeError, "exact Files-selected"):
+                require_bound_recipe_grant_destination(prefix + wrong, left)
+
+    def test_bound_edit_recovery_requires_sole_successful_instrumentation_for_the_spent_attempt(self):
+        from run_library_folder_picker_ldplayer import BOUND_RECIPE_CASE, RUNNER, require_bound_recovery_writer
+        operation = self._uuid(3)
+        folder = "PristinePage-tree-1234567890ab"
+        call = {"argv": ["adb.exe", "-s", "emulator-5554", "shell", "am", "instrument", "-w", "-r",
+                         "-e", "class", BOUND_RECIPE_CASE, "-e", "libraryFixtureFolder", folder,
+                         "-e", "librarySelectedAppendOperation", operation, RUNNER], "exit": 0}
+        require_bound_recovery_writer([call], "emulator-5554", folder, operation)
+        for unexpected in ([], [call, call], [call | {"exit": 1}], [call | {"argv": call["argv"][:-2] + [self._uuid(5), RUNNER]}]):
+            with self.subTest(unexpected=unexpected), self.assertRaisesRegex(RuntimeError, "sole spent bound writer"):
+                require_bound_recovery_writer(unexpected, "emulator-5554", folder, operation)
+
+    def test_fresh_recipe_witness_requires_only_its_own_new_private_scope(self):
+        from run_library_folder_picker_ldplayer import verify_fresh_recipe_scope
+        scope = "library-selected-editor-7bde9de8-6e8e-4a84-9ec3-25a58670daeb"
+        before = {"existing-synthetic-control"}
+        verify_fresh_recipe_scope(before, before | {scope}, scope)
+        verify_fresh_recipe_scope(before, before, scope, expect_created=False)
+        verify_fresh_recipe_scope(before, before | {scope}, scope, expect_created=False)
+        with self.assertRaisesRegex(RuntimeError, "fresh selected edit"):
+            verify_fresh_recipe_scope(before, before | {"library-settings"}, scope, expect_created=False)
+        for prior, actual in ((before, before), (before, {scope}), (before, before | {scope, "library-settings"}),
+                              (before | {scope}, before | {scope})):
+            with self.subTest(prior=prior, actual=actual), self.assertRaisesRegex(RuntimeError, "fresh selected edit"):
+                verify_fresh_recipe_scope(prior, actual, scope)
+
+    def test_recipe_boot_retry_requires_no_android_command_and_no_usable_serial(self):
+        from run_library_folder_picker_ldplayer import verify_selected_recipe_boot_only_trace
+        trace = [
+            {"argv": ["adb.exe", "version"], "exit": 0},
+            {"argv": ["ldconsole.exe", "launch", "--index", "4"], "exit": 0},
+            {"argv": ["ldconsole.exe", "adb", "--index", "4", "--command", "get-serialno"],
+             "exit": 0, "stderr": "error: device offline"},
+            {"argv": ["ldconsole.exe", "quit", "--index", "4"], "exit": 0},
+        ]
+        verify_selected_recipe_boot_only_trace(trace, 4)
+        changed = trace[2] | {"stdout": "emulator-5554", "stderr": ""}
+        guest_read = {"argv": ["adb.exe", "-s", "emulator-5554", "shell", "pm", "path", "android"], "exit": 0}
+        guest_install = {"argv": ["adb.exe", "-s", "emulator-5554", "install", "candidate.apk"], "exit": 0}
+        for unexpected in (changed, guest_read, guest_install):
+            with self.subTest(unexpected=unexpected), self.assertRaisesRegex(RuntimeError, "boot-only"):
+                verify_selected_recipe_boot_only_trace([*trace[:2], unexpected, *trace[2:]], 4)
+
+    def test_selected_recipe_admission_refuses_a_candidate_pair_or_drifted_retained_state(self):
+        from run_library_folder_picker_ldplayer import require_selected_recipe_predecessor
+        pair = {"app": "prior", "test": "prior-test"}
+        ordinary = {"pointer": "prior-pointer"}
+        grants = {"quantity": 1, "sha256": "original-grant-digest"}
+        require_selected_recipe_predecessor(pair, pair, ordinary, ordinary, grants, grants)
+        for actual in (({"app": "candidate", "test": "candidate-test"}, ordinary, grants),
+                       (pair, {"pointer": "different"}, grants),
+                       (pair, ordinary, {"quantity": 1, "sha256": "different"})):
+            with self.subTest(actual=actual), self.assertRaisesRegex(RuntimeError, "selected edit predecessor"):
+                require_selected_recipe_predecessor(actual[0], pair, actual[1], ordinary, actual[2], grants)
+
+    def test_repeat_refuses_contradictory_release_and_cleanup_metadata(self):
+        original = dict(name="synthetic", installation="installed", index=3, created="creation", worktree="owned",
+                        purpose="library", api=28, created_by_agent=True, generation="exact", runtime_processes=[[15, 42], [17, 47]])
+        stopped = original | dict(state="stopped-released", claim_generation="exact", shutdown_verified=True,
+                                  shutdown_ready=True, evidence_saved=True, owner=None, consumers=[], reservedKiB=0,
+                                  keep_running=False, handoff_to=None, shutdown_processes=original["runtime_processes"],
+                                  cleanup_attempt={"generation": "exact", "state": "completed"})
+        verify_released_selected_repeat_guest(original, stopped)
+        for mismatch in (dict(claim_generation="later"), dict(consumers=["work"]), dict(reservedKiB=4),
+                         dict(cleanup_attempt={"generation": "exact", "state": "running"}), dict(evidence_saved=False)):
+            with self.assertRaisesRegex(RuntimeError, "same-generation"):
+                verify_released_selected_repeat_guest(original, stopped | mismatch)
+
+    def test_bound_edit_reuses_only_the_exact_anchored_synchronous_release(self):
+        from run_library_folder_picker_ldplayer import verify_bound_recipe_release
+        original = dict(name="synthetic", installation="installed", index=3, created="creation", worktree="owned",
+                        purpose="library", api=28, created_by_agent=True, generation="exact", runtime_processes=[[15, 42], [17, 47]])
+        snapshot = original | dict(state="shutdown_ready", claim_generation="exact", shutdown_verified=False,
+                                   shutdown_ready=True, evidence_saved=True, owner="writer", reservedKiB=0,
+                                   keep_running=False, handoff_to=None, shutdown_processes=original["runtime_processes"],
+                                   cleanup_attempt={"generation": "exact", "state": "running", "token": "cleanup"})
+        manifest = Path("retained-manifest.json").resolve()
+        stopped = snapshot | dict(owner=None, state="stopped-released", shutdown_verified=True, stopped="stopped",
+                                  runtime_evidence=str(manifest),
+                                  cleanup_attempt=snapshot["cleanup_attempt"] | {"state": "completed", "finished": "stopped"})
+        verify_bound_recipe_release(original, stopped, manifest, snapshot)
+        verify_bound_recipe_release(original, stopped | {"consumers": []}, manifest, snapshot)
+        for bad in (stopped | {"consumers": ["live"]}, stopped | {"consumers": None},
+                    stopped | {"runtime_evidence": str(manifest.with_name("unrelated.json"))},
+                    stopped | {"cleanup_attempt": stopped["cleanup_attempt"] | {"token": "different"}},
+                    stopped | {"ownership_history": [{"owner": "other"}]}):
+            with self.subTest(bad=bad), self.assertRaises(RuntimeError):
+                verify_bound_recipe_release(original, bad, manifest, snapshot)
+        with self.assertRaisesRegex(RuntimeError, "same-generation"):
+            verify_released_selected_repeat_guest(original, stopped)
+        with self.assertRaises(RuntimeError):
+            verify_bound_recipe_release(original, stopped, manifest, snapshot | {"consumers": ["live"]})
+
+    def test_advanced_edit_only_accepts_the_named_intervening_release_and_pinned_bound_history(self):
+        from run_library_folder_picker_ldplayer import verify_advanced_recipe_release
+        original = dict(name="synthetic", installation="installed", index=3, created="creation", worktree="owned",
+                        purpose="library", api=28, created_by_agent=True, generation=self._uuid(1), runtime_processes=[[15, 42], [17, 47]])
+        snapshot = original | dict(state="shutdown_ready", claim_generation=original["generation"], shutdown_verified=False,
+                                  shutdown_ready=True, evidence_saved=True, owner="other", reservedKiB=0,
+                                  keep_running=False, handoff_to=None, shutdown_processes=original["runtime_processes"],
+                                  cleanup_attempt={"generation": original["generation"], "state": "running", "token": "exact"})
+        stopped = snapshot | dict(state="stopped-released", owner=None, stopped="done", shutdown_verified=True,
+                                  cleanup_attempt=snapshot["cleanup_attempt"] | {"state": "completed", "finished": "done"})
+        prior = {k: stopped[k] for k in ("generation", "owner", "state", "worktree", "purpose", "shutdown_processes", "stopped", "cleanup_attempt")}
+        generation = self._uuid(2)
+        processes = [[25, 52], [27, 57]]
+        later = stopped | dict(generation=generation, claim_generation=generation, worktree="other", consumers=[],
+                               runtime_processes=processes, shutdown_processes=processes, ownership_history=[prior],
+                               cleanup_attempt={"generation": generation, "state": "completed", "finished": "done"})
+        manifest = Path("retained-advance-predecessor.json").resolve()
+        verify_advanced_recipe_release(original, later, manifest, snapshot, [generation])
+        final = self._uuid(3)
+        interim = {k: later[k] for k in prior} | {"stopped": "interim complete"}
+        latest = later | dict(generation=final, claim_generation=final, ownership_history=[prior, interim],
+                              cleanup_attempt={"generation": final, "state": "completed"})
+        verify_advanced_recipe_release(original, latest, manifest, snapshot, [generation, final])
+        for named, record in (([final], latest), ([generation, final], latest | {"ownership_history": [prior, interim | {"owner": "active"}]}),
+                              ([final], later), ([generation], later | {"consumers": ["live"]}),
+                              ([generation], later | {"ownership_history": [prior | {"shutdown_processes": processes}]}),
+                              ([generation], later | {"ownership_history": [prior | {"cleanup_attempt": prior["cleanup_attempt"] | {"token": "other"}}]})):
+            with self.subTest(named=named, record=record), self.assertRaises(RuntimeError):
+                verify_advanced_recipe_release(original, record, manifest, snapshot, named)
+
+    def test_repeat_refuses_grant_mode_drift_before_the_new_fixture_is_written(self):
+        from run_library_folder_picker_ldplayer import APP, URI_PERMISSIONS_HEADER
+        initial = (f"{URI_PERMISSIONS_HEADER}\n  Granted Uri Permissions:\n  * UID 10234 holds:\n"
+                   "    UriPermission{123 content://synthetic/tree/folder [user 0] [prefix]}\n"
+                   f"      targetUserId=0 sourcePkg=synthetic.docs targetPkg={APP}\n"
+                   "      mode=0x3 owned=0x0 global=0x0 persistable=0x3 persisted=0x3 persistedCreate=42\n"
+                   "-------------------------------------------------------------------------------\n")
+        before = parse_app_persisted_grants(initial)
+        require_same_repeat_grants(before, parse_app_persisted_grants(initial.replace("UriPermission{123", "UriPermission{456")))
+        after = parse_app_persisted_grants(initial.replace("persisted=0x3", "persisted=0x1"))
+        def deny_write(*args, **kwargs):
+            self.fail("The new fixture was touched before checking its preserved permissions")
+        folder = "PristinePage-tree-0123456789ab"
+        with self.assertRaisesRegex(RuntimeError, "persisted grant inventory changed"):
+            stage_independent_fixture_pair(deny_write, f"/sdcard/Documents/{folder}", folder, (("left", {}), ("right", {})),
+                                           lambda: require_same_repeat_grants(before, after))
+        for wrong in (initial.replace(f" targetPkg={APP}", " targetPkg=foreign.app"), initial.rsplit("\n", 2)[0]):
+            with self.assertRaisesRegex(RuntimeError, "package-scoped"):
+                parse_app_persisted_grants(wrong)
+
+    def test_correctly_named_spend_cannot_authorize_a_different_payload(self):
+        key = sha256(b"catalogs/exact.sqlite").hexdigest()
+        good = f"pristinepage-library-move-spent-v1\n{key}\n{'b' * 64}\n42:15\n{'c' * 64}\n512\n"
+        verify_library_move_spend(good, key, 512, "c" * 64)
+        for wrong in (good.replace("c" * 64, "d" * 64), good.replace("\n512\n", "\n513\n"), good.replace("42:15", "42:0")):
+            with self.assertRaisesRegex(RuntimeError, "move spend"):
+                verify_library_move_spend(wrong, key, 512, "c" * 64)
+
+    def test_repeat_mode_is_not_allowed_to_accept_a_reassigned_or_failed_prior_attempt(self):
+        self.assertTrue(select_selected_repeat(True, selected_append=True, reassigned=None, failed_host=False))
+        for selected_append, reassigned, failed in ((False, None, False), (True, self._uuid(9), False), (True, None, True)):
+            with self.assertRaisesRegex(RuntimeError, "exact successful predecessor"):
+                select_selected_repeat(True, selected_append=selected_append, reassigned=reassigned, failed_host=failed)
+
+    def test_selected_delivery_death_requires_its_own_case_id_and_exact_crash(self):
+        from run_library_folder_picker_ldplayer import read_selected_delivery_death
+        operation = self._uuid(7)
+        start = ("INSTRUMENTATION_STATUS: class=app.pristinepage.LibraryFolderFilesJourneyTest\n"
+                 "INSTRUMENTATION_STATUS: test=endsProcessAfterSelectedAppendCompletionBeforeDelivery\n"
+                 "INSTRUMENTATION_STATUS_CODE: 1\n")
+        boundary = (f"INSTRUMENTATION_STATUS: selectedAppendDeathOperation={operation}\n"
+                    "INSTRUMENTATION_STATUS: selectedAppendDeathPid=2345\n"
+                    f"INSTRUMENTATION_STATUS: selectedAppendDeathGrantInventory={'a' * 64}\n"
+                    "INSTRUMENTATION_STATUS_CODE: 72\n")
+        crash = "INSTRUMENTATION_RESULT: shortMsg=Process crashed.\nINSTRUMENTATION_CODE: 0\n"
+        self.assertEqual(("2345", "a" * 64), read_selected_delivery_death(start + boundary + crash, operation))
+        for output in (start + crash, start + boundary * 2 + crash, start + boundary,
+                       start + boundary.replace("2345", "0") + crash,
+                       start + boundary.replace(operation, self._uuid(8)) + crash,
+                       start.replace("BeforeDelivery", "WrongBoundary") + boundary + crash):
+            with self.assertRaisesRegex(RuntimeError, "exact selected append checkpoint"):
+                read_selected_delivery_death(output, operation)
+
+    def test_selected_death_is_not_a_repeat_or_reassignment_mode(self):
+        from run_library_folder_picker_ldplayer import select_selected_death
+        self.assertTrue(select_selected_death(True, selected_append=True, repeat=False, reassigned=None, failed_host=False))
+        for append, repeat, reassigned, failed in ((False, False, None, False), (True, True, None, False),
+                                                   (True, False, self._uuid(9), False), (True, False, None, True)):
+            with self.assertRaisesRegex(RuntimeError, "exact repeat predecessor"):
+                select_selected_death(True, selected_append=append, repeat=repeat, reassigned=reassigned, failed_host=failed)
+
+    def test_unexplained_successor_process_never_starts_cold_or_replays_writer(self):
+        from run_library_folder_picker_ldplayer import exercise_selected_delivery_death, SELECTED_DEATH_CASE
+        folder, operation = "PristinePage-tree-0123456789ab", self._uuid(7)
+        commands = []
+
+        def adb(*args, **kwargs):
+            commands.append(args)
+            if args[:2] == ("shell", "pidof"):
+                return "3456\n" if any("instrument" in call for call in commands) else ""
+            if args[0] == "shell" and "ps -A" in args[1]:
+                return ""
+            if args[1:3] == ("am", "instrument"):
+                return "captured"
+            if "run-as" in args and "ls" in args:
+                return ""
+            self.fail(f"Unadmitted command: {args}")
+
+        with (TemporaryDirectory(prefix="pristinepage-selected-death-test-") as temporary,
+              patch("run_library_folder_picker_ldplayer.verify_unchanged_settings_destination"),
+              patch("run_library_folder_picker_ldplayer.read_app_persisted_grants", return_value=()),
+              patch("run_library_folder_picker_ldplayer.recheck_target"),
+              patch("run_library_folder_picker_ldplayer.read_selected_delivery_death", return_value=("2345", "a" * 64)),
+              patch("run_library_folder_picker_ldplayer.observe_selected_history", side_effect=AssertionError("Must not inspect before cold admission"))):
+            class Run:
+                def path(self, name):
+                    return Path(temporary) / name
+
+                def save(self, path, record, *, durable):
+                    path.write_text(json.dumps(record), encoding="utf8")
+
+            (Path(temporary) / "evidence").mkdir()
+            with self.assertRaisesRegex(RuntimeError, "process absence"):
+                exercise_selected_delivery_death(Run(), adb, None, Path(temporary) / "evidence",
+                                                  f"/sdcard/Documents/{folder}", folder, {}, {}, {}, operation, ())
+            self.assertTrue((Path(temporary) / "selected-death-attempt.json").is_file())
+        instruments = [call for call in commands if "instrument" in call]
+        self.assertEqual(1, len(instruments))
+        self.assertIn(SELECTED_DEATH_CASE, instruments[0])
+        self.assertFalse(any("force-stop" in call for call in commands))
+
+    def test_selected_cold_admission_requires_positive_absence_not_empty_or_failed_output(self):
+        from run_library_folder_picker_ldplayer import require_selected_cold_process
+        def result(reply):
+            def command(mode, script, **kwargs):
+                self.assertEqual("shell", mode)
+                self.assertIn("ps -A -o PID,NAME 2>&1", script)
+                self.assertIn("2345", script)
+                self.assertIn("app.pristinepage.debug.test", script)
+                return reply
+            return command
+        require_selected_cold_process(result("selected-processes-absent:2345\n"), "2345")
+        for reply in ("", "ps: invalid option\n", "selected-processes-absent:3456\n", "selected-processes-absent:2345\nerror\n"):
+            with self.assertRaisesRegex(RuntimeError, "process absence"):
+                require_selected_cold_process(result(reply), "2345")
+
+    def test_retained_append_death_refuses_any_unexpected_replay_or_cold_launch(self):
+        from run_library_folder_picker_ldplayer import verify_selected_death_handoff_trace, SELECTED_DEATH_CASE, SELECTED_DEATH_RECOVERY_CASE
+        writer = {"argv": ["adb", "shell", "am", "instrument", "-w", "-r", "-e", "class", SELECTED_DEATH_CASE], "exit": 0}
+        refused = {"argv": ["adb", "shell", "rows=$(ps -A -o PID,NAME 2>&1)"], "exit": 71, "stdout": "", "stderr": ""}
+        verify_selected_death_handoff_trace([writer, refused])
+        for trace in ([writer, writer, refused], [writer, refused | {"exit": 0}], [refused, writer],
+                      [writer, refused, writer | {"argv": writer["argv"][:-1] + [SELECTED_DEATH_RECOVERY_CASE]}],
+                      [writer, refused, {"argv": ["adb", "shell", "am", "force-stop", "app.pristinepage.debug"]}]):
+            with self.assertRaisesRegex(RuntimeError, "exact interrupted selected append"):
+                verify_selected_death_handoff_trace(trace)
+
+    def test_selected_death_prior_evidence_refuses_already_changed_spend_bytes_and_grants(self):
+        from run_library_folder_picker_ldplayer import require_selected_death_prior_evidence
+        records = [{"operation": "one"}, {"operation": "two"}]
+        expected = {"grants": {"quantity": 0, "sha256": "a" * 64}, "legacy": {"older": "b" * 64},
+                    "spends": {"one": {"leaf": "c" * 64}, "two": {"leaf": "d" * 64}}}
+        observed = (records, {op: {"spends": leaves} for op, leaves in expected["spends"].items()})
+        require_selected_death_prior_evidence(expected, expected["grants"], expected["legacy"], observed)
+        for grants, legacy, snapshot in (
+            (expected["grants"] | {"quantity": 1}, expected["legacy"], observed),
+            (expected["grants"], {"older": "e" * 64}, observed),
+            (expected["grants"], expected["legacy"], (records, observed[1] | {"one": {"spends": {"leaf": "f" * 64}}})),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "pinned selected repeat evidence"):
+                require_selected_death_prior_evidence(expected, grants, legacy, snapshot)
+
+    def test_repeat_receipt_requires_the_exact_intent_and_all_three_markers(self):
+        def marker(suffix, predecessor):
+            return (f"pristinepage-library-v1\n{self._uuid(99)}\n{self._uuid(suffix)}\n{predecessor}\n"
+                    f"8\n512\n{'c' * 64}\n")
+
+        # Distinguish input markers solely by exact generation and predecessor fields.
+        baseline, incoming, child = marker(1, "-"), marker(2, "-"), marker(3, self._uuid(1))
+        intent = "pristinepage-library-copy-intent-v1\n" + "a" * 64 + "\n" + "b" * 64 + "\n" + baseline + incoming + child
+        receipt = "pristinepage-selected-merge-complete-v1\n" + intent
+        self.assertEqual(("a" * 64, "b" * 64), verify_selected_append_records(intent, receipt, baseline, incoming, child))
+        for wrong_intent, wrong_receipt, wrong_child in (
+            (intent + "\n", receipt, child),
+            (intent, receipt.replace("b" * 64, "d" * 64), child),
+            (intent, receipt, marker(4, self._uuid(1))),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "selected append"):
+                verify_selected_append_records(wrong_intent, wrong_receipt, baseline, incoming, wrong_child)
+
+    def test_selected_history_reads_no_unbounded_record(self):
+        from run_library_folder_picker_ldplayer import read_selected_history_record
+        path = "generations/synthetic.complete"
+        for claimed in ("0", "257", "12 unexpected", "1"):
+            calls = []
+            def command(*args):
+                calls.append(args)
+                if args[0] == "stat":
+                    return claimed
+                return "too many bytes\n"
+            with self.assertRaisesRegex(RuntimeError, "selected history record"):
+                read_selected_history_record(command, path, 256)
+            self.assertEqual(2 if claimed == "1" else 1, len(calls))
+
+    @staticmethod
+    def _uuid(suffix):
+        return f"10000000-0000-4000-8000-{suffix:012d}"
+
     def test_derived_roots_admits_only_the_two_selection_witness(self):
         case = "app.pristinepage.LibraryFolderFilesJourneyTest#separatesIndependentlySelectedRootsWithoutAParentGrant"
         self.assertEqual((case,), select_independent_roots(True, False, derived=True))
@@ -33,6 +561,58 @@ class LibraryFolderPickerRunnerTest(unittest.TestCase):
         for enabled, mixed, derived in ((False, False, True), (True, True, True), (True, False, False)):
             with self.assertRaisesRegex(RuntimeError, "standalone"):
                 select_independent_roots(enabled, mixed, derived=derived, append=True)
+
+    def test_selected_recipe_oracle_checks_both_transitions_and_preserves_prior_undo(self):
+        from run_library_folder_picker_ldplayer import verify_selected_recipe_catalog
+        from make_library_folder_picker_fixture import make_fixture, synthetic_scan
+        with TemporaryDirectory(prefix="pristinepage-recipe-oracle-") as temporary:
+            root = Path(temporary)
+            before = root / "baseline"
+            make_fixture(before, with_scan=True)
+            baseline, = (before / "catalogs").glob("*.sqlite")
+            predecessor = baseline
+            for issuing, turns, saved, timestamp, refs in ((2, 2, 3, 20, 5), (3, 3, 4, 30, 7)):
+                candidate = root / f"edited-{saved}.sqlite"
+                shutil.copyfile(predecessor, candidate)
+                with closing(sqlite3.connect(candidate)) as db:
+                    document, = db.execute("SELECT documentId FROM Document").fetchone()
+                    page, source = db.execute("SELECT pageId,sourceId FROM Page").fetchone()
+                    prior, = db.execute("SELECT canonicalRecipe FROM RecipeRevision WHERE recipeRevision=?", (issuing,)).fetchone()
+                    recipe = json.loads(prior)
+                    recipe["geometry"]["outputQuarterTurns"] = turns
+                    encoded = json.dumps(recipe, sort_keys=True, separators=(",", ":")).encode()
+                    digest = sha256(b"pristinepage-recipe-json-v1\0" + len(encoded).to_bytes(4, "big") + encoded).hexdigest()
+                    db.execute("INSERT INTO RecipeRevision VALUES (?,?,?,1,?,?,?,?)",
+                               (page, saved, source, encoded, digest, issuing, timestamp))
+                    db.execute("UPDATE Document SET documentRevision=?,updatedAt=?", (saved, timestamp))
+                    db.execute("UPDATE Page SET currentRecipeRevision=?", (saved,))
+                    def state(revision):
+                        return json.dumps(dict(version=1, pages=[dict(pageId=page, sourceId=source, recipeRevision=revision)]),
+                                          separators=(",", ":")).encode()
+                    undo = self._uuid(saved + 5)
+                    db.execute("INSERT INTO UndoEntry VALUES (?,?,?,?, 'RECIPE_EDIT',?,?,'AVAILABLE')",
+                               (undo, document, state(issuing), state(saved), saved, 86_400_000 + timestamp))
+                    db.execute("INSERT INTO SourceReference VALUES ('RECIPE_HISTORY',?,?,?)", (f"recipe-v1/{page}/{saved}", source, timestamp))
+                    db.execute("INSERT INTO SourceReference VALUES ('UNDO',?,?,?)", (undo, source, timestamp))
+                    db.execute("UPDATE Source SET refCount=?", (refs,))
+                    db.commit()
+                good = candidate.read_bytes()
+                before_bytes = predecessor.read_bytes()
+                verify_selected_recipe_catalog(candidate, predecessor, synthetic_scan()[0], issuing_revision=issuing)
+                self.assertEqual(good, candidate.read_bytes())
+                self.assertEqual(before_bytes, predecessor.read_bytes())
+                for sql in ("UPDATE Document SET title='Synthetic'",
+                            "UPDATE UndoEntry SET afterState=beforeState WHERE appliedDocumentRevision=3",
+                            "UPDATE RecipeRevision SET parentRevision=1 WHERE recipeRevision=3",
+                            "UPDATE Source SET refCount=3"):
+                    candidate.write_bytes(good)
+                    with closing(sqlite3.connect(candidate)) as db:
+                        db.execute(sql)
+                        db.commit()
+                    with self.subTest(issuing=issuing, mutation=sql), self.assertRaisesRegex(RuntimeError, "selected recipe catalog"):
+                        verify_selected_recipe_catalog(candidate, predecessor, synthetic_scan()[0], issuing_revision=issuing)
+                candidate.write_bytes(good)
+                predecessor = candidate
 
     def test_selected_append_host_oracle_rejects_missing_recipe_history(self):
         with TemporaryDirectory(prefix="pristinepage-append-catalog-test-") as temporary:
@@ -53,6 +633,21 @@ class LibraryFolderPickerRunnerTest(unittest.TestCase):
                     INSERT INTO RecipeRevision VALUES(9,1,NULL),(9,2,1),(2,1,NULL),(2,2,1);
                 """)
                 verify_selected_append_catalog(path, "old", "incoming")
+                with self.assertRaisesRegex(RuntimeError, "recipe history"):
+                    verify_selected_append_catalog(path, "old", "incoming", repeated=True)
+                db.executescript("""
+                    UPDATE Page SET currentRecipeRevision=4 WHERE pageId=2;
+                    INSERT INTO RecipeRevision VALUES(2,3,NULL),(2,4,3);
+                """)
+                verify_selected_append_catalog(path, "old", "incoming", repeated=True)
+                db.execute("UPDATE RecipeRevision SET parentRevision=1 WHERE pageId=2 AND recipeRevision=4")
+                db.commit()
+                with self.assertRaisesRegex(RuntimeError, "recipe history"):
+                    verify_selected_append_catalog(path, "old", "incoming", repeated=True)
+                db.executescript("""
+                    UPDATE Page SET currentRecipeRevision=2 WHERE pageId=2;
+                    DELETE FROM RecipeRevision WHERE pageId=2 AND recipeRevision>2;
+                """)
                 db.execute("DELETE FROM RecipeRevision WHERE pageId=2 AND recipeRevision=1")
                 db.commit()
                 with self.assertRaisesRegex(RuntimeError, "recipe history"):

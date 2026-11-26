@@ -78,7 +78,9 @@ class RoomDocumentRepository @JvmOverloads constructor(private val metadata: Met
                 coroutineContext.ensureActive()
                 val after = append(page, prepared.bytes, prepared.hash, prepared.masks.links, now)
                 addUndo(doc.documentId, "RECIPE_EDIT", listOf(pointer(page)), listOf(pointer(after)), prepared.masks.links, nextDoc, now)
-                updateDocument(doc.copy(documentRevision = nextDoc, updatedAt = now))
+                if (q.advanceDocumentRevision(doc.documentId, doc.documentRevision, nextDoc, now) != 1) {
+                    reject(OperationErrorCode.INTEGRITY_FAILED, "document_unavailable", doc.documentId)
+                }
                 SaveRecipeResult.Saved(pageId, after.currentRecipeRevision, nextDoc, prepared.hash)
             }
         }

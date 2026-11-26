@@ -117,6 +117,38 @@ class LocalLibraryFolderExportJournalTest {
         assertFailsWith<IOException> { attempts.requireNew(intent.operationId) }
     }
 
+    @Test fun aVerifiedReturnToTheSameDefaultCanSettleItsOldReceiptWithoutMakingItAReplay() {
+        val (root, intent) = staged()
+        val files = checkNotNull(root.parentFile).toPath()
+        val journal = LocalLibraryFolderExportJournal(root, DirectorySync { true })
+        journal.start(intent).recordCompletion()
+        val attempts = LocalLibraryBackupAttempts(files, DirectorySync { true })
+        val afterReturn = intent.issuedAt.copy(number = 3)
+        // Returning to Default is not a picker replay. Only a verified origin enables historical read and settlement.
+        assertTrue(attempts.discoverActive(afterReturn).receipts.isEmpty())
+        val historical = attempts.discoverActive(afterReturn, verifiedOrigin = intent.issuedAt)
+        assertEquals(intent.operationId, historical.receipts.single().receipt.operationId)
+        assertTrue(historical.receipts.single() is LibraryFolderExportState.Completed)
+        assertFailsWith<IOException> { attempts.requireNew(intent.operationId) }
+        journal.acknowledge(intent)
+        assertTrue(attempts.archiveAcknowledged(intent.operationId, afterReturn, verifiedOrigin = intent.issuedAt))
+        assertTrue(attempts.discoverActive(afterReturn, verifiedOrigin = intent.issuedAt).receipts.isEmpty())
+        assertFailsWith<IOException> { attempts.requireNew(intent.operationId) }
+    }
+
+    @Test fun legacyReceiptAdmissionCannotUseForeignAncestryOrExposeAFutureActivation() {
+        val (root, future) = staged(issuedNumber = 5)
+        val files = checkNotNull(root.parentFile).toPath()
+        LocalLibraryFolderExportJournal(root, DirectorySync { true }).start(future).recordCompletion()
+        val attempts = LocalLibraryBackupAttempts(files, DirectorySync { true })
+        val current = future.issuedAt.copy(number = 3)
+        val origin = current.copy(number = 1)
+        assertTrue(attempts.discoverActive(current, verifiedOrigin = origin).receipts.isEmpty())
+        assertFailsWith<IOException> {
+            attempts.discoverActive(current, verifiedOrigin = origin.copy(libraryId = future.generation.libraryId))
+        }
+    }
+
     @Test fun coldDiscoveryKeepsAVerifiedReceiptVisibleBesideAnUnreadableAttemptAndRemovesArchivedRowsFromTheInbox() {
         val (root, intent) = staged()
         val files = checkNotNull(root.parentFile).toPath()
@@ -492,7 +524,7 @@ class LocalLibraryFolderExportJournalTest {
         assertContentEquals(changed, candidate.readBytes())
     }
 
-    private fun staged(): Pair<File, LibraryFolderExportRecords.Intent> {
+    private fun staged(issuedNumber: Long = 1): Pair<File, LibraryFolderExportRecords.Intent> {
         val id = "10000000-0000-4000-8000-000000000001"
         val root = temporary.newFolder().resolve("library-out-$id").canonicalFile.also { check(it.mkdir()) }
         val catalog = ByteArray(512) { 73 }
@@ -502,7 +534,7 @@ class LocalLibraryFolderExportJournalTest {
             "10000000-0000-4000-8000-000000000003", "10000000-0000-4000-8000-000000000004", null, 8, ObjectId(digest, 512),
         )
         return root to LibraryFolderExportRecords.Intent(
-            id, LibraryActivation("10000000-0000-4000-8000-000000000002", 1),
+            id, LibraryActivation("10000000-0000-4000-8000-000000000002", issuedNumber),
             LibraryFolderGrantRecord(id, "content://com.android.externalstorage.documents/tree/primary%3ADocuments%2FB", 3),
             1, 42, generation,
         )

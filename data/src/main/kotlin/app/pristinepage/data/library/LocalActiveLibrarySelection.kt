@@ -24,6 +24,7 @@ internal class LocalActiveLibrarySelection(root: File, private val directorySync
     private val directory = root.absoluteFile
     private val parent = directory.toPath()
     private val pointer = parent.resolve("active-library")
+    private val defaultOrigin = parent.resolve("default-origin")
 
     /** Null is positive absence, not permission to create a default after an earlier selection may have been lost. */
     fun readVerified(): Selection? {
@@ -31,6 +32,18 @@ internal class LocalActiveLibrarySelection(root: File, private val directorySync
         forceDirectory()
         if (readExact() != first) throw IOException("Active library selection changed during verification")
         return first
+    }
+
+    fun readDefaultOrigin(): Selection? {
+        val first = readExact(defaultOrigin)
+        forceDirectory()
+        if (first != readExact(defaultOrigin) || first != null && (first.location != Location.Default || first.identity.activation != 1L)) invalid()
+        return first
+    }
+
+    fun encodeDefaultOrigin(origin: Selection): ByteArray {
+        if (origin.location != Location.Default || origin.identity.activation != 1L) invalid()
+        return encode(origin)
     }
 
     /** False does not change an authoritative expected selection. A missing or different non-null predecessor must be reconciled, not treated as a refused switch. */
@@ -63,15 +76,15 @@ internal class LocalActiveLibrarySelection(root: File, private val directorySync
         return true
     }
 
-    private fun readExact(): Selection? {
+    private fun readExact(path: java.nio.file.Path = pointer): Selection? {
         if (parent.toRealPath() != parent || !Files.isDirectory(parent, NOFOLLOW_LINKS)) {
             throw IOException("Active library settings directory is unavailable")
         }
-        val attributes = try { Files.readAttributes(pointer, BasicFileAttributes::class.java, NOFOLLOW_LINKS) }
+        val attributes = try { Files.readAttributes(path, BasicFileAttributes::class.java, NOFOLLOW_LINKS) }
         catch (_: NoSuchFileException) { return null }
         if (!attributes.isRegularFile || attributes.size() !in 1..MAX_BYTES.toLong()) invalid()
         val data = ByteBuffer.allocate(MAX_BYTES + 1)
-        FileChannel.open(pointer, READ, NOFOLLOW_LINKS).use { channel ->
+        FileChannel.open(path, READ, NOFOLLOW_LINKS).use { channel ->
             while (data.hasRemaining()) {
                 when (channel.read(data)) {
                     -1 -> break

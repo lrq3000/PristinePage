@@ -5,6 +5,7 @@ import app.pristinepage.core.pipeline.*
 import app.pristinepage.data.model.*
 import app.pristinepage.data.repository.CommittedSource
 import app.pristinepage.data.repository.CommittedSources
+import app.pristinepage.data.repository.ScopedCommittedOriginals
 import app.pristinepage.image.decode.*
 import app.pristinepage.image.preview.OriginalPreviewRaster
 import java.io.File
@@ -79,6 +80,27 @@ class OriginalPreviewTest {
         assertTrue(propagated); assertEquals(0, f.lookups); assertEquals(0, f.decoded); assertEquals(0L, f.budget.usedBytes)
     }
 
+    @Test fun scopedOriginalPreviewNeedsOnlyOneVerifiedLoanAndKeepsExactPixels() = runBlocking<Unit> {
+        val f = Fixture()
+        f.loadScoped(2).use { preview ->
+            assertEquals(OutputSpec(PixelSize(2, 1), RenderPurpose.PREVIEW), preview.output)
+            assertEquals(f.info, preview.inspection)
+            assertArrayEquals(byteArrayOf(60, 60, 100, 229.toByte(), 100, 100), preview.image.toPackedByteArray())
+            assertEquals(1, f.lookups)
+            assertEquals(1, f.decoded)
+            assertThrows(IllegalStateException::class.java) { f.lastDecoded!!.image.toPackedByteArray() }
+        }
+        assertEquals(0L, f.budget.usedBytes)
+    }
+
+    @Test fun scopedOriginalRefusalAfterDecodeDoesNotDeliverOrRetainPixels() = runBlocking<Unit> {
+        val f = Fixture()
+        assertEquals(OperationErrorCode.PERMISSION_LOST, error { f.loadScoped(2, refuseAfterDecode = true) }.code)
+        assertEquals(1, f.decoded)
+        assertEquals(0L, f.budget.usedBytes)
+        assertThrows(IllegalStateException::class.java) { f.lastDecoded!!.image.toPackedByteArray() }
+    }
+
     private class Fixture(capacity: Long = 4L * 1024 * 1024) {
         val id = SourceId("11111111-1111-4111-8111-111111111111")
         val pixels = intArrayOf(0,0,0,100,20,40,200,40,80,240,60,120,20,100,200,120,120,160,220,140,120,255,160,80).map(Int::toByte).toByteArray()
@@ -93,15 +115,34 @@ class OriginalPreviewTest {
             returnedInfo = if (changeAfterSizing && lookups > 1) info.copy(sourcePixelHash = "c".repeat(64)) else info
             CommittedSource(id, SourceBlobId("22222222-2222-4222-8222-222222222222"), "a".repeat(64), 4, returnedInfo, file)
         }
-        private val decoder = SourceDecoder(sources, SourceFileDecoder { input, expected ->
+        private val codec = SourceFileDecoder { input, expected ->
             assertEquals(file, input); assertEquals("a".repeat(64), expected); decoded++
             val permit = DecodeAdmission(budget).admit(4,4,2,1)
             DecodedSource(returnedInfo, RgbImage(4,2,12,pixels), permit, expected).also { lastDecoded = it }
-        })
+        }
+        private val decoder = SourceDecoder(sources, codec)
+
+        suspend fun loadScoped(limit: Int, refuseAfterDecode: Boolean = false): OriginalPreviewRaster {
+            val scoped = ScopedCommittedOriginals { requested, expected, consume ->
+                assertNull(expected)
+                val original = sources.load(requested)
+                consume(original.binding(), file)
+                if (refuseAfterDecode) throw RepositoryFailure(OperationError(OperationErrorCode.PERMISSION_LOST, true, "library_reconnect_required", null))
+            }
+            val type = Class.forName("app.pristinepage.image.preview.OriginalPreviewLoader")
+            val constructor = try { type.getConstructor(SourceDecoder::class.java, ImageAllocationBudget::class.java) }
+            catch (_: NoSuchMethodException) { throw AssertionError("The loader still requires unscoped original lookup") }
+            return invoke(type, constructor.newInstance(SourceDecoder(scoped, codec), budget), id.value, limit)
+        }
+
         suspend fun load(limit: Int, source: String = id.value): OriginalPreviewRaster {
             val type = try { Class.forName("app.pristinepage.image.preview.OriginalPreviewLoader") }
             catch (_: ClassNotFoundException) { throw AssertionError("Verified original preview loader is absent") }
             val loader = type.getConstructor(CommittedSources::class.java, SourceDecoder::class.java, ImageAllocationBudget::class.java).newInstance(sources, decoder, budget)
+            return invoke(type, loader, source, limit)
+        }
+
+        private suspend fun invoke(type: Class<*>, loader: Any, source: String, limit: Int): OriginalPreviewRaster {
             return kotlin.coroutines.intrinsics.suspendCoroutineUninterceptedOrReturn { continuation ->
                 try { type.getMethod("load", String::class.java, Int::class.javaPrimitiveType, kotlin.coroutines.Continuation::class.java).invoke(loader, source, limit, continuation) }
                 catch (failure: InvocationTargetException) { throw failure.targetException }

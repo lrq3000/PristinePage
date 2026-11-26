@@ -7,6 +7,9 @@ import app.pristinepage.data.library.LibraryObjectTransfer.ObjectId
 import app.pristinepage.data.library.LocalLibraryMergeJournal
 import java.io.File
 import java.io.IOException
+import java.nio.file.Files
+import java.nio.file.attribute.BasicFileAttributeView
+import java.nio.file.attribute.FileTime
 import java.util.UUID
 import org.junit.Assert.*
 import org.junit.Rule
@@ -69,11 +72,145 @@ class LocalLibraryMergeJournalTest {
         assertEquals(stageText, stage.readText())
     }
 
+    @Test fun onlyTheLiveSelectedAttemptCanRecordCompletionAndReopenItWithoutReplay() {
+        val root = temporary.newFolder().canonicalFile
+        val (writer, stage) = stage(root)
+        val cold = selectedJournal(root)
+        val live = writer.startSelected(intent)
+        assertEquals(LocalLibraryMergeJournal.SelectedState(intent, completed = false), cold.inspectSelected(child.id))
+        assertThrows(IOException::class.java) { cold.startSelected(intent) }
+        live.recordCompletion(child)
+        assertEquals(LocalLibraryMergeJournal.SelectedState(intent, completed = true), cold.inspectSelected(child.id))
+        val receipt = File(stage.parentFile, "selected-merge.complete")
+        val bytes = receipt.readBytes()
+        assertThrows(IOException::class.java) { live.recordCompletion(child) }
+        assertArrayEquals(bytes, receipt.readBytes())
+        assertEquals(stageText, stage.readText())
+    }
+
+    @Test fun aSelectedCompletionWithTheWrongGenerationCannotPublishOrRenewItsToken() {
+        val (journal, stage) = stage(temporary.newFolder().canonicalFile)
+        val live = journal.startSelected(intent)
+        assertThrows(IOException::class.java) { live.recordCompletion(baseline) }
+        assertThrows(IOException::class.java) { live.recordCompletion(child) }
+        assertFalse(File(stage.parentFile, "selected-merge.complete").exists())
+        assertEquals(LocalLibraryMergeJournal.SelectedState(intent, completed = false), journal.inspectSelected(child.id))
+    }
+
+    @Test fun aVisibleSelectedCompletionMayOnlyBeReadAfterItsDirectoryBarrierSucceeds() {
+        var fail = true
+        val (journal, stage) = stage(temporary.newFolder().canonicalFile,
+            DirectorySync { parent -> !(fail && File(parent, "selected-merge.complete").isFile) })
+        val live = journal.startSelected(intent)
+        assertThrows(IOException::class.java) { live.recordCompletion(child) }
+        val receipt = File(stage.parentFile, "selected-merge.complete")
+        assertTrue(receipt.isFile)
+        assertThrows(IOException::class.java) { journal.inspectSelected(child.id) }
+        fail = false
+        assertEquals(LocalLibraryMergeJournal.SelectedState(intent, completed = true), journal.inspectSelected(child.id))
+        receipt.writeBytes(byteArrayOf(1))
+        assertThrows(IOException::class.java) { journal.inspectSelected(child.id) }
+        assertArrayEquals(byteArrayOf(1), receipt.readBytes())
+    }
+
+    @Test fun aSelectedCompletionWithoutItsIntentCanNeitherBeAdoptedNorReissued() {
+        val (journal, stage) = stage(temporary.newFolder().canonicalFile)
+        journal.startSelected(intent).recordCompletion(child)
+        val receipt = File(stage.parentFile, "selected-merge.complete")
+        val bytes = receipt.readBytes()
+        check(File(stage.parentFile, "merge.intent").delete())
+        assertThrows(IOException::class.java) { journal.inspectSelected(child.id) }
+        assertThrows(IOException::class.java) { journal.startSelected(intent) }
+        assertFalse(File(stage.parentFile, "merge.intent").exists())
+        assertArrayEquals(bytes, receipt.readBytes())
+    }
+
+    @Test fun selectedColdInspectionRejectsCatalogBytesChangedDuringTheDirectoryBarrier() {
+        var corrupt = false
+        val (journal, _) = stage(temporary.newFolder().canonicalFile, DirectorySync { parent ->
+            val receipt = File(parent, "selected-merge.complete")
+            if (corrupt && receipt.isFile) File(parent, "catalog.sqlite").writeText("b".repeat(512))
+            true
+        })
+        journal.startSelected(intent).recordCompletion(child)
+        corrupt = true
+        assertThrows(IOException::class.java) { journal.inspectSelected(child.id) }
+    }
+
+    @Test fun selectedInspectionDistinguishesAnAbsentAttemptFromRetainedPreIntentEvidence() {
+        val (journal, stage) = stage(temporary.newFolder().canonicalFile)
+        assertNull(journal.inspectSelected(id(6)))
+        assertThrows(IOException::class.java) { journal.inspectSelected(child.id) }
+        val spill = File(stage.parentFile, ".pristinepage-interrupted.part").apply { writeText("retain") }
+        check(stage.delete())
+        assertThrows(IOException::class.java) { journal.inspectSelected(child.id) }
+        assertEquals("retain", spill.readText())
+    }
+
+    @Test fun aSelectedReceiptCannotConfirmACatalogWithAnUnexpectedSidecar() {
+        val (journal, stage) = stage(temporary.newFolder().canonicalFile)
+        journal.startSelected(intent).recordCompletion(child)
+        for (suffix in listOf("-wal", "-shm", "-journal")) {
+            val sidecar = File(stage.parentFile, stage.name + suffix).apply { writeText("retain") }
+            assertThrows(IOException::class.java) { journal.inspectSelected(child.id) }
+            assertEquals("retain", sidecar.readText())
+            check(sidecar.delete())
+        }
+    }
+
+    @Test fun coldInspectionRejectsAnExactByteReceiptReplacedAfterItsDirectoryBarrier() {
+        var replace = false
+        val (journal, stage) = stage(temporary.newFolder().canonicalFile, DirectorySync { parent ->
+            if (replace && parent.name == "merge-stages") {
+                replace = false
+                val receipt = File(parent, "${child.id}/selected-merge.complete")
+                val original = File(receipt.parentFile, "retained-original")
+                Files.move(receipt.toPath(), original.toPath())
+                Files.copy(original.toPath(), receipt.toPath())
+                // The retained original prevents inode reuse. Distinct times also identify the test nodes on Windows JVMs without fileKey().
+                Files.getFileAttributeView(receipt.toPath(), BasicFileAttributeView::class.java)
+                    .setTimes(null, null, FileTime.fromMillis(946_684_800_000))
+            }
+            true
+        })
+        journal.startSelected(intent).recordCompletion(child)
+        replace = true
+        assertThrows(IOException::class.java) { journal.inspectSelected(child.id) }
+        val retained = File(stage.parentFile, "retained-original")
+        assertArrayEquals(retained.readBytes(), File(stage.parentFile, "selected-merge.complete").readBytes())
+    }
+
+    @Test fun coldInspectionAdmitsCatalogExtentBeforeItsBarrier() {
+        var syncs = 0
+        val (journal, stage) = stage(temporary.newFolder().canonicalFile, DirectorySync { ++syncs; true })
+        journal.startSelected(intent).recordCompletion(child)
+        stage.appendText("extra")
+        syncs = 0
+        assertThrows(IOException::class.java) { journal.inspectSelected(child.id) }
+        assertEquals(0, syncs)
+    }
+
+    @Test fun lossOfAuthorityAfterStagingButBeforeLinkCannotLeaveACompletion() {
+        val (journal, stage) = stage(temporary.newFolder().canonicalFile)
+        val live = journal.startSelected(intent)
+        assertThrows(IOException::class.java) {
+            live.recordCompletion(child, requireOwner = {
+                if (stage.parentFile.list().orEmpty().any { it.endsWith(".part") }) throw IOException("Issuing authority changed")
+            })
+        }
+        assertFalse(File(stage.parentFile, "selected-merge.complete").exists())
+        assertEquals(LocalLibraryMergeJournal.SelectedState(intent, completed = false), journal.inspectSelected(child.id))
+    }
+
     private fun stage(root: File, sync: DirectorySync = DirectorySync { true }, ancestor: File = checkNotNull(root.parentFile)): Pair<LocalLibraryMergeJournal, File> {
         val stageDirectory = File(root, "merge-stages/${child.id}").apply { check(mkdirs()) }
         val stage = File(stageDirectory, "catalog.sqlite").apply { writeText(stageText) }
-        return LocalLibraryMergeJournal(root, ancestor.toPath(), sync) to stage
+        return selectedJournal(root, sync, ancestor) to stage
     }
+
+    private fun selectedJournal(root: File, sync: DirectorySync = DirectorySync { true }, ancestor: File = checkNotNull(root.parentFile)) =
+        // Test-only fallback for Windows providers with no file key. The synthetic replacement fixture sets a known distinct creation time.
+        LocalLibraryMergeJournal(root, ancestor.toPath(), sync, nodeIdentity = { _, attrs -> attrs.fileKey() ?: attrs.creationTime() })
 
     private fun id(value: Int) = UUID(0, value.toLong()).toString()
 }

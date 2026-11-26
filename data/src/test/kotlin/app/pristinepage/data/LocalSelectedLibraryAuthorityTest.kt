@@ -4,6 +4,7 @@ import app.pristinepage.data.files.DirectorySync
 import app.pristinepage.data.library.ActiveLibraryFence.Identity
 import app.pristinepage.data.library.ActiveLibraryFence.Location
 import app.pristinepage.data.library.ActiveLibraryFence.Selection
+import app.pristinepage.data.library.LibraryActivation
 import app.pristinepage.data.library.LibraryFolderGrantRecord
 import app.pristinepage.data.library.LibraryGeneration
 import app.pristinepage.data.library.LibraryObjectTransfer.ObjectId
@@ -26,6 +27,180 @@ class LocalSelectedLibraryAuthorityTest {
     )
     private val uri = "content://com.android.externalstorage.documents/tree/primary%3ADocuments%2FScans"
     private val grant = LibraryFolderGrantRecord("34adcfe8-fc9e-46d0-bc74-da5355276c24", uri, 1)
+    private val successor = generation.copy(
+        id = "e6cbf4e1-0560-4e04-82eb-1d77fd44d961", predecessorId = generation.id, catalog = ObjectId("c".repeat(64), 621),
+    )
+
+    @Test fun sameFolderAdvanceReopensAtOneNewActivationAndRetainsThePriorVerification() {
+        val root = roots.newFolder().canonicalFile
+        val writer = LocalSelectedLibraryAuthority(root, sync)
+        val selected = select(writer, writable = true)
+        val selectedPath = root.resolve("folder-verifications").resolve("${grant.grantId}-${generation.id}")
+        val next = writer.advanceVerifiedFolderGeneration(selected, successor) {}
+        val reopened = assertIs<LocalSelectedLibraryAuthority.Selected.Folder>(LocalSelectedLibraryAuthority(root, sync).read())
+        assertEquals(next, reopened)
+        assertEquals(selected.grant, reopened.grant)
+        assertEquals(Identity(generation.libraryId, 3), reopened.selection.identity)
+        assertEquals(successor, reopened.expectedGeneration)
+        assertEquals(generation.encode().toList(), selectedPath.readBytes().toList())
+        assertFailsWith<IOException> { writer.advanceVerifiedFolderGeneration(selected, successor) { error("Stale binding used") } }
+        assertEquals(reopened, writer.read())
+    }
+
+    @Test fun reconstructsAnIssuingBindingOnlyFromTheCurrentChildAndRetainedSameGrantProof() {
+        val root = roots.newFolder().canonicalFile
+        val writer = LocalSelectedLibraryAuthority(root, sync)
+        val issuing = select(writer, writable = true)
+        val adopted = writer.advanceVerifiedFolderGeneration(issuing, successor) {}
+        val cold = LocalSelectedLibraryAuthority(root, sync)
+        assertEquals(issuing, cold.readVerifiedRecipePredecessor(adopted))
+        assertEquals(issuing, cold.readArchivedRecipePredecessor(2, grant.grantId, generation))
+        assertEquals(null, cold.readArchivedRecipePredecessor(2, grant.grantId, generation.copy(catalog = ObjectId("9".repeat(64), 512))))
+        val predecessor = root.resolve("folder-verifications").resolve("${grant.grantId}-${generation.id}")
+        java.nio.file.Files.delete(predecessor.toPath())
+        assertEquals(null, cold.readVerifiedRecipePredecessor(adopted))
+        assertEquals(null, cold.readArchivedRecipePredecessor(2, grant.grantId, generation))
+        assertEquals(adopted, cold.read())
+        writer.returnToDefault(adopted.selection) {}
+        assertFailsWith<IOException> { cold.readVerifiedRecipePredecessor(adopted) }
+    }
+
+    @Test fun sameFolderAdvanceRefusesReadOnlyBindingsAndUnrelatedGenerationsBeforeStaging() {
+        val readOnly = LocalSelectedLibraryAuthority(roots.newFolder().canonicalFile, sync)
+        val readSelection = select(readOnly, writable = false)
+        assertFailsWith<IOException> { readOnly.advanceVerifiedFolderGeneration(readSelection, successor) { error("Read-only binding used") } }
+        assertEquals(readSelection, readOnly.read())
+
+        val root = roots.newFolder().canonicalFile
+        val writer = LocalSelectedLibraryAuthority(root, sync)
+        val selected = select(writer, writable = true)
+        val folder = root.resolve("folder-verifications")
+        val oldNames = folder.list()!!.toSet()
+        for (wrong in listOf(generation, successor.copy(libraryId = initial.identity.libraryId),
+            successor.copy(predecessorId = null), successor.copy(catalogSchema = 7))) {
+            assertFailsWith<IOException> { writer.advanceVerifiedFolderGeneration(selected, wrong) { error("Invalid generation used") } }
+        }
+        assertEquals(selected, writer.read())
+        assertEquals(oldNames, folder.list()!!.toSet())
+    }
+
+    @Test fun sameFolderAdvanceRefusesAuthorityLossAtThePointerAndDoesNotTreatAnUncertainMoveAsRefusal() {
+        val root = roots.newFolder().canonicalFile
+        val writer = LocalSelectedLibraryAuthority(root, sync)
+        val selected = select(writer, writable = true)
+        val newVerification = root.resolve("folder-verifications").resolve("${grant.grantId}-${successor.id}")
+        assertFailsWith<IOException> {
+            writer.advanceVerifiedFolderGeneration(selected, successor) {
+                if (newVerification.exists()) throw IOException("Provider authority ended")
+            }
+        }
+        assertEquals(selected, writer.read())
+        val pointer = root.resolve("active-library")
+        val predecessor = pointer.readBytes().toList()
+        val failAck = LocalSelectedLibraryAuthority(root, DirectorySync { pointer.readBytes().toList() == predecessor })
+        assertFailsWith<IOException> { failAck.advanceVerifiedFolderGeneration(selected, successor) {} }
+        val reconciled = assertIs<LocalSelectedLibraryAuthority.Selected.Folder>(writer.read())
+        assertEquals(successor, reconciled.expectedGeneration)
+        assertFailsWith<IOException> { writer.advanceVerifiedFolderGeneration(selected, successor) { error("Acknowledgment retried a write") } }
+        assertEquals(reconciled, writer.read())
+    }
+
+    @Test fun authorityLostDuringTheFinalPrivateReadCannotPublishThePointer() {
+        val root = roots.newFolder().canonicalFile
+        val good = LocalSelectedLibraryAuthority(root, sync)
+        val selected = select(good, writable = true)
+        var allowed = true
+        val writer = LocalSelectedLibraryAuthority(root, DirectorySync {
+            if (root.list().orEmpty().any { name -> name.startsWith(".active-library-") && name.endsWith(".pending") }) allowed = false
+            true
+        })
+        assertFailsWith<IOException> {
+            writer.advanceVerifiedFolderGeneration(selected, successor) {
+                if (!allowed) throw IOException("Provider grant ended during the final private read")
+            }
+        }
+        assertEquals(selected, good.read())
+    }
+
+    @Test fun reconnectGrantIsHandedOffOnlyAtTheActualPointerSwap() {
+        val root = roots.newFolder().canonicalFile
+        val stable = LocalSelectedLibraryAuthority(root, sync)
+        val selected = select(stable, writable = true)
+        val pointer = root.resolve("active-library")
+        val original = pointer.readBytes().toList()
+        val verification = root.resolve("folder-verifications").resolve("${grant.grantId}-${successor.id}")
+        var handoffs = 0
+        val unavailable = LocalSelectedLibraryAuthority(root, DirectorySync { !verification.exists() })
+        assertFailsWith<IOException> {
+            unavailable.advanceOrReadVerifiedFolderGeneration(selected, successor, beforePointerReplace = { handoffs++ }) {}
+        }
+        assertEquals(0, handoffs)
+        assertEquals(original, pointer.readBytes().toList())
+
+        val advanced = stable.advanceOrReadVerifiedFolderGeneration(selected, successor, beforePointerReplace = {
+            assertEquals(original, pointer.readBytes().toList())
+            handoffs++
+        }) {}
+        assertEquals(1, handoffs)
+        assertEquals(advanced, stable.read())
+    }
+
+    @Test fun exactSuccessorReadbackNeverChangesAnUnadvancedPointer() {
+        val writer = LocalSelectedLibraryAuthority(roots.newFolder().canonicalFile, sync)
+        val selected = select(writer, writable = true)
+        assertEquals(null, writer.readAdvancedFolderGeneration(selected, successor))
+        assertEquals(selected, writer.read())
+
+        val advanced = writer.advanceVerifiedFolderGeneration(selected, successor) {}
+        assertEquals(advanced, writer.readAdvancedFolderGeneration(selected, successor))
+        assertEquals(null, writer.readAdvancedFolderGeneration(selected, successor.copy(catalogSchema = 7)))
+        assertEquals(null, writer.readAdvancedFolderGeneration(selected, successor.copy(catalog = ObjectId("d".repeat(64), 621))))
+    }
+
+    @Test fun aDeliberateReturnToDefaultReadsOnlyTheOriginalPrivateLibraryIdentity() {
+        val root = roots.newFolder().canonicalFile
+        val writer = LocalSelectedLibraryAuthority(root, sync)
+        val folder = select(writer, writable = true)
+        val switched = writer.returnToDefault(folder.selection) {}
+        assertEquals(Selection(Location.Default, initial.identity.copy(activation = 3)), switched.selection)
+        assertEquals(switched, LocalSelectedLibraryAuthority(root, sync).read())
+        assertEquals(LibraryActivation(initial.identity.libraryId, 1), writer.verifiedDefaultOrigin(switched))
+        assertFailsWith<IOException> { writer.returnToDefault(folder.selection) { error("Stale switch offered another mutation") } }
+        val next = folder.selection.copy(identity = folder.selection.identity.copy(activation = 4))
+        writer.chooseFolder(switched.selection, next, folder.grant, folder.expectedGeneration)
+        val reread = assertIs<LocalSelectedLibraryAuthority.Selected.Folder>(writer.read())
+        assertFailsWith<IOException> { writer.verifiedDefaultOrigin(switched) }
+        assertEquals(initial.identity.copy(activation = 5), writer.returnToDefault(reread.selection) {}.selection.identity)
+    }
+
+    @Test fun aLostPointerAcknowledgmentReadsBackTheExactSuccessorWithoutReenteringPublication() {
+        val root = roots.newFolder().canonicalFile
+        val pointer = root.resolve("active-library")
+        val stable = LocalSelectedLibraryAuthority(root, sync)
+        val before = select(stable, writable = true)
+        val original = pointer.readBytes().toList()
+        var lost = false
+        var writerChecks = 0
+        val flaky = LocalSelectedLibraryAuthority(root, DirectorySync {
+            if (!lost && pointer.readBytes().toList() != original) { lost = true; false } else true
+        })
+        val advanced = flaky.advanceOrReadVerifiedFolderGeneration(before, successor) {
+            check(!lost) { "Cannot repeat live writer activity after the uncertain replacement" }
+            writerChecks++
+        }
+        assertEquals(true, lost)
+        assertEquals(2, writerChecks)
+        assertEquals(successor, advanced.expectedGeneration)
+        assertEquals(advanced, stable.read())
+    }
+
+    private fun select(writer: LocalSelectedLibraryAuthority, writable: Boolean): LocalSelectedLibraryAuthority.Selected.Folder {
+        writer.initializeDefault(initial)
+        val exact = grant.copy(returnedModes = if (writable) 3 else 1)
+        val next = Selection(Location.Folder(exact.grantId, generation.id), Identity(generation.libraryId, 2))
+        writer.chooseFolder(initial, next, exact, generation)
+        return assertIs<LocalSelectedLibraryAuthority.Selected.Folder>(writer.read())
+    }
 
     @Test fun durableSelectionReopensWithTheSameTreeAndExactFullGeneration() {
         val root = roots.newFolder().canonicalFile
@@ -40,6 +215,43 @@ class LocalSelectedLibraryAuthorityTest {
         assertFailsWith<IOException> { reopened.requireExact(uri, generation.copy(catalog = ObjectId("b".repeat(64), 512))) }
         assertFailsWith<IOException> { reopened.requireExact(uri.replace("Scans", "Other"), generation) }
         reopened.requireExact(uri, generation)
+    }
+
+    @Test fun aFinalDestinationRefusalDoesNotRetainTheProvisionalFolderGrant() {
+        val root = roots.newFolder().canonicalFile
+        val writer = LocalSelectedLibraryAuthority(root, sync)
+        assertEquals(true, writer.initializeDefault(initial))
+        val next = Selection(Location.Folder(grant.grantId, generation.id), Identity(generation.libraryId, 2))
+        var retained = false
+        assertFailsWith<IOException> {
+            writer.chooseFolder(initial, next, grant, generation, beforePointerReplace = { retained = true }) {
+                if (root.list().orEmpty().any { it.startsWith(".active-library-") && it.endsWith(".pending") }) {
+                    throw IOException("The destination changed during pointer staging")
+                }
+            }
+        }
+        assertEquals(false, retained)
+        assertEquals(initial, writer.read()?.selection)
+    }
+
+    @Test fun grantRetentionPrecedesTheSinglePointerReplacementEvenIfTheResultCannotBeAcknowledged() {
+        val root = roots.newFolder().canonicalFile
+        val stable = LocalSelectedLibraryAuthority(root, sync)
+        assertEquals(true, stable.initializeDefault(initial))
+        var retained = 0
+        val next = Selection(Location.Folder(grant.grantId, generation.id), Identity(generation.libraryId, 2))
+        val writer = LocalSelectedLibraryAuthority(root, DirectorySync {
+            // The first post-replacement barrier fails, leaving the exact selected pointer visible but unacknowledged.
+            !root.resolve("active-library").readBytes().toString(Charsets.US_ASCII).contains("\n2\n")
+        })
+        assertFailsWith<IOException> {
+            writer.chooseFolder(initial, next, grant, generation, beforePointerReplace = {
+                assertEquals(initial, stable.read()?.selection)
+                retained++
+            })
+        }
+        assertEquals(1, retained)
+        assertEquals(next.identity, stable.read()?.selection?.identity)
     }
 
     @Test fun refusingANewerFolderBindingCannotReplaceTheAuthoritativeDefault() {

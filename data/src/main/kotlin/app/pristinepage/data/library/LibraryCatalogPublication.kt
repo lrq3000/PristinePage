@@ -37,14 +37,20 @@ internal class LibraryCatalogPublication(private val store: Store, private val p
         verifyExistingOnly: Boolean = false,
         requiresObjects: Boolean = false,
         beforeNewMarker: ((LibraryGeneration) -> Unit)? = null,
+        createOnly: Boolean = false,
         verifyReopen: (File) -> Unit,
     ): LibraryGeneration {
         require(maximumCatalogBytes > 0)
+        require(!createOnly || !verifyExistingOnly)
         if (generation.catalog.byteCount > maximumCatalogBytes) throw IOException("Library catalog exceeds admission limit")
         val alreadyMarked = markerExists(generation)
+        if (createOnly && alreadyMarked) throw IOException("A fresh publication cannot adopt a visible library marker")
         if (verifyExistingOnly && !alreadyMarked) throw IOException("The expected published library marker is missing")
         checkpoint()
         val catalog = store.openCatalog(generation)
+        if (createOnly && catalog != null) {
+            catalog.use { throw IOException("A fresh publication cannot adopt an existing catalog") }
+        }
         if (catalog == null) {
             if (alreadyMarked) throw IOException("Committed library catalog is missing")
             checkpoint()

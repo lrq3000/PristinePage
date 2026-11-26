@@ -13,7 +13,8 @@ import kotlinx.coroutines.ensureActive
 import java.time.ZoneId
 import java.util.Locale
 
-data class LibraryStartup(val report: RecoveryReport, val activation: LibraryActivation? = null)
+data class LibraryStartup(val report: RecoveryReport, val activation: LibraryActivation? = null,
+    val selectedFolder: Boolean = false, val reconnect: Boolean = false, val selectedRecipeWritable: Boolean = false)
 
 /** Immediate foreground commands against the existing Application-owned store. These ports carry no Activity, live bitmap, private path or persistable-grant promise. Real adapter delegates to the already tested repositories/controller. */
 interface LibraryActions {
@@ -33,11 +34,15 @@ interface LibraryActions {
     suspend fun activeImportRequest(id: DocumentId): PhotoImportRequest? = activeImport(id)?.let { PhotoImportRequest.abandonmentOnly(it) }
     suspend fun activeIssuedImport(id: DocumentId, issuedAt: LibraryActivation): PhotoImportRequest? = activeImportRequest(id)
     suspend fun create(title: String): DocumentId
+    suspend fun createIssued(title: String, issuedAt: LibraryActivation?): DocumentId = create(title)
     suspend fun begin(document: DocumentSummary): PhotoImportRequest
+    suspend fun beginIssued(document: DocumentSummary, issuedAt: LibraryActivation?): PhotoImportRequest = begin(document)
     suspend fun deliver(request: PhotoImportRequest, selection: LibraryPhotoResult): List<IngestResult>
     suspend fun cancel(request: PhotoImportRequest)
     suspend fun rename(document: DocumentId, revision: Long, title: String): DocumentMutationResult =
         DocumentMutationResult.Rejected(OperationError(OperationErrorCode.PROVIDER_UNAVAILABLE, false, "rename_unavailable", document.value))
+    suspend fun renameIssued(document: DocumentId, revision: Long, title: String, issuedAt: LibraryActivation?): DocumentMutationResult =
+        rename(document, revision, title)
 }
 
 /** Opt-in so older/synthetic consumers of the plain ID-ordered catalog keep their own cursor contract. */
@@ -112,7 +117,18 @@ data class LibraryState(
     val pageSearchUnavailable: Boolean = false,
     val albumSearchUnavailable: Boolean = false,
     val restoringSelection: Boolean = false,
+    val selectedFolder: Boolean = false,
+    val reconnect: Boolean = false,
+    val selectedRecipeWritable: Boolean = false,
+    val recipeWriteNeedsReconnect: Boolean = false,
 ) {
+    /** Presentation eligibility only: the selected writer checks the grant, physical root and pointer again at use. */
+    internal fun canApplyRecipe(issuedAt: LibraryActivation): Boolean =
+        activation == issuedAt && !reconnect && (!selectedFolder || selectedRecipeWritable && !recipeWriteNeedsReconnect)
+
+    internal val settingsReconnectAt: LibraryActivation?
+        get() = activation.takeIf { reconnect || selectedFolder && recipeWriteNeedsReconnect }
+
     // Keep transient search input (which can contain a private quote) out of incidental diagnostics.
     override fun toString() = "LibraryState(loading=$loading, albumCount=${documents.size}, hasMore=$hasMore, phase=$phase)"
 }

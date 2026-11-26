@@ -20,6 +20,8 @@ import java.nio.file.StandardOpenOption.READ
 import java.nio.file.StandardOpenOption.WRITE
 import java.nio.file.attribute.BasicFileAttributes
 
+private const val CATALOG_REVISION_SPEND_HEADER = "pristinepage-catalog-revision-spent-v1\n"
+
 /** Local filesystem only. The caller owns a stable, exclusively controlled app-managed directory; provider URIs cannot be translated into this capability. */
 internal class LocalLibraryDirectory(root: File, private val directorySync: DirectorySync = PlatformDirectorySync) :
     LibraryObjectTransfer.Store, LibraryMergePublication.Destination {
@@ -38,21 +40,122 @@ internal class LocalLibraryDirectory(root: File, private val directorySync: Dire
         }
     }
 
+    override fun requireIndependentRevisionJournal(path: Path) = requireIndependentScratch(path)
+
     override fun open(id: LibraryObjectTransfer.ObjectId) = open(objectPath(id))
     override fun create(id: LibraryObjectTransfer.ObjectId, write: (OutputStream) -> Unit) = create(objectPath(id), write = write)
     override fun create(id: LibraryObjectTransfer.ObjectId, requireCurrent: () -> Unit, write: (OutputStream) -> Unit) =
         create(objectPath(id), beforeStage = requireCurrent, beforeLink = requireCurrent, write = write)
     override fun openCatalog(generation: LibraryGeneration) = open(generation.catalogPath)
     override fun createCatalog(generation: LibraryGeneration, write: (OutputStream) -> Unit) = create(generation.catalogPath, write = write)
+    override fun createGuardedCatalog(generation: LibraryGeneration, requireCurrent: () -> Unit, write: (OutputStream) -> Unit) =
+        create(generation.catalogPath, beforeStage = requireCurrent, beforeLink = requireCurrent, write = write)
     override fun openMarker(generation: LibraryGeneration) = open(markerPath(generation))
+
+    fun requireUnspentCatalogRevision(operation: String) {
+        open(catalogRevisionSpend(operation))?.use { throw IOException("The catalog revision attempt is already spent") }
+    }
+
+    /** A one-use admission record, not completion. It must be durable before any writable destination stage is opened. */
+    fun spendCatalogRevision(predecessor: LibraryGeneration, successor: LibraryGeneration, requireOwner: () -> Unit) {
+        var linkAttempted = false
+        try {
+            create(catalogRevisionSpend(successor.id), privateSupport = true, beforeStage = requireOwner, beforeLink = {
+                requireOwner()
+                linkAttempted = true
+            }) { it.write(catalogRevisionSpendBytes(predecessor, successor)) }
+        } catch (failure: IOException) {
+            if (linkAttempted) throw CatalogRevisionSpendUnconfirmed()
+            throw failure
+        }
+    }
+
+    fun catalogRevisionSpendByteCount(predecessor: LibraryGeneration, successor: LibraryGeneration): Int =
+        catalogRevisionSpendBytes(predecessor, successor).size
+
+    /** Observe a private spend under the caller's exclusive lane and held nodes; no provider, pointer, or write authority follows. */
+    fun requireRecordedCatalogRevision(predecessor: LibraryGeneration, successor: LibraryGeneration,
+        checkpoint: () -> Unit = {}, hold: (Path, (requireNodes: () -> Unit, syncParents: () -> Unit, openHeld: () -> InputStream) -> Unit) -> Unit,
+    ) {
+        val expected = catalogRevisionSpendBytes(predecessor, successor)
+        val leaf = readPath(catalogRevisionSpend(successor.id))
+        fun refused(): Nothing = throw IOException("The catalog revision spend does not match its durable record")
+        fun requireBytes(openHeld: () -> InputStream) {
+            // Both reads consume only a bounded canonical record plus an EOF probe from the admitted node.
+            openHeld().buffered(expected.size + 1).use {
+                for (byte in expected) {
+                    checkpoint()
+                    if (it.read() != byte.toInt().and(255)) refused()
+                }
+                if (it.read() != -1) refused()
+            }
+        }
+        hold(leaf) { requireNodes, syncParents, openHeld ->
+            checkpoint()
+            requireNodes()
+            requireBytes(openHeld)
+            requireNodes()
+            syncParents()
+            requireNodes()
+            requireBytes(openHeld)
+            requireNodes()
+            checkpoint()
+        }
+    }
+
+    private fun catalogRevisionSpendBytes(predecessor: LibraryGeneration, successor: LibraryGeneration): ByteArray =
+        CATALOG_REVISION_SPEND_HEADER.toByteArray(Charsets.US_ASCII) + predecessor.encode() + successor.encode()
+
+    private fun catalogRevisionSpend(operation: String): String {
+        requireOpaqueId(operation)
+        return "catalog-revision-spends/$operation.spent"
+    }
 
     /** Private merge-journal use only. An operation ID is never supplied by SQLite rows or a display label. */
     fun openMergeIntent(generation: String) = open(mergeStagePath(generation) + "/merge.intent")
 
-    fun createMergeIntent(generation: String, bytes: ByteArray) =
-        create(mergeStagePath(generation) + "/merge.intent") { it.write(bytes) }
+    fun createMergeIntent(generation: String, bytes: ByteArray, beforeLink: () -> Unit = {}) =
+        create(mergeStagePath(generation) + "/merge.intent", beforeLink = beforeLink) { it.write(bytes) }
 
     fun openMergeStage(generation: String) = open(mergeStagePath(generation) + "/catalog.sqlite")
+
+    fun requireFreshSelectedMergeStage(generation: String) {
+        Files.newDirectoryStream(readPath(mergeStagePath(generation))).use { entries ->
+            val names = entries.iterator()
+            if (!names.hasNext() || names.next().fileName.toString() != "catalog.sqlite" || names.hasNext()) {
+                throw IOException("The private selected merge stage is not fresh")
+            }
+        }
+    }
+
+    fun openSelectedMergeCompletion(generation: String) = open(mergeStagePath(generation) + "/selected-merge.complete")
+
+    fun createSelectedMergeCompletion(generation: String, bytes: ByteArray, beforeLink: () -> Unit) =
+        create(mergeStagePath(generation) + "/selected-merge.complete", beforeLink = beforeLink) { it.write(bytes) }
+
+    data class MergeNode(val identity: Any, val byteCount: Long)
+    data class SelectedMergeEvidence(val attempt: Any, val catalog: MergeNode?, val intent: MergeNode?, val completion: MergeNode?)
+
+    /** Pin the exact observed nodes across the directory barrier; an unexplained SQLite sidecar invalidates the closed-stage proof. */
+    fun selectedMergeEvidence(generation: String, identity: (Path, BasicFileAttributes) -> Any): SelectedMergeEvidence? {
+        val relative = mergeStagePath(generation)
+        fun attributes(path: Path): BasicFileAttributes? = try {
+            Files.readAttributes(path, BasicFileAttributes::class.java, NOFOLLOW_LINKS)
+        } catch (_: NoSuchFileException) { null }
+        val attempt = readPath(relative)
+        val parent = attributes(attempt) ?: return null
+        if (!parent.isDirectory) throw IOException("The private selected merge attempt is not a directory")
+        fun file(name: String): MergeNode? {
+            val path = readPath("$relative/$name")
+            val attrs = attributes(path) ?: return null
+            if (!attrs.isRegularFile) throw IOException("The private selected merge evidence is not a regular file")
+            return MergeNode(identity(path, attrs), attrs.size())
+        }
+        for (suffix in listOf("-wal", "-shm", "-journal")) {
+            if (attributes(readPath("$relative/catalog.sqlite$suffix")) != null) throw IOException("The selected merge catalog is not closed")
+        }
+        return SelectedMergeEvidence(identity(attempt, parent), file("catalog.sqlite"), file("merge.intent"), file("selected-merge.complete"))
+    }
 
     enum class ExportRecord(val nameOnDisk: String) {
         INTENT("export.intent"), COMPLETE("export.complete"), ACKNOWLEDGED("export.ack"),
@@ -63,9 +166,12 @@ internal class LocalLibraryDirectory(root: File, private val directorySync: Dire
     fun createExportRecord(record: ExportRecord, bytes: ByteArray, beforeLink: () -> Unit) =
         create(record.nameOnDisk, beforeLink = beforeLink) { it.write(bytes) }
 
-    fun requireAndForceExportStage(generation: LibraryGeneration, checkpoint: () -> Unit) {
+    fun requireAndForceExportStage(generation: LibraryGeneration, checkpoint: () -> Unit) =
+        requireAndForceClosedCatalog(generation, checkpoint)
+
+    fun requireAndForceClosedCatalog(generation: LibraryGeneration, checkpoint: () -> Unit) {
         val stage = readPath("catalog.sqlite")
-        if (!presentRegularFile(stage)) throw IOException("Private backup catalog is missing")
+        if (!presentRegularFile(stage)) throw IOException("Private closed catalog is missing")
         FileChannel.open(stage, READ, WRITE, NOFOLLOW_LINKS).use {
             generation.verifyCatalog(Channels.newInputStream(it), checkpoint)
             it.force(true)
@@ -79,20 +185,24 @@ internal class LocalLibraryDirectory(root: File, private val directorySync: Dire
             .use { generation.verifyCatalog(it, checkpoint) }
 
     /** The private owner name starts as an exclusive hard link to the actual staged inode, not a second catalog copy. */
-    fun anchorExportStage() {
+    fun anchorExportStage() = anchorClosedCatalog("export.catalog.owner")
+
+    fun anchorClosedCatalog(ownerLeaf: String) {
         val stage = readPath("catalog.sqlite")
-        val owner = readPath("export.catalog.owner")
-        if (!presentRegularFile(stage)) throw IOException("Private backup catalog is missing")
+        val owner = readPath(ownerLeaf)
+        if (!presentRegularFile(stage)) throw IOException("Private closed catalog is missing")
         Files.createLink(owner, stage)
         forceExportJournal()
-        requireExportStageOwner()
+        requireClosedCatalogOwner(ownerLeaf)
     }
 
-    fun requireExportStageOwner() {
+    fun requireExportStageOwner() = requireClosedCatalogOwner("export.catalog.owner")
+
+    fun requireClosedCatalogOwner(ownerLeaf: String) {
         val stage = readPath("catalog.sqlite")
-        val owner = readPath("export.catalog.owner")
+        val owner = readPath(ownerLeaf)
         if (!presentRegularFile(stage) || !presentRegularFile(owner) || !Files.isSameFile(stage, owner)) {
-            throw IOException("The private backup catalog has no exact attempt owner")
+            throw IOException("The closed catalog has no exact attempt owner")
         }
     }
 
@@ -176,7 +286,26 @@ internal class LocalLibraryDirectory(root: File, private val directorySync: Dire
         forceDirectory(checkNotNull(paths.root.parentFile))
     }
 
+    enum class RecipeEditRecord(val leaf: String) {
+        INTENT("recipe-edit.intent"), COMPLETED("recipe-edit.complete"), ADOPTED("recipe-edit.adopted"),
+    }
+
+    fun openRecipeEditRecord(record: RecipeEditRecord) = open(record.leaf)
+
+    fun createRecipeEditRecord(record: RecipeEditRecord, bytes: ByteArray,
+        recordIdentity: (Path) -> Any, requireOwner: (Path?) -> Unit,
+    ): Any {
+        var published: Any? = null
+        create(record.leaf, privateSupport = true, beforeStage = { requireOwner(null) },
+            recordIdentity = recordIdentity, verifyRecordLink = requireOwner, onVerifiedLink = { published = it },
+            discardDefiniteRefusal = record == RecipeEditRecord.ADOPTED) { it.write(bytes) }
+        return checkNotNull(published)
+    }
+
     /** Private grant records never cross a library export or accept a destination path from a provider. */
+    fun createDefaultOrigin(bytes: ByteArray) =
+        create("default-origin", privateSupport = true) { it.write(bytes) }
+
     fun createFolderGrant(record: LibraryFolderGrantRecord) =
         create(folderGrantPath(record.grantId), privateSupport = true) { it.write(record.encode()) }
 
@@ -210,14 +339,17 @@ internal class LocalLibraryDirectory(root: File, private val directorySync: Dire
         forceDirectory(paths.root)
     }
 
-    fun forceMergeStage(generation: String, durableAncestor: Path) {
+    fun forceMergeStage(generation: String, durableAncestor: Path, exactCatalogBytes: Long? = null) {
         val directory = mergeStagePath(generation)
         val stage = readPath("$directory/catalog.sqlite")
         if (!rootPath.startsWith(durableAncestor) || !Files.isDirectory(durableAncestor, NOFOLLOW_LINKS) ||
             durableAncestor.toRealPath() != durableAncestor
         ) throw IOException("Private merge stage has no admitted durable ancestor")
         if (!presentRegularFile(stage)) throw IOException("Private merge stage is missing")
-        FileChannel.open(stage, WRITE, NOFOLLOW_LINKS).use { it.force(true) }
+        FileChannel.open(stage, WRITE, NOFOLLOW_LINKS).use {
+            if (exactCatalogBytes != null && it.size() != exactCatalogBytes) throw IOException("The private merge stage extent changed")
+            it.force(true)
+        }
         var containing = checkNotNull(stage.parent)
         while (true) {
             forceDirectory(containing.toFile())
@@ -331,7 +463,9 @@ internal class LocalLibraryDirectory(root: File, private val directorySync: Dire
     }
 
     private fun create(relativePath: String, privateSupport: Boolean = false, beforeLink: () -> Unit = {},
-        beforeStage: () -> Unit = {}, write: (OutputStream) -> Unit,
+        beforeStage: () -> Unit = {}, recordIdentity: ((Path) -> Any)? = null,
+        verifyRecordLink: ((Path) -> Unit)? = null, onVerifiedLink: (Any) -> Unit = {},
+        discardDefiniteRefusal: Boolean = false, write: (OutputStream) -> Unit,
     ) {
         val file = paths.beneath(relativePath)
         val destination = file.toPath()
@@ -340,6 +474,7 @@ internal class LocalLibraryDirectory(root: File, private val directorySync: Dire
         paths.createDirectories(parent, ::forceDirectory)
         if (privateSupport) admitPrivateSupportStage(parent.toPath())
         forceDirectory(parent)
+        val prelinkOwner = if (discardDefiniteRefusal) recordIdentity?.invoke(parent.toPath()) else null
         beforeStage()
         val stage = Files.createTempFile(parent.toPath(), ".pristinepage-", ".part")
         FileChannel.open(stage, WRITE, NOFOLLOW_LINKS).use { channel ->
@@ -347,9 +482,33 @@ internal class LocalLibraryDirectory(root: File, private val directorySync: Dire
             channel.force(true)
         }
         // The exclusive link makes the closed stage visible without replacing any existing leaf. A backend without this primitive refuses rather than copying into the final name.
-        beforeLink()
+        val forced = recordIdentity?.invoke(stage)
+        try {
+            beforeLink()
+            verifyRecordLink?.invoke(stage)
+        } catch (refused: Exception) {
+            if (prelinkOwner != null && forced != null && recordIdentity != null) {
+                try {
+                    // The publisher has not called createLink. Only discard the exact temporary record inside its original private directory.
+                    if (recordIdentity(parent.toPath()) == prelinkOwner && Files.notExists(destination, NOFOLLOW_LINKS) &&
+                        recordIdentity(stage) == forced) {
+                        Files.delete(stage)
+                        forceDirectory(parent)
+                        if (!Files.notExists(stage, NOFOLLOW_LINKS)) throw IOException("The refused private stage remains")
+                    }
+                } catch (cleanup: Exception) { if (cleanup !== refused) refused.addSuppressed(cleanup) }
+            }
+            throw refused
+        }
+        if (recordIdentity != null && recordIdentity(stage) != forced) {
+            throw IOException("The closed private record changed before publication")
+        }
         Files.createLink(destination, stage)
         forceDirectory(parent)
+        if (recordIdentity != null &&
+            (recordIdentity(stage) != forced || recordIdentity(destination) != forced || !Files.isSameFile(stage, destination))
+        ) throw IOException("The durable private record no longer names its forced inode")
+        forced?.let(onVerifiedLink)
         // A failed write, close or sync keeps its exact stage as recovery evidence. Once durable, unlink only this attempt's temporary name; never remove the final name.
         try { Files.deleteIfExists(stage) } catch (_: IOException) { /* The verified object remains usable. */ }
     }

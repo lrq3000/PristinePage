@@ -11,7 +11,7 @@ import shutil
 import sqlite3
 import subprocess
 import sys
-from urllib.parse import quote
+from urllib.parse import quote, unquote
 import uuid
 
 from make_library_folder_picker_fixture import make_fixture, synthetic_scan
@@ -33,6 +33,17 @@ ANCESTRY_COLD_CASE = "app.pristinepage.LibraryProviderAncestryColdTest#provesMan
 INDEPENDENT_GRANT_CASE = "app.pristinepage.LibraryFolderFilesJourneyTest#persistsIndependentFilesRootsAndAnchor"
 INDEPENDENT_DERIVED_CASE = "app.pristinepage.LibraryFolderFilesJourneyTest#separatesIndependentlySelectedRootsWithoutAParentGrant"
 SELECTED_APPEND_CASE = "app.pristinepage.LibraryFolderFilesJourneyTest#selectedFilesMergeAppendsOnlyTheMissingOriginalAndKeepsItsPredecessor"
+SELECTED_REPEAT_CASE = "app.pristinepage.LibraryFolderFilesJourneyTest#selectedFilesMergeCanAppendTwiceWithoutReusingAnOlderStage"
+SELECTED_DEATH_CASE = "app.pristinepage.LibraryFolderFilesJourneyTest#endsProcessAfterSelectedAppendCompletionBeforeDelivery"
+SELECTED_DEATH_RECOVERY_CASE = "app.pristinepage.LibrarySelectedAppendDeathRecoveryTest#coldProcessInspectsCompletedSelectedAppendWithoutReplay"
+SELECTED_RECIPE_CASE = "app.pristinepage.LibraryFolderFilesJourneyTest#oneFilesSelectionPublishesOnlyAClosedEditedCatalog"
+BOUND_RECIPE_CASE = "app.pristinepage.LibraryFolderFilesJourneyTest#selectedRecipeReceiptBindsTheExactIssuingActivation"
+ADVANCED_RECIPE_CASE = "app.pristinepage.LibraryFolderFilesJourneyTest#selectedRecipeAdvancesOnlyTheVerifiedDirectSuccessor"
+DETACHED_RECIPE_PASSED = "4217fc17c82f844e6b261c59d3aba864bdc2fca24900d610f863070d760078f3"
+BOUND_RECIPE_READBACK = "7752ad1d2608da23c5006622340e912526755103b1a76c69c335ffa7bed7dd81"
+SELECTED_RECIPE_BASELINE = "6e8a2b6c8dfdc36c323c548667045688a0f7a5024386e610c5616892708ff794"
+SELECTED_RECIPE_BOOT_REFUSAL = "3eebda9fc80c090ec377221082f6e715af1c232066bf425daf1cb4108474e7e9"
+SELECTED_RECIPE_FRESH_GUEST_KEY = "824a07547898a7b9bc91be9de2c5c25de8131ab7f49b8abfc48d90855a54d2dc"
 INDEPENDENT_COLD_CASE = "app.pristinepage.LibraryProviderAncestryColdTest#twoIndependentFilesRootsRequireDisjointPhysicalAncestry"
 INDEPENDENT_CHILDREN = ("Library-Left", "Library-Right")
 WORKING_CASE = "app.pristinepage.LibraryFolderFilesJourneyTest#populatingAWorkingRoomCatalogDoesNotMaterializeTheOriginal"
@@ -72,6 +83,24 @@ WRITE_PROBE_CASE = "app.pristinepage.LibraryFolderFilesJourneyTest#grantedTreeCa
 BACKUP_CASE = "app.pristinepage.LibraryFolderFilesJourneyTest#defaultLibraryExportsItsOriginalAndAcceptedEditIntoANewFilesBackup"
 SETTINGS_BACKUP_CASE = "app.pristinepage.LibraryFolderFilesJourneyTest#settingsPublishesOneBackupOfTheSyntheticDefaultLibrary"
 SETTINGS_PICKER_CASE = "app.pristinepage.LibraryFolderFilesJourneyTest#settingsOpensAndCancelsFilesWithoutStartingABackup"
+MAIN_SETTINGS_OPEN_CASE = "app.pristinepage.LibraryFolderFilesJourneyTest#mainSettingsOpensAnExistingLibraryAndReturnsToTheUnchangedDefault"
+MAIN_SETTINGS_APPLY_CASE = "app.pristinepage.LibraryFolderFilesJourneyTest#mainSettingsAppliesOneSelectedEditAndReopensTheSamePage"
+SETTINGS_OPEN_CANCELED_GUEST = "agent-pristinepage-tree-d5eac64d59bd"
+SETTINGS_OPEN_CANCELED_RUN = "picker-adapter-library-tree-14e34a5f3966"
+SETTINGS_OPEN_NAVIGATION_RUN = "picker-adapter-library-tree-244aa1a50b23"
+SETTINGS_OPEN_NAVIGATION_MANIFEST = "77783b3e16115c3441f36071f91d1e377ae6dc615a1038a6b8083c9fcbe8b9fc"
+SETTINGS_OPEN_MENU_MANIFEST = "a0aa2831e567babf6319c43825e1b17cfa01b5159adc7d38a9eaa16ac80d74ff"
+SETTINGS_OPEN_PASS_RUN = "picker-adapter-library-tree-ac053d11fb43"
+SETTINGS_OPEN_PASS_MANIFEST = "332fd154cb07ef0a27352d32bf0a6a0d888178e32e5ba3c05a58cfd05798e44c"
+SETTINGS_APPLY_COLD_RUN = "picker-adapter-library-tree-4db9216db4be"
+SETTINGS_APPLY_COLD_MANIFEST = "fa877750cf04d08c37fefed8dbda943883742372d163065b046fdeb4437973a2"
+SETTINGS_APPLY_NAVIGATION_RUN = "picker-adapter-library-tree-4cf8aff1e6b0"
+SETTINGS_APPLY_NAVIGATION_MANIFEST = "ea9c3c036f4bece7810571fbbc51d0eca28678db920dc00d01216a8f37a7a476"
+SETTINGS_OPEN_REFUSALS = {
+    SETTINGS_OPEN_NAVIGATION_MANIFEST: (SETTINGS_OPEN_NAVIGATION_RUN, "synthetic folder", "Documents / android:id/title", None),
+    SETTINGS_OPEN_MENU_MANIFEST: ("picker-adapter-library-tree-0d2c964e72ee", "root drawer",
+                                  "Masquer mém. stock. int. / android:id/title", SETTINGS_OPEN_NAVIGATION_MANIFEST),
+}
 SETTINGS_RECOVERY_CASE = "app.pristinepage.LibraryFolderFilesJourneyTest#coldSettingsRecoversTheExactCompletedBackupWithoutWriting"
 BACKUP_DEATH_CASE = "app.pristinepage.LibraryFolderFilesJourneyTest#endsProcessAfterBackupCommitBeforeDelivery"
 BACKUP_DEATH_RECOVERY_CASE = "app.pristinepage.LibraryBackupDeathRecoveryTest#coldProcessInspectsInterruptedDeliveryWithoutReplay"
@@ -103,7 +132,11 @@ INDEPENDENT_DERIVED_PASSED = "550461e2206a8f887853ded659da4a494215144c64ba53f14f
 INDEPENDENT_SHARED_READER_PASSED = "8fbc16be139aa19e4e81d73e2c48ebf0e41199ba42500cfcbcf0df5a47b15081"
 INDEPENDENT_CLOSED_DRY_RUN_PASSED = "8730d1669c0f61f82d07eb2ee8d4bcd3d3bd762fed8e73317660e0e640a478db"
 SELECTED_APPEND_HOST_REFUSAL = "ea076b07261c53b5d5f3aea812717dc5f974dec05675c5ff8065c0802fd986f4"
+SELECTED_APPEND_PASSED = "3498e3282d00a523ed7257524afbe2d357c10bec999e617244bead1a2f1e16a7"
+SELECTED_REPEAT_PASSED = "0857432a8308f790866e60559db02729f92bfdacca4a20fc144278c1e1a86200"
+SELECTED_DEATH_COLD_REFUSED = "659fbf69c85ca0c8e22a271b57a065706aae28a3b898a54e927d500219fe67fe"
 UUID_TEXT = r"[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}"
+URI_PERMISSIONS_HEADER = "ACTIVITY MANAGER URI PERMISSIONS (dumpsys activity permissions)"
 BACKUP_ORIGINAL = "ebd602840377a3b3cf763cb6828fee67861ff77c444e8fe5894457ef6d99a24d"
 OCR_ACTIVATION_CASES = tuple(f"app.pristinepage.ocr.OcrWorkManagerIntegrationTest#{method}" for method in (
     "sameActivationKeepsTheLiveWakeButAnotherActivationDoesNotShareIt",
@@ -135,9 +168,33 @@ def recheck_target(run, ns):
 
 def read_backup_delivery_death(output, operation, *, before_marker=False):
     """Reject an ordinary assertion failure, an early crash or anything other than the one armed boundary."""
-    target, method = (BACKUP_PRE_MARKER_CASE if before_marker else BACKUP_DEATH_CASE).split("#")
-    lines = output.rstrip(" \r\n").splitlines()
     error = "Missing exact backup checkpoint and ensuing Android process crash"
+    checkpoint = read_deliberate_process_death(output, BACKUP_PRE_MARKER_CASE if before_marker else BACKUP_DEATH_CASE,
+                                              "72" if before_marker else "71", error)
+    keys = {"backupDeathOperation", "backupDeathPid", "backupDeathReceipt", "backupDeathBindings"}
+    if before_marker:
+        keys.add("backupDeathGrantInventory")
+    need(set(checkpoint) == keys and
+         checkpoint["backupDeathOperation"] == operation and re.fullmatch(r"[1-9][0-9]{0,8}", checkpoint["backupDeathPid"]) and
+         re.fullmatch(rf"{UUID_TEXT}:{UUID_TEXT}", checkpoint["backupDeathReceipt"]) and
+         re.fullmatch(rf"{UUID_TEXT}:{UUID_TEXT}:{UUID_TEXT}(?::[a-f0-9]{{64}}){{3}}", checkpoint["backupDeathBindings"]) and
+         (not before_marker or re.fullmatch(r"[a-f0-9]{64}", checkpoint["backupDeathGrantInventory"])), error)
+    identity = checkpoint["backupDeathPid"], checkpoint["backupDeathReceipt"].split(":"), checkpoint["backupDeathBindings"].split(":")
+    return (*identity, checkpoint["backupDeathGrantInventory"]) if before_marker else identity
+
+
+def read_selected_delivery_death(output, operation):
+    error = "Missing exact selected append checkpoint and ensuing Android process crash"
+    checkpoint = read_deliberate_process_death(output, SELECTED_DEATH_CASE, "72", error)
+    need(set(checkpoint) == {"selectedAppendDeathOperation", "selectedAppendDeathPid", "selectedAppendDeathGrantInventory"} and
+         checkpoint["selectedAppendDeathOperation"] == operation and re.fullmatch(r"[1-9][0-9]{0,8}", checkpoint["selectedAppendDeathPid"]) and
+         re.fullmatch(r"[a-f0-9]{64}", checkpoint["selectedAppendDeathGrantInventory"]), error)
+    return checkpoint["selectedAppendDeathPid"], checkpoint["selectedAppendDeathGrantInventory"]
+
+
+def read_deliberate_process_death(output, case, status, error):
+    target, method = case.split("#")
+    lines = output.rstrip(" \r\n").splitlines()
     need(lines[-2:] == ["INSTRUMENTATION_RESULT: shortMsg=Process crashed.", "INSTRUMENTATION_CODE: 0"], error)
     blocks, fields = [], {}
     for line in lines[:-2]:
@@ -150,20 +207,11 @@ def read_backup_delivery_death(output, operation, *, before_marker=False):
             fields = {}
         else:
             need(not line.strip() or ("stream" in fields and not line.startswith("INSTRUMENTATION_")), error)
-    need(not fields and [code for code, _ in blocks] == ["1", "72" if before_marker else "71"], error)
+    need(not fields and [code for code, _ in blocks] == ["1", status], error)
     start, checkpoint = blocks[0][1], blocks[1][1]
-    keys = {"backupDeathOperation", "backupDeathPid", "backupDeathReceipt", "backupDeathBindings"}
-    if before_marker:
-        keys.add("backupDeathGrantInventory")
     need(start.get("class") == target and start.get("test") == method and
-         set(start) <= {"class", "test", "current", "id", "numtests", "stream"} and
-         set(checkpoint) == keys and
-         checkpoint["backupDeathOperation"] == operation and re.fullmatch(r"[1-9][0-9]{0,8}", checkpoint["backupDeathPid"]) and
-         re.fullmatch(rf"{UUID_TEXT}:{UUID_TEXT}", checkpoint["backupDeathReceipt"]) and
-         re.fullmatch(rf"{UUID_TEXT}:{UUID_TEXT}:{UUID_TEXT}(?::[a-f0-9]{{64}}){{3}}", checkpoint["backupDeathBindings"]) and
-         (not before_marker or re.fullmatch(r"[a-f0-9]{64}", checkpoint["backupDeathGrantInventory"])), error)
-    identity = checkpoint["backupDeathPid"], checkpoint["backupDeathReceipt"].split(":"), checkpoint["backupDeathBindings"].split(":")
-    return (*identity, checkpoint["backupDeathGrantInventory"]) if before_marker else identity
+         set(start) <= {"class", "test", "current", "id", "numtests", "stream"}, error)
+    return checkpoint
 
 
 def check_fixture_root(namespaces, after, probe_write, probe_passed, backup_export, backup_passed):
@@ -201,6 +249,48 @@ def select_settings_picker_case(args):
                   args.activation_compatibility, args.expect_home, args.settings_retry)),
          "Settings picker cancellation requires the retained synthetic guest and a standalone invocation")
     return SETTINGS_PICKER_CASE
+
+
+def select_main_settings_open(args):
+    reuse = getattr(args, "settings_open_reuse", False)
+    retry = getattr(args, "settings_open_retry", None)
+    apply = getattr(args, "settings_apply", None)
+    apply_retry = getattr(args, "settings_apply_retry", None)
+    if apply is not None:
+        identity = {"settings_apply", "settings_apply_retry", "previous", "commit", "app_sha", "test_sha", "guest"}
+        need(apply == SETTINGS_OPEN_PASS_MANIFEST and args.guest == SETTINGS_OPEN_CANCELED_GUEST and
+             apply_retry in (None, SETTINGS_APPLY_NAVIGATION_MANIFEST) and
+             len(args.previous or ()) == 2 and not any(value for name, value in vars(args).items() if name not in identity),
+             "Require the standalone selected Apply continuation")
+        return MAIN_SETTINGS_APPLY_CASE
+    error = "MainActivity Settings Open requires a standalone fresh synthetic app graph"
+    if not args.settings_open:
+        need(not reuse and retry is None and apply_retry is None, error)
+        return None
+    identity = {"settings_open", "settings_open_reuse", "settings_open_retry", "fresh", "commit", "app_sha", "test_sha", "guest"}
+    if retry is not None:
+        identity.add("previous")
+    need(sum((args.fresh, reuse, retry is not None)) == 1 and
+         (not (reuse or retry is not None) or args.guest == SETTINGS_OPEN_CANCELED_GUEST) and
+         (retry is None or retry in SETTINGS_OPEN_REFUSALS and len(args.previous or ()) == 2) and
+         not any(value for name, value in vars(args).items() if name not in identity), error)
+    return MAIN_SETTINGS_OPEN_CASE
+
+
+def verify_canceled_settings_open_release(record, previous):
+    archive = previous / f"{previous.name}-canceled-release.json"
+    observed = json.loads(archive.read_bytes())
+    trace = previous / f"{previous.name}-commands.jsonl"
+    blocker = previous / f"{previous.name}-canceled-cleanup-blocker.json"
+    need(record["name"] == observed["guest"] == SETTINGS_OPEN_CANCELED_GUEST and
+         record["generation"] == observed["generation"] == "8f251e03-368e-49cb-98b0-3ab356ece420" and
+         record["index"] == observed["index"] and record["shutdown_processes"] == [observed["originalProcess"]] and
+         record["runtime_evidence"] == str(archive.resolve()) and observed["shutdownVerified"] is True and
+         observed["noRuntimeConsumer"] is True and observed["testLaunched"] is False and observed["storageDeleted"] is False and
+         sha(trace) == observed["commandsSha256"] and sha(blocker) == observed["anchoredBlockerSha256"] and
+         not any({"install", "instrument", "push"}.intersection(json.loads(row)["argv"])
+                 for row in trace.read_text(encoding="utf-8").splitlines()),
+         "The exact canceled guest release does not establish an unspent Settings run")
 
 
 def select_settings_recovery_case(args):
@@ -328,6 +418,67 @@ def verify_released_independent_guest(original, stopped):
          "The released guest does not match the exact independent-root predecessor")
 
 
+def verify_released_selected_repeat_guest(original, stopped):
+    verify_released_independent_guest(original, stopped)
+    generation = original["generation"]
+    cleanup = stopped.get("cleanup_attempt") or {}
+    need(stopped.get("claim_generation") == generation and stopped.get("consumers") == [] and
+         stopped.get("reservedKiB") == 0 and stopped.get("shutdown_ready") is True and stopped.get("evidence_saved") is True and
+         stopped.get("keep_running") is False and stopped.get("handoff_to") is None and
+         cleanup.get("generation") == generation and cleanup.get("state") == "completed",
+         "The repeat needs completed same-generation release, cleanup and evidence with no remaining consumers")
+
+
+def verify_bound_recipe_release(original, stopped, manifest, snapshot):
+    """Prove the synchronous detached runner's release without changing the shared record or treating an unknown roster as empty elsewhere."""
+    verify_released_independent_guest(original, stopped)
+    generation = original["generation"]
+    cleanup = snapshot.get("cleanup_attempt") or {}
+    completed = stopped.get("cleanup_attempt") or {}
+    error = "The bound edit needs the exact anchored synchronous release"
+    need(snapshot.get("generation") == snapshot.get("claim_generation") == cleanup.get("generation") == generation and
+         snapshot.get("state") == "shutdown_ready" and snapshot.get("shutdown_verified") is False and
+         snapshot.get("shutdown_ready") is True and snapshot.get("evidence_saved") is True and
+         snapshot.get("keep_running") is False and snapshot.get("handoff_to") is None and
+         snapshot.get("reservedKiB") == 0 and snapshot.get("consumers", []) == [] and
+         snapshot.get("shutdown_processes") == original["runtime_processes"] and cleanup.get("state") == "running" and
+         bool(stopped.get("stopped")) and bool(completed.get("finished")), error)
+    expected = dict(snapshot, owner=None, state="stopped-released", shutdown_verified=True,
+                    stopped=stopped["stopped"], runtime_evidence=str(manifest.resolve()),
+                    cleanup_attempt=dict(cleanup, state="completed", finished=completed["finished"]))
+    if "consumers" not in snapshot and stopped.get("consumers") == []:
+        expected["consumers"] = []
+    need(stopped == expected, error)
+
+
+def verify_advanced_recipe_release(original, stopped, manifest, snapshot, intervening):
+    if not intervening:
+        verify_bound_recipe_release(original, stopped, manifest, snapshot)
+        return
+    history = stopped.get("ownership_history", [])[-len(intervening):]
+    need(1 <= len(intervening) <= 4 and len(set(intervening)) == len(intervening) and
+         [row.get("generation") for row in history] == [original["generation"], *intervening[:-1]],
+         "The exact intervening release sequence changed")
+    prior = history[0]
+    # Other allocator clients retain only a projection of the prior claim. Bind that projection to the pinned shutdown snapshot, not to guessed defaults.
+    archived = dict(snapshot, owner=None, state="stopped-released", shutdown_verified=True,
+                    stopped=prior.get("stopped"), runtime_evidence=str(manifest.resolve()),
+                    cleanup_attempt=prior["cleanup_attempt"])
+    verify_bound_recipe_release(original, archived, manifest, snapshot)
+    need(all(prior.get(k) == archived[k] for k in
+             ("generation", "owner", "state", "worktree", "purpose", "shutdown_processes", "stopped", "cleanup_attempt")),
+         "The intervening process history does not retain the exact bound release")
+    for released in history[1:]:
+        cleanup = released.get("cleanup_attempt") or {}
+        need(released.get("state") == "stopped-released" and released.get("owner") is None and released.get("stopped") and
+             len(released.get("shutdown_processes", ())) == 2 and cleanup.get("state") == "completed" and
+             cleanup.get("generation") == released["generation"] and cleanup.get("finished"),
+             "An intervening claim is not positively released")
+    previous = history[-1]
+    verify_released_append_guest(original | dict(generation=previous["generation"], worktree=previous["worktree"],
+                                                 runtime_processes=previous["shutdown_processes"]), stopped, intervening[-1])
+
+
 def verify_released_append_guest(original, stopped, generation):
     """Accept only an explicitly named intervening release on the same disk, retaining the dry-run provenance."""
     stable = ("name", "installation", "index", "created", "api", "created_by_agent")
@@ -390,6 +541,157 @@ def settings_run_anchors(raw, expected_sha):
              "Retained Settings anchor changed")
         return path.read_text(encoding="utf-8")
     return anchored
+
+
+def verify_settings_open_navigation_failure(raw, guest, previous, digest):
+    """Borrow only the exact pre-selection failure; the live pointer, grants and fixture require separate readback."""
+    run_name, failed_step, observation, predecessor = SETTINGS_OPEN_REFUSALS[digest]
+    need(raw.name == run_name, "Wrong Settings Open artifact directory")
+    anchor = settings_run_anchors(raw, digest)
+    artifacts = json.loads(anchor("artifacts.json"))
+    claim = json.loads(anchor("claim.json"))
+    shutdown = json.loads(anchor("shutdown.json"))
+    fixture = json.loads(anchor("settings-open-fixture.json"))
+    folder = fixture["folder"]
+    transcript = anchor("instrumentation.txt")
+    launches = [call for line in anchor("commands.jsonl").splitlines() if "instrument" in (call := json.loads(line))["argv"]]
+    need(guest == claim["name"] == artifacts["guest"] and artifacts["mainSettingsOpen"] is True and
+         artifacts.get("mainSettingsOpenRetry") == predecessor and bool(artifacts["previous"]) == (predecessor is not None) and
+         claim["generation"] == shutdown["generation"] and claim["runtime_processes"] == shutdown["originalProcesses"] and
+         shutdown["ownedShutdownVerified"] is True and shutdown["storageDeleted"] is False and
+         {p: proof["sha256"] for p, proof in artifacts["proof"].items()} == previous and
+         json.loads(anchor("outcomes.json")) == {"passed": [], "failed": [MAIN_SETTINGS_OPEN_CASE], "installedSha256": previous} and
+         json.loads(anchor("preservation.json")) == {"externalFixtureUnchanged": True, "persistedGrantCount": 0} and
+         read_results(transcript, (MAIN_SETTINGS_OPEN_CASE,)) == ([], [MAIN_SETTINGS_OPEN_CASE]) and
+         f"Files did not reach {failed_step}; foreground=com.android.documentsui;" in transcript and
+         observation in transcript and "Suppressed:" not in transcript and
+         re.fullmatch(r"PristinePage-tree-[a-f0-9]{12}", folder) and len(launches) == 1 and launches[0].get("exit") == 0 and
+         launches[0]["argv"][-8:] == [MAIN_SETTINGS_OPEN_CASE, "-e", "libraryFixtureFolder", folder,
+                                     "-e", "librarySettingsOpenFixture", "fresh", RUNNER],
+         "The retained Settings Open run does not establish this pre-selection refusal")
+    return claim, fixture
+
+
+def require_initial_settings_pointer(pointer, leaves):
+    # The first confirmed departure creates default-origin. Any such record or an unexplained stage disqualifies this pre-selection retry.
+    need(default_settings_pointer_id(pointer, 1) and leaves == ["active-library"],
+         "The retained graph is not the unchanged initial Default library")
+
+
+def default_settings_pointer_id(record, activation):
+    fields = record.splitlines()
+    body = "\n".join(fields[:-1]) + "\n"
+    if (len(fields) == 6 and fields[0] == "pristinepage-active-library-v1" and re.fullmatch(UUID_TEXT, fields[1]) and
+            fields[2:5] == [str(activation), "-", "-"] and record == body + sha256(body.encode("ascii")).hexdigest() + "\n"):
+        return fields[1]
+    return None
+
+
+def require_returned_settings_pointer(pointer, origin, activation):
+    identity = default_settings_pointer_id(origin, 1)
+    need(identity and default_settings_pointer_id(pointer, activation) == identity,
+         "The retained graph is not the exact returned Default library")
+    return identity
+
+
+def verify_settings_open_success(raw, guest, previous):
+    anchor = settings_run_anchors(raw, SETTINGS_OPEN_PASS_MANIFEST)
+    artifacts, claim, shutdown, fixture = (json.loads(anchor(leaf)) for leaf in
+                                          ("artifacts.json", "claim.json", "shutdown.json", "settings-open-fixture.json"))
+    need(guest == claim["name"] == artifacts["guest"] and artifacts["mainSettingsOpen"] is True and
+         artifacts["mainSettingsOpenRetry"] == SETTINGS_OPEN_MENU_MANIFEST and
+         claim["generation"] == shutdown["generation"] and claim["runtime_processes"] == shutdown["originalProcesses"] and
+         shutdown["ownedShutdownVerified"] is True and shutdown["storageDeleted"] is False and
+         {p: proof["sha256"] for p, proof in artifacts["proof"].items()} == previous and
+         json.loads(anchor("outcomes.json")) == {"passed": [MAIN_SETTINGS_OPEN_CASE], "failed": [], "installedSha256": previous} and
+         json.loads(anchor("preservation.json")) == {"externalFixtureUnchanged": True, "persistedGrantCount": 0} and
+         read_results(anchor("instrumentation.txt"), (MAIN_SETTINGS_OPEN_CASE,)) == ([MAIN_SETTINGS_OPEN_CASE], []) and
+         re.fullmatch(r"PristinePage-tree-[a-f0-9]{12}", fixture["folder"]),
+         "No exact completed read-only Settings Open and Return")
+    return claim, fixture
+
+
+def require_settings_apply_grants(observed, expected, prior_folder):
+    prefix = "content://com.android.externalstorage.documents/tree/"
+    allowed = {prefix + quote(document_id, safe="") for document_id in
+               (f"home:{prior_folder}", f"primary:Documents/{prior_folder}")}
+    need(observed == expected and len(expected) == 1 and expected[0][0] in allowed and
+         expected[0][1:] == (True, "com.android.externalstorage", 3),
+         "The Apply baseline is not the exact retained grant of the read-only fixture")
+
+
+def verify_settings_apply_cold_refusal(raw, guest, previous, prior_claim, prior_folder):
+    anchor = settings_run_anchors(raw, SETTINGS_APPLY_COLD_MANIFEST)
+    artifacts, claim, shutdown = (json.loads(anchor(leaf)) for leaf in ("artifacts.json", "claim.json", "shutdown.json"))
+    history = claim["ownership_history"]
+    trace = [json.loads(line) for line in anchor("commands.jsonl").splitlines()]
+    observations = [parse_app_persisted_grants(row["stdout"]) for row in trace if row.get("exit") == 0 and
+                    any("dumpsys -t 10 activity" in arg for arg in row["argv"])]
+    need(guest == claim["name"] == artifacts["guest"] and artifacts["mainSettingsApply"] == SETTINGS_OPEN_PASS_MANIFEST and
+         artifacts["previous"] == previous and history and history[-1]["generation"] == prior_claim["generation"] and
+         claim["generation"] == shutdown["generation"] and claim["runtime_processes"] == shutdown["originalProcesses"] and
+         shutdown["ownedShutdownVerified"] is True and shutdown["storageDeleted"] is False and len(observations) == 1 and
+         all(not {"install", "instrument", "push"}.intersection(row["argv"]) for row in trace),
+         "The cold Apply refusal did not establish a read-only, pre-install continuation")
+    grants = observations[0]
+    require_settings_apply_grants(grants, grants, prior_folder)
+    return claim, grants
+
+
+def verify_settings_apply_navigation_refusal(raw, guest, previous, cold_claim, read_only_fixture):
+    anchor = settings_run_anchors(raw, SETTINGS_APPLY_NAVIGATION_MANIFEST)
+    artifacts, claim, shutdown, fixture, boundary = (json.loads(anchor(leaf)) for leaf in
+        ("artifacts.json", "claim.json", "shutdown.json", "settings-open-fixture.json", "settings-apply-boundary.json"))
+    spend = json.loads((raw.parent / f"settings-retry-spent-{SETTINGS_OPEN_PASS_MANIFEST}.json").read_bytes())
+    transcript = anchor("instrumentation.txt")
+    folder = fixture["folder"]
+    trace = [json.loads(line) for line in anchor("commands.jsonl").splitlines()]
+    launches = [call for call in trace if "instrument" in call["argv"]]
+    pointer_reads = [call for call in trace if call["argv"][-5:] ==
+                     [APP, "head", "-c", "321", "files/library-settings/active-library"]]
+    expected_call = ["shell", "am", "instrument", "-w", "-r", "-e", "class", MAIN_SETTINGS_APPLY_CASE,
+                     "-e", "libraryFixtureFolder", folder, "-e", "librarySettingsOpenFixture", "apply",
+                     "-e", "librarySettingsPriorFolder", read_only_fixture["folder"], RUNNER]
+    need(guest == claim["name"] == artifacts["guest"] and artifacts["mainSettingsApply"] == SETTINGS_OPEN_PASS_MANIFEST and
+         artifacts["mainSettingsApplyCold"] == SETTINGS_APPLY_COLD_MANIFEST and
+         claim["ownership_history"][-1]["generation"] == cold_claim["generation"] and
+         shutdown["originalProcesses"] == claim["runtime_processes"] and shutdown["generation"] == claim["generation"] and
+         shutdown["ownedShutdownVerified"] is True and shutdown["storageDeleted"] is False and
+         {p: proof["sha256"] for p, proof in artifacts["proof"].items()} == previous and
+         read_results(transcript, (MAIN_SETTINGS_APPLY_CASE,)) == ([], [MAIN_SETTINGS_APPLY_CASE]) and
+         len(launches) == 1 and launches[0]["argv"][3:] == expected_call and launches[0]["exit"] == 0 and
+         launches[0]["stdout"] == transcript and len(pointer_reads) == 3 and
+         trace.index(pointer_reads[1]) < trace.index(launches[0]) < trace.index(pointer_reads[2]) and
+         all(call["exit"] == 0 and call["argv"][:3] == launches[0]["argv"][:3] and
+             sha256(call["stdout"].encode("ascii")).hexdigest() == boundary["pointerSha256"] for call in pointer_reads) and
+         "Files did not reach Files toolbar after showing internal storage; foreground=com.android.documentsui;" in transcript and
+         "Masquer mém. stock. int. / android:id/title" in transcript and
+         json.loads(anchor("junit-outcomes.json")) == {"passed": [], "failed": [MAIN_SETTINGS_APPLY_CASE], "installedSha256": previous} and
+         json.loads(anchor("preservation.json")) == {"predecessorFilesUnchanged": True, "persistedGrantCount": 1, "priorGrantsUnchanged": True} and
+         re.fullmatch(r"PristinePage-tree-[a-f0-9]{12}", folder) and folder != read_only_fixture["folder"] and
+         fixture["inventory"] == read_only_fixture["inventory"] and fixture["conversion"] == read_only_fixture["conversion"] and
+         spend == {"guest": guest, "candidate": raw.name, "destination": folder} and
+         boundary["pointerActivation"] == "3" and re.fullmatch(r"[a-f0-9]{64}", boundary["pointerSha256"]) and
+         boundary["generationMarkers"] == [leaf.split("/", 1)[1] for leaf in fixture["inventory"] if leaf.startswith("generations/")],
+         "Apply retry requires the exact pre-selection failure, unchanged marker, pointer and retained grant")
+    return claim, fixture, boundary["pointerSha256"]
+
+
+def require_settings_apply_private_absence(files, settings, folder):
+    retained = {"catalog-recipe-attempts-v1", "catalog-revision-spends", f"library-settings-apply-pointer-{folder}"}
+    need(not retained.intersection(files) and not any(name.startswith(".active-library-") and name.endswith(".pending")
+         for name in settings), "An earlier selected recipe attempt or pointer stage is retained")
+
+
+def collect_settings_apply_boundary(instrumentation_terminated, observations):
+    """Keep observations independent; without terminal JUnit evidence every observation is provisional."""
+    result = dict(instrumentationTerminated=instrumentation_terminated, observationErrors={})
+    for name, observe in observations.items():
+        try:
+            result[name] = observe()
+        except Exception as failure:
+            result["observationErrors"][name] = type(failure).__name__
+    return result
 
 
 def verify_settings_retry_evidence(raw, expected_sha, guest, previous):
@@ -538,14 +840,14 @@ def spend_settings_retry(raw, digest, attempt):
         raise RuntimeError("This Settings retry is already spent") from error
 
 
-def verify_unchanged_settings_destination(adb, guest_root, files, backup_name=None):
+def verify_unchanged_settings_destination(adb, guest_root, files, backup_name=None, *, extra_names=()):
     namespaces = {"catalogs", "generations", "objects"}
     ident = r"[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}"
     locator = rf"(?:catalogs/{ident}\.sqlite|generations/{ident}\.complete|objects/[a-f0-9]{{64}})"
     need({relative.split("/")[0] for relative in files} == namespaces and
          all(re.fullmatch(locator, file) and re.fullmatch(r"[a-f0-9]{64}", digest) for file, digest in files.items()),
          "Invalid retained synthetic inventory")
-    expected_root = namespaces if backup_name is None else namespaces | {backup_name}
+    expected_root = namespaces | set(extra_names) | ({backup_name} if backup_name is not None else set())
     need(set(adb("shell", "ls", "-A", "-1", guest_root).splitlines()) == expected_root,
          "The first Settings destination is not unchanged; the backup must not be repeated")
     for namespace in namespaces:
@@ -597,26 +899,38 @@ def exercise_selected_append(run, adb, ns, raw, guest_root, folder, files, recei
             marker_path = f"generations/{operation}.complete"
             catalog_path = f"catalogs/{operation}.sqlite"
             baseline_path, = (name for name in files if name.startswith("generations/"))
-            baseline = adb("shell", "cat", f"{left}/{baseline_path}").splitlines()
+            baseline_text = adb("shell", "cat", f"{left}/{baseline_path}")
+            baseline = baseline_text.splitlines()
             marker_text = adb("shell", "cat", f"{left}/{marker_path}")
             marker = marker_text.splitlines()
             need(len(baseline) == 7 and len(marker) == 7 and
                  marker[:5] == [baseline[0], baseline[1], operation, baseline[2], baseline[4]] and
                  marker[5].isdigit() and 0 < int(marker[5]) <= 2 * 1024 * 1024 and re.fullmatch(r"[a-f0-9]{64}", marker[6]),
                  "The selected append did not publish one exact successor")
+            stage_name = f"merge-staging-{operation}"
             verify_unchanged_settings_destination(adb, left, files | {
                 marker_path: sha256(marker_text.encode("ascii")).hexdigest(), catalog_path: marker[6], f"objects/{missing}": missing,
-            }, backup_name="merge-staging")
-            need(not adb("shell", "ls", "-A", "-1", f"{left}/merge-staging").strip(), "The selected append retained a staged provider file")
+            }, backup_name=stage_name)
+            need(not adb("shell", "ls", "-A", "-1", f"{left}/{stage_name}").strip(), "The selected append retained a staged provider file")
             need(adb("shell", "stat", "-c", "%s", f"{left}/{catalog_path}").strip() == marker[5],
                  "The selected append catalog extent differs from its marker")
             catalog = raw / "selected-append-catalog.sqlite"
             adb("pull", f"{left}/{catalog_path}", catalog, timeout=20)
             need(catalog.stat().st_size == int(marker[5]) and sha(catalog) == marker[6], "The pulled selected append catalog changed")
             verify_selected_append_catalog(catalog, synthetic_scan()[0], missing)
+            incoming_marker, = (name for name in received if name.startswith("generations/"))
+            source_text = adb("shell", "cat", f"{right}/{incoming_marker}")
+            stage = f"files/library-selected-merge-v1/merge-stages/{operation}"
+            intent = adb("shell", "run-as", APP, "cat", f"{stage}/merge.intent")
+            completion = adb("shell", "run-as", APP, "cat", f"{stage}/selected-merge.complete")
+            verify_selected_append_records(intent, completion, baseline_text, source_text, marker_text)
+            need(adb("shell", "run-as", APP, "sha256sum", f"{stage}/catalog.sqlite").split() ==
+                 [marker[6], f"{stage}/catalog.sqlite"], "The private selected append stage differs from the external catalog")
             run.save(run.path("selected-append-readback.json"), {
                 "generation": operation, "predecessor": baseline[2], "catalogSha256": marker[6],
                 "catalogBytes": int(marker[5]), "missingBytes": missing_bytes, "copiedObjectSha256": missing,
+                "privateIntentSha256": sha256(intent.encode("ascii")).hexdigest(),
+                "privateCompletionSha256": sha256(completion.encode("ascii")).hexdigest(),
             }, durable=True)
             run.save(status, {"fixture": folder, "state": "prior-inventory-restored"}, durable=True)
         return {"passed": passed, "failed": failed, "installedSha256": hashes}
@@ -632,21 +946,854 @@ def exercise_selected_append(run, adb, ns, raw, guest_root, folder, files, recei
                  "The selected append changed predecessor or unreferenced fixture bytes")
 
 
-def verify_selected_append_catalog(catalog, destination_digest, incoming_digest):
+def verify_selected_append_records(intent, completion, baseline_marker, incoming_marker, successor_marker):
+    expected_markers = baseline_marker + incoming_marker + successor_marker
+    header = "pristinepage-library-copy-intent-v1\n"
+    fields = re.fullmatch(r"([a-f0-9]{64})\n([a-f0-9]{64})\n",
+                          intent[len(header):-len(expected_markers)] if expected_markers else "")
+    need(intent.startswith(header) and intent.endswith(expected_markers) and fields is not None and fields[1] != fields[2],
+         "The private selected append intent does not bind both roots and all three exact markers")
+    if completion is not None:
+        need(completion == "pristinepage-selected-merge-complete-v1\n" + intent,
+             "The private selected append completion does not match its exact intent")
+    return fields.groups()
+
+
+def exercise_selected_repeat(run, adb, ns, raw, guest_root, folder, files, received, hashes, operation, repeat, missing, missing_bytes):
+    left, right = (f"{guest_root}/{name}" for name in independent_fixture_children(folder))
+    scope = f"library-selected-repeat-{operation}"
+    need(re.fullmatch(UUID_TEXT, operation) and re.fullmatch(UUID_TEXT, repeat) and operation != repeat,
+         "The selected repeat needs two fresh, distinct IDs")
+    verify_unchanged_settings_destination(adb, left, files)
+    verify_unchanged_settings_destination(adb, right, received)
+    require_cold_backup_app(adb)
+    need(scope not in adb("shell", "run-as", APP, "ls", "-A", "-1", "files").splitlines(),
+         "A retained selected repeat scope must never be repeated")
+    status = run.path("independent-roots-grants.json")
+    run.save(status, {"fixture": folder, "state": "cleanup-unconfirmed"}, durable=True)
+    try:
+        recheck_target(run, ns)
+        output = adb("shell", "am", "instrument", "-w", "-r", "-e", "class", SELECTED_REPEAT_CASE,
+                     "-e", "libraryFixtureFolder", folder, "-e", "librarySelectedAppendOperation", operation,
+                     "-e", "librarySelectedRepeatOperation", repeat, "-e", "librarySelectedAppendBytes", str(missing_bytes), RUNNER, timeout=260)
+        run.path("independent-roots-append-instrumentation.txt").write_text(output, encoding="utf-8")
+        passed, failed = read_results(output, (SELECTED_REPEAT_CASE,))
+        if not failed:
+            labels = ("selected-append", "selected-repeat")
+            readings, _ = observe_selected_history(adb, folder, files, received, scope, [operation, repeat],
+                                                   catalogs=[raw / f"{label}-catalog.sqlite" for label in labels])
+            need(readings[0]["copiedObjectSha256"] == missing and readings[0]["missingBytes"] == missing_bytes,
+                 "The selected repeat copied different synthetic bytes")
+            for label, record in zip(labels, readings):
+                run.save(run.path(f"{label}-readback.json"), record, durable=True)
+            run.save(status, {"fixture": folder, "state": "prior-inventory-restored"}, durable=True)
+        return {"passed": passed, "failed": failed, "installedSha256": hashes}
+    finally:
+        recheck_target(run, ns)
+        need(adb("shell", "ls", "-A", "-1", guest_root).splitlines() == sorted(independent_fixture_children(folder)),
+             "The repeat selected append changed its synthetic parent")
+        verify_unchanged_settings_destination(adb, right, received)
+        for relative, digest in files.items():
+            leaf = f"{left}/{relative}"
+            need(adb("shell", "sha256sum", leaf).split() == [digest, leaf],
+                 "The repeat selected append changed predecessor or unreferenced fixture bytes")
+
+
+def exercise_selected_delivery_death(run, adb, ns, raw, guest_root, folder, files, incoming, hashes, operation, grants):
+    left, right = (f"{guest_root}/{name}" for name in independent_fixture_children(folder))
+    scope = f"library-selected-death-{operation}"
+    require_cold_backup_app(adb)
+    verify_unchanged_settings_destination(adb, left, files)
+    verify_unchanged_settings_destination(adb, right, incoming)
+    require_same_repeat_grants(grants, read_app_persisted_grants(adb))
+    need(scope not in adb("shell", "run-as", APP, "ls", "-A", "-1", "files").splitlines(),
+         "A retained selected death attempt must never be repeated")
+    recheck_target(run, ns)
+    # Persist the one-use admission before the writer, including when the command or transport loses its result.
+    spend_settings_retry(raw.parent, SELECTED_REPEAT_PASSED, dict(operation=operation, destination=folder, kind="selected-delivery-death"))
+    run.save(run.path("selected-death-attempt.json"), {"operation": operation, "fixture": folder, "state": "armed"}, durable=True)
+    output = adb("shell", "am", "instrument", "-w", "-r", "-e", "class", SELECTED_DEATH_CASE,
+                 "-e", "libraryFixtureFolder", folder, "-e", "librarySelectedAppendOperation", operation, RUNNER, timeout=180, allowed=(0, 1))
+    run.path("selected-death-instrumentation.txt").write_text(output, encoding="utf-8")
+    checkpoint = read_selected_delivery_death(output, operation)
+    return complete_selected_delivery_death(run, adb, ns, raw, folder, files, incoming, hashes, operation, grants, checkpoint)
+
+
+def complete_selected_delivery_death(run, adb, ns, raw, folder, files, incoming, hashes, operation, grants, checkpoint):
+    old_pid, fingerprint = checkpoint
+    scope = f"library-selected-death-{operation}"
+    recheck_target(run, ns)
+    require_selected_cold_process(adb, old_pid)
+    require_same_repeat_grants(grants, read_app_persisted_grants(adb))
+    before = observe_selected_history(adb, folder, files, incoming, scope, [operation], catalogs=[raw / "selected-death-catalog.sqlite"])
+    run.save(run.path("selected-death-before-cold.json"), before, durable=True)
+    recheck_target(run, ns)
+    require_selected_cold_process(adb, old_pid)
+    try:
+        output = adb("shell", "am", "instrument", "-w", "-r", "-e", "class", SELECTED_DEATH_RECOVERY_CASE,
+                     "-e", "libraryFixtureFolder", folder, "-e", "librarySelectedAppendOperation", operation,
+                     "-e", "librarySelectedAppendPreviousPid", old_pid,
+                     "-e", "librarySelectedAppendGrantInventory", fingerprint, RUNNER, timeout=75, allowed=(0, 1))
+        run.path("selected-death-cold-instrumentation.txt").write_text(output, encoding="utf-8")
+        passed, failed = read_results(output, (SELECTED_DEATH_RECOVERY_CASE,))
+    finally:
+        recheck_target(run, ns)
+        require_selected_cold_process(adb, old_pid)
+        require_same_repeat_grants(grants, read_app_persisted_grants(adb))
+        after = observe_selected_history(adb, folder, files, incoming, scope, [operation])
+        run.save(run.path("selected-death-after-cold.json"), after, durable=True)
+        need(before == after, "Cold selected append recovery changed retained evidence")
+    return {"passed": passed, "failed": failed, "installedSha256": hashes}
+
+
+def select_selected_repeat(enabled, *, selected_append, reassigned, failed_host):
+    need(not enabled or (selected_append and reassigned is None and not failed_host),
+         "Repeated selected append requires the standalone lane and the exact successful predecessor")
+    return enabled
+
+
+def select_selected_death(enabled, *, selected_append, repeat, reassigned, failed_host):
+    need(not enabled or (selected_append and not repeat and reassigned is None and not failed_host),
+         "Selected append death requires the exact repeat predecessor and a standalone synthetic scope")
+    return enabled
+
+
+def parse_app_persisted_grants(text):
+    """Decode only the Android 9 package-filtered grant section, never a global dump."""
+    refused = "Could not establish the package-scoped persisted grant inventory"
+    rows = text.strip().splitlines()
+    need(len(text) <= 65536 and len(rows) >= 3 and rows[0] == URI_PERMISSIONS_HEADER and
+         re.fullmatch(r"-{16,}", rows[-1]), refused)
+    body = [row for row in rows[1:-1] if row]
+    if [row.strip() for row in body] == ["(nothing)"]:
+        return ()
+    need(len(body) >= 5 and body[0] == "  Granted Uri Permissions:" and re.fullmatch(r"  \* UID [1-9][0-9]{0,4} holds:", body[1]), refused)
+    result = set()
+    index = 2
+    while index < len(body):
+        need(index + 2 < len(body), refused)
+        uri, package, modes = body[index:index + 3]
+        locator = re.fullmatch(r"    UriPermission\{[a-f0-9]+ (content://\S+) \[user (0)\]( \[prefix\])?\}", uri)
+        parties = re.fullmatch(rf"      targetUserId=0 sourcePkg=([a-zA-Z0-9._]+) targetPkg={re.escape(APP)}", package)
+        bits = re.fullmatch(r"      mode=0x[0-3] owned=0x[0-3] global=0x[0-3] persistable=0x[0-3] persisted=0x([0-3])(?: persistedCreate=[0-9]+)?", modes)
+        need(locator is not None and parties is not None and bits is not None, refused)
+        if bits[1] != "0":
+            grant = (locator[1], bool(locator[3]), parties[1], int(bits[1]))
+            need(grant not in result and len(result) < 8, refused)
+            result.add(grant)
+        index += 3
+        while index < len(body) and re.fullmatch(r"      (?:readOwners:|writeOwners:|  \* .+)", body[index]):
+            index += 1
+    return tuple(sorted(result))
+
+
+def read_app_persisted_grants(adb):
+    # API 28's direct permissions subcommand ignores -p. The full -a -p branch passes it to the section; filter on-device so unrelated sections never reach ADB.
+    command = (f"set -o pipefail; dumpsys -t 10 activity -a -p {APP} | "
+               f"sed -n '/^{URI_PERMISSIONS_HEADER}$/,/^----------------/p'")
+    return parse_app_persisted_grants(adb("shell", command, timeout=20))
+
+
+def require_same_repeat_grants(expected, actual):
+    need(actual == expected, "The package's persisted grant inventory changed")
+
+
+def verify_library_move_spend(text, key, size, digest):
+    fields = text.splitlines()
+    need(0 < len(text.encode("ascii")) <= 512 and text == "\n".join(fields) + "\n" and len(fields) == 6 and
+         fields[:2] == ["pristinepage-library-move-spent-v1", key] and re.fullmatch(r"[a-f0-9]{64}", fields[2]) and
+         re.fullmatch(r"[0-9]+:[1-9][0-9]*", fields[3]) and fields[4:] == [digest, str(size)],
+         "The library move spend does not bind its exact payload")
+
+
+def verify_library_move_spends(adb, stage, actual_names, payloads):
+    expected = {sha256(leaf.encode("ascii")).hexdigest(): proof for leaf, proof in payloads.items()}
+    need(actual_names == {f"{key}.spent" for key in expected}, "The selected append move spend inventory differs")
+    fingerprints = {}
+    for key, (size, digest) in expected.items():
+        path = f"{stage}/{key}.spent"
+        extent = adb("shell", "run-as", APP, "stat", "-c", "%s", path).strip()
+        need(re.fullmatch(r"[1-9][0-9]{0,2}", extent) and int(extent) <= 512, "The library move spend extent is invalid")
+        text = adb("shell", "run-as", APP, "cat", path)
+        need(len(text.encode("ascii")) == int(extent), "The library move spend extent changed")
+        verify_library_move_spend(text, key, size, digest)
+        fingerprints[key] = sha256(text.encode("ascii")).hexdigest()
+    return fingerprints
+
+
+def read_selected_history_record(command, path, maximum):
+    size = command("stat", "-c", "%s", path).strip()
+    error = "Invalid selected history record extent"
+    need(re.fullmatch(r"[1-9][0-9]{0,3}", size) and int(size) <= maximum, error)
+    text = command("head", "-c", str(maximum + 1), path)
+    need(len(text.encode("ascii")) == int(size), error)
+    return text
+
+
+def observe_selected_history(adb, folder, files, incoming, scope, operations, *, catalogs=None):
+    """Authenticate the exact provider chain and private evidence, without granting access or writing on the guest."""
+    root = f"/sdcard/Documents/{folder}"
+    children = independent_fixture_children(folder)
+    need(adb("shell", "ls", "-A", "-1", root).splitlines() == sorted(children), "The selected history parent changed")
+    need(len(operations) in (1, 2) and len(set(operations)) == len(operations) and
+         all(re.fullmatch(UUID_TEXT, value) for value in operations) and
+         scope in {f"library-selected-death-{operations[0]}", f"library-selected-repeat-{operations[0]}"},
+         "The selected history scope and generation IDs must be exact")
+    left, right = (f"{root}/{name}" for name in children)
+    baseline, = (leaf for leaf in files if leaf.startswith("generations/"))
+    source, = (leaf for leaf in incoming if leaf.startswith("generations/"))
+    def guest(*args):
+        return adb("shell", *args)
+    baseline_text = read_selected_history_record(guest, f"{left}/{baseline}", 256)
+    source_text = read_selected_history_record(guest, f"{right}/{source}", 256)
+    need(sha256(baseline_text.encode("ascii")).hexdigest() == files[baseline] and
+         sha256(source_text.encode("ascii")).hexdigest() == incoming[source], "Selected history inputs diverged from their evidence")
+    missing, payload, _ = synthetic_scan(alternate=True)
+    inventory = files | {f"objects/{missing}": missing}
+    stages, results, fingerprints = [], [], {}
+    storage = f"files/{scope}/library-selected-merge-v1"
+    journal = f"{storage}/merge-stages"
+
+    def private(*args):
+        return adb("shell", "run-as", APP, *args)
+
+    def identity(command, path):
+        value = command("stat", "-c", "%d:%i", path).strip()
+        need(re.fullmatch(r"[0-9]+:[1-9][0-9]*", value), "The selected history node cannot be identified")
+        return value
+
+    need(set(private("ls", "-A", "-1", f"files/{scope}").splitlines()) ==
+         {"library-selected-merge-v1", "library-selected-merge-v1.lock", "read-scratch"} and
+         not private("ls", "-A", "-1", f"files/{scope}/read-scratch").strip() and
+         private("ls", "-A", "-1", storage).splitlines() == ["merge-stages"] and
+         set(private("ls", "-A", "-1", journal).splitlines()) == set(operations), "The selected history private scope changed")
+    keys = None
+    for index, operation in enumerate(operations):
+        repeated = index > 0
+        prior = baseline_text.splitlines()
+        marker, catalog = f"generations/{operation}.complete", f"catalogs/{operation}.sqlite"
+        text = read_selected_history_record(guest, f"{left}/{marker}", 256)
+        elements = text.splitlines()
+        need(len(prior) == len(elements) == 7 and elements[:5] == [prior[0], prior[1], operation, prior[2], prior[4]] and
+             re.fullmatch(r"[1-9][0-9]{0,6}", elements[5]) and int(elements[5]) <= 2 * 1024 * 1024 and
+             re.fullmatch(r"[a-f0-9]{64}", elements[6]), "The selected history marker is not the exact successor")
+        extent, digest = int(elements[5]), elements[6]
+        need(adb("shell", "stat", "-c", "%s", f"{left}/{catalog}").strip() == str(extent), "The selected catalog extent changed")
+        stage_name = f"merge-staging-{operation}"
+        need(not adb("shell", "ls", "-A", "-1", f"{left}/{stage_name}").strip(), "The selected history provider stage is not empty")
+        stages.append(stage_name)
+        fingerprints[stage_name] = identity(guest, f"{left}/{stage_name}")
+        if catalogs is not None:
+            local = catalogs[index]
+            adb("pull", f"{left}/{catalog}", local, timeout=20)
+            need(local.stat().st_size == extent and sha(local) == digest, "The pulled selected history catalog changed")
+            verify_selected_append_catalog(local, synthetic_scan()[0], missing, repeated=repeated)
+        attempt = f"{journal}/{operation}"
+        intent = read_selected_history_record(private, f"{attempt}/merge.intent", 1024)
+        receipt = read_selected_history_record(private, f"{attempt}/selected-merge.complete", 1024)
+        bound = verify_selected_append_records(intent, receipt, baseline_text, source_text, text)
+        need(keys is None or keys == bound, "The selected history receipts refer to different roots")
+        keys = bound
+        need(private("sha256sum", f"{attempt}/catalog.sqlite").split() == [digest, f"{attempt}/catalog.sqlite"],
+             "The selected history private catalog differs from the external catalog")
+        marker_digest = sha256(text.encode("ascii")).hexdigest()
+        payloads = {catalog: (extent, digest), marker: (len(text.encode("ascii")), marker_digest)}
+        if not repeated:
+            payloads[f"objects/{missing}"] = (len(payload), missing)
+        known = {"catalog.sqlite", "merge.intent", "selected-merge.complete"}
+        names = set(private("ls", "-A", "-1", attempt).splitlines())
+        need(known <= names, "The selected history lost private records")
+        fingerprints[operation] = {
+            "spends": verify_library_move_spends(adb, attempt, names - known, payloads),
+            "nodes": {leaf: identity(private, f"{attempt}/{leaf}") for leaf in sorted(names)},
+        }
+        inventory.update({marker: marker_digest, catalog: digest})
+        results.append(dict(generation=operation, predecessor=prior[2], catalogSha256=digest, catalogBytes=extent,
+                            missingBytes=0 if repeated else len(payload), copiedObjectSha256=None if repeated else missing,
+                            privateIntentSha256=sha256(intent.encode("ascii")).hexdigest(),
+                            privateCompletionSha256=sha256(receipt.encode("ascii")).hexdigest()))
+        baseline_text = text
+    verify_unchanged_settings_destination(adb, right, incoming)
+    verify_unchanged_settings_destination(adb, left, inventory, extra_names=stages)
+    return results, fingerprints
+
+
+def pinned_selected_death_predecessor(raw, guest, installed):
+    anchor = settings_run_anchors(raw, SELECTED_REPEAT_PASSED)
+    artifact = json.loads(anchor("artifacts.json"))
+    claim = json.loads(anchor("claim.json"))
+    grants = json.loads(anchor("independent-roots-grants.json"))
+    readings = [json.loads(anchor(f"{label}-readback.json")) for label in ("selected-append", "selected-repeat")]
+    operations = [row["generation"] for row in readings]
+    need(raw.name == "picker-adapter-library-tree-23f912ee54cb" and artifact["guest"] == guest == claim["name"] and
+         operations == [artifact["selectedRootAppend"], artifact["selectedRepeat"]] and readings[1]["predecessor"] == operations[0] and
+         grants["state"] == "prior-inventory-restored" and
+         json.loads(anchor("outcomes.json")) == {"passed": [SELECTED_REPEAT_CASE], "failed": [], "installedSha256": installed} and
+         read_results(anchor("independent-roots-append-instrumentation.txt"), (SELECTED_REPEAT_CASE,)) == ([SELECTED_REPEAT_CASE], []),
+         "The exact successful repeat predecessor was not verified")
+    independent_fixture_children(grants["fixture"])
+    missing, payload, _ = synthetic_scan(alternate=True)
+    for index, (label, row) in enumerate(zip(("selected-append", "selected-repeat"), readings)):
+        catalog = raw / f"{label}-catalog.sqlite"
+        need(catalog.stat().st_size == row["catalogBytes"] and sha(catalog) == row["catalogSha256"] and
+             row["missingBytes"] == (0 if index else len(payload)) and row["copiedObjectSha256"] == (None if index else missing),
+             "A retained repeat catalog or original-copy record changed")
+        verify_selected_append_catalog(catalog, synthetic_scan()[0], missing, repeated=index == 1)
+    legacy = json.loads(anchor("legacy-selected-append-private.json"))
+    grant_record = json.loads(anchor("repeat-prior-grants.json"))
+    spends = pinned_selected_repeat_spends(anchor("commands.jsonl"), operations)
+    expected = dict(legacy=legacy, grants=grant_record, spends=spends)
+    return claim, (grants["fixture"], artifact["fixture"], artifact["incomingFixture"], readings, expected), artifact["previous"]
+
+
+def verify_selected_death_handoff_trace(trace):
+    instrumentation = [(index, record) for index, record in enumerate(trace) if "instrument" in record["argv"]]
+    proof = [(index, record) for index, record in enumerate(trace)
+             if any(arg.startswith("rows=$(ps -A -o PID,NAME 2>&1)") for arg in record["argv"])]
+    need(len(instrumentation) == len(proof) == 1 and instrumentation[0][0] < proof[0][0] and
+         SELECTED_DEATH_CASE in instrumentation[0][1]["argv"] and instrumentation[0][1].get("exit") == 0 and
+         proof[0][1].get("exit") == 71 and not proof[0][1].get("stdout") and not proof[0][1].get("stderr") and
+         not any("force-stop" in record["argv"] for record in trace),
+         "The exact interrupted selected append did not stop at cold admission")
+    return instrumentation[0][1]
+
+
+def pinned_selected_death_handoff(raw, guest, pair):
+    anchor = settings_run_anchors(raw, SELECTED_DEATH_COLD_REFUSED)
+    artifacts = json.loads(anchor("artifacts.json"))
+    claim = json.loads(anchor("claim.json"))
+    attempt = json.loads(anchor("selected-death-attempt.json"))
+    shutdown = json.loads(anchor("shutdown.json"))
+    transcript = [json.loads(row) for row in anchor("commands.jsonl").splitlines()]
+    writer = verify_selected_death_handoff_trace(transcript)
+    operation, folder = attempt["operation"], attempt["fixture"]
+    independent_fixture_children(folder)
+    need(re.fullmatch(UUID_TEXT, operation) and raw.name == "picker-adapter-library-tree-0f3bb6abf393" and
+         artifacts["selectedDeath"] is True and artifacts["selectedRootAppend"] == operation and
+         artifacts["guest"] == claim["name"] == guest and attempt["state"] == "armed" and
+         writer["argv"][-7:] == ["-e", "libraryFixtureFolder", folder, "-e", "librarySelectedAppendOperation", operation, RUNNER] and
+         shutdown["generation"] == claim["generation"] and shutdown["stage"] == "verified-before-release" and
+         shutdown["ownedShutdownVerified"] is True and shutdown["usageReleased"] is False and
+         all(node["running"] is False for node in shutdown["after"]) and
+         pair == {package: sha(raw / f"{package}.apk") for package in (APP, TEST)},
+         "The interrupted selected append does not bind the exact released guest, attempt and installed pair")
+    spent = json.loads((raw.parent / f"settings-retry-spent-{SELECTED_REPEAT_PASSED}.json").read_bytes())
+    need(spent == dict(operation=operation, destination=folder, kind="selected-delivery-death"),
+         "The interrupted selected append admission is not the exact spent attempt")
+    checkpoint = read_selected_delivery_death(anchor("selected-death-instrumentation.txt"), operation)
+    return claim, (folder, operation, artifacts["fixture"], artifacts["incomingFixture"], checkpoint), artifacts["previous"]
+
+
+def pinned_selected_repeat_spends(transcript, operations):
+    journal = f"files/library-selected-repeat-{operations[0]}/library-selected-merge-v1/merge-stages"
+    expected = {operation: {} for operation in operations}
+    for line in transcript.splitlines():
+        record = json.loads(line)
+        args = record["argv"]
+        if args[-5:-1] != ["shell", "run-as", APP, "cat"]:
+            continue
+        match = re.fullmatch(rf"{journal}/({UUID_TEXT})/([a-f0-9]{{64}})\.spent", args[-1])
+        if match:
+            operation, key = match.groups()
+            need(operation in expected and key not in expected[operation] and record.get("exit") == 0 and not record.get("stderr") and
+                 0 < len(record["stdout"]) <= 512, "The pinned selected repeat spend evidence is ambiguous")
+            expected[operation][key] = sha256(record["stdout"].encode("ascii")).hexdigest()
+    need([len(expected[op]) for op in operations] == [3, 2], "The pinned selected repeat spend evidence is incomplete")
+    return expected
+
+
+def require_selected_death_prior_evidence(expected, grants, legacy, observed):
+    records, fingerprints = observed
+    spends = {op: fingerprints.get(op, {}).get("spends") for op in expected["spends"]}
+    need(len(records) == 2 and grants == expected["grants"] and legacy == expected["legacy"] and spends == expected["spends"],
+         "The pinned selected repeat evidence changed before installation")
+
+
+def pinned_selected_repeat_predecessor(raw, guest, installed):
+    anchor = settings_run_anchors(raw, SELECTED_APPEND_PASSED)
+    artifact = json.loads(anchor("artifacts.json"))
+    grants = json.loads(anchor("independent-roots-grants.json"))
+    readback = json.loads(anchor("selected-append-readback.json"))
+    claim = json.loads(anchor("claim.json"))
+    need(raw.name == "picker-adapter-library-tree-6a2d8a67bc65" and artifact["guest"] == guest == claim["name"]
+         and artifact["selectedRootAppend"] == readback["generation"] and re.fullmatch(UUID_TEXT, readback["generation"])
+         and grants["state"] == "prior-inventory-restored"
+         and json.loads(anchor("outcomes.json")) == {"passed": [SELECTED_APPEND_CASE], "failed": [], "installedSha256": installed}
+         and read_results(anchor("independent-roots-append-instrumentation.txt"), (SELECTED_APPEND_CASE,)) == ([SELECTED_APPEND_CASE], []),
+         "The exact successful selected append predecessor was not verified")
+    independent_fixture_children(grants["fixture"])
+    catalog = raw / "selected-append-catalog.sqlite"
+    need(catalog.stat().st_size == readback["catalogBytes"] and sha(catalog) == readback["catalogSha256"],
+         "The successful selected append catalog anchor changed")
+    verify_selected_append_catalog(catalog, synthetic_scan()[0], readback["copiedObjectSha256"])
+    return claim, (grants["fixture"], artifact["fixture"], artifact["incomingFixture"], readback), artifact["previous"]
+
+
+def observe_legacy_selected_append(adb, receipt):
+    folder, files, incoming, readback = receipt
+    root = f"/sdcard/Documents/{folder}"
+    children = independent_fixture_children(folder)
+    need(adb("shell", "ls", "-A", "-1", root).splitlines() == sorted(children),
+         "The retained selected append parent inventory changed")
+    left, right = (f"{root}/{name}" for name in children)
+    operation = readback["generation"]
+    marker = f"generations/{operation}.complete"
+    catalog = f"catalogs/{operation}.sqlite"
+    baseline, = (name for name in files if name.startswith("generations/"))
+    source, = (name for name in incoming if name.startswith("generations/"))
+    before_text = adb("shell", "cat", f"{left}/{baseline}")
+    source_text = adb("shell", "cat", f"{right}/{source}")
+    child_text = adb("shell", "cat", f"{left}/{marker}")
+    child = child_text.splitlines()
+    original = before_text.splitlines()
+    need(len(original) == 7 and len(child) == 7 and original[2] == readback["predecessor"] and
+         child[:5] == [original[0], original[1], operation, original[2], original[4]] and
+         child[5:] == [str(readback["catalogBytes"]), readback["catalogSha256"]],
+         "The retained selected append marker changed")
+    missing = readback["copiedObjectSha256"]
+    verify_unchanged_settings_destination(adb, left, files | {
+        marker: sha256(child_text.encode("ascii")).hexdigest(), catalog: child[6], f"objects/{missing}": missing,
+    }, backup_name="merge-staging")
+    need(not adb("shell", "ls", "-A", "-1", f"{left}/merge-staging").strip(), "The retained selected write stage is not empty")
+    verify_unchanged_settings_destination(adb, right, incoming)
+    private = "files/library-selected-merge-v1"
+    def private_list(path):
+        return set(adb("shell", "run-as", APP, "ls", "-A", "-1", path).splitlines())
+    need(private_list(private) == {"merge-stages"} and private_list(f"{private}/merge-stages") == {operation},
+         "The retained private selected append namespace changed")
+    stage = f"{private}/merge-stages/{operation}"
+    names = private_list(stage)
+    spend_names = names - {"catalog.sqlite", "merge.intent"}
+    need({"catalog.sqlite", "merge.intent"} <= names, "The retained selected append private inventory changed")
+    verify_library_move_spends(adb, stage, spend_names, {
+        catalog: (readback["catalogBytes"], readback["catalogSha256"]),
+        marker: (len(child_text.encode("ascii")), sha256(child_text.encode("ascii")).hexdigest()),
+        f"objects/{missing}": (readback["missingBytes"], missing),
+    })
+    intent = adb("shell", "run-as", APP, "cat", f"{stage}/merge.intent")
+    verify_selected_append_records(intent, None, before_text, source_text, child_text)
+    observed = {}
+    for name in sorted(names):
+        path = f"{stage}/{name}"
+        fields = adb("shell", "run-as", APP, "sha256sum", path).split()
+        need(len(fields) == 2 and fields[1] == path and re.fullmatch(r"[a-f0-9]{64}", fields[0]),
+             "The retained selected append private leaf could not be fingerprinted")
+        observed[name] = fields[0]
+    need(observed["catalog.sqlite"] == child[6] and observed["merge.intent"] == sha256(intent.encode("ascii")).hexdigest(),
+         "The retained selected append private catalog or intent changed")
+    return observed
+
+
+def verify_selected_append_catalog(catalog, destination_digest, incoming_digest, *, repeated=False):
     with closing(sqlite3.connect(catalog.resolve().as_uri() + "?mode=ro", uri=True)) as db:
         rows = db.execute("""
             SELECT d.title, n.filename, p.ordinal, b.byteSha256, p.currentRecipeRevision, r.recipeRevision, r.parentRevision
             FROM Document d JOIN Page p USING(documentId) JOIN LibraryScanName n USING(pageId)
             JOIN Source s USING(sourceId) JOIN SourceBlob b USING(sourceBlobId) JOIN RecipeRevision r ON p.pageId=r.pageId
-            ORDER BY p.ordinal, r.recipeRevision LIMIT 5
+            ORDER BY p.ordinal, r.recipeRevision LIMIT 7
         """).fetchall()
-        need(rows == [
+        incoming_current = 4 if repeated else 2
+        expected = [
             ("Synthetic folder test", "Synthetic.png", 0, destination_digest, 2, 1, None),
             ("Synthetic folder test", "Synthetic.png", 0, destination_digest, 2, 2, 1),
-            ("Synthetic folder test", "Additional synthetic.png", 1, incoming_digest, 2, 1, None),
-            ("Synthetic folder test", "Additional synthetic.png", 1, incoming_digest, 2, 2, 1),
-        ] and db.execute("SELECT count(*) FROM Document").fetchone() == (1,),
-            "The actual selected append catalog lost the album order, originals or full recipe history")
+            ("Synthetic folder test", "Additional synthetic.png", 1, incoming_digest, incoming_current, 1, None),
+            ("Synthetic folder test", "Additional synthetic.png", 1, incoming_digest, incoming_current, 2, 1),
+        ]
+        if repeated:
+            expected += [
+                ("Synthetic folder test", "Additional synthetic.png", 1, incoming_digest, 4, 3, None),
+                ("Synthetic folder test", "Additional synthetic.png", 1, incoming_digest, 4, 4, 3),
+            ]
+        need(rows == expected and db.execute("SELECT count(*) FROM Document").fetchone() == (1,)
+             and db.execute("SELECT count(*) FROM Page").fetchone() == (2,),
+              "The actual selected append catalog lost the album order, originals or full recipe history")
+
+
+def verify_selected_recipe_catalog(catalog, predecessor, original_digest, *, issuing_revision=2):
+    """Read-only oracle for the exact one-scan fixture and its single recipe edit; verify prior history and Undo independently."""
+    error = "The selected recipe catalog changed more than the bound recipe edit"
+    need(issuing_revision in (2, 3), "Only the first and second fixture edits are admissible")
+    saved_revision = issuing_revision + 1
+    paths = [candidate.resolve() for candidate in (predecessor, catalog)]
+    need(all(0 < item.stat().st_size <= 2 * 1024 * 1024 and
+             not any(Path(str(item) + suffix).exists() for suffix in ("-wal", "-shm", "-journal")) for item in paths), error)
+    with (closing(sqlite3.connect(paths[0].as_uri() + "?mode=ro&immutable=1", uri=True)) as before,
+          closing(sqlite3.connect(paths[1].as_uri() + "?mode=ro&immutable=1", uri=True)) as after):
+        def rows(db, query):
+            return db.execute(query).fetchmany(16)
+        need(rows(after, "PRAGMA foreign_key_check") == [] and rows(after, "PRAGMA quick_check") == [("ok",)], error)
+        documents = "SELECT documentId,CAST(title AS BLOB),documentRevision,lifecycle,createdAt,updatedAt,deletedAt FROM Document"
+        old_docs, new_docs = rows(before, documents), rows(after, documents)
+        need(len(old_docs) == len(new_docs) == 1, error)
+        old, new = old_docs[0], new_docs[0]
+        changed_at = new[5]
+        need(isinstance(changed_at, int) and changed_at > 0 and
+             new == (*old[:2], saved_revision, *old[3:5], changed_at, old[6]) and old[2] == issuing_revision, error)
+        pages = "SELECT pageId,documentId,sourceId,currentRecipeRevision,state,ordinal,removedAt,createdAt FROM Page"
+        old_pages, new_pages = rows(before, pages), rows(after, pages)
+        need(len(old_pages) == len(new_pages) == 1 and old_pages[0][3] == issuing_revision and
+             new_pages[0] == (*old_pages[0][:3], saved_revision, *old_pages[0][4:]), error)
+        page, document, source = old_pages[0][:3]
+        need(document == old[0], error)
+        for table in ("LibraryScanName", "SourceBlob", "SourceCaptureDay"):
+            need(rows(after, f"SELECT * FROM {table}") == rows(before, f"SELECT * FROM {table}"), error)
+        need(rows(after, "SELECT byteSha256 FROM SourceBlob") == [(original_digest,)], error)
+        sources = "SELECT sourceId,sourceBlobId,pixelSha256,width,height,exifOrientation,conversionFingerprint,profileSha256,state,createdAt,refCount FROM Source"
+        old_sources = rows(before, sources)
+        refs_before = 3 if issuing_revision == 2 else 5
+        need(len(old_sources) == 1 and old_sources[0][0] == source and old_sources[0][-1] == refs_before and
+             rows(after, sources) == [(*old_sources[0][:-1], refs_before + 2)], error)
+        revisions = "SELECT pageId,recipeRevision,sourceId,recipeSchemaVersion,canonicalRecipe,recipeSha256,parentRevision,createdAt FROM RecipeRevision ORDER BY recipeRevision"
+        past, current = rows(before, revisions), rows(after, revisions)
+        need(len(past) == issuing_revision and len(current) == saved_revision and current[:-1] == past and
+             [row[1] for row in past] == list(range(1, saved_revision)) and past[-1][:4] == (page, issuing_revision, source, 1), error)
+        recipe = json.loads(past[-1][4])
+        need(recipe["geometry"]["outputQuarterTurns"] == issuing_revision - 1, error)
+        recipe["geometry"]["outputQuarterTurns"] = issuing_revision
+        encoded = json.dumps(recipe, sort_keys=True, separators=(",", ":")).encode("ascii")
+        fingerprint = sha256(b"pristinepage-recipe-json-v1\0" + len(encoded).to_bytes(4, "big") + encoded).hexdigest()
+        need(current[-1] == (page, saved_revision, source, 1, encoded, fingerprint, issuing_revision, changed_at), error)
+        undo = "SELECT undoId,documentId,action,appliedDocumentRevision,state,expiresAt,beforeState,afterState FROM UndoEntry ORDER BY appliedDocumentRevision"
+        earlier, revised = rows(before, undo), rows(after, undo)
+        need(len(earlier) == issuing_revision - 2 and len(revised) == issuing_revision - 1 and revised[:-1] == earlier and
+             revised[-1][1:6] == (document, "RECIPE_EDIT", saved_revision, "AVAILABLE", changed_at + 86_400_000), error)
+        for index, revision in enumerate((issuing_revision, saved_revision), 6):
+            binding = {"version": 1, "pages": [{"pageId": page, "sourceId": source, "recipeRevision": revision}]}
+            need(json.loads(revised[-1][index]) == binding, error)
+        references = "SELECT ownerType,ownerId,sourceId FROM SourceReference"
+        expected_refs = set(rows(before, references)) | {("RECIPE_HISTORY", f"recipe-v1/{page}/{saved_revision}", source), ("UNDO", revised[-1][0], source)}
+        found_refs = rows(after, references)
+        need(len(found_refs) == len(expected_refs) and set(found_refs) == expected_refs, error)
+        for table in ("OcrResult", "OcrPageWork", "Job"):
+            need(not rows(after, f"SELECT 1 FROM {table} LIMIT 1"), error)
+        return fingerprint
+
+
+def verify_settings_apply_destination(run, adb, destination, fixture, inventory, default_id, *, issuing=4, expected_operation=None):
+    """Independently reopen the actual closed successor; the instrumentation only qualifies the foreground acknowledgment."""
+    baseline, = (leaf for leaf in inventory if leaf.startswith("generations/"))
+    initial_text = (fixture / baseline).read_text(encoding="ascii")
+    initial = initial_text.splitlines()
+    published = set(adb("shell", "ls", "-A", "-1", f"{destination}/generations").splitlines())
+    children = published - {baseline.split("/", 1)[1]}
+    need(len(published) == 2 and len(children) == 1, "Apply must publish exactly one new generation")
+    marker_name, = children
+    match = re.fullmatch(rf"({UUID_TEXT})\.complete", marker_name)
+    need(match, "Apply published an invalid generation name")
+    operation = match[1]
+    need(expected_operation is None or operation == expected_operation, "The closed catalog is not the known setup publication")
+    marker_leaf, catalog_leaf = f"generations/{marker_name}", f"catalogs/{operation}.sqlite"
+    marker = read_selected_history_record(lambda *args: adb("shell", *args), f"{destination}/{marker_leaf}", 256)
+    fields = marker.splitlines()
+    need(len(initial) == len(fields) == 7 and fields[:5] == [initial[0], initial[1], operation, initial[2], initial[4]] and
+         re.fullmatch(r"[1-9][0-9]{0,6}", fields[5]) and int(fields[5]) <= 2 * 1024 * 1024 and
+         re.fullmatch(r"[a-f0-9]{64}", fields[6]), "Apply did not publish the exact direct successor")
+    stage = f"merge-staging-{operation}"
+    verify_unchanged_settings_destination(adb, destination, inventory | {
+        marker_leaf: sha256(marker.encode("ascii")).hexdigest(), catalog_leaf: fields[6]}, backup_name=stage)
+    need(not adb("shell", "ls", "-A", "-1", f"{destination}/{stage}").strip() and
+         adb("shell", "stat", "-c", "%s", f"{destination}/{catalog_leaf}").strip() == fields[5],
+         "The foreground edit left incomplete staging")
+    catalog = run.path("settings-apply-catalog.sqlite")
+    adb("pull", f"{destination}/{catalog_leaf}", catalog, timeout=20)
+    need(catalog.stat().st_size == int(fields[5]) and sha(catalog) == fields[6], "The readback catalog differs from the marker")
+    original, _, _ = synthetic_scan()
+    recipe = verify_selected_recipe_catalog(catalog, fixture / f"catalogs/{initial[2]}.sqlite", original)
+    def private(*args):
+        return adb("shell", "run-as", APP, *args)
+    root = "files/library-settings"
+    selected = read_selected_history_record(private, f"files/library-settings-apply-pointer-{destination.rsplit('/', 1)[1]}", 320)
+    attempt = f"files/catalog-recipe-attempts-v1/{operation}"
+    receipt = read_bound_recipe_evidence(adb, "files", attempt, destination, initial_text, marker, fields[6],
+                                         advanced=True, issuing=issuing, captured_pointer=selected)
+    spend = read_selected_history_record(private, f"files/catalog-revision-spends/{operation}.spent", 1024)
+    need(spend == "pristinepage-catalog-revision-spent-v1\n" + initial_text + marker, "Apply lost the catalog revision spend")
+    extras = {"catalog.sqlite", "recipe-edit.intent", "recipe-edit.complete", "recipe-edit.catalog-owner"}
+    leaves = set(private("ls", "-A", "-1", attempt).splitlines())
+    moves = verify_library_move_spends(adb, attempt, leaves - extras, {
+        catalog_leaf: (int(fields[5]), fields[6]), marker_leaf: (len(marker.encode("ascii")), sha256(marker.encode("ascii")).hexdigest())})
+    pointer = read_selected_history_record(private, f"{root}/active-library", 320)
+    origin = read_selected_history_record(private, f"{root}/default-origin", 320)
+    need(require_returned_settings_pointer(pointer, origin, issuing + 2) == default_id, "The journey did not return to the same Default library")
+    run.save(run.path("settings-apply-readback.json"), dict(generation=operation, predecessor=initial[2],
+              catalogSha256=fields[6], recipeSha256=recipe, originalInventoryUnchanged=True, selectedActivation=issuing + 1,
+             receiptSha256=receipt, revisionSpendSha256=sha256(spend.encode("ascii")).hexdigest(), moveSpends=moves,
+              returnedActivation=issuing + 2), durable=True)
+
+
+def require_selected_recipe_predecessor(installed, expected_pair, ordinary, expected_ordinary, grants, expected_grants):
+    need(installed == expected_pair and ordinary == expected_ordinary and grants == expected_grants,
+         "The selected edit predecessor APKs, private state or persisted grants changed")
+
+
+def verify_selected_recipe_boot_only_trace(trace, index):
+    """Whitelist the failed launch and read-only transport probes; no Android command can qualify for a retry."""
+    suffix = ("--index", str(index))
+    permitted_hosts = {
+        ("pwsh", ("-NoProfile", "-Command", "(Get-CimInstance Win32_OperatingSystem).FreePhysicalMemory")),
+        ("adb.exe", ("version",)),
+        ("ldconsole.exe", ("list2",)),
+        ("ldconsole.exe", ("isrunning", *suffix)),
+    }
+    phase, probes = "before", 0
+    error = "The selected edit is not a boot-only refusal"
+    for row in trace:
+        exe, *tail = row["argv"]
+        call = Path(exe).name.lower(), tuple(tail)
+        need(row.get("exit") == 0, error)
+        if call in permitted_hosts:
+            continue
+        if call == ("ldconsole.exe", ("launch", *suffix)):
+            need(phase == "before", error)
+            phase = "launched"
+        elif call == ("ldconsole.exe", ("adb", *suffix, "--command", "get-serialno")):
+            reply = (row.get("stdout", "") + "\n" + row.get("stderr", "")).strip()
+            need(phase == "launched" and re.fullmatch(r"error: device (?:offline|'emulator-[0-9]+' not found)", reply), error)
+            probes += 1
+        else:
+            need(call == ("ldconsole.exe", ("quit", *suffix)) and phase == "launched" and probes > 0, error)
+            phase = "stopped"
+    need(phase == "stopped", error)
+
+
+def selected_recipe_boot_retry_owner(root, original, previous, candidate):
+    raw = root / "picker-adapter-library-tree-00860c6898ca"
+    anchor = settings_run_anchors(raw, SELECTED_RECIPE_BOOT_REFUSAL)
+    artifacts = json.loads(anchor("artifacts.json"))
+    shutdown = json.loads(anchor("shutdown.json"))
+    manifest = json.loads((raw / f"{raw.name}-final-manifest.json").read_bytes())
+    snapshot = manifest["recordSnapshot"]
+    stable = ("name", "installation", "index", "created", "worktree", "purpose", "api", "created_by_agent")
+    history = snapshot.get("ownership_history", [])
+    need(all(snapshot.get(key) == original[key] for key in stable) and history and
+         history[-1]["generation"] == original["generation"] and history[-1]["shutdown_processes"] == original["runtime_processes"] and
+         artifacts["guest"] == original["name"] and artifacts["selectedRecipe"] is True and artifacts["previous"] == previous and
+         {package: row["sha256"] for package, row in artifacts["proof"].items()} == candidate and
+         snapshot["serial"] is None and manifest["generation"] == shutdown["generation"] == snapshot["generation"] and
+         shutdown["stage"] == "verified-before-release" and shutdown["ownedShutdownVerified"] is True and
+         shutdown["storageDeleted"] is False and
+         snapshot["runtime_processes"] == shutdown["originalProcesses"] == [[node["pid"], node["start"]] for node in shutdown["after"]] and
+         len(shutdown["after"]) == 2 and all(node["running"] is False for node in shutdown["after"]),
+         "The exact prior selected edit boot-only evidence changed")
+    verify_selected_recipe_boot_only_trace([json.loads(line) for line in anchor("commands.jsonl").splitlines()], original["index"])
+    return snapshot
+
+
+def verify_fresh_recipe_scope(before, after, scope, *, expect_created=True):
+    expected = before | {scope}
+    need(scope not in before and "library-settings" not in before and
+         (after == expected or (not expect_created and after == before)),
+         "The fresh selected edit changed private library state outside its exact attempt")
+
+
+def recipe_private_scopes(adb):
+    text = adb("shell", f"run-as {APP} sh -c 'if [ -d files ]; then ls -A -1 files; fi'")
+    return {leaf for leaf in text.splitlines() if leaf.startswith("library-")}
+
+
+def verify_bound_recipe_receipt(intent, completion, old_marker, new_marker, pointer, grant, *, advanced=False, issuing=2):
+    error = "The bound recipe receipt does not match its active binding and exact catalogs"
+    def checked(fields, text):
+        body = "\n".join(fields[:-1]) + "\n"
+        return text == body + sha256(body.encode("ascii")).hexdigest() + "\n"
+    old, new = old_marker.splitlines(), new_marker.splitlines()
+    active_marker, marker_text = (new, new_marker) if advanced else (old, old_marker)
+    active, access, observed = (value.splitlines() for value in (pointer, grant, intent))
+    need(len(old) == len(new) == 7 and len(active) == 7 and len(access) == 5 and len(observed) == 19 and
+         active[:3] == ["pristinepage-active-library-v2", old[1], str(issuing + int(advanced))] and active[4] == active_marker[2] and
+         re.fullmatch(UUID_TEXT, active[3]) and access[:3] == ["pristinepage-library-grant-v1", active[3], "3"] and
+         access[3].startswith("content://com.android.externalstorage.documents/tree/") and
+         checked(active, pointer) and checked(access, grant) and active[5] == sha256((grant + marker_text).encode("ascii")).hexdigest() and
+         observed[:4] == ["pristinepage-recipe-edit-intent-v1", str(issuing), active[3], sha256((grant + old_marker).encode("ascii")).hexdigest()] and
+         re.fullmatch(r"[a-f0-9]{64}", observed[4]) and intent == "\n".join(observed[:5]) + "\n" + old_marker + new_marker and
+         completion == f"pristinepage-recipe-edit-complete-v1\n{sha256(intent.encode('ascii')).hexdigest()}\n", error)
+    return active[3], sha256(completion.encode("ascii")).hexdigest()
+
+
+def require_bound_recipe_grant_destination(uri, destination):
+    prefix = "content://com.android.externalstorage.documents/tree/"
+    base = "/sdcard/Documents/"
+    path = destination.removeprefix(base)
+    expected = {prefix + quote(document_id, safe="") for document_id in (f"home:{path}", f"primary:Documents/{path}")}
+    need(destination.startswith(base) and uri in expected, "The receipt did not bind the exact Files-selected synthetic folder")
+
+
+def require_bound_recovery_writer(trace, serial, folder, operation):
+    launches = [call for call in trace if "instrument" in call["argv"]]
+    expected = ["-s", serial, "shell", "am", "instrument", "-w", "-r", "-e", "class", BOUND_RECIPE_CASE,
+                "-e", "libraryFixtureFolder", folder, "-e", "librarySelectedAppendOperation", operation, RUNNER]
+    need(len(launches) == 1 and launches[0].get("exit") == 0 and launches[0]["argv"][1:] == expected,
+         "The trace did not record the sole spent bound writer")
+
+
+def read_bound_recipe_evidence(adb, private, attempt, left, predecessor, successor, catalog_digest, *, advanced=False, issuing=2, captured_pointer=None):
+    def app_files(*args):
+        return adb("shell", "run-as", APP, *args)
+    settings = f"{private}/library-settings"
+    pointer = captured_pointer if captured_pointer is not None else read_selected_history_record(app_files, f"{settings}/active-library", 320)
+    fields = pointer.splitlines()
+    need(len(fields) == 7 and re.fullmatch(UUID_TEXT, fields[3]), "The bound recipe receipt has no exact grant identifier")
+    grant_id = fields[3]
+    grant = read_selected_history_record(app_files, f"{settings}/folder-grants/{grant_id}", 4352)
+    intent = read_selected_history_record(app_files, f"{attempt}/recipe-edit.intent", 1024)
+    completion = read_selected_history_record(app_files, f"{attempt}/recipe-edit.complete", 256)
+    _, receipt_digest = verify_bound_recipe_receipt(intent, completion, predecessor, successor, pointer, grant, advanced=advanced, issuing=issuing)
+    require_bound_recipe_grant_destination(grant.splitlines()[3], left)
+    previous_id = predecessor.splitlines()[2]
+    catalog = f"{attempt}/catalog.sqlite"
+    node = app_files("stat", "-c", "%d:%i", catalog).strip()
+    if advanced:
+        next_id = successor.splitlines()[2]
+        need(read_selected_history_record(app_files, f"{settings}/folder-verifications/{grant_id}-{next_id}", 256) == successor,
+             "The advanced pointer has no exact successor verification")
+    need(read_selected_history_record(app_files, f"{settings}/folder-verifications/{grant_id}-{previous_id}", 256) == predecessor and
+         re.fullmatch("[0-9]+:[1-9][0-9]*", node) and
+         node == app_files("stat", "-c", "%d:%i", f"{attempt}/recipe-edit.catalog-owner").strip() and
+         app_files("sha256sum", catalog).split() == [catalog_digest, catalog],
+         "The bound recipe receipt lost the original binding or staged catalog owner")
+    return receipt_digest
+
+
+def preserve_detached_recipe(adb, files, attempt, readback):
+    folder, operation = attempt["folder"], attempt["operation"]
+    children = independent_fixture_children(folder)
+    parent = f"/sdcard/Documents/{folder}"
+    need(operation == readback["generation"] and re.fullmatch(UUID_TEXT, operation), "The detached edit predecessor changed")
+    need(adb("shell", "ls", "-A", "-1", parent).splitlines() == sorted(children), "The detached edit parent changed")
+    left, right = (f"{parent}/{name}" for name in children)
+    verify_unchanged_settings_destination(adb, right, files)
+    marker, catalog, stage = f"generations/{operation}.complete", f"catalogs/{operation}.sqlite", f"merge-staging-{operation}"
+    text = read_selected_history_record(lambda *args: adb("shell", *args), f"{left}/{marker}", 256)
+    need(text.splitlines()[2:4] == [operation, readback["predecessor"]] and
+         text.splitlines()[-2:] == [str(readback["catalogBytes"]), readback["catalogSha256"]], "The detached edit marker changed")
+    marker_hash = sha256(text.encode("ascii")).hexdigest()
+    verify_unchanged_settings_destination(adb, left, files | {marker: marker_hash, catalog: readback["catalogSha256"]}, backup_name=stage)
+    nodes = attempt["before"]
+    need(set(nodes) == set(files) | {"objects", "catalogs", "generations"}, "The earlier detached fixture identity inventory changed")
+    for leaf, expected in nodes.items():
+        actual = adb("shell", "stat", "-c", "%d:%i:%s", f"{left}/{leaf}").strip()
+        need((actual if "/" in leaf else actual.rsplit(":", 1)[0]) == expected, "The earlier detached fixture node was replaced")
+    need(not adb("shell", "ls", "-A", "-1", f"{left}/{stage}").strip(), "The detached edit stage changed")
+    scope = f"files/library-selected-editor-{operation}"
+    private = f"{scope}/catalog-recipe-attempts-v1/{operation}"
+    def app_files(*args):
+        return adb("shell", "run-as", APP, *args)
+    spend = read_selected_history_record(app_files, f"{scope}/catalog-revision-spends/{operation}.spent", 1024)
+    catalog_copy = f"{private}/catalog.sqlite"
+    names = set(app_files("ls", "-A", "-1", private).splitlines())
+    need(app_files("sha256sum", catalog_copy).split() == [readback["catalogSha256"], catalog_copy] and
+         sha256(spend.encode("ascii")).hexdigest() == readback["revisionSpendSha256"] and
+         verify_library_move_spends(adb, private, names - {"catalog.sqlite"},
+             {catalog: (readback["catalogBytes"], readback["catalogSha256"]), marker: (len(text.encode("ascii")), marker_hash)}) ==
+         readback["moveSpends"], "The detached edit private evidence changed")
+
+
+def exercise_selected_recipe_edit(run, adb, ns, raw, fixture, files, hashes, *, fresh=False, bound=False, advanced=False,
+                                  recovery_authority=None):
+    """One picker and one new operation; preserve an ambiguous result rather than rerunning it."""
+    recover = recovery_authority is not None
+    need(not recover or (bound and not fresh and not advanced and re.fullmatch(r"[0-9a-f]{64}", recovery_authority)
+                         and not (raw.parent / f"settings-retry-spent-{recovery_authority}.json").exists()),
+         "Pointer recovery requires a new isolated bound edit and an unspent admission")
+    folder = "PristinePage-tree-" + uuid.uuid4().hex[:12]
+    operation = str(uuid.uuid4())
+    parent = f"/sdcard/Documents/{folder}"
+    children = independent_fixture_children(folder)
+    left, right = (f"{parent}/{name}" for name in children)
+    private = f"files/library-selected-editor-{operation}"
+    scope = private.rsplit("/", 1)[1]
+    initial_private = recipe_private_scopes(adb)
+    def identify(path):
+        value = adb("shell", "stat", "-c", "%d:%i:%s", path).strip()
+        need(re.fullmatch(r"[0-9]+:[1-9][0-9]*:[0-9]+", value), "The selected edit fixture node identity is unavailable")
+        return value
+    def admit():
+        recheck_target(run, ns)
+        require_cold_backup_app(adb)
+        need({package: run.installed_hash(package) for package in hashes} == hashes and
+             scope not in recipe_private_scopes(adb),
+             "The selected edit does not have an exact installed pair and fresh private scope")
+    if fresh:
+        admit()
+        need(not initial_private and not read_app_persisted_grants(adb), "Fresh selected edit needs no prior library or grants")
+        adb("shell", "mkdir", "-p", "/sdcard/Documents")
+    stage_independent_fixture_pair(adb, parent, folder, ((fixture, files), (fixture, files)), admit)
+    before = {leaf: identify(f"{left}/{leaf}") for leaf in (*files, "catalogs", "generations", "objects")}
+    # For directories compare identity, not extent: new catalog and marker legitimately change directory sizes.
+    for directory in ("catalogs", "generations", "objects"):
+        before[directory] = before[directory].rsplit(":", 1)[0]
+    source_catalog, = (leaf for leaf in files if leaf.startswith("catalogs/"))
+    source_marker, = (leaf for leaf in files if leaf.startswith("generations/"))
+    initial = read_selected_history_record(lambda *args: adb("shell", *args), f"{left}/{source_marker}", 256)
+    run.save(run.path("selected-recipe-attempt.json"), {"folder": folder, "operation": operation, "before": before}, durable=True)
+    try:
+        admit()
+        if recover:
+            authority = recovery_authority
+        elif advanced:
+            authority = (sha256(f"selected-recipe-advance-fresh-v1:{ns['NAME']}".encode("ascii")).hexdigest()
+                         if fresh else BOUND_RECIPE_READBACK)
+        else:
+            authority = (DETACHED_RECIPE_PASSED if bound else sha256(f"selected-recipe-fresh-v1:{ns['NAME']}".encode("ascii")).hexdigest()
+                         if fresh else SELECTED_RECIPE_BASELINE)
+        spend_settings_retry(raw.parent, authority, dict(operation=operation, destination=folder, kind="selected-recipe-edit"))
+        case = ADVANCED_RECIPE_CASE if advanced else BOUND_RECIPE_CASE if bound else SELECTED_RECIPE_CASE
+        recovery_args = ("-e", "libraryRecoverSelectedRecipePointer", "true") if recover else ()
+        output = adb("shell", "am", "instrument", "-w", "-r", "-e", "class", case,
+                     "-e", "libraryFixtureFolder", folder, "-e", "librarySelectedAppendOperation", operation,
+                     *recovery_args, RUNNER, timeout=190)
+        run.path("selected-recipe-instrumentation.txt").write_text(output, encoding="utf-8")
+        passed, failed = read_results(output, (case,))
+        if not failed:
+            if fresh:
+                verify_fresh_recipe_scope(initial_private, recipe_private_scopes(adb), scope)
+            marker_leaf, catalog_leaf = f"generations/{operation}.complete", f"catalogs/{operation}.sqlite"
+            marker = read_selected_history_record(lambda *args: adb("shell", *args), f"{left}/{marker_leaf}", 256)
+            prior, fields = initial.splitlines(), marker.splitlines()
+            need(len(prior) == len(fields) == 7 and fields[:5] == [prior[0], prior[1], operation, prior[2], prior[4]] and
+                 re.fullmatch(r"[1-9][0-9]{0,6}", fields[5]) and int(fields[5]) <= 2 * 1024 * 1024 and
+                 re.fullmatch(r"[a-f0-9]{64}", fields[6]), "The selected edit marker is not the exact successor")
+            marker_hash = sha256(marker.encode("ascii")).hexdigest()
+            stage = f"merge-staging-{operation}"
+            verify_unchanged_settings_destination(adb, left, files | {marker_leaf: marker_hash, catalog_leaf: fields[6]}, backup_name=stage)
+            need(not adb("shell", "ls", "-A", "-1", f"{left}/{stage}").strip() and
+                 identify(f"{left}/{catalog_leaf}").rsplit(":", 1)[1] == fields[5], "The selected edit has incomplete provider staging")
+            catalog = raw / "selected-recipe-catalog.sqlite"
+            adb("pull", f"{left}/{catalog_leaf}", catalog, timeout=20)
+            need(catalog.stat().st_size == int(fields[5]) and sha(catalog) == fields[6], "The selected edited catalog changed")
+            recipe = verify_selected_recipe_catalog(catalog, fixture / source_catalog, synthetic_scan()[0])
+            def app_files(*args):
+                return adb("shell", "run-as", APP, *args)
+            spend = read_selected_history_record(app_files, f"{private}/catalog-revision-spends/{operation}.spent", 1024)
+            need(spend == "pristinepage-catalog-revision-spent-v1\n" + initial + marker, "The edit spend does not bind both exact catalogs")
+            attempt = f"{private}/catalog-recipe-attempts-v1/{operation}"
+            leaves = set(app_files("ls", "-A", "-1", attempt).splitlines())
+            staged_catalog = f"{attempt}/catalog.sqlite"
+            need(app_files("sha256sum", staged_catalog).split() == [fields[6], staged_catalog], "The private closed catalog differs")
+            extras = {"catalog.sqlite"}
+            receipt_digest = None
+            if bound or advanced:
+                receipt_digest = read_bound_recipe_evidence(adb, private, attempt, left, initial, marker, fields[6], advanced=advanced or recover)
+                extras.update(("recipe-edit.intent", "recipe-edit.complete", "recipe-edit.catalog-owner"))
+            move_spends = verify_library_move_spends(adb, attempt, leaves - extras,
+                {catalog_leaf: (int(fields[5]), fields[6]), marker_leaf: (len(marker.encode("ascii")), marker_hash)})
+            run.save(run.path("selected-recipe-readback.json"), {"generation": operation, "predecessor": prior[2],
+                "catalogSha256": fields[6], "catalogBytes": int(fields[5]), "recipeSha256": recipe, "originalCopies": 0,
+                "revisionSpendSha256": sha256(spend.encode("ascii")).hexdigest(), "moveSpends": move_spends,
+                "boundReceiptSha256": receipt_digest}, durable=True)
+        return {"passed": passed, "failed": failed, "installedSha256": hashes}
+    finally:
+        recheck_target(run, ns)
+        if fresh:
+            verify_fresh_recipe_scope(initial_private, recipe_private_scopes(adb), scope, expect_created=False)
+        verify_unchanged_settings_destination(adb, right, files)
+        need(adb("shell", "ls", "-A", "-1", parent).splitlines() == sorted(children),
+             "The single-root edit affected the synthetic parent")
+        for leaf, old in before.items():
+            current = identify(f"{left}/{leaf}")
+            need((current if "/" in leaf else current.rsplit(":", 1)[0]) == old, "A selected edit replaced a retained node")
+        for leaf, digest in files.items():
+            need(adb("shell", "sha256sum", f"{left}/{leaf}").split() == [digest, f"{left}/{leaf}"], "A selected edit changed retained bytes")
 
 
 def exercise_independent_roots(run, adb, ns, guest_root, folder, files, hashes, prior_folder, retained_record=None, *, derived=False):
@@ -871,6 +2018,26 @@ def require_cold_backup_app(adb):
     need(not adb("shell", "pidof", APP, TEST, allowed=(0, 1)).strip(), "The app and test process must be absent")
 
 
+def require_selected_cold_process(adb, writer_pid):
+    need(re.fullmatch(r"[1-9][0-9]{0,8}", writer_pid), "Invalid selected writer process identity")
+    # Prove a successful guest process inventory that includes its own shell, and return only the package-scoped result.
+    script = (
+        'refuse() { printf "selected-processes-refused:%s\\n" "$1"; exit 71; }; '
+        'rows=$(ps -A -o PID,NAME 2>&1) || refuse unavailable; '
+        'printf "%s\\n" "$rows" | (read -r first second && [ "$first $second" = "PID NAME" ] || refuse header; '
+        'observer=0; while read -r pid name; do '
+        'case "$pid" in ""|*[!0-9]*) refuse row ;; esac; '
+        f'case "$name" in "") refuse row ;; {APP}|{APP}:*|{TEST}|{TEST}:*) refuse package-present ;; esac; '
+        f'[ "$pid" != "{writer_pid}" ] || refuse writer-pid-present; '
+        '[ "$pid" != "$$" ] || observer=1; done; '
+        f'[ "$observer" = 1 ] || refuse observer; printf "selected-processes-absent:{writer_pid}\\n")'
+    )
+    reply = adb("shell", script, allowed=(0, 71))
+    diagnostic = re.fullmatch(r"selected-processes-refused:(unavailable|header|row|package-present|writer-pid-present|observer)\n", reply)
+    detail = f" ({diagnostic[1]})" if diagnostic else ""
+    need(reply == f"selected-processes-absent:{writer_pid}\n", "Could not establish exact selected app and writer process absence" + detail)
+
+
 def finish_pre_marker_outcome(outcome, preservation_checks, record, *, label="Pre-marker backup"):
     failures = []
     for check in preservation_checks:
@@ -991,11 +2158,9 @@ def complete_pre_marker_death(run, adb, ns, raw, fixture_root, fixture, operatio
         extent, recorded = before["files"][path]
         need(extent <= 512, "The interrupted move spend exceeds its bound")
         text = adb("shell", "run-as", APP, "cat", path)
-        fields = text.splitlines()
-        need(len(text) == extent and sha256(text.encode("ascii")).hexdigest() == recorded and
-             text == "\n".join(fields) + "\n" and len(fields) == 6 and fields[:2] == ["pristinepage-library-move-spent-v1", key] and
-             re.fullmatch(r"[a-f0-9]{64}", fields[2]) and re.fullmatch(r"[0-9]+:[1-9][0-9]*", fields[3]) and
-             fields[4:] == [digest, str(size)], "The interrupted move spend does not bind its exact payload")
+        need(len(text) == extent and sha256(text.encode("ascii")).hexdigest() == recorded,
+             "The interrupted move spend changed")
+        verify_library_move_spend(text, key, size, digest)
 
     def verify_external():
         verify_interrupted_external(adb, fixture_root, fixture, generation, payloads)
@@ -1115,7 +2280,13 @@ def run(args):
          not subprocess.check_output(["git", "ls-files", "--others", "--exclude-standard", "--", *INPUTS]),
          "The checked-out production/test build inputs do not match the admitted source")
     need(re.fullmatch(r"agent-pristinepage-tree-[a-f0-9]{12}", args.guest), "Require a dedicated library app-test guest name")
-    need(args.fresh != bool(args.previous), "Choose first admission or an exact retained predecessor pair")
+    settings_open = select_main_settings_open(args)
+    reuse_empty_settings = args.settings_open_reuse
+    retry_open = args.settings_open_retry
+    apply_open = args.settings_apply
+    apply_retry = args.settings_apply_retry
+    absent_before_install = args.fresh or reuse_empty_settings
+    need(absent_before_install != bool(args.previous), "Choose first admission or an exact retained predecessor pair")
     picker_case = select_settings_picker_case(args)
     recovery_case = select_settings_recovery_case(args)
     backup_case = select_backup_case(args)
@@ -1155,8 +2326,32 @@ def run(args):
              "Pre-marker death needs an exact retained guest and a standalone invocation")
     independent_derived = args.independent_roots_derived
     selected_append = args.selected_root_append
+    bound_recipe = args.selected_bound_recipe_edit
+    advanced_recipe = args.selected_advanced_recipe_edit
+    advanced_release = args.selected_advanced_released_generation
+    need(advanced_release is None or (advanced_recipe and not args.fresh and 1 <= len(advanced_release) <= 4 and
+         all(re.fullmatch(UUID_TEXT, generation) for generation in advanced_release)),
+         "Intervening releases require the retained advanced recipe mode and exact consecutive generations")
+    selected_recipe = args.selected_recipe_edit or bound_recipe or advanced_recipe
+    need(not (bound_recipe or advanced_recipe) or
+         not (args.selected_recipe_edit or args.selected_recipe_boot_retry or (bound_recipe and (args.fresh or advanced_recipe))),
+         "Choose a standalone selected recipe witness and its authorized guest")
+    if selected_recipe and args.fresh and not advanced_recipe:
+        need(sha256(args.guest.encode("ascii")).hexdigest() == SELECTED_RECIPE_FRESH_GUEST_KEY,
+             "Fresh selected edit requires its exact admitted guest name")
+    if advanced_recipe and args.fresh:
+        authority = sha256(f"selected-recipe-advance-fresh-v1:{args.guest}".encode("ascii")).hexdigest()
+        need(not (raw_path := ROOT / "validation/raw/storage" / f"settings-retry-spent-{authority}.json").exists(),
+             f"The isolated fresh advancement spend already exists: {raw_path.name}")
+    need(not args.selected_recipe_boot_retry or (selected_recipe and not args.fresh), "Boot-only retry requires retained selected recipe mode")
     append_release = args.selected_append_released_generation
     append_host_recovery = args.selected_append_host_recovery
+    selected_repeat = select_selected_repeat(args.selected_append_repeat, selected_append=selected_append,
+                                            reassigned=append_release, failed_host=append_host_recovery)
+    selected_death_recovery = args.selected_append_death_recover
+    need(not (args.selected_append_death and selected_death_recovery), "Select either a fresh write or read-only inspection, never both")
+    selected_death = select_selected_death(args.selected_append_death or selected_death_recovery, selected_append=selected_append,
+                                          repeat=selected_repeat, reassigned=append_release, failed_host=append_host_recovery)
     need(append_release is None or (selected_append and re.fullmatch(UUID_TEXT, append_release)),
          "Reassignment is valid only for a standalone selected append and one exact released generation")
     need(not append_host_recovery or (selected_append and append_release is None),
@@ -1174,6 +2369,11 @@ def run(args):
          "The independent-roots handoff requires the exact standalone grant receipt")
     need(not independent_derived or not (args.independent_roots_retry or independent_handoff),
          "Derived independent roots may not repeat or continue a previous selection")
+    need(not selected_recipe or not any((before_marker, args.backup_delivery_death, args.backup_death_retry,
+             death_receipt, death_picker_case, ancestry_cases, capacity_case, picker_case, recovery_case, backup_case,
+             args.probe_write, args.ocr_activation, args.working_catalog, args.probe_directory, args.activation,
+             args.selected_catalog, args.activation_compatibility, args.expect_home, args.settings_retry,
+             args.settings_prior_failure, independent_cases)), "Selected recipe edit requires a standalone app guest")
     need(bool(args.settings_retry) == bool(args.settings_prior_failure), "A retained retry requires the exact first failure receipt")
     if args.ocr_activation:
         need(not any((args.fresh, args.expect_home, args.probe_directory, args.working_catalog, args.activation, args.selected_catalog,
@@ -1181,7 +2381,6 @@ def run(args):
              "The OCR regression batch requires the retained app guest and does not operate on Files fixtures")
     prefix = "picker-adapter-library-tree-" + uuid.uuid4().hex[:12]
     raw = ROOT / "validation/raw/storage" / prefix
-    raw.mkdir()
     stage = ROOT / "validation/raw/providers/ocr-app-standard-full"
     built = {
         APP: ROOT / "app/build/outputs/apk/debug/app-debug.apk",
@@ -1190,11 +2389,15 @@ def run(args):
     disk_floor = 16 if args.fresh else 12
     need(shutil.disk_usage(ROOT).free >= disk_floor * 1024**3 + sum(path.stat().st_size for path in built.values()),
          "Not enough disk for the exact retained APK pair and the guest floor")
+    raw.mkdir()
     hashes = dict(zip(built, [args.app_sha, args.test_sha]))
     proof = {package: exact_apk(path, hashes[package], stage, package == TEST) for package, path in built.items()}
-    if independent_cases:
+    if independent_cases or selected_recipe or settings_open:
         require_independent_manifests(proof.values())
     previous = {}
+    open_retry = None
+    expected_apply_grants = None
+    retained_apply_fixture = None
     prior_destinations = []
     prior_navigation_only = False
     completed = None
@@ -1215,10 +2418,24 @@ def run(args):
     independent_protected = None
     prior_derived = []
     failed_append_fixture = None
+    prior_successful_append = None
+    prior_successful_repeat = None
+    selected_death_retained = None
+    recipe_baseline = None
+    recipe_boot_retry = None
+    recipe_interrupted = None
+    recipe_interrupted_expected = None
+    recipe_retained = None
+    bound_baseline = None
+    bound_release = None
+    advanced_baseline = None
     protect_interrupted = None
     death_authority = CAPACITY_PASSED if before_marker else args.backup_death_retry or SETTINGS_COLD_MANIFEST
     death_operation = str(uuid.uuid4()) if args.backup_delivery_death or before_marker else None
     append_operation = str(uuid.uuid4()) if selected_append else None
+    repeat_operation = str(uuid.uuid4()) if selected_repeat else None
+    need(not selected_death or selected_death_recovery or not (raw.parent / f"settings-retry-spent-{SELECTED_REPEAT_PASSED}.json").exists(),
+         "The selected delivery-death authorization was already spent; do not launch another writer")
     need(args.backup_death_retry is None or (death_operation and args.backup_death_retry == BACKUP_DIRECT_CONTROL_PASS),
          "Retry requires the exact new no-write batch receipt")
     if args.previous:
@@ -1228,6 +2445,110 @@ def run(args):
                  "The predecessor must be the retained evidence file for this package")
             previous[package] = sha(path)
             exact_apk(path, previous[package], stage, package == TEST)
+        if retry_open:
+            prior = raw.parent / SETTINGS_OPEN_REFUSALS[retry_open][0]
+            need(all(Path(path).resolve().parent == prior.resolve() for path in args.previous) and
+                 hashes[APP] == previous[APP] and hashes[TEST] != previous[TEST] and
+                 not (raw.parent / f"settings-retry-spent-{retry_open}.json").exists(),
+                 "Only an unspent, test-only Settings Open continuation is admitted")
+            open_retry = verify_settings_open_navigation_failure(prior, args.guest, previous, retry_open)
+        if apply_open:
+            prior = raw.parent / SETTINGS_OPEN_PASS_RUN
+            nav = raw.parent / SETTINGS_APPLY_NAVIGATION_RUN
+            retained_pair = nav if apply_retry else prior
+            need(all(Path(path).resolve().parent == retained_pair.resolve() for path in args.previous) and
+                 hashes[TEST] != previous[TEST] and (hashes[APP] == previous[APP]) == bool(apply_retry) and
+                 not (raw.parent / f"settings-retry-spent-{apply_retry or apply_open}.json").exists(),
+                 "Only the unspent checked Apply successor pair is admitted")
+            prior_pair = {p: sha(prior / f"{p}.apk") for p in built} if apply_retry else previous
+            open_retry = verify_settings_open_success(prior, args.guest, prior_pair)
+            prior_claim, prior_fixture = open_retry
+            cold_claim, expected_apply_grants = verify_settings_apply_cold_refusal(
+                raw.parent / SETTINGS_APPLY_COLD_RUN, args.guest, prior_pair, prior_claim, prior_fixture["folder"])
+            if apply_retry:
+                nav_claim, retained_apply_fixture, expected_pointer_sha = verify_settings_apply_navigation_refusal(
+                    nav, args.guest, previous, cold_claim, prior_fixture)
+                retained_fixture_path = nav / "synthetic-library"
+                need(all(sha(retained_fixture_path / leaf) == digest for leaf, digest in retained_apply_fixture["inventory"].items()),
+                     "The retained host Apply fixture changed")
+                open_retry = nav_claim, prior_fixture
+            else:
+                open_retry = cold_claim, prior_fixture
+        if advanced_recipe:
+            from run_bound_recipe_readback_ldplayer import WRITER, WRITER_SHA256, readback
+            writer = raw.parent / WRITER
+            observed = raw.parent / "picker-adapter-library-tree-2e4518656e0a"
+            need({Path(file).resolve().parent for file in args.previous} == {writer.resolve()} and
+                 not (raw.parent / f"settings-retry-spent-{BOUND_RECIPE_READBACK}.json").exists(),
+                 "The active edit requires the exact bound predecessor and an unspent admission")
+            prior = settings_run_anchors(writer, WRITER_SHA256)
+            cold = settings_run_anchors(observed, BOUND_RECIPE_READBACK)
+            observed_artifact = json.loads(cold("artifacts.json"))
+            writer_artifact = json.loads(prior("artifacts.json"))
+            writer_claim = json.loads(prior("claim.json"))
+            recipe_baseline = json.loads(cold("claim.json"))
+            observed_proof = json.loads(cold("bound-recipe-readback.json"))
+            shutdown = json.loads(cold("shutdown.json"))
+            need(writer_artifact["guest"] == observed_artifact["guest"] == recipe_baseline["name"] == args.guest and
+                 observed_artifact["boundWriterManifest"] == WRITER_SHA256 and observed_proof["installedSha256"] == previous and
+                 observed_proof["pointerActivation"] == 2 and observed_proof["persistedGrants"] == [] and
+                 shutdown["generation"] == recipe_baseline["generation"] and shutdown["originalProcesses"] == recipe_baseline["runtime_processes"] and
+                 shutdown["ownedShutdownVerified"] is True and shutdown["isrunning"] == "stop" and shutdown["storageDeleted"] is False and
+                 recipe_baseline["ownership_history"] and writer_claim["generation"] == recipe_baseline["ownership_history"][-1]["generation"],
+                 "The exact observed bound predecessor or guest changed")
+            manifest = observed / f"{observed.name}-final-manifest.json"
+            manifest_bytes = manifest.read_bytes()
+            need(sha256(manifest_bytes).hexdigest() == BOUND_RECIPE_READBACK, "Bound readback manifest changed")
+            bound_release = manifest, json.loads(manifest_bytes)["recordSnapshot"]
+            pinned = settings_run_anchors(raw.parent / "picker-adapter-library-tree-5e7909463a3e", DETACHED_RECIPE_PASSED)
+            bound_baseline = (json.loads(pinned("artifacts.json"))["fixture"], json.loads(pinned("selected-recipe-attempt.json")),
+                              json.loads(pinned("selected-recipe-readback.json")))
+            advanced_baseline = writer_artifact["fixture"], json.loads(prior("selected-recipe-attempt.json")), observed_proof, readback
+        elif bound_recipe:
+            old = raw.parent / "picker-adapter-library-tree-5e7909463a3e"
+            need({Path(file).resolve().parent for file in args.previous} == {old.resolve()} and
+                 not (raw.parent / f"settings-retry-spent-{DETACHED_RECIPE_PASSED}.json").exists(),
+                 "The bound edit requires the exact detached predecessor and an unspent admission")
+            pinned = settings_run_anchors(old, DETACHED_RECIPE_PASSED)
+            recipe_baseline = json.loads(pinned("claim.json"))
+            artifact = json.loads(pinned("artifacts.json"))
+            need(artifact["selectedRecipeFresh"] and artifact["guest"] == recipe_baseline["name"] == args.guest and
+                 json.loads(pinned("outcomes.json")) == {"passed": [SELECTED_RECIPE_CASE], "failed": [], "installedSha256": previous},
+                  "The exact detached predecessor did not pass on this app guest")
+            manifest = old / f"{old.name}-final-manifest.json"
+            manifest_bytes = manifest.read_bytes()
+            need(sha256(manifest_bytes).hexdigest() == DETACHED_RECIPE_PASSED, "Detached release manifest changed")
+            snapshot = json.loads(manifest_bytes)["recordSnapshot"]
+            shutdown = json.loads(pinned("shutdown.json"))
+            need(shutdown["generation"] == recipe_baseline["generation"] and
+                 shutdown["originalProcesses"] == recipe_baseline["runtime_processes"] and
+                 shutdown["stage"] == "verified-before-release" and shutdown["ownedShutdownVerified"] is True and
+                 shutdown["isrunning"] == "stop" and shutdown["storageDeleted"] is False and
+                 read_results(pinned("selected-recipe-instrumentation.txt"), (SELECTED_RECIPE_CASE,)) == ([SELECTED_RECIPE_CASE], []),
+                 "The detached predecessor did not finish its synchronous test and shut down")
+            bound_release = manifest, snapshot
+            bound_baseline = artifact["fixture"], json.loads(pinned("selected-recipe-attempt.json")), json.loads(pinned("selected-recipe-readback.json"))
+        elif selected_recipe:
+            old = raw.parent / "picker-adapter-library-tree-e569733fb1fa"
+            need({Path(file).resolve().parent for file in args.previous} == {old.resolve()} and
+                 not (raw.parent / f"settings-retry-spent-{SELECTED_RECIPE_BASELINE}.json").exists(),
+                 "Selected recipe edit requires the exact released cold-recovery pair and an unspent admission")
+            pinned = settings_run_anchors(old, SELECTED_RECIPE_BASELINE)
+            recipe_baseline = json.loads(pinned("claim.json"))
+            need(recipe_baseline["name"] == json.loads(pinned("artifacts.json"))["guest"] == args.guest and
+                 json.loads(pinned("outcomes.json")) == {"passed": [SELECTED_DEATH_RECOVERY_CASE], "failed": [], "installedSha256": previous},
+                 "The selected edit predecessor did not pass cold recovery on the exact guest and APKs")
+            _, recipe_interrupted, repeat_pair = pinned_selected_death_handoff(
+                raw.parent / "picker-adapter-library-tree-0f3bb6abf393", args.guest, previous)
+            recipe_interrupted_expected = json.loads(pinned("selected-death-after-cold.json"))
+            _, repeat, legacy_pair = pinned_selected_death_predecessor(raw.parent / "picker-adapter-library-tree-23f912ee54cb",
+                                                                      args.guest, repeat_pair)
+            _, legacy, _ = pinned_selected_repeat_predecessor(raw.parent / "picker-adapter-library-tree-6a2d8a67bc65",
+                                                              args.guest, legacy_pair)
+            recipe_retained = repeat, legacy, {name: json.loads(pinned(name + ".json")) for name in
+                ("repeat-prior-grants", "recovery-before", "legacy-selected-append-private", "protected-selected-repeat")}
+            if args.selected_recipe_boot_retry:
+                recipe_boot_retry = selected_recipe_boot_retry_owner(raw.parent, recipe_baseline, previous, hashes)
         if recovery_case:
             parents = {Path(file).resolve().parent for file in args.previous}
             need(len(parents) == 1 and previous[APP] == hashes[APP] and args.settings_recover == SETTINGS_COMPLETED_MANIFEST,
@@ -1241,19 +2562,39 @@ def run(args):
             if args.independent_roots_retry or independent_handoff or independent_derived:
                 if independent_derived:
                     dry_pair = previous
-                    if append_host_recovery:
+                    legacy_pair = previous
+                    if selected_death:
+                        repeat_pair = previous
+                        if selected_death_recovery:
+                            need(previous == hashes, "Read-only selected recovery requires the exact already-installed APK pair")
+                            independent_claim, selected_death_retained, repeat_pair = pinned_selected_death_handoff(root, args.guest, previous)
+                            append_operation = selected_death_retained[1]
+                            root = raw.parent / "picker-adapter-library-tree-23f912ee54cb"
+                        repeat_claim, prior_successful_repeat, legacy_pair = pinned_selected_death_predecessor(root, args.guest, repeat_pair)
+                        if not selected_death_recovery:
+                            independent_claim = repeat_claim
+                        root = raw.parent / "picker-adapter-library-tree-6a2d8a67bc65"
+                    if selected_repeat or selected_death:
+                        legacy_claim, prior_successful_append, recovered_pair = pinned_selected_repeat_predecessor(root, args.guest, legacy_pair)
+                        if selected_repeat:
+                            independent_claim = legacy_claim
+                        root = raw.parent / "picker-adapter-library-tree-f417bf74e32d"
+                    if append_host_recovery or selected_repeat or selected_death:
+                        recovered_pair = recovered_pair if prior_successful_append else previous
                         failed = settings_run_anchors(root, SELECTED_APPEND_HOST_REFUSAL)
                         verify_selected_append_host_refusal(failed("independent-roots-append-instrumentation.txt"))
                         artifact = json.loads(failed("artifacts.json"))
                         status = json.loads(failed("independent-roots-grants.json"))
                         need(artifact["guest"] == args.guest and artifact["selectedRootAppend"] and artifact["incomingFixture"]
                              and artifact["appendInterveningRelease"] and status["state"] == "cleanup-unconfirmed"
-                             and json.loads(failed("outcomes.json")) == {"passed": [], "failed": [SELECTED_APPEND_CASE], "installedSha256": previous}
-                             and previous[APP] == hashes[APP] and previous[TEST] != hashes[TEST],
-                             "Recovery requires the exact failed host attempt and a test-only successor")
+                             and json.loads(failed("outcomes.json")) == {"passed": [], "failed": [SELECTED_APPEND_CASE], "installedSha256": recovered_pair}
+                             and (legacy_pair[APP] == recovered_pair[APP] if prior_successful_append else
+                                  previous[APP] == hashes[APP] and previous[TEST] != hashes[TEST]),
+                             "The failed host attempt and corrected successor do not match the pinned history")
                         dry_pair = json.loads(failed("installed-before.json"))
                         need(dry_pair == artifact["previous"], "The failed append did not start from the exact dry-run pair")
-                        independent_claim = json.loads(failed("claim.json"))
+                        if not prior_successful_append:
+                            independent_claim = json.loads(failed("claim.json"))
                         failed_append_fixture = status["fixture"], artifact["fixture"], artifact["incomingFixture"]
                         root = raw.parent / "picker-adapter-library-tree-d0bcd64ff487"
                     latest = settings_run_anchors(root, INDEPENDENT_CLOSED_DRY_RUN_PASSED if selected_append else INDEPENDENT_SHARED_READER_PASSED)
@@ -1478,13 +2819,16 @@ def run(args):
         need(sha(saved) == hashes[package], "Retained candidate APK changed")
         retained[package] = saved
     fixture = raw / "synthetic-library"
-    files = (independent_retained[1] if independent_retained else retained_pre_marker[1] if pre_marker_handoff else retained_ancestry[1] if ancestry_resume else {} if args.ocr_activation or recovery_case or death_receipt
-             else make_fixture(fixture, with_scan=True))
-    original = None if args.ocr_activation or recovery_case or death_receipt else synthetic_scan()[0]
+    if apply_retry:
+        fixture = retained_fixture_path
+    without_generic_fixture = args.ocr_activation or recovery_case or death_receipt or settings_open
+    files = (selected_death_retained[2] if selected_death_retained else independent_retained[1] if independent_retained else retained_pre_marker[1] if pre_marker_handoff else retained_ancestry[1] if ancestry_resume else {} if without_generic_fixture
+              else make_fixture(fixture, with_scan=True))
+    original = None if without_generic_fixture else synthetic_scan()[0]
     if original:
         need(files.get(f"objects/{original}") == original, "The populated Files fixture lacks its exact original")
     alternate_fixture = raw / "synthetic-incoming"
-    received = make_fixture(alternate_fixture, with_scan=True, alternate_scan=True) if selected_append else None
+    received = selected_death_retained[3] if selected_death_retained else make_fixture(alternate_fixture, with_scan=True, alternate_scan=True) if selected_append else None
     missing, missing_bytes = (None, None)
     if selected_append:
         missing, payload, _ = synthetic_scan(alternate=True)
@@ -1494,26 +2838,50 @@ def run(args):
     (raw / f"{prefix}-artifacts.json").write_text(
         json.dumps(dict(proof=proof, source=args.commit, fixture=files, previous=previous, guest=args.guest,
                         settingsCancel=args.settings_retry, settingsPriorFailure=args.settings_prior_failure,
-                        settingsCompleted=args.settings_recover, backupDeliveryDeath=death_operation,
+                         settingsCompleted=args.settings_recover, mainSettingsOpen=bool(settings_open),
+                         mainSettingsOpenRetry=retry_open, mainSettingsApply=apply_open,
+                         mainSettingsApplyCold=SETTINGS_APPLY_COLD_MANIFEST if apply_open else None,
+                         mainSettingsApplyRetry=apply_retry, backupDeliveryDeath=death_operation,
                         backupDeathRetry=args.backup_death_retry, backupDeathReceiptOnly=death_receipt,
                         treeAncestryHandoff=ancestry_resume, backupPreMarker=before_marker,
                         backupPreMarkerHandoff=pre_marker_handoff, independentRoots=bool(independent_cases),
                         independentRootsRetry=args.independent_roots_retry, independentRootsHandoff=independent_handoff,
-                         independentRootsDerived=independent_derived, selectedRootAppend=append_operation,
+                         independentRootsDerived=independent_derived, selectedRootAppend=append_operation, selectedRepeat=repeat_operation,
+                          selectedDeath=selected_death, selectedDeathReadOnly=bool(selected_death_retained), selectedRecipe=selected_recipe,
+                          selectedRecipeBootRetry=bool(recipe_boot_retry), selectedRecipeFresh=selected_recipe and args.fresh,
+                            selectedBoundRecipe=bound_recipe, selectedAdvancedRecipe=advanced_recipe, advancedInterveningRelease=advanced_release,
                          appendInterveningRelease=append_release, appendHostRecovery=append_host_recovery, incomingFixture=received)),
         encoding="utf-8",
     )
     ns = load_allocator(ROOT, args.guest, raw, "pristinepage-tree-" + os.environ["OPENCODE_SESSION_ID"])
 
     def admit_independent(record):
-        if append_release:
+        if open_retry:
+            claim, _ = open_retry
+            run_name = (SETTINGS_APPLY_NAVIGATION_RUN if apply_retry else SETTINGS_APPLY_COLD_RUN) if apply_open else SETTINGS_OPEN_REFUSALS[retry_open][0]
+            manifest = raw.parent / run_name / f"{run_name}-final-manifest.json"
+            need(record["generation"] == claim["generation"] and record["shutdown_processes"] == claim["runtime_processes"] and
+                 Path(record["runtime_evidence"]).resolve() == manifest.resolve(),
+                 "The Settings Open retry is not the immediately released navigation attempt")
+        elif reuse_empty_settings:
+            verify_canceled_settings_open_release(record, raw.parent / SETTINGS_OPEN_CANCELED_RUN)
+        elif advanced_recipe and bound_release:
+            verify_advanced_recipe_release(recipe_baseline, record, *bound_release, advanced_release)
+        elif bound_release:
+            verify_bound_recipe_release(recipe_baseline, record, *bound_release)
+        elif recipe_baseline:
+            verify_released_selected_repeat_guest(recipe_boot_retry or recipe_baseline, record)
+        elif append_release:
             verify_released_append_guest(independent_claim, record, append_release)
+        elif selected_repeat or selected_death:
+            verify_released_selected_repeat_guest(independent_claim, record)
         else:
             verify_released_independent_guest(independent_claim, record)
 
     class FolderRun(run_type(ns, purpose="pristinepage-library-app-tree", operation="PristinePage Files tree",
                              fresh_disk_floor_gib=16, add_statuses=(0, 1, 2, 3),
-                             admit_released=admit_independent if independent_claim else None, reassign_released=bool(append_release))):
+                               admit_released=admit_independent if independent_claim or recipe_baseline or reuse_empty_settings or open_retry else None,
+                              reassign_released=bool(append_release or advanced_release))):
         def process(self, pid):
             return inspect_prior_pid(super().process, pid)
 
@@ -1522,10 +2890,21 @@ def run(args):
     pre_marker_preservation = ()
     independent_outcome = None
     independent_preservation = ()
+    recipe_outcome = None
+    recipe_preservation = ()
+    check_prior_apply_fixture = None
     print(f"Runtime evidence: {raw.relative_to(ROOT)}", flush=True)
     try:
         wait_for_allocator(run, lambda: run.prepare(args.fresh, None, args.fresh), before_claim=True)
         recheck_target(run, ns)
+        if selected_recipe or settings_open:
+            need(run.owned()["api"] == 28, "This selected Files witness requires API 28")
+        if recipe_baseline:
+            current = run.owned()
+            verify_completed_guest(recipe_baseline, current)
+            expected_release = advanced_release[-1] if advanced_release else (recipe_boot_retry or recipe_baseline)["generation"]
+            need(current["ownership_history"][-1]["generation"] == expected_release,
+                 "The selected edit does not follow its exact verified release")
         if capacity_claim:
             verify_completed_guest(capacity_claim, run.owned())
         if independent_claim:
@@ -1562,22 +2941,106 @@ def run(args):
             verify_closed_backup(adb, path, prior_generation, marker)
 
         present = set(adb("shell", "pm", "list", "packages", APP).splitlines())
-        expected = set() if args.fresh else {f"package:{p}" for p in built}
+        expected = set() if absent_before_install else {f"package:{p}" for p in built}
         need(present == expected, "The exact expected package set did not match; nothing was replaced")
         installed = {p: run.installed_hash(p) if f"package:{p}" in present else None for p in built}
-        if independent_derived:
+        if recipe_baseline:
+            need(installed == previous, "The selected edit predecessor APK pair was not installed")
+        elif open_retry:
+            need(installed == previous, "The exact Settings Open predecessor APK pair was not installed")
+            require_cold_backup_app(adb)
+            _, old_fixture = open_retry
+            def require_starting_grants():
+                observed = read_app_persisted_grants(adb)
+                if apply_open:
+                    require_settings_apply_grants(observed, expected_apply_grants, old_fixture["folder"])
+                else:
+                    need(not observed, "The navigation refusal left a retained grant")
+            require_starting_grants()
+            def read_default_pointer():
+                path = "files/library-settings"
+                def private(*argv):
+                    return adb("shell", "run-as", APP, *argv)
+                pointer = read_selected_history_record(private, f"{path}/active-library", 320)
+                if apply_open:
+                    origin = read_selected_history_record(private, f"{path}/default-origin", 320)
+                    if apply_retry:
+                        need(sha256(pointer.encode("ascii")).hexdigest() == expected_pointer_sha, "The refused Apply pointer changed")
+                    return require_returned_settings_pointer(pointer, origin, 3)
+                require_initial_settings_pointer(pointer, private("ls", "-A", "-1", path).splitlines())
+                return pointer
+            initial_pointer = read_default_pointer()
+            def verify_prior_settings_fixture():
+                recheck_target(run, ns)
+                verify_unchanged_settings_destination(adb, f"/sdcard/Documents/{old_fixture['folder']}", old_fixture["inventory"])
+            verify_prior_settings_fixture()
+            if apply_open:
+                def require_unspent_settings_apply():
+                    def entries(path):
+                        return adb("shell", "run-as", APP, "ls", "-A", "-1", path).splitlines()
+                    require_settings_apply_private_absence(entries("files"), entries("files/library-settings"),
+                                                           retained_apply_fixture["folder"] if apply_retry else None)
+                require_unspent_settings_apply()
+                check_prior_apply_fixture = verify_prior_settings_fixture
+            if apply_retry:
+                verify_unchanged_settings_destination(adb, f"/sdcard/Documents/{retained_apply_fixture['folder']}", retained_apply_fixture["inventory"])
+        elif independent_derived:
             verify_independent_derived_installed(installed, previous)
-        elif not args.fresh:
+        elif not absent_before_install:
             check_installed_pair(installed, previous, hashes)
         run.save(run.path("installed-before.json"), installed, durable=True)
-        if independent_cases:
+        if bound_baseline:
             require_cold_backup_app(adb)
-        if selected_append:
-            need("library-selected-merge-v1" not in adb("shell", "run-as", APP, "ls", "-A", "-1", "files").splitlines(),
-                 "A retained selected append must never be repeated")
+            def check_bound_predecessor():
+                recheck_target(run, ns)
+                need(not read_app_persisted_grants(adb) and "library-settings" not in recipe_private_scopes(adb),
+                     "The bound recipe fixture changed the ordinary active binding or persisted grants")
+                preserve_detached_recipe(adb, *bound_baseline)
+                if advanced_baseline:
+                    prior_files, prior_attempt, proof, read_prior = advanced_baseline
+                    observed = read_prior(run, adb, ns, prior_files, prior_attempt, (proof["catalogBytes"], proof["catalogSha256"]))
+                    need(observed == {key: proof[key] for key in observed}, "The retained bound receipt or staged evidence changed")
+            check_bound_predecessor()
+            recipe_preservation = (check_bound_predecessor,)
+        elif recipe_baseline:
+            old_folder, old_operation, old_files, old_incoming, _ = recipe_interrupted
+            require_cold_backup_app(adb)
+            repeat, legacy, expected = recipe_retained
+            repeat_folder, repeat_files, repeat_incoming, repeat_records, _ = repeat
+            repeat_operations = [row["generation"] for row in repeat_records]
+            def check_recipe_retention():
+                recheck_target(run, ns)
+                grants = read_app_persisted_grants(adb)
+                grant_digest = {"quantity": len(grants), "sha256": sha256(json.dumps(grants).encode("utf8")).hexdigest()}
+                # Both preflight and teardown check retained state; package replacement is separately authorized for the run.
+                require_selected_recipe_predecessor(installed, previous, settings_private_baseline(adb), expected["recovery-before"],
+                                                    grant_digest, expected["repeat-prior-grants"])
+                observed = observe_selected_history(adb, old_folder, old_files, old_incoming,
+                                                    f"library-selected-death-{old_operation}", [old_operation])
+                need(json.loads(json.dumps(observed)) == recipe_interrupted_expected, "The earlier interrupted append evidence changed")
+                need(observe_legacy_selected_append(adb, legacy) == expected["legacy-selected-append-private"],
+                     "The earlier selected append evidence changed")
+                observed_repeat = observe_selected_history(adb, repeat_folder, repeat_files, repeat_incoming,
+                    f"library-selected-repeat-{repeat_operations[0]}", repeat_operations)
+                need(json.loads(json.dumps(observed_repeat)) == expected["protected-selected-repeat"], "The earlier repeat evidence changed")
+            check_recipe_retention()
+            recipe_preservation = (check_recipe_retention,)
+        if independent_cases and not selected_death_retained:
+            require_cold_backup_app(adb)
+        def require_fresh_append_scope():
+            private = adb("shell", "run-as", APP, "ls", "-A", "-1", "files").splitlines()
+            name = (f"library-selected-death-{append_operation}" if selected_death else
+                    f"library-selected-repeat-{append_operation}" if selected_repeat else "library-selected-merge-v1")
+            need(name not in private, "A retained selected append must never be repeated")
+
+        if selected_append and not selected_death_retained:
+            require_fresh_append_scope()
         if completed:
             verify_completed_guest(publication_claim, run.owned())
-            require_cold_backup_app(adb)
+            if selected_death_retained:
+                require_selected_cold_process(adb, selected_death_retained[4][0])
+            else:
+                require_cold_backup_app(adb)
             verify_completed_destination(adb, *completed)
             baseline = settings_private_baseline(adb)
             need(not (death_operation or death_receipt or independent_cases) or baseline == pinned_cold_baseline,
@@ -1613,6 +3076,38 @@ def run(args):
                     protect_interrupted(adb)
                 check_interrupted()
                 independent_preservation = (*checks, check_interrupted)
+                if prior_successful_append:
+                    grants_before = read_app_persisted_grants(adb)
+                    grant_record = {
+                        "quantity": len(grants_before),
+                        "sha256": sha256(json.dumps(grants_before).encode("utf8")).hexdigest(),
+                    }
+                    run.save(run.path("repeat-prior-grants.json"), grant_record, durable=True)
+                    def check_prior_grants():
+                        recheck_target(run, ns)
+                        require_same_repeat_grants(grants_before, read_app_persisted_grants(adb))
+                    independent_preservation = (*independent_preservation, check_prior_grants)
+                    protected_append = observe_legacy_selected_append(adb, prior_successful_append)
+                    run.save(run.path("legacy-selected-append-private.json"), protected_append, durable=True)
+                    def check_prior_successful_append():
+                        recheck_target(run, ns)
+                        need(observe_legacy_selected_append(adb, prior_successful_append) == protected_append,
+                             "The earlier successful selected append changed")
+                    independent_preservation = (*independent_preservation, check_prior_successful_append)
+                if prior_successful_repeat:
+                    prior_folder, prior_files, prior_incoming, expected, anchors = prior_successful_repeat
+                    operations = [row["generation"] for row in expected]
+                    def observe_prior_repeat():
+                        recheck_target(run, ns)
+                        return observe_selected_history(adb, prior_folder, prior_files, prior_incoming,
+                                                        f"library-selected-repeat-{operations[0]}", operations)
+                    protected_repeat = observe_prior_repeat()
+                    need(protected_repeat[0] == expected, "The two earlier successful selected receipts changed")
+                    require_selected_death_prior_evidence(anchors, grant_record, protected_append, protected_repeat)
+                    run.save(run.path("protected-selected-repeat.json"), protected_repeat, durable=True)
+                    def check_prior_repeat():
+                        need(observe_prior_repeat() == protected_repeat, "The earlier successful selected history changed")
+                    independent_preservation = (*independent_preservation, check_prior_repeat)
                 if independent_prior:
                     def check_prior_picker():
                         recheck_target(run, ns)
@@ -1671,7 +3166,7 @@ def run(args):
             else:
                 pre_marker_preservation = checks
         for p, path in retained.items():
-            flags = install_flags(p, installed[p], hashes[p], previous.get(TEST), previous.get(APP))
+            flags = None if selected_death_retained else install_flags(p, installed[p], hashes[p], previous.get(TEST), previous.get(APP))
             if flags is not None:
                 need(sha(path) == hashes[p], "Candidate changed before installation")
                 result = adb("install", *flags, "--no-streaming", path, timeout=130)
@@ -1679,6 +3174,112 @@ def run(args):
             need(run.installed_hash(p) == hashes[p], "Installed APK differs from the admitted candidate")
         need(adb("shell", "pm", "list", "instrumentation", APP).splitlines() ==
              [f"instrumentation:{RUNNER} (target={APP})"], "The instrumentation registry differs")
+        if settings_open:
+            require_cold_backup_app(adb)
+            if open_retry:
+                require_starting_grants()
+            else:
+                need(not read_app_persisted_grants(adb), "The MainActivity graph must not have a persisted grant")
+            fingerprint = adb("shell", "getprop", "ro.build.fingerprint").strip()
+            need(re.fullmatch(r"[A-Za-z0-9_.+:/,-]{12,256}", fingerprint), "Missing exact Android build fingerprint")
+            policy = f"android-imagedecoder-v2/api28/{sha256(fingerprint.encode()).hexdigest()[:16]}/srgb-straight-white-exif-v1"
+            if open_retry:
+                need(read_default_pointer() == initial_pointer, "The Default pointer changed during APK replacement")
+                need(policy == old_fixture["conversion"], "The retained scan no longer matches the native conversion")
+            if apply_open:
+                require_unspent_settings_apply()
+            if retry_open or apply_retry:
+                source = retained_apply_fixture if apply_retry else old_fixture
+                folder, inventory = source["folder"], source["inventory"]
+            else:
+                if not apply_open:
+                    need("library-settings" not in recipe_private_scopes(adb), "The fresh MainActivity graph already has an active pointer")
+                inventory = make_fixture(fixture, with_scan=True, conversion=policy)
+                folder = "PristinePage-tree-" + uuid.uuid4().hex[:12]
+            destination = f"/sdcard/Documents/{folder}"
+            run.save(run.path("settings-open-fixture.json"), dict(folder=folder, inventory=inventory, conversion=policy), durable=True)
+            if not retry_open and not apply_retry:
+                adb("shell", "mkdir", "-p", "/sdcard/Documents")
+                stage_synthetic_files(adb, fixture, destination, inventory)
+            verify_unchanged_settings_destination(adb, destination, inventory)
+            recheck_target(run, ns)
+            if apply_open:
+                check_prior_apply_fixture()
+            if retry_open or apply_open:
+                spend_settings_retry(raw.parent, retry_open or apply_retry or apply_open, dict(guest=args.guest, candidate=prefix, destination=folder))
+            prior_folder_arg = ("-e", "librarySettingsPriorFolder", old_fixture["folder"]) if apply_open else ()
+            restore_hidden_arg = ("-e", "librarySettingsRestoreHidden", "true") if apply_retry else ()
+            junit_terminated = False
+            try:
+                output = adb("shell", "am", "instrument", "-w", "-r", "-e", "class", settings_open,
+                             "-e", "libraryFixtureFolder", folder, "-e", "librarySettingsOpenFixture", "apply" if apply_open else "fresh",
+                             *prior_folder_arg, *restore_hidden_arg, RUNNER, timeout=260)
+                run.path("instrumentation.txt").write_text(output, encoding="utf-8")
+                passed, failed = read_results(output, (settings_open,))
+                junit_terminated = True
+                run.save(run.path("junit-outcomes.json" if apply_open else "outcomes.json"),
+                         dict(passed=passed, failed=failed, installedSha256=hashes), durable=True)
+            finally:
+                if apply_open:
+                    active_failure = sys.exc_info()[1]
+                    def predecessor_unchanged():
+                        for leaf, digest in inventory.items():
+                            path = f"{destination}/{leaf}"
+                            need(adb("shell", "sha256sum", path).split() == [digest, path], "The foreground edit changed a predecessor file")
+                        return True
+                    def pointer_proof():
+                        pointer = read_selected_history_record(lambda *argv: adb("shell", "run-as", APP, *argv),
+                                                               "files/library-settings/active-library", 320)
+                        return dict(sha256=sha256(pointer.encode("ascii")).hexdigest(), activation=pointer.splitlines()[2])
+                    def grant_proof():
+                        observed = read_app_persisted_grants(adb)
+                        return dict(count=len(observed), priorUnchanged=observed == expected_apply_grants)
+                    def check(observe):
+                        recheck_target(run, ns)
+                        return observe()
+                    observations = {
+                        "pointer": pointer_proof,
+                        "generationMarkers": lambda: adb("shell", "ls", "-A", "-1", f"{destination}/generations").splitlines(),
+                        "grants": grant_proof,
+                        "predecessorFilesUnchanged": predecessor_unchanged,
+                    }
+                    boundary = collect_settings_apply_boundary(junit_terminated, {
+                        name: (lambda observe=observe: check(observe)) for name, observe in observations.items()
+                    })
+                    try:
+                        run.save(run.path("settings-apply-boundary.json"), boundary, durable=True)
+                    except Exception as evidence_failure:
+                        if active_failure is None:
+                            raise
+                        active_failure.add_note(f"Apply boundary retention failed: {type(evidence_failure).__name__}")
+                else:
+                    recheck_target(run, ns)
+                    verify_unchanged_settings_destination(adb, destination, inventory)
+                    grants = read_app_persisted_grants(adb)
+                    run.save(run.path("preservation.json"), dict(externalFixtureUnchanged=True, persistedGrantCount=len(grants)), durable=True)
+            if apply_open:
+                need(failed or (not boundary["observationErrors"] and boundary["grants"]["priorUnchanged"]),
+                     "The successful JUnit journey did not verify the starting grant inventory and predecessor files")
+            else:
+                need(failed or not grants, "The successful journey did not restore the starting grant inventory")
+            if apply_open and not failed:
+                verify_settings_apply_destination(run, adb, destination, fixture, inventory, initial_pointer)
+                check_prior_apply_fixture()
+                run.save(run.path("outcomes.json"),
+                         dict(passed=passed, failed=[], readOnlyFixtureUnchanged=True, installedSha256=hashes), durable=True)
+                check_prior_apply_fixture = None
+            print(f"MainActivity Settings {'Apply' if apply_open else 'Open'}: {len(passed)} passed, {len(failed)} failed.", flush=True)
+            return bool(failed)
+        if selected_recipe:
+            if args.fresh:
+                def check_fresh_recipe_grants():
+                    recheck_target(run, ns)
+                    need(not read_app_persisted_grants(adb), "The fresh selected edit left a persisted grant")
+                check_fresh_recipe_grants()
+                recipe_preservation = (check_fresh_recipe_grants,)
+            recipe_outcome = exercise_selected_recipe_edit(run, adb, ns, raw, fixture, files, hashes, fresh=args.fresh, bound=bound_recipe,
+                                                           advanced=advanced_recipe)
+            return bool(recipe_outcome["failed"])
         if death_receipt:
             recheck_target(run, ns)
             try:
@@ -1730,6 +3331,11 @@ def run(args):
             need(not (raw.parent / f"settings-retry-spent-{death_authority}.json").exists(),
                  "This isolated backup death authorization became spent before fixture staging")
         if independent_cases:
+            if selected_death_retained:
+                folder, operation, _, _, checkpoint = selected_death_retained
+                independent_outcome = complete_selected_delivery_death(run, adb, ns, raw, folder, files, received,
+                                                                      hashes, operation, grants_before, checkpoint)
+                return bool(independent_outcome["failed"])
             folder = independent_retained[0] if independent_retained else "PristinePage-tree-" + uuid.uuid4().hex[:12]
             guest_root = f"/sdcard/Documents/{folder}"
             if not independent_retained:
@@ -1741,14 +3347,19 @@ def run(args):
                         need({p: run.installed_hash(p) for p in hashes} == hashes,
                              "The selected append APK pair changed after installation")
                         require_cold_backup_app(adb)
-                        need("library-selected-merge-v1" not in adb("shell", "run-as", APP, "ls", "-A", "-1", "files").splitlines(),
-                             "A retained selected append must never be repeated")
+                        require_fresh_append_scope()
                         recheck_target(run, ns)
                 stage_independent_fixture_pair(adb, guest_root, folder,
                     ((fixture, files), (alternate_fixture, received) if selected_append else (fixture, files)), admit_fixtures)
-            if selected_append:
+            if selected_death:
+                independent_outcome = exercise_selected_delivery_death(run, adb, ns, raw, guest_root, folder, files, received,
+                                                                       hashes, append_operation, grants_before)
+            elif selected_repeat:
+                independent_outcome = exercise_selected_repeat(run, adb, ns, raw, guest_root, folder, files, received,
+                                                                hashes, append_operation, repeat_operation, missing, missing_bytes)
+            elif selected_append:
                 independent_outcome = exercise_selected_append(run, adb, ns, raw, guest_root, folder, files, received,
-                                                               hashes, append_operation, missing, missing_bytes)
+                                                                hashes, append_operation, missing, missing_bytes)
             else:
                 independent_outcome = exercise_independent_roots(run, adb, ns, guest_root, folder, files, hashes,
                                                                 independent_prior[0] if independent_prior else None,
@@ -1908,6 +3519,13 @@ def run(args):
         return bool(failed)
     finally:
         try:
+            if check_prior_apply_fixture:
+                check_prior_apply_fixture()
+            if recipe_preservation:
+                finish_pre_marker_outcome(recipe_outcome, recipe_preservation,
+                                          lambda value: run.save(run.path("outcomes.json"), value, durable=True), label="Selected Files edit")
+                if recipe_outcome is not None:
+                    print(f"Selected Files edit: {len(recipe_outcome['passed'])} passed, {len(recipe_outcome['failed'])} failed; retained evidence verified.", flush=True)
             if independent_preservation:
                 finish_pre_marker_outcome(independent_outcome, independent_preservation,
                                           lambda value: run.save(run.path("outcomes.json"), value, durable=True),
@@ -1941,6 +3559,11 @@ if __name__ == "__main__":
     parser.add_argument("--backup-export", action="store_true", help="Export an isolated default library into a separately named backup child")
     parser.add_argument("--settings-backup", action="store_true", help="Exercise real Settings publication on an admitted synthetic guest")
     parser.add_argument("--settings-picker-only", action="store_true", help="Open and cancel Files from Settings on the retained synthetic guest; never select a destination")
+    parser.add_argument("--settings-open", action="store_true", help="Open a complete synthetic library from the real MainActivity Settings and return to Default on a fresh app guest")
+    parser.add_argument("--settings-open-reuse", action="store_true", help="Reclaim only the canceled Settings guest that stopped before its first APK install")
+    parser.add_argument("--settings-open-retry", metavar="NAVIGATION_MANIFEST_SHA", help="Retry only the anchored preselection failure on its unchanged Default and synthetic folder")
+    parser.add_argument("--settings-apply", metavar="OPEN_PASS_MANIFEST_SHA", help="Exercise one foreground selected recipe edit on an independent synthetic folder")
+    parser.add_argument("--settings-apply-retry", metavar="NAVIGATION_MANIFEST_SHA", help="Continue only the Apply fixture stopped before Files selection")
     parser.add_argument("--settings-recover", metavar="COMPLETED_MANIFEST_SHA", help="Read the existing Settings receipt after a cold launch; never open a picker")
     parser.add_argument("--backup-delivery-death", action="store_true", help="One isolated native process death after commit but before delivery; never replay")
     parser.add_argument("--backup-pre-marker", action="store_true",
@@ -1969,8 +3592,24 @@ if __name__ == "__main__":
                         help="With standalone derived roots, append one missing original to the fresh synthetic destination")
     parser.add_argument("--selected-append-released-generation", metavar="GENERATION",
                         help="Reconcile one exact intervening released claim; still require the installed dry-run pair and preserved fixtures")
+    parser.add_argument("--selected-append-repeat", action="store_true",
+                        help="Run two new selected appends in one isolated synthetic scope after the exact successful release")
+    parser.add_argument("--selected-append-death", action="store_true",
+                        help="Run one selected append, end its process after the private receipt, then inspect without replay")
+    parser.add_argument("--selected-append-death-recover", action="store_true",
+                        help="Read back the exact retained interruption using its already-installed pair; never launch a writer")
     parser.add_argument("--selected-append-host-recovery", action="store_true",
                         help="Use the pinned failure before Files launch; verify both previous fixture trees before a new test-only attempt")
+    parser.add_argument("--selected-recipe-edit", action="store_true",
+                        help="Publish one closed catalog-only edit through a single Files grant on an admitted app guest")
+    parser.add_argument("--selected-recipe-boot-retry", action="store_true",
+                        help="Permit one retry on the exact released guest after its pinned boot-only refusal")
+    parser.add_argument("--selected-bound-recipe-edit", action="store_true",
+                        help="Record one active-binding recipe receipt on the exact released detached-edit guest without advancing the pointer")
+    parser.add_argument("--selected-advanced-recipe-edit", action="store_true",
+                         help="Verify one new isolated live receipt and direct pointer advance; retain the exact bound and detached predecessors")
+    parser.add_argument("--selected-advanced-released-generation", metavar="GENERATION", action="append",
+                        help="Name each exact intervening stopped release in order without relaxing installed pair or retained evidence checks")
     parser.add_argument("--provider-capacity", action="store_true",
                         help="Verify the real Files capacity gate with an unattainable synthetic requirement and no publication")
     parser.add_argument("--settings-retry", metavar="CANCEL_MANIFEST_SHA", help="Permit one new confirmation on the exact retained, independently canceled fixture")

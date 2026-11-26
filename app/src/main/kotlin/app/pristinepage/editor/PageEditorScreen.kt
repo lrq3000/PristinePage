@@ -65,6 +65,7 @@ class PageEditorScreen(
     private val nextPage: (() -> Unit)? = null,
     private val savedOcr: SavedPageOcrReader? = null,
     private val showOcrDiagnostics: Boolean = false,
+    private val allowSave: Boolean = true,
 ) : EditorContent {
     @Composable override fun Content(session: EditorSession, onExit: () -> Unit) {
         val state by session.state.collectAsStateWithLifecycle()
@@ -221,10 +222,11 @@ class PageEditorScreen(
                 Text(stringResource(R.string.editor_heading), Modifier.weight(1f), style = MaterialTheme.typography.titleMedium)
                 Button(onClick = {
                     if (state.dirty) {
+                        if (!allowSave || state.saveNeedsReopen) return@Button
                         if (guidedStep == null) applyRevision = state.page?.recipeRevision
                         session.apply()
                     } else chosenPanel = ""
-                }, enabled = editable && !shapeBlocksApply && (state.dirty || (guidedStep == null && panel.isNotEmpty())),
+                }, enabled = editable && !shapeBlocksApply && (if (state.dirty) allowSave && !state.saveNeedsReopen else guidedStep == null && panel.isNotEmpty()),
                     modifier = Modifier.heightIn(min = 48.dp).testTag("editor-apply")) { Text(stringResource(R.string.editor_apply)) }
             }
             val screenHeight = androidx.compose.ui.platform.LocalConfiguration.current.screenHeightDp
@@ -237,12 +239,17 @@ class PageEditorScreen(
             }
             Column(Modifier.weight(1f).fillMaxWidth().verticalScroll(rememberScrollState()).padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             if (state.loading) CircularProgressIndicator()
+            if (!allowSave) Text(stringResource(R.string.editor_selected_preview_only), style = MaterialTheme.typography.bodySmall)
             state.error?.let {
-                Text(if (it.safeMessageKey == "editor_save_delivery_unconfirmed") stringResource(R.string.editor_save_delivery_unconfirmed)
-                    else errorText(it.code), color = MaterialTheme.colorScheme.error)
+                Text(when (it.safeMessageKey) {
+                    "editor_save_attempt_unconfirmed" -> stringResource(R.string.editor_save_attempt_unconfirmed)
+                    "editor_save_delivery_unconfirmed" -> stringResource(R.string.editor_save_delivery_unconfirmed)
+                    "library_reconnect_required" -> stringResource(R.string.editor_library_reconnect_required)
+                    else -> errorText(it.code)
+                }, color = MaterialTheme.colorScheme.error)
                 if (state.page == null) Button(onClick = session::retryLoad, modifier = control("editor-retry-load")) { Text(stringResource(R.string.editor_retry_load)) }
             }
-            // Loading the original is independent of recipe decoding. Unsupported recipes must not make an authentic page unreadable.
+            // When the catalog admits the page, an independent original read need not execute its accepted recipe.
             if (state.page == null && state.error != null) originalOnLoadFailure?.invoke()
             if (!pinCropHistory) {
                 val height = if (panel == "shape") cropPreview else (screenHeight * .51f).coerceIn(220f, 440f).dp
@@ -254,7 +261,7 @@ class PageEditorScreen(
                 val page = state.page
                 val frame = it.geometry
                 val seed = guidedStep == 0 && !seedAttempted && page?.recipeRevision == 1L && frame is GeometryRecipe.None
-                if (page != null && loadOriginal != null &&
+                if (!session.previewBindingSuspended(state) && page != null && loadOriginal != null &&
                     (frame is GeometryRecipe.Perspective || frame is GeometryRecipe.ManualCurve || frame is GeometryRecipe.ManualCurveFourSides ||
                         frame is GeometryRecipe.Bezier || seed)) {
                     AtelierFrameCanvas(page.sourceId.value, frame, editable, loadOriginal, session, bezierSelection,
@@ -416,7 +423,7 @@ class PageEditorScreen(
             onDismissRequest = session::keepEditing,
             title = { Text(stringResource(R.string.editor_exit_title)) },
             text = { if (shapeBlocksApply) ShapeSaveNotice(state, preview) else Text(stringResource(R.string.editor_exit_notice)) },
-            confirmButton = { TextButton(onClick = session::applyAndBack, enabled = editable && !shapeBlocksApply, modifier = Modifier.heightIn(min = 48.dp).testTag("editor-apply-exit")) { Text(stringResource(R.string.editor_apply)) } },
+            confirmButton = { if (allowSave && !state.saveNeedsReopen) TextButton(onClick = session::applyAndBack, enabled = editable && !shapeBlocksApply, modifier = Modifier.heightIn(min = 48.dp).testTag("editor-apply-exit")) { Text(stringResource(R.string.editor_apply)) } },
             dismissButton = { Column {
                 TextButton(onClick = session::keepEditing, modifier = Modifier.heightIn(min = 48.dp).testTag("editor-keep-editing")) { Text(stringResource(R.string.editor_keep_editing)) }
                 TextButton(onClick = session::discardAndBack, modifier = Modifier.heightIn(min = 48.dp).testTag("editor-discard-exit")) { Text(stringResource(R.string.editor_discard_exit)) }

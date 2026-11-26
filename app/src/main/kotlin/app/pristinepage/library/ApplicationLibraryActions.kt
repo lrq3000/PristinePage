@@ -39,17 +39,17 @@ class ApplicationLibraryActions private constructor(
         services: ApplicationServices) : this(context, onPagesSaved, services::imports, services)
 
     override suspend fun startup() = open().startupRecovery
-    override suspend fun openLibrary() = open().let { LibraryStartup(it.startupRecovery, it.activation) }
+    override suspend fun openLibrary() = scoped?.openLibraryPresentation() ?: open().let { LibraryStartup(it.startupRecovery, it.activation) }
     override suspend fun list(after: DocumentId?, limit: Int) = open().store.catalog.list(after, limit)
     override suspend fun listAlbums(order: AlbumOrder, locale: Locale, after: AlbumPosition?, limit: Int, issuedAt: LibraryActivation?): AlbumPage {
         val services = scoped ?: return open().store.albums.listAlbums(order, locale, after, limit)
-        return services.readDefaultHomeAlbums(issuedAt, null, order, locale, after, limit)
+        return services.readLibraryHomeAlbums(issuedAt, null, order, locale, after, limit)
     }
 
     override suspend fun searchAlbums(query: AlbumSearchQuery, order: AlbumOrder, locale: Locale, after: AlbumPosition?, limit: Int,
         issuedAt: LibraryActivation?): AlbumPage {
         val services = scoped ?: return open().store.albumSearch.searchAlbums(query, order, locale, after, limit)
-        return services.readDefaultHomeAlbums(issuedAt, query, order, locale, after, limit)
+        return services.readLibraryHomeAlbums(issuedAt, query, order, locale, after, limit)
     }
 
     override suspend fun searchPages(query: String, issuedAt: LibraryActivation?): HomePageSearchPage {
@@ -67,17 +67,22 @@ class ApplicationLibraryActions private constructor(
     private suspend fun fixtureSearch(graph: ApplicationImports, query: String, cursor: HomePageCursor?): HomePageSearchPage =
         queryHomePages(graph, query, cursor) { fixtureSearch(graph, query, it) }
 
-    override suspend fun rename(document: DocumentId, revision: Long, title: String) = open().store.documents.renameDocument(document, revision, title)
+    override suspend fun rename(document: DocumentId, revision: Long, title: String) =
+        renameIssued(document, revision, title, scoped?.recordedDefaultActivation())
+    override suspend fun renameIssued(document: DocumentId, revision: Long, title: String, issuedAt: LibraryActivation?) =
+        scoped?.renameDefaultAlbum(issuedAt, document, revision, title) ?: open().store.documents.renameDocument(document, revision, title)
     override suspend fun load(id: DocumentId) = open().store.catalog.load(id)
     override suspend fun loadIssued(id: DocumentId, issuedAt: LibraryActivation) =
-        scoped?.loadDefaultAlbum(issuedAt, id) ?: load(id)
+        scoped?.loadLibraryAlbum(issuedAt, id) ?: load(id)
     override suspend fun openPageHit(hit: HomePageSearchHit, issuedAt: LibraryActivation?): DocumentOverview? {
         val services = scoped ?: return super.openPageHit(hit, issuedAt)
         if (issuedAt == null || hit.issuedAt != issuedAt) return null
         return services.openDefaultPageHit(issuedAt, hit)
     }
     override suspend fun activeImport(id: DocumentId) = open().store.catalog.activeImport(id)
-    override suspend fun create(title: String) = open().store.documents.createDocument(title)
+    override suspend fun create(title: String) = createIssued(title, scoped?.recordedDefaultActivation())
+    override suspend fun createIssued(title: String, issuedAt: LibraryActivation?) =
+        scoped?.createDefaultAlbum(issuedAt, title) ?: open().store.documents.createDocument(title)
     override suspend fun activeImportRequest(id: DocumentId): PhotoImportRequest? {
         val graph = open()
         val services = scoped
@@ -90,12 +95,14 @@ class ApplicationLibraryActions private constructor(
         return services.findDefaultPhotoBatch(issuedAt, id)?.let { PhotoImportRequest.abandonmentOnly(it, issuedAt) }
     }
 
-    override suspend fun begin(document: DocumentSummary): PhotoImportRequest {
-        val graph = open()
+    override suspend fun begin(document: DocumentSummary): PhotoImportRequest = beginIssued(document, scoped?.recordedDefaultActivation())
+
+    override suspend fun beginIssued(document: DocumentSummary, issuedAt: LibraryActivation?): PhotoImportRequest {
         val services = scoped
-        if (services == null) return PhotoImportRequest(graph.store.imports.beginImport(document.documentId, document.documentRevision, null).parentId.value)
-        val batch = services.reserveDefaultPhotoBatch(graph.activation, document.documentId, document.documentRevision)
-        return PhotoImportRequest(batch.value, issuedAt = graph.activation)
+        if (services == null) return PhotoImportRequest(open().store.imports.beginImport(document.documentId, document.documentRevision, null).parentId.value)
+        val expected = issuedAt ?: throw RepositoryFailure(OperationError(OperationErrorCode.SOURCE_UNAVAILABLE, false, "library_activation_changed", null))
+        val batch = services.reserveDefaultPhotoBatch(expected, document.documentId, document.documentRevision)
+        return PhotoImportRequest(batch.value, issuedAt = expected)
     }
 
     override suspend fun deliver(request: PhotoImportRequest, selection: LibraryPhotoResult): List<IngestResult> {

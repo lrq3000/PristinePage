@@ -27,12 +27,20 @@ internal class AndroidSelectedLibraryDestination private constructor(
     private val successor: LibraryGeneration,
 ) : LibraryMergePublication.Destination {
     private val rootObservation = AndroidLibraryDescriptorAncestry.observe(root.descriptor)
+    private val stagingName = LibrarySelectedAppendAdmission.stagingName(successor.id)
+    private val managedIdentities = setOf(root.identity, objects.identity, catalogs.identity, generations.identity)
+    private var retainedStages: Map<String, Observation>? = null
     private var stagingObservation: Observation? = null
     private val originalNames = listing(objects, MAX_OBJECT_ENTRIES, requireFiles = false).associateByTo(HashMap()) { it.name }
     private val acknowledged = HashMap<String, Pair<Long, Long>>()
 
     override fun requireIndependentScratch(scratch: Path) {
         if (scratch != this.scratch) throw IOException("Selected library publication needs its independent private scratch")
+        requireRoots()
+    }
+
+    override fun requireIndependentRevisionJournal(path: Path) {
+        provider.requirePrivateJournal(path)
         requireRoots()
     }
 
@@ -56,10 +64,32 @@ internal class AndroidSelectedLibraryDestination private constructor(
         val catalogRows = listing(catalogs, MAX_GENERATION_ENTRIES, requireFiles = false)
         val objectRows = listing(objects, MAX_OBJECT_ENTRIES, requireFiles = false)
         if (objectRows.associateBy { it.name } != originalNames) throw IOException("The selected library objects changed during admission")
-        LibrarySelectedAppendAdmission.requireSpaceForAppend(rootRows.any { it.name == STAGING },
+        LibrarySelectedAppendAdmission.requireSpaceForAppend(rootRows.any { it.name == stagingName },
             catalogRows.any { it.name == "${successor.id}.sqlite" }, rootRows.size, catalogRows.size, objectRows.size,
             originals.count { it !in originalNames })
-        generationInventory(provider.checkpoint).requireAppendable(successor)
+        val inventory = generationInventory(provider.checkpoint)
+        inventory.requireAppendable(successor)
+        val retained = LibrarySelectedAppendAdmission.retainedStagingNames(rootRows.map { it.name }, successor.id, inventory.generationIds())
+        val observed = HashMap<String, Observation>()
+        val distinct = HashSet<Observation>()
+        for (entry in rootRows) {
+            if (entry.name !in retained) continue
+            if (!entry.directory) throw IOException("A retained selected merge stage is not a directory")
+            provider.openDirectory(entry.id).use { descriptor ->
+                val stage = HeldLibraryDirectory(entry.id, descriptor, provider.directoryIdentity(descriptor))
+                val seen = AndroidLibraryDescriptorAncestry.observe(descriptor)
+                if (stage.identity in managedIdentities || !distinct.add(seen) ||
+                    listing(stage, 1, requireFiles = true).isNotEmpty()
+                ) throw IOException("A retained selected merge stage cannot be verified empty")
+                AndroidLibraryDescriptorAncestry.requireNamedDirectory(root.descriptor, entry.name, descriptor)
+                AndroidLibraryDescriptorAncestry.requirePhysicallyEmpty(descriptor)
+                AndroidLibraryDescriptorAncestry.requireNamedDirectory(root.descriptor, entry.name, descriptor)
+                observed[entry.name] = seen
+            }
+        }
+        if (retainedStages?.let { it != observed } == true) throw IOException("The retained selected merge stages changed")
+        AndroidLibraryDescriptorAncestry.requireVacantName(root.descriptor, stagingName)
+        retainedStages = observed
     }
 
     override fun openCatalog(generation: LibraryGeneration) = find(catalogs, "${generation.id}.sqlite")?.let {
@@ -75,7 +105,11 @@ internal class AndroidSelectedLibraryDestination private constructor(
     }
 
     override fun createCatalog(generation: LibraryGeneration, write: (OutputStream) -> Unit) {
-        publish(catalogs, "${generation.id}.sqlite", generation.catalog, requireRoots, requireRoots, write)
+        createGuardedCatalog(generation, requireRoots, write)
+    }
+
+    override fun createGuardedCatalog(generation: LibraryGeneration, requireCurrent: () -> Unit, write: (OutputStream) -> Unit) {
+        publish(catalogs, "${generation.id}.sqlite", generation.catalog, requireCurrent, requireCurrent, write)
     }
 
     override fun createMarker(generation: LibraryGeneration, bytes: ByteArray): Nothing =
@@ -103,26 +137,36 @@ internal class AndroidSelectedLibraryDestination private constructor(
     ): LibraryTreeReadSource.Entry {
         if (find(parent, name) != null) throw IOException("The selected library final name already exists")
         requireStage()
-        val staged = find(root, STAGING, isDirectory = true)
+        val staged = find(root, stagingName, isDirectory = true)
         if ((staged == null) != (stagingObservation == null)) throw IOException("The selected library stage was not created by this attempt")
-        val stageId = staged?.id ?: provider.create(root.id, Document.MIME_TYPE_DIR, STAGING).also {
-            if (find(root, STAGING, isDirectory = true)?.id != it) throw IOException("The selected library stage was not created exactly")
+        val prior = retainedStages ?: throw IOException("The selected staging namespace was not admitted")
+        val stageId = staged?.id ?: run {
+            AndroidLibraryDescriptorAncestry.requireVacantName(root.descriptor, stagingName)
+            provider.create(root.id, Document.MIME_TYPE_DIR, stagingName)
+        }.also {
+            if (find(root, stagingName, isDirectory = true)?.id != it) throw IOException("The selected library stage was not created exactly")
             sync(root)
         }
         return provider.openDirectory(stageId).use { descriptor ->
             val seen = AndroidLibraryDescriptorAncestry.observe(descriptor)
             val stage = HeldLibraryDirectory(stageId, descriptor, provider.directoryIdentity(descriptor))
             if (seen.mount != rootObservation.mount || stage.identity.first != root.identity.first ||
-                stage.identity in setOf(root.identity, objects.identity, catalogs.identity, generations.identity) ||
+                stage.identity in managedIdentities || seen in prior.values ||
                 (stagingObservation != null && stagingObservation != seen)
             ) throw IOException("The selected library stage identity changed")
+            fun requireStageBinding() {
+                requireBound(stage)
+                AndroidLibraryDescriptorAncestry.requireNamedDirectory(root.descriptor, stagingName, descriptor)
+            }
             stagingObservation = seen
             if (listing(stage, 1, requireFiles = true).isNotEmpty()) throw IOException("The selected library has unresolved staging files")
+            requireStageBinding()
+            AndroidLibraryDescriptorAncestry.requirePhysicallyEmpty(descriptor)
             val writer = AndroidLibraryLeafWriter(provider, root, root, stage, spend,
                 { directory, leaf -> find(directory, leaf)?.id }, ::sync)
             val finalIdentity = writer.publish(parent, name, id,
-                requireStage = { requireStage(); requireBound(stage); requireBound(parent) },
-                requireVisibility = { requireCurrent(); requireBound(stage); requireBound(parent) }, write = write)
+                requireStage = { requireStage(); requireBound(parent); requireStageBinding() },
+                requireVisibility = { requireCurrent(); requireBound(parent); requireStageBinding() }, write = write)
             val entry = find(parent, name) ?: throw IOException("The published selected library file disappeared")
             acknowledged[entry.id] = finalIdentity
             entry
@@ -177,8 +221,6 @@ internal class AndroidSelectedLibraryDestination private constructor(
     }
 
     companion object {
-        // Leave an exported backup's staging namespace untouched. This qualification expects a fresh merge namespace.
-        private const val STAGING = "merge-staging"
         fun <T> use(provider: WritableTree, expectedRoot: Observation, scratch: Path, spend: LocalLibraryMoveAuthorization, successor: LibraryGeneration,
             requireRoots: () -> Unit, block: (AndroidSelectedLibraryDestination) -> T,
         ): T {

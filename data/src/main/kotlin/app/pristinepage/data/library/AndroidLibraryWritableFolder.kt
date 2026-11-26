@@ -14,6 +14,7 @@ import android.system.Os
 import android.system.OsConstants
 import java.io.FileNotFoundException
 import java.io.IOException
+import java.nio.file.Path
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.withContext
@@ -73,6 +74,24 @@ class AndroidLibraryWritableFolder(context: Context) {
 
         fun requireDirectory(id: String, anchor: ParcelFileDescriptor) = openDirectory(id).use { current ->
             if (directoryIdentity(anchor) != directoryIdentity(current)) throw IOException("The writable library directory changed")
+        }
+
+        /** Keep both exact Files bindings held under this provider attempt. Neither document ID grants access to their common ancestor. */
+        fun <T> withSeparatePreviousRoot(previous: Uri, destination: ParcelFileDescriptor, block: (() -> Unit) -> T): T {
+            val priorId = AndroidLibraryTreeRead.localTreeDocumentId(previous) ?: throw IOException("The previous folder is unavailable")
+            val hints = LibraryTreeAncestryHint.parentHops(priorId, root)
+            val prior = WritableTree(app, previous, priorId, signal, checkpoint, Access.PERSISTED)
+            return prior.openDirectory(priorId).use { held ->
+                AndroidLibraryDescriptorAncestry.withDerivedAnchor(held, destination, hints, checkpoint) { ancestry ->
+                    fun requireCurrent() {
+                        prior.requireDirectory(priorId, held)
+                        requireDirectory(root, destination)
+                        ancestry()
+                    }
+                    requireCurrent()
+                    block(::requireCurrent).also { requireCurrent() }
+                }
+            }
         }
 
         fun children(parent: String, limit: Int): List<LibraryTreeReadSource.Entry> =
@@ -135,9 +154,13 @@ class AndroidLibraryWritableFolder(context: Context) {
             return stat.st_dev to stat.st_ino
         }
 
+        fun requirePrivateJournal(path: Path) {
+            if (app.filesDir.toPath().toRealPath() != path) throw IOException("The selected library revision requires its exact private journal")
+        }
+
         fun requireExactAccess() {
             checkpoint()
-            if (!AndroidLibraryTreeRead.hasTrustedLocalProvider(app)) throw IOException("The exact library folder is not writable")
+            if (!AndroidLibraryTreeRead.hasTrustedLocalProvider(app)) throw ExactLibraryWriteAccessUnavailable()
             val granted = when (access) {
                 Access.PERSISTED -> resolver.persistedUriPermissions.any {
                     it.isReadPermission && it.isWritePermission && it.uri.toString() == tree.toString()
@@ -146,7 +169,7 @@ class AndroidLibraryWritableFolder(context: Context) {
                 Access.LIVE_FILES_RESULT -> app.checkUriPermission(tree, Process.myPid(), Process.myUid(),
                     Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION) == PackageManager.PERMISSION_GRANTED
             }
-            if (!granted) throw IOException("The exact library folder is not writable")
+            if (!granted) throw ExactLibraryWriteAccessUnavailable()
             checkpoint()
         }
 
@@ -163,3 +186,5 @@ class AndroidLibraryWritableFolder(context: Context) {
         }
     }
 }
+
+internal class ExactLibraryWriteAccessUnavailable : IOException("The exact library folder is not writable")

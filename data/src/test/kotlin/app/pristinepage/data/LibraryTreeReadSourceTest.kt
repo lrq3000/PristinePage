@@ -117,6 +117,21 @@ class LibraryTreeReadSourceTest {
         assertEquals(false, "substitute-catalog" in fixture.backend.opened)
     }
 
+    @Test fun recoveryFinalReadRefusesAnIdenticalCatalogUnderADifferentProviderId() {
+        val fixture = Fixture()
+        val scratch = temporary.newFolder().canonicalFile.toPath()
+        val recovery = LibraryBackupRead(LibraryTreeReadSource("root", fixture.backend, bindAcrossChecks = true), scratch, 1024)
+        assertEquals(fixture.generation, recovery.observeTip(fixture.generation))
+        recovery.read(8, fixture.generation, fixture.generation) { _, _ ->
+            LibraryBackupRead.Projection(Unit, listOf(fixture.a))
+        }
+
+        fixture.backend.tree.getValue("n2")[0] = Entry("substitute-catalog", "${fixture.generation.id}.sqlite", false)
+        fixture.backend.files["substitute-catalog"] = fixture.backend.files.getValue("catalog-id")
+        assertThrows(IOException::class.java) { recovery.requireCurrent(fixture.generation) }
+        assertEquals(false, "substitute-catalog" in fixture.backend.opened)
+    }
+
     @Test fun aNewTipDuringProjectionRefusesTheEarlierGeneration() {
         val fixture = Fixture()
         val scratch = temporary.newFolder().canonicalFile.toPath()

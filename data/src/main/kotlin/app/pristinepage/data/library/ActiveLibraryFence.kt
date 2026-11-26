@@ -40,6 +40,7 @@ internal class ActiveLibraryFence(initial: Selection) {
     private var status: State = State.Ready(initial)
     private var consumers = 0
     private var reconciling = false
+    private var pausing = false
     private val revokedDuringProof = HashSet<Identity>(2)
 
     fun state(): State = synchronized(monitor) { status }
@@ -49,7 +50,7 @@ internal class ActiveLibraryFence(initial: Selection) {
         currentCoroutineContext().ensureActive()
         val selected = synchronized(monitor) {
             val ready = status as? State.Ready ?: return null
-            if (ready.selection.identity != expected) return null
+            if (pausing || ready.selection.identity != expected) return null
             consumers++
             ready.selection
         }
@@ -58,6 +59,18 @@ internal class ActiveLibraryFence(initial: Selection) {
         } finally {
             synchronized(monitor) { consumers-- }
         }
+    }
+
+    /** Temporarily close admission, without guessing the durable result of the caller's cutover. */
+    suspend fun <T : Any> exclusiveCutover(expected: Identity, operation: suspend () -> T): T? {
+        currentCoroutineContext().ensureActive()
+        synchronized(monitor) {
+            val ready = status as? State.Ready ?: return null
+            if (pausing || consumers != 0 || ready.selection.identity != expected) return null
+            pausing = true
+        }
+        try { return operation() }
+        finally { synchronized(monitor) { pausing = false } }
     }
 
     /** False means the exact old selection remains authoritative. An exception is uncertain and requires durable reconciliation. */
@@ -70,7 +83,7 @@ internal class ActiveLibraryFence(initial: Selection) {
         currentCoroutineContext().ensureActive()
         val before = synchronized(monitor) {
             val ready = status as? State.Ready ?: return false
-            if (consumers != 0 || ready.selection.identity != expected || next.identity.activation != expected.activation + 1) return false
+            if (pausing || consumers != 0 || ready.selection.identity != expected || next.identity.activation != expected.activation + 1) return false
             revokedDuringProof.clear()
             status = State.Switching(ready.selection, next)
             ready.selection
@@ -120,7 +133,7 @@ internal class ActiveLibraryFence(initial: Selection) {
     suspend fun reconcile(readVerified: suspend CoroutineScope.() -> Selection?): Boolean {
         currentCoroutineContext().ensureActive()
         val allowed = synchronized(monitor) {
-            if (consumers != 0 || reconciling) return false
+            if (pausing || consumers != 0 || reconciling) return false
             val permitted = when (val current = status) {
                 is State.Reconnect -> setOf(current.selection)
                 is State.Uncertain -> setOf(current.before, current.after)

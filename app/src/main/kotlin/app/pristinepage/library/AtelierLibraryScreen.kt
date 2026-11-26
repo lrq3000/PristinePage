@@ -87,6 +87,7 @@ import kotlinx.coroutines.launch
     thumbnailsCurrent: (DocumentSummary) -> Boolean = { true },
     observeOcrPending: ((DocumentId, DocumentPage) -> Flow<AlbumOcrPending.State?>)? = null,
     openAtelier: ((String, DocumentSummary?) -> Unit)? = null,
+    onReconnect: () -> Unit = {},
     onSettings: () -> Unit,
     onEdit: (DocumentId, PageId) -> Unit,
 ) {
@@ -99,7 +100,8 @@ import kotlinx.coroutines.launch
     fun nextTitle() = defaultAlbumTitle(template = preferencesState.albumTitleTemplate)
     val home = state.selectedId == null
     val overview = state.document
-    val canAcquire = !state.loading && !state.preparingImport && state.request == null && !state.renaming
+    val canOpenPage = !state.reconnect && !state.loading && !state.preparingImport && state.request == null && !state.renaming
+    val canAcquire = !state.selectedFolder && canOpenPage
     val canClose = state.request == null && !state.preparingImport && !state.renaming
     fun acquire(kind: PhotoImportKind) {
         sheet = null
@@ -150,7 +152,7 @@ import kotlinx.coroutines.launch
                     session.observePageSearch(query, state.activation)
                 }
             }
-            if (state.canSearchAlbums) OutlinedTextField(
+            if (state.canSearchAlbums && !state.reconnect) OutlinedTextField(
                 value = state.albumSearch,
                 onValueChange = { session.accept(LibraryEvent.SetAlbumSearch(it, ZoneId.systemDefault())) },
                 label = { Text(stringResource(R.string.home_search_scans)) },
@@ -174,13 +176,20 @@ import kotlinx.coroutines.launch
                 item { Text(stringResource(preferencesState.order.label()), style = MaterialTheme.typography.labelMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant) }
                 item { LibraryFeedback(state, session) }
+                if (state.reconnect) item {
+                    Column {
+                        Text(stringResource(R.string.library_folder_unavailable))
+                        TextButton(onClick = onReconnect, modifier = Modifier.heightIn(min = AtelierStyle.touchTarget)
+                            .testTag("library-reconnect")) { Text(stringResource(R.string.library_reconnect)) }
+                    }
+                }
                 if (searching && state.pageSearchUnavailable) item {
                     Text(stringResource(R.string.home_page_search_unavailable), Modifier.padding(vertical = 4.dp))
                 }
                 if (searching && state.albumSearchUnavailable) item {
                     Text(stringResource(R.string.home_album_search_unavailable), Modifier.padding(vertical = 4.dp))
                 }
-                if (state.documents.isEmpty() && state.pageMatches.isEmpty() && !state.loading && !state.hasMore && state.error == null &&
+                if (!state.reconnect && state.documents.isEmpty() && state.pageMatches.isEmpty() && !state.loading && !state.hasMore && state.error == null &&
                     !state.albumSearchUnavailable && !state.pageSearchUnavailable) {
                     item { Text(stringResource(if (!searching) R.string.atelier_empty
                         else if (state.canSearchPages) R.string.home_search_no_page_or_album_matches
@@ -220,7 +229,7 @@ import kotlinx.coroutines.launch
             }
         } else {
             val selectedId = state.selectedId
-            val batchActivation = state.activation
+            val batchActivation = state.activation.takeUnless { state.selectedFolder }
             key(selectedId) {
                 LazyVerticalGrid(GridCells.Adaptive(148.dp), Modifier.weight(1f).fillMaxWidth().testTag("document-overview"),
                     contentPadding = PaddingValues(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp),
@@ -249,9 +258,11 @@ import kotlinx.coroutines.launch
                         Surface(
                             modifier = Modifier.fillMaxWidth().testTag("original-page-${page.pageId.value}")
                                 .semantics { selected = state.selectedPage == page.pageId }
-                                .combinedClickable(enabled = canAcquire && overview != null, role = Role.Button,
-                                    onLongClickLabel = stringResource(R.string.carnet_select_page),
-                                    onLongClick = { if (batchActivation != null && overview != null) onSelectPages(batchActivation, overview, page.pageId) }) {
+                                 .combinedClickable(enabled = canOpenPage && overview != null, role = Role.Button,
+                                     onLongClickLabel = if (batchActivation != null) stringResource(R.string.carnet_select_page) else null,
+                                     onLongClick = if (batchActivation != null && overview != null) {
+                                         { onSelectPages(batchActivation, overview, page.pageId) }
+                                     } else null) {
                                     overview?.let { onEdit(it.document.documentId, page.pageId) }
                                 },
                             shape = RoundedCornerShape(AtelierStyle.surfaceRadius), color = MaterialTheme.colorScheme.surface,

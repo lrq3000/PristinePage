@@ -11,15 +11,24 @@ import android.system.ErrnoException
 import android.system.Os
 import app.pristinepage.core.io.transferExactBytes
 import app.pristinepage.core.pipeline.PixelSize
+import app.pristinepage.core.pipeline.Recipe
+import app.pristinepage.core.recipe.RecipeCodec
+import app.pristinepage.data.files.PlatformDirectorySync
 import app.pristinepage.data.library.LibraryObjectTransfer.ObjectId
 import app.pristinepage.data.library.RoomLibraryCatalogReader.Companion.MAX_PORTABLE_BYTES
 import app.pristinepage.data.model.OperationError
 import app.pristinepage.data.model.OperationErrorCode
+import app.pristinepage.data.model.DocumentId
+import app.pristinepage.data.model.PageId
 import app.pristinepage.data.model.RepositoryFailure
+import app.pristinepage.data.model.SaveRecipeResult
 import app.pristinepage.data.model.SourceBlobId
 import app.pristinepage.data.model.SourceInspection
+import app.pristinepage.data.model.requireOpaqueId
 import app.pristinepage.data.repository.CommittedSourceBinding
 import app.pristinepage.data.repository.DocumentCatalog
+import app.pristinepage.data.repository.EditablePages
+import app.pristinepage.data.repository.RecipeAdmission
 import app.pristinepage.data.repository.ScopedCommittedOriginals
 import java.io.File
 import java.io.IOException
@@ -32,6 +41,7 @@ import java.nio.file.StandardOpenOption.READ
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.sync.Mutex
@@ -51,7 +61,7 @@ class AndroidLibraryTreeRead(context: Context, private val scratchDirectory: Fil
 
     private class VerifiedTree(
         val tree: String, val generation: LibraryGeneration, override val albums: Int, override val scans: Int,
-        private val originals: Map<String, ObjectId>,
+        private val originals: Map<String, ObjectId>, val editRoot: AndroidLibraryDescriptorAncestry.Observation?,
     ) : Verified {
         override val libraryId: String get() = generation.libraryId
         override val generationId: String get() = generation.id
@@ -66,16 +76,77 @@ class AndroidLibraryTreeRead(context: Context, private val scratchDirectory: Fil
         return verifyExact(tree, previous?.generation)
     }
 
+    /** The confirmation path captures physical identity while verifying this exact generation, not on a later edit retry. */
+    internal suspend fun verifyRecipeEditTarget(tree: Uri, expected: LibraryGeneration? = null, requireOwner: () -> Unit = {}): Verified =
+        verifyExact(tree, expected = expected, bindEditRoot = true, requireOwner = requireOwner)
+
+    internal fun confirmedRecipePredecessor(verified: Verified): LibraryGeneration {
+        val selection = requireVerifiedTree(verified)
+        if (selection.editRoot == null) throw IOException("Expected a writable recipe edit confirmation")
+        return selection.generation
+    }
+
+    internal fun requireConfirmedRoot(verified: Verified, expected: AndroidLibraryDescriptorAncestry.Observation) {
+        if (requireVerifiedTree(verified).editRoot != expected) throw LibraryTreeUnavailable("The published library folder changed")
+    }
+
+    internal suspend fun <T : Any> openConfirmedFolder(
+        verified: Verified, requireCurrent: () -> Unit, choose: (LibraryGeneration, () -> Unit) -> T,
+    ): T {
+        val candidate = requireVerifiedTree(verified)
+        val rootIdentity = candidate.editRoot ?: throw IOException("Folder confirmation requires a writable, verified tree")
+        val tree = Uri.parse(candidate.tree)
+        return withReadBackend(tree, scratchDirectory, requireCurrent) { backend, read, checkpoint ->
+            backend.requireWritableAccess()
+            backend.openRootDirectory().use { held ->
+                if (AndroidLibraryDescriptorAncestry.observe(held) != rootIdentity) {
+                    throw LibraryTreeUnavailable("The confirmed library folder changed")
+                }
+                readCatalog(read, candidate.generation, checkpoint) { _, _ -> Unit }
+                fun requireDestination() {
+                    checkpoint()
+                    requireCurrent()
+                    backend.requireWritableAccess()
+                    backend.rebindRoot(rootIdentity)
+                    read.requireCurrent(candidate.generation)
+                    backend.rebindRoot(rootIdentity)
+                    backend.requireWritableAccess()
+                }
+                requireDestination()
+                choose(candidate.generation, ::requireDestination)
+            }.also {
+                backend.requireWritableAccess()
+                checkpoint()
+            }
+        }
+    }
+
     /** A durable private selection supplies the full expected marker; reject a different tip before projecting rows or opening originals. */
-    private suspend fun verifyExact(tree: Uri, expected: LibraryGeneration?, scratch: File = scratchDirectory): Verified =
-        readTree(tree, scratch) { read, checkpoint ->
+    private suspend fun verifyExact(tree: Uri, expected: LibraryGeneration?, scratch: File = scratchDirectory,
+        bindEditRoot: Boolean = false, requireOwner: () -> Unit = {},
+    ): Verified = withReadBackend(tree, scratch, requireOwner) { backend, read, checkpoint ->
+        fun verify(root: AndroidLibraryDescriptorAncestry.Observation?) =
             readCatalog(read, expected, checkpoint) { generation, catalog ->
                 val originals = catalog.originals.associate { it.sourceBlobId to ObjectId(it.byteSha256, it.byteCount) }
-                VerifiedTree(tree.toString(), generation, catalog.albums.size, catalog.albums.sumOf { it.pages.size }, originals)
+                VerifiedTree(tree.toString(), generation, catalog.albums.size, catalog.albums.sumOf { it.pages.size }, originals, root)
             }.value
+        if (bindEditRoot) {
+            backend.requireWritableAccess()
+            backend.openRootDirectory().use { held ->
+                val root = AndroidLibraryDescriptorAncestry.observe(held)
+                verify(root).also { backend.rebindRoot(root) }
+            }.also {
+                requireOwner()
+                backend.requireWritableAccess()
+            }
+        } else {
+            backend.requireRoot()
+            verify(null).also { backend.requireRoot() }
         }
+    }
 
-    internal data class PairInput(val tree: Uri, val expected: LibraryGeneration? = null)
+    internal data class PairInput(val tree: Uri, val expected: LibraryGeneration? = null,
+        val root: AndroidLibraryDescriptorAncestry.Observation? = null)
     internal data class PairMember(val tree: Uri, val generation: LibraryGeneration, val snapshot: RoomLibrarySavedCatalog.Snapshot)
     internal data class MergePlan(val destination: PairInput, val incoming: PairInput, val candidate: LibraryCatalogMerge.Candidate)
 
@@ -93,7 +164,8 @@ class AndroidLibraryTreeRead(context: Context, private val scratchDirectory: Fil
         val candidate = LibraryCatalogMerge.plan(operationId, left.snapshot, right.snapshot, originals.checkpoint)
         LibraryBackupRead.admitOriginals(candidate.catalog.originals.map { ObjectId(it.byteSha256, it.byteCount) },
             MAX_TREE_ORIGINAL_BYTES, originals.checkpoint)
-        MergePlan(PairInput(left.tree, left.generation), PairInput(right.tree, right.generation), candidate)
+        MergePlan(PairInput(left.tree, left.generation, originals.destinationIdentity),
+            PairInput(right.tree, right.generation, originals.incomingIdentity), candidate)
     }
 
     /** Compare both current inventories and measure capacity on the held destination. This neither reserves space nor grants a write. */
@@ -120,11 +192,490 @@ class AndroidLibraryTreeRead(context: Context, private val scratchDirectory: Fil
         project: (PairMember, PairMember) -> T,
     ): T = withVerifiedPairOriginals(left, right, requireAuthority) { a, b, _ -> project(a, b) }
 
-    /** Runs the commit under the same held roots, grants and provider owner used for admission. The ordinary reader stays immutable. */
+    internal data class SelectedAppend(val generation: LibraryGeneration, val completion: LocalLibraryMergeJournal.SelectedCompletion)
+
+    internal sealed interface SelectedRecipeEdit {
+        data class Refused(val result: SaveRecipeResult) : SelectedRecipeEdit
+        /** The detached successor is verified. There is no active-pointer change or user-visible save receipt. */
+        data class Published(val generation: LibraryGeneration) : SelectedRecipeEdit
+        /** Private proof and projection only. Do not deliver the ordinary Room save before activation. */
+        class Completed(
+            val receipt: LocalLibraryRecipeEditJournal.Receipt, val projection: SaveRecipeResult.Saved,
+            private val issuer: SelectedLibraryWriteLease,
+        ) : SelectedRecipeEdit {
+            fun requireIssuingLease(lease: SelectedLibraryWriteLease, files: Path) {
+                if (lease !== issuer) throw IOException("The live edit receipt belongs to a different writer")
+                issuer.requireCurrent(files)
+            }
+        }
+    }
+
+    private data class PendingRecipeCompletion(
+        val journal: LocalLibraryRecipeEditJournal, val intent: LocalLibraryRecipeEditJournal.Intent,
+        val live: LocalLibraryRecipeEditJournal.LiveCompletion, val projection: SaveRecipeResult.Saved,
+    )
+
+    private class HeldRevisionRoot(
+        val read: LibraryBackupRead,
+        val requireCurrent: () -> Unit,
+        val checkpoint: () -> Unit,
+        val writable: AndroidLibraryWritableFolder.WritableTree,
+    )
+
+    /** Prepare and publish a detached catalog edit under one exact Files grant. Never transfer an original or set the active selection. */
+    internal suspend fun appendSelectedRecipeEdit(
+        verified: Verified, operation: String, document: DocumentId, page: PageId, expectedRevision: Long,
+        admission: RecipeAdmission, requireAuthority: () -> Unit, edit: (Recipe) -> Recipe,
+    ): SelectedRecipeEdit = withContext(Dispatchers.IO) {
+        val files = app.filesDir.toPath().toRealPath()
+        val checkpoint = { coroutineContext.ensureActive() }
+        withSelectedLibraryWriteLane(files) { lease ->
+            appendRecipeUnderLease(files, lease, verified, operation, document, page, expectedRevision, admission,
+                requireAuthority, checkpoint, null, edit = edit)
+        }
+    }
+
+    internal suspend fun <T : Any> appendBoundRecipeEdit(
+        binding: LocalSelectedLibraryAuthority.Selected.Folder, authority: LocalSelectedLibraryAuthority,
+        operation: String, document: DocumentId, page: PageId,
+        expectedRevision: Long, admission: RecipeAdmission, requireAuthority: () -> Unit, edit: (Recipe) -> Recipe,
+        onPublicationStarted: (LibraryGeneration) -> Unit,
+        consume: suspend (SelectedRecipeEdit, SelectedLibraryWriteLease) -> T,
+    ): T = withContext(Dispatchers.IO) {
+        requireOpaqueId(operation)
+        requireAuthority()
+        val files = app.filesDir.toPath().toRealPath()
+        val checkpoint = { coroutineContext.ensureActive() }
+        withSelectedLibraryWriteLane(files) { lease ->
+            fun requireSelection() {
+                lease.requireCurrent(files)
+                requireAuthority()
+                checkpoint()
+            }
+            requireSelection()
+            val verified = confirmRecipeBeforePublication(files, binding, authority, checkpoint, ::requireSelection, operation)
+                ?: verifyRecipeEditTarget(Uri.parse(binding.grant.exactUri), binding.expectedGeneration, ::requireSelection)
+            val result = appendRecipeUnderLease(files, lease, verified, operation, document, page, expectedRevision, admission,
+                ::requireSelection, checkpoint, binding, onPublicationStarted, edit)
+            consume(result, lease)
+        }
+    }
+
+    /** An active Import holds the same lane as the recipe writer. It must not advance past unresolved recipe cleanup. */
+    internal suspend fun requireCurrentRecipeSettlement(
+        binding: LocalSelectedLibraryAuthority.Selected.Folder, authority: LocalSelectedLibraryAuthority,
+        lease: SelectedLibraryWriteLease, requireActive: () -> Unit,
+    ) {
+        val context = currentCoroutineContext()
+        val files = app.filesDir.toPath().toRealPath()
+        confirmRecipeBeforePublication(files, binding, authority, context::ensureActive, requireSelection = {
+            context.ensureActive()
+            lease.requireCurrent(files)
+            requireActive()
+        })
+    }
+
+    private suspend fun confirmRecipeBeforePublication(
+        files: Path, binding: LocalSelectedLibraryAuthority.Selected.Folder, authority: LocalSelectedLibraryAuthority,
+        checkpoint: () -> Unit, requireSelection: () -> Unit, recipeOperation: String? = null,
+    ): Verified? {
+        val attempts = androidRecipeAttempts(files, checkpoint)
+        val readPredecessor = { authority.readVerifiedRecipePredecessor(binding) }
+        val verifySpend: (LocalLibraryRecipeEditJournal.Intent) -> Unit = { intent ->
+            LocalLibraryDirectory(files.toFile()).requireAndroidRevisionSpend(
+                intent.binding.expectedGeneration, intent.successor, requireSelection, checkpoint)
+        }
+        var verifiedChild: Verified? = null
+        val verifyChild: suspend (LocalLibraryRecipeEditJournal.Intent) -> Unit = { intent ->
+            val verified = requireVerifiedTree(
+                verifyRecipeEditTarget(Uri.parse(binding.grant.exactUri), binding.expectedGeneration, requireSelection))
+            val root = verified.editRoot ?: throw UnsettledSelectedRecipeEdit()
+            if (recipeRootKey(verified.tree, root) != intent.rootSha256) throw UnsettledSelectedRecipeEdit()
+            verifiedChild = verified
+        }
+        if (recipeOperation == null) {
+            attempts.settleCurrentForPublication(binding, readPredecessor, verifySpend, authority::read, verifyChild,
+                authority::readArchivedRecipePredecessor, requireSelection)
+        } else {
+            attempts.prepareFollowingEdit(binding, recipeOperation, readPredecessor, verifySpend, authority::read, verifyChild,
+                authority::readArchivedRecipePredecessor, requireSelection)
+        }
+        return verifiedChild
+    }
+
+    /** Scope a cold read to the exact selected folder and one completed direct successor. */
+    internal suspend fun observeInterruptedRecipeSuccessor(issuedAt: LibraryActivation): LibraryGeneration? =
+        reconcileInterruptedRecipe(issuedAt, advancePointer = false)?.generation
+
+    /** Recover only the private pointer under the current Files grant. Never reissue the write or deliver an editor Save result. */
+    internal suspend fun recoverInterruptedRecipeSuccessor(
+        issuedAt: LibraryActivation, expectedBinding: LocalSelectedLibraryAuthority.Selected.Folder? = null,
+        beforePointerReplace: () -> Unit = {},
+    ): LibraryActivation? = reconcileInterruptedRecipe(issuedAt, advancePointer = true, expectedBinding, beforePointerReplace)?.activation
+
+    private data class RecipeReconciliation(
+        val generation: LibraryGeneration, val activation: LibraryActivation?, val intent: LocalLibraryRecipeEditJournal.Intent,
+    )
+
+    private suspend fun reconcileInterruptedRecipe(
+        issuedAt: LibraryActivation, advancePointer: Boolean,
+        expectedBinding: LocalSelectedLibraryAuthority.Selected.Folder? = null, beforePointerReplace: () -> Unit = {},
+    ): RecipeReconciliation? = withContext(Dispatchers.IO) {
+        val files = app.filesDir.toPath().toRealPath()
+        withSelectedLibraryWriteLane(files) { lane ->
+            val authority = LocalLibrarySettingsBootstrap(files.toFile()).openExisting() ?: throw UnsettledSelectedRecipeEdit()
+            val binding = authority.read() as? LocalSelectedLibraryAuthority.Selected.Folder ?: throw UnsettledSelectedRecipeEdit()
+            val issuing = binding.selection.identity
+            if (LibraryActivation(issuing.libraryId, issuing.activation) != issuedAt || binding.grant.returnedModes != 3 ||
+                (expectedBinding != null && binding != expectedBinding)
+            ) {
+                throw UnsettledSelectedRecipeEdit()
+            }
+            var expected = binding
+            val tree = Uri.parse(binding.grant.exactUri)
+            val predecessor = binding.expectedGeneration
+            fun requireSelection() {
+                coroutineContext.ensureActive()
+                lane.requireCurrent(files)
+                if (authority.read() != expected) throw UnsettledSelectedRecipeEdit()
+            }
+            val reconciliation = withReadBackend(tree, scratchDirectory, ::requireSelection, bindAcrossChecks = true) { backend, read, checkpoint ->
+                backend.requireWritableAccess()
+                backend.openRootDirectory().use { held ->
+                    val root = AndroidLibraryDescriptorAncestry.observe(held)
+                    fun requireRoot() {
+                        requireSelection()
+                        backend.requireWritableAccess()
+                        backend.rebindRoot(root)
+                        // Rebinding uses read access and can outlast loss of the write mode. Recheck both modes after it.
+                        backend.requireWritableAccess()
+                    }
+                    val observed = read.observeTip(predecessor)
+                    if (observed == predecessor) {
+                        read.requireCurrent(predecessor)
+                        requireRoot()
+                        return@use null
+                    }
+                    if (observed.libraryId != predecessor.libraryId || observed.predecessorId != predecessor.id ||
+                        observed.catalogSchema != predecessor.catalogSchema
+                    ) throw UnsettledSelectedRecipeEdit()
+                    val attempt = files.resolve("catalog-recipe-attempts-v1").resolve(observed.id)
+                    val private = LocalLibraryDirectory(files.toFile())
+                    fun requireRecordedEdit(): LocalLibraryRecipeEditJournal.Intent {
+                        requireRoot()
+                        try {
+                            val ownedAttempt = canonicalLibraryDirectory(attempt.toFile(), files)
+                            val proof = androidRecipeEditJournal(ownedAttempt.toFile(), checkpoint).observeForRecovery(binding)
+                            if (proof.phase != LocalLibraryRecipeEditJournal.Phase.COMPLETED || proof.intent.successor != observed ||
+                                proof.intent.rootSha256 != recipeRootKey(tree.toString(), root)
+                            ) throw IOException("The interrupted edit has no exact private completion")
+                            private.requireAndroidRevisionSpend(predecessor, observed, ::requireSelection, checkpoint)
+                            return proof.intent
+                        } catch (failure: IOException) { throw UnsettledSelectedRecipeEdit(failure) }
+                    }
+                    val intent = requireRecordedEdit()
+                    readCatalog(read, observed, checkpoint) { _, _ -> Unit }
+                    fun requireDestination(checkRetainedCatalog: Boolean) {
+                        requireRecordedEdit()
+                        read.requireCurrent(observed, predecessor, verifyRetainedCatalog = checkRetainedCatalog)
+                        requireRoot()
+                    }
+                    requireDestination(checkRetainedCatalog = true)
+                    val activation = if (!advancePointer) null else {
+                        expected = authority.advanceOrReadVerifiedFolderGeneration(binding, observed, beforePointerReplace) {
+                            // Do not carry a detached observation across the pointer swap. Rebind the current grant, tip and private evidence.
+                            requireDestination(checkRetainedCatalog = true)
+                        }
+                        requireDestination(checkRetainedCatalog = false)
+                        expected.selection.identity.let { LibraryActivation(it.libraryId, it.activation) }
+                    }
+                    RecipeReconciliation(observed, activation, intent)
+                }.also {
+                    requireSelection()
+                    backend.requireWritableAccess()
+                }
+            }
+            if (expectedBinding != null && reconciliation?.activation != null) {
+                // Real Reconnect consumes only the child this attempt already adopted and closed. Debug pointer-only witnesses remain unchanged.
+                val checkpoint = { coroutineContext.ensureActive() }
+                androidRecipeAttempts(files, checkpoint).settleRecordedAdoption(reconciliation.intent, expected, authority::read) {
+                    checkpoint()
+                    lane.requireCurrent(files)
+                }
+            }
+            reconciliation
+        }
+    }
+
+    /** Only the still-owned writer may offer its live receipt. Reopen the full successor, then keep the exact grant, stage and tip checked at the private pointer swap. */
+    internal suspend fun <T : Any> withBoundRecipeAdoption(
+        edit: SelectedRecipeEdit.Completed, lease: SelectedLibraryWriteLease, requirePredecessor: () -> Unit,
+        advance: (() -> Unit) -> T, requireAdvanced: (T) -> Unit,
+    ): T = withContext(Dispatchers.IO) {
+        val files = app.filesDir.toPath().toRealPath()
+        val receipt = edit.receipt
+        val intent = receipt.intent
+        val tree = Uri.parse(intent.binding.grant.exactUri)
+        fun requireWriter() {
+            coroutineContext.ensureActive()
+            edit.requireIssuingLease(lease, files)
+            requirePredecessor()
+        }
+        requireWriter()
+        receipt.requireCurrent()
+        withReadBackend(tree, scratchDirectory, ::requireWriter) { backend, read, checkpoint ->
+            backend.requireWritableAccess()
+            val activated = backend.openRootDirectory().use { held ->
+                val root = AndroidLibraryDescriptorAncestry.observe(held)
+                if (recipeRootKey(tree.toString(), root) != intent.rootSha256) {
+                    throw LibraryTreeUnavailable("The edited folder no longer matches the live receipt")
+                }
+                readCatalog(read, intent.successor, checkpoint) { _, _ -> Unit }
+                fun requireDestination() {
+                    checkpoint()
+                    edit.requireIssuingLease(lease, files)
+                    receipt.requireCurrent()
+                    backend.requireWritableAccess()
+                    backend.rebindRoot(root)
+                    read.requireCurrent(intent.successor, intent.binding.expectedGeneration)
+                    backend.rebindRoot(root)
+                    backend.requireWritableAccess()
+                    checkpoint()
+                }
+                fun beforeAdvance() {
+                    requireWriter()
+                    requireDestination()
+                }
+                beforeAdvance()
+                val result = advance(::beforeAdvance)
+                // The predecessor is no longer active. Never rerun the provider write to confirm delivery.
+                requireAdvanced(result)
+                requireDestination()
+                result
+            }
+            backend.requireWritableAccess()
+            checkpoint()
+            activated
+        }
+    }
+
+    internal suspend fun settleLiveRecipeAdoption(
+        edit: SelectedRecipeEdit.Completed, lease: SelectedLibraryWriteLease,
+        adopted: LocalSelectedLibraryAuthority.Selected.Folder, authority: LocalSelectedLibraryAuthority,
+    ): Boolean = withContext(Dispatchers.IO) {
+        val files = app.filesDir.toPath().toRealPath()
+        val checkpoint = { coroutineContext.ensureActive() }
+        androidRecipeAttempts(files, checkpoint).settleRecordedAdoption(edit.receipt.intent, adopted, authority::read) {
+            checkpoint()
+            edit.requireIssuingLease(lease, files)
+        }
+    }
+
+    private fun recipeRootKey(tree: String, root: AndroidLibraryDescriptorAncestry.Observation) =
+        backupSha256("pristinepage-selected-root-v1\n$tree\n$root".toByteArray(Charsets.UTF_8))
+
+    private suspend fun appendRecipeUnderLease(
+        files: Path, lease: SelectedLibraryWriteLease, verified: Verified, operation: String, document: DocumentId,
+        page: PageId, expectedRevision: Long, admission: RecipeAdmission, requireAuthority: () -> Unit,
+        checkpoint: () -> Unit, binding: LocalSelectedLibraryAuthority.Selected.Folder?,
+        onPublicationStarted: (LibraryGeneration) -> Unit = {}, edit: (Recipe) -> Recipe,
+    ): SelectedRecipeEdit {
+        requireOpaqueId(operation)
+        val selection = requireVerifiedTree(verified)
+        val identity = selection.editRoot ?: throw IOException("The selected catalog edit requires the confirmed physical root")
+        if (binding != null) {
+            binding.requireExact(selection.tree, selection.generation)
+            if (binding.grant.returnedModes != 3) throw IOException("The active library binding is read-only")
+        }
+        val privateOwner = localLibraryRootKey(files)
+        val journal = LocalLibraryDirectory(files.toFile())
+        fun requirePrivateOwner() {
+            checkpoint()
+            lease.requireCurrent(files)
+            requireAuthority()
+            if (localLibraryRootKey(files) != privateOwner) {
+                throw IOException("The selected catalog edit lost its private owner")
+            }
+            checkpoint()
+        }
+        requirePrivateOwner()
+        val attempts = androidRecipeAttempts(files, checkpoint)
+        val attempt = attempts.requireNew(operation)
+        val namespace = checkNotNull(attempt.parent)
+        var pending: PendingRecipeCompletion? = null
+        val published = LibraryProviderAttempt.runOwned { owner ->
+            val providerCheckpoint = owner::requireCurrent
+            val result = withRevisionAnchor(selection, files, providerCheckpoint, ::requirePrivateOwner) { anchor ->
+                if (AndroidLibraryDescriptorAncestry.observe(anchor) != identity) {
+                    throw LibraryTreeUnavailable("The selected edit folder no longer matches its confirmed physical root")
+                }
+                if (files.toFile().usableSpace < 3 * MAX_PORTABLE_BYTES) throw IOException("Not enough private space for the selected page edit")
+                createRevisionAttempt(files, namespace, attempt, ::requirePrivateOwner)
+                val attemptOwner = localLibraryRootKey(attempt)
+                fun requireAttempt() {
+                    requirePrivateOwner()
+                    if (localLibraryRootKey(attempt) != attemptOwner) throw IOException("The private recipe edit stage changed")
+                }
+                val baseline = withRevisionIo(selection, attempt, anchor, providerCheckpoint, ::requireAttempt) { root ->
+                    readCatalog(root.read, selection.generation, root.checkpoint) { _, snapshot -> snapshot }.value
+                }
+                val savedPage = baseline.albums.singleOrNull { it.row.documentId == document.value }
+                    ?.pages?.singleOrNull { it.row.pageId == page.value && it.row.state == "ACTIVE" }
+                    ?: throw IOException("The selected page does not belong to the requested album")
+                if (savedPage.row.currentRecipeRevision != expectedRevision) {
+                    return@withRevisionAnchor SelectedRecipeEdit.Refused(SaveRecipeResult.Conflict(savedPage.row.currentRecipeRevision))
+                }
+                val recipe = edit(RecipeCodec.decode(savedPage.revisions.single { it.recipeRevision == expectedRevision }.canonicalRecipe))
+                val file = attempt.resolve("catalog.sqlite")
+                val candidate = when (val prepared = RoomLibraryCatalogStage(app).stageRecipeEdit(baseline, file.toFile(),
+                    document, page, expectedRevision, recipe, admission)) {
+                    is RoomLibraryCatalogStage.RecipeEdit.Ready -> prepared
+                    is RoomLibraryCatalogStage.RecipeEdit.Refused -> return@withRevisionAnchor SelectedRecipeEdit.Refused(prepared.result)
+                }
+                requireAttempt()
+                val successor = LibraryGeneration(selection.generation.libraryId, operation, selection.generation.id, candidate.schema, candidate.catalog)
+                if (binding != null) {
+                    val rootKey = recipeRootKey(selection.tree, identity)
+                    val intent = LocalLibraryRecipeEditJournal.Intent(binding, rootKey, successor)
+                    val receiptJournal = androidRecipeEditJournal(attempt.toFile(), checkpoint)
+                    val live = receiptJournal.start(intent) {
+                        requireAttempt()
+                        // A persisted-grant inspection borrows no provider descriptor or provider lane after closure.
+                        revisionWriter(selection, CancellationSignal(), checkpoint).requireExactAccess()
+                    }
+                    pending = PendingRecipeCompletion(receiptJournal, intent, live, candidate.saved)
+                }
+                SelectedRecipeEdit.Published(publishSelectedRecipeCandidate(selection, identity, anchor, attempt,
+                    file, successor, baseline, candidate, lease, journal, providerCheckpoint, ::requireAttempt, onPublicationStarted))
+            }
+            requirePrivateOwner()
+            // Check write access again after the last descriptor closes; a completed detached marker is not grant renewal.
+            withLibraryProviderSignal { signal -> revisionWriter(selection, signal, providerCheckpoint).requireExactAccess() }
+            requirePrivateOwner()
+            result
+        }
+        val completion = pending
+        return if (completion == null) published else {
+            val detached = published as? SelectedRecipeEdit.Published ?: throw IOException("The recipe edit did not publish its exact successor")
+            val receipt = completion.live.recordAfterProviderClosure(detached.generation)
+            if (completion.journal.inspect(completion.intent) != LocalLibraryRecipeEditJournal.Phase.COMPLETED) {
+                throw IOException("The private recipe edit receipt could not be reopened")
+            }
+            requirePrivateOwner()
+            revisionWriter(selection, CancellationSignal(), checkpoint).requireExactAccess()
+            SelectedRecipeEdit.Completed(receipt, completion.projection, lease)
+        }
+    }
+
+    private fun createRevisionAttempt(files: Path, namespace: Path, attempt: Path, requireAuthority: () -> Unit) {
+        requireAuthority()
+        if (Files.notExists(namespace, NOFOLLOW_LINKS)) {
+            Files.createDirectory(namespace)
+            if (!PlatformDirectorySync.sync(files.toFile())) throw IOException("The catalog edit namespace is not durable")
+        }
+        if (canonicalLibraryDirectory(namespace.toFile(), files) != namespace) throw IOException("Invalid catalog edit namespace")
+        Files.newDirectoryStream(namespace).use { entries ->
+            var retained = 0
+            for (entry in entries) {
+                requireAuthority()
+                if (++retained >= 4 || !Files.isDirectory(entry, NOFOLLOW_LINKS)) throw IOException("Retained catalog edit attempts need attention")
+                try { requireOpaqueId(entry.fileName.toString()) } catch (_: IllegalArgumentException) {
+                    throw IOException("Unrecognized private catalog edit evidence")
+                }
+            }
+        }
+        requireAuthority()
+        Files.createDirectory(attempt)
+        if (!PlatformDirectorySync.sync(namespace.toFile())) throw IOException("The private recipe edit attempt is not durable")
+    }
+
+    private suspend fun publishSelectedRecipeCandidate(
+        selection: VerifiedTree, identity: AndroidLibraryDescriptorAncestry.Observation, anchor: ParcelFileDescriptor,
+        attempt: Path, file: Path, successor: LibraryGeneration, baseline: RoomLibrarySavedCatalog.Snapshot,
+        candidate: RoomLibraryCatalogStage.RecipeEdit.Ready, lease: SelectedLibraryWriteLease, journal: LocalLibraryDirectory,
+        checkpoint: () -> Unit, requireAuthority: () -> Unit, onPublicationStarted: (LibraryGeneration) -> Unit,
+    ): LibraryGeneration = withRevisionIo(selection, attempt, anchor, checkpoint, requireAuthority) { root ->
+        val predecessor = selection.generation
+        root.read.requireCurrent(predecessor)
+        val objects = baseline.originals.map { ObjectId(it.byteSha256, it.byteCount) }
+        val editedObjects = candidate.snapshot.originals.map { ObjectId(it.byteSha256, it.byteCount) }
+        val published = root.writable.guarded {
+            AndroidSelectedLibraryDestination.use(root.writable, identity, attempt, LocalLibraryMoveAuthorization(attempt.toFile()),
+                successor, root.requireCurrent) { target ->
+                target.requireReady(objects.mapTo(HashSet(), ObjectId::sha256))
+                val catalogBudget = candidate.catalog.byteCount + 128L * 1024
+                LibraryCatalogRevisionPublication(target, attempt, journal, root.requireCurrent, root.checkpoint, onPublicationStarted)
+                    .publishUnderLease(lease, predecessor, successor, objects, editedObjects,
+                        root.writable.capacity(root.writable.root, anchor), catalogBudget, { Files.newInputStream(file, READ, NOFOLLOW_LINKS) }) { reopened ->
+                        reader.verifyStagedProjection(reopened, candidate.snapshot, root.checkpoint)
+                    }
+            }
+        }
+        // Independently reopen using the anchored read adapter after closing every destination writer descriptor.
+        root.read.read(candidate.schema, published, published, MAX_TREE_ORIGINAL_BYTES) { _, reopened ->
+            reader.verifyStagedProjection(reopened, candidate.snapshot, root.checkpoint)
+            LibraryBackupRead.Projection(Unit, editedObjects)
+        }
+        root.requireCurrent()
+        published
+    }
+
+    private fun revisionWriter(selection: VerifiedTree, signal: CancellationSignal, checkpoint: () -> Unit): AndroidLibraryWritableFolder.WritableTree {
+        val tree = Uri.parse(selection.tree)
+        val root = localTreeDocumentId(tree) ?: throw LibraryTreeUnavailable("This folder provider is not supported")
+        return AndroidLibraryWritableFolder.WritableTree(app, tree, root, signal, checkpoint, AndroidLibraryWritableFolder.Access.PERSISTED)
+    }
+
+    private suspend fun <T> withRevisionAnchor(selection: VerifiedTree, scratch: Path, checkpoint: () -> Unit,
+        requireAuthority: () -> Unit, use: suspend (ParcelFileDescriptor) -> T,
+    ): T {
+        var owned: ParcelFileDescriptor? = null
+        var primary: Throwable? = null
+        try {
+            withLibraryProviderSignal { signal ->
+                requireAuthority()
+                val writable = revisionWriter(selection, signal, checkpoint)
+                writable.requireExactAccess()
+                owned = Backend(app, writable.tree, writable.root, scratch, signal, checkpoint).openRootDirectory()
+                writable.requireExactAccess()
+            }
+            return use(checkNotNull(owned))
+        } catch (failure: Throwable) {
+            primary = failure
+            throw failure
+        } finally {
+            try { owned?.close() } catch (failure: Exception) {
+                if (primary == null) throw failure
+                if (primary !== failure) primary.addSuppressed(failure)
+            }
+        }
+    }
+
+    private suspend fun <T> withRevisionIo(selection: VerifiedTree, scratch: Path, anchor: ParcelFileDescriptor,
+        checkpoint: () -> Unit, requireAuthority: () -> Unit, use: (HeldRevisionRoot) -> T,
+    ): T = withLibraryProviderSignal { signal ->
+        val writable = revisionWriter(selection, signal, checkpoint)
+        val backend = Backend(app, writable.tree, writable.root, scratch, signal, checkpoint)
+        val identity = AndroidLibraryDescriptorAncestry.observe(anchor)
+        fun requireCurrent() {
+            checkpoint()
+            requireAuthority()
+            writable.requireExactAccess()
+            backend.rebindRoot(identity)
+            checkpoint()
+        }
+        requireCurrent()
+        val result = use(HeldRevisionRoot(backupRead(LibraryTreeReadSource(writable.root, backend), scratch, checkpoint),
+            ::requireCurrent, checkpoint, writable))
+        requireCurrent()
+        result
+    }
+
+    /** Runs the commit under the admitted roots and provider owner. The private completion token stays provisional until all provider scopes close. */
     internal suspend fun appendMerge(plan: MergePlan, generation: LibraryGeneration, scratch: Path,
         journal: LocalLibraryMergeJournal, spend: LocalLibraryMoveAuthorization, requireAuthority: () -> Unit,
         verifyReopened: (File) -> Unit,
-    ): LibraryGeneration = withVerifiedPairOriginals(plan.destination, plan.incoming, requireAuthority, appended = generation) { left, right, pair ->
+    ): SelectedAppend = withVerifiedPairOriginals(plan.destination, plan.incoming, requireAuthority, appended = generation) { left, right, pair ->
         val writable = pair.writableDestination()
         fun requireRoots() {
             pair.requireCurrent()
@@ -148,12 +699,12 @@ class AndroidLibraryTreeRead(context: Context, private val scratchDirectory: Fil
                 requireRoots()
                 if (target.generationInventory(pair.checkpoint).tip != intent.destination) throw IOException("The destination generation changed")
                 if (pair.incoming.generationInventory(pair.checkpoint).tip != intent.incoming) throw IOException("The incoming generation changed")
-                if (journal.reopen(generation.id, pair.checkpoint) != null) throw IOException("The selected library append was already attempted")
-                journal.publish(intent, pair.checkpoint)
+                val completion = journal.startSelected(intent, pair.checkpoint, ::requireRoots)
                 target.requireReady(originalNames)
-                LibraryMergePublication(target, pair.incoming, scratch, ::requireRoots, pair.checkpoint)
+                val published = LibraryMergePublication(target, pair.incoming, scratch, ::requireRoots, pair.checkpoint)
                     .publish(intent, LibraryMergeIntent.Resume.WRITE_MISSING, plan.candidate, left.snapshot.originals, right.snapshot.originals,
                         pair.availableDestinationBytes(), metadata, { journal.openStage(generation.id) }, verifyReopened)
+                SelectedAppend(published, completion)
             }
         }
     }
@@ -182,6 +733,9 @@ class AndroidLibraryTreeRead(context: Context, private val scratchDirectory: Fil
                         second.openRootDirectory().use { heldRight ->
                             val leftIdentity = AndroidLibraryDescriptorAncestry.observe(heldLeft)
                             val rightIdentity = AndroidLibraryDescriptorAncestry.observe(heldRight)
+                            if (left.root?.let { it != leftIdentity } == true || right.root?.let { it != rightIdentity } == true) {
+                                throw LibraryTreeUnavailable("A confirmed library folder changed")
+                            }
                             AndroidLibraryDescriptorAncestry.withDerivedAnchor(heldLeft, heldRight, hints, checkpoint) { requireAncestry ->
                                 fun requireCurrent() {
                                     requireIssuingAuthority()
@@ -252,7 +806,7 @@ class AndroidLibraryTreeRead(context: Context, private val scratchDirectory: Fil
                 LibraryBackupRead.Projection(project(generation, catalog), catalog.originals.map { ObjectId(it.byteSha256, it.byteCount) })
             }
         } } catch (_: UnexpectedLibraryTip) {
-            throw LibraryTreeUnavailable("Unexpected library tip during catalog admission")
+            throw SelectedLibraryTipChanged()
         }
 
     /** Stream one original into caller-owned disposable output. The caller must discard that output on any failure and verify closure before using it. */
@@ -293,21 +847,21 @@ class AndroidLibraryTreeRead(context: Context, private val scratchDirectory: Fil
     /** Rebuild a private Room catalog without importing original bytes. This detached read cannot activate a library or commit an edit. */
     suspend fun <T : Any> openWorkingCatalog(
         verified: Verified, block: suspend CoroutineScope.(DocumentCatalog) -> T,
-    ): T = useWorkingCatalog({ verified }, {}) { catalog, _ -> block(catalog) }
+    ): T = useWorkingCatalog({ verified }, {}) { catalog, _, _ -> block(catalog) }
 
     /** A detached read-only original port under the same verified catalog lifetime; it cannot change the selected library. */
     suspend fun openWorkingOriginals(
         verified: Verified, block: suspend CoroutineScope.(ScopedCommittedOriginals) -> Unit,
-    ) = useWorkingCatalog({ verified }, {}) { _, originals -> block(originals) }
+    ) = useWorkingCatalog({ verified }, {}) { _, originals, _ -> block(originals) }
 
     internal suspend fun <T : Any> useSelectedWorkingLibrary(
         tree: Uri, generation: LibraryGeneration, confirmSelection: suspend () -> Unit,
-        block: suspend CoroutineScope.(DocumentCatalog, ScopedCommittedOriginals) -> T,
+        block: suspend CoroutineScope.(DocumentCatalog, ScopedCommittedOriginals, EditablePages) -> T,
     ): T = useWorkingCatalog({ attempt -> verifyExact(tree, generation, attempt) }, confirmSelection, block)
 
     private suspend fun <T : Any> useWorkingCatalog(
         verify: suspend (File) -> Verified, confirmSelection: suspend () -> Unit,
-        block: suspend CoroutineScope.(DocumentCatalog, ScopedCommittedOriginals) -> T,
+        block: suspend CoroutineScope.(DocumentCatalog, ScopedCommittedOriginals, EditablePages) -> T,
     ): T = withContext(Dispatchers.IO) {
         if (!WORKING.tryLock()) throw IOException("A library working catalog is already open")
         try {
@@ -348,8 +902,8 @@ class AndroidLibraryTreeRead(context: Context, private val scratchDirectory: Fil
                 }
                 val originals = workingOriginals(selected, snapshot, access, checkpoint)
                 mayRetire = false
-                val result = stage.useCatalog(file, access, acknowledgeClose = { mayRetire = true }) { catalog ->
-                    block(catalog, originals)
+                val result = stage.useCatalog(file, access, acknowledgeClose = { mayRetire = true }) { catalog, editable ->
+                    block(catalog, originals, editable)
                 }
                 access.requireCurrent()
                 result
@@ -400,17 +954,25 @@ class AndroidLibraryTreeRead(context: Context, private val scratchDirectory: Fil
 
     private suspend fun <T> readTree(
         tree: Uri, scratchLocation: File = scratchDirectory, block: (LibraryBackupRead, () -> Unit) -> T,
+    ): T = withReadBackend(tree, scratchLocation) { backend, read, checkpoint ->
+        backend.requireRoot()
+        val result = block(read, checkpoint)
+        backend.requireRoot()
+        result
+    }
+
+    private suspend fun <T> withReadBackend(
+        tree: Uri, scratchLocation: File, requireOwner: () -> Unit = {}, bindAcrossChecks: Boolean = false,
+        block: (Backend, LibraryBackupRead, () -> Unit) -> T,
     ): T = withContext(Dispatchers.IO) {
         val checkpoint = { coroutineContext.ensureActive() }
         LibraryProviderAttempt.run {
             withLibraryProviderSignal { signal ->
                 val root = localTreeDocumentId(tree) ?: throw LibraryTreeUnavailable("This folder provider is not supported")
+                requireOwner()
                 val scratch = canonicalLibraryDirectory(scratchLocation, app.filesDir.toPath().toRealPath())
                 val backend = Backend(app, tree, root, scratch, signal, checkpoint)
-                backend.requireRoot()
-                val result = block(backupRead(LibraryTreeReadSource(root, backend), scratch, checkpoint), checkpoint)
-                backend.requireRoot()
-                result
+                block(backend, backupRead(LibraryTreeReadSource(root, backend, bindAcrossChecks), scratch, checkpoint), checkpoint)
             }
         }
     }
@@ -427,6 +989,11 @@ class AndroidLibraryTreeRead(context: Context, private val scratchDirectory: Fil
         private data class Binding(val parent: String, val entry: LibraryTreeReadSource.Entry)
 
         fun member(generation: LibraryGeneration, catalog: RoomLibrarySavedCatalog.Snapshot) = PairMember(tree, generation, catalog)
+
+        fun requireWritableAccess() {
+            AndroidLibraryWritableFolder.WritableTree(app, tree, rootId, signal, checkpoint,
+                AndroidLibraryWritableFolder.Access.PERSISTED).requireExactAccess()
+        }
 
         fun requireRoot() {
             checkAccess()
@@ -563,7 +1130,20 @@ class AndroidLibraryTreeRead(context: Context, private val scratchDirectory: Fil
 }
 
 /** Known loss of provider identity or access; private scratch and callback exceptions are not this state. */
-internal class LibraryTreeUnavailable(message: String) : IOException(message)
+internal open class LibraryTreeUnavailable(message: String) : IOException(message)
+
+/** An unverified interruption is not proof of lost platform access or permission to replay. */
+internal class UnsettledSelectedRecipeEdit(cause: Throwable? = null) : IOException("The selected edit could not be settled", cause)
+
+internal fun androidRecipeEditJournal(attempt: File, checkpoint: () -> Unit = {}): LocalLibraryRecipeEditJournal =
+    LocalLibraryRecipeEditJournal(attempt, checkpoint = checkpoint, nodeIdentity = { path, _ -> androidRecipeNode(path) })
+
+private fun androidRecipeAttempts(files: Path, checkpoint: () -> Unit) =
+    LocalSelectedRecipeAttempts(files, checkpoint = checkpoint, nodeIdentity = { path, _ -> androidRecipeNode(path) })
+
+private fun androidRecipeNode(path: Path): Pair<Long, Long> =
+    try { Os.lstat(path.toString()).let { it.st_dev to it.st_ino } }
+    catch (failure: ErrnoException) { throw IOException("The private recipe edit evidence cannot be identified", failure) }
 
 /** Register before calling the synchronous resolver. The caller owns any returned descriptor while checking cancellation. */
 internal suspend fun <T> withLibraryProviderSignal(block: (CancellationSignal) -> T): T =

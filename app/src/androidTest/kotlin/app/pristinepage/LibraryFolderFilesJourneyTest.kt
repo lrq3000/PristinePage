@@ -13,16 +13,30 @@ import android.database.sqlite.SQLiteDatabase
 import android.graphics.Rect
 import android.net.Uri
 import android.os.Build
+import android.os.ParcelFileDescriptor
 import android.os.Bundle
 import android.os.Process
 import android.os.SystemClock
 import android.provider.DocumentsContract
+import android.system.Os
 import android.view.InputDevice
+import android.view.KeyEvent
 import android.view.MotionEvent
 import android.view.accessibility.AccessibilityNodeInfo
 import androidx.activity.result.ActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.activity.compose.setContent
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.runtime.getValue
+import androidx.compose.ui.test.ComposeTimeoutException
+import androidx.compose.ui.test.assertIsEnabled
+import androidx.compose.ui.test.assertIsNotEnabled
+import androidx.compose.ui.test.assertTextEquals
+import androidx.compose.ui.test.hasAnyAncestor
+import androidx.compose.ui.test.hasClickAction
+import androidx.compose.ui.test.hasContentDescription
 import androidx.compose.ui.test.hasTestTag
+import androidx.compose.ui.test.hasText
 import androidx.compose.ui.test.isEnabled
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
@@ -31,6 +45,8 @@ import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performScrollTo
 import androidx.compose.ui.test.performClick
 import androidx.lifecycle.ViewModelProvider
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import app.pristinepage.core.pipeline.OutputSpec
@@ -48,35 +64,59 @@ import app.pristinepage.data.model.DocumentId
 import app.pristinepage.data.model.IngestResult
 import app.pristinepage.data.model.OperationErrorCode
 import app.pristinepage.data.model.RepositoryFailure
+import app.pristinepage.data.repository.RecipeAdmission
 import app.pristinepage.data.model.SaveRecipeResult
 import app.pristinepage.data.model.SourceBlobId
 import app.pristinepage.data.repository.ScopedCommittedOriginals
 import app.pristinepage.data.repository.SavedOcrWork
+import app.pristinepage.editor.EditorIdentity
+import app.pristinepage.editor.EditorViewModel
+import app.pristinepage.editor.EditorView
+import app.pristinepage.editor.PageEditorScreen
+import app.pristinepage.library.LibraryStorageViewModel
+import app.pristinepage.design.AtelierPreferences
 import app.pristinepage.image.decode.AndroidSourceInspector
 import app.pristinepage.image.decode.SourceDecoder
 import app.pristinepage.library.LibraryBackupConfirmation
 import app.pristinepage.library.LibraryBackupViewModel
 import app.pristinepage.library.LibraryFolderGrantHandoff
 import app.pristinepage.library.LibraryFolderPickerContract
+import app.pristinepage.library.ApplicationLibraryActions
+import app.pristinepage.library.AtelierLibraryScreen
+import app.pristinepage.library.ImportLibrarySession
+import app.pristinepage.library.LibraryIdentity
 import app.pristinepage.testing.LibraryInterruptionPickerActivity
 import java.io.ByteArrayOutputStream
 import java.io.File
 import java.io.IOException
 import java.io.OutputStream
+import java.nio.file.Files
+import java.nio.file.StandardCopyOption.ATOMIC_MOVE
+import java.nio.file.StandardOpenOption.CREATE_NEW
 import java.security.MessageDigest
 import java.util.UUID
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicReference
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.awaitCancellation
+import kotlinx.coroutines.async
 import kotlinx.coroutines.cancelAndJoin
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeout
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -114,7 +154,14 @@ class LibraryFolderFilesJourneyTest {
     }
     private val chooseHost = TestRule { next, description ->
         val rule = if (description.methodName in setOf("endsProcessAfterPayloadBeforeTheCompletionMarker", "persistsIndependentFilesRootsAndAnchor",
-                "separatesIndependentlySelectedRootsWithoutAParentGrant", "selectedFilesMergeAppendsOnlyTheMissingOriginalAndKeepsItsPredecessor"))
+                 "separatesIndependentlySelectedRootsWithoutAParentGrant", "selectedFilesMergeAppendsOnlyTheMissingOriginalAndKeepsItsPredecessor",
+                 "selectedFilesMergeCanAppendTwiceWithoutReusingAnOlderStage", "endsProcessAfterSelectedAppendCompletionBeforeDelivery",
+                 "oneFilesSelectionPublishesOnlyAClosedEditedCatalog", "selectedRecipeReceiptBindsTheExactIssuingActivation",
+                   "selectedRecipeAdvancesOnlyTheVerifiedDirectSuccessor", "selectedRecipeSettlesTwoEditsWithoutRetainingCatalogStages",
+                   "selectedRecipeDoesNotReclaimOrWriteAgainAfterLosingWriteAuthority",
+                   "opensSelectedAlbumGridAndVerifiedOriginalWhileBrowsing",
+                 "startEmptyRefusesANestedStageOfTheCurrentFilesLibrary", "unconfirmedDefaultGraphCloseFencesBothSuccessorAndReturn",
+                 "selectedEditorDisplaysActualOriginalAndFrameWithoutWrite"))
             interruptionCompose else compose
         rule.apply(next, description)
     }
@@ -223,9 +270,426 @@ class LibraryFolderFilesJourneyTest {
         assertEquals(ocrBefore, settingsFixtureOcr(app, page.pageId.value))
     }
 
+    @Test fun mainSettingsOpensAnExistingLibraryAndReturnsToTheUnchangedDefault() = mainSettingsJourney(applyEdit = false)
+
+    @Test fun mainSettingsAppliesOneSelectedEditAndReopensTheSamePage() = mainSettingsJourney(applyEdit = true)
+
+    @Test fun mainSettingsAppliesAndSettlesASelectedEditWithoutTestEnablement() =
+        mainSettingsJourney(applyEdit = true, ordinaryApply = true)
+
+    @Test fun settingsCopiesAndMergesAReadOnlyFilesLibrary() {
+        val args = InstrumentationRegistry.getArguments()
+        val parent = settingsFixtureFolder()
+        val (target, source) = LibraryIndependentRootGrants.paths(parent)
+        val protectedFolder = checkNotNull(args.getString("librarySettingsPriorFolder"))
+        check(protectedFolder != parent && protectedFolder.matches(Regex("PristinePage-tree-[0-9a-f]{12}")))
+        val instrumentation = InstrumentationRegistry.getInstrumentation()
+        val app = instrumentation.targetContext.applicationContext as PristinePageApplication
+        val witness = LibraryIndependentRootGrants
+        val baseline = witness.inventory(app)
+        val protected = baseline.keys.map(Uri::parse).single { it in witness.spellings(protectedFolder) }
+        assertEquals(mapOf(protected.toString() to (true to true)), baseline)
+        witness.refuseEffectiveWrite(app, witness.spellings(target) + witness.spellings(source))
+        witness.refuseParentAccess(app, parent)
+        val initial = runBlocking { app.services.imports() }.activation
+        assertEquals(12L, initial.number)
+        val album = DocumentId("aaaaaaaa-aaaa-4aaa-8aaa-000000000001")
+        val owner = compose.runOnUiThread { ViewModelProvider(compose.activity)[LibraryStorageViewModel::class.java] }
+        val manifest = File(app.filesDir.canonicalFile, "library-settings/active-library")
+        fun enabled(tag: String) = compose.onAllNodes(hasTestTag(tag) and isEnabled()).fetchSemanticsNodes().size == 1
+        compose.onNodeWithTag("atelier-settings").performClick()
+        compose.onNodeWithTag("settings-open-library_storage").performClick()
+        selectHintedSettingsFiles(instrumentation, app, owner, initial, target, select = true)
+        compose.waitUntil(20_000) { owner.state.value.review != null }
+        assertEquals(initial, runBlocking { app.services.storageLocation() }.activation)
+        compose.onNodeWithTag("library-storage-open").performClick()
+        compose.waitUntil(20_000) { owner.state.value.location?.activation?.number == 13L && enabled("library-storage-import") }
+        val selected = checkNotNull(owner.state.value.location).activation
+        val targetGrant = (witness.inventory(app).keys - baseline.keys).single()
+        assertTrue(Uri.parse(targetGrant) in witness.spellings(target))
+        val withTarget = baseline + (targetGrant to (true to true))
+        assertEquals(withTarget, witness.inventory(app))
+        val beforeCopy = manifest.readBytes()
+        try {
+            selectHintedSettingsFiles(instrumentation, app, owner, selected, source, select = true, action = LibraryStorageViewModel.Action.IMPORT)
+            compose.waitUntil(30_000) { owner.state.value.review != null || owner.state.value.error }
+            val review = checkNotNull(owner.state.value.review)
+            val prepared = review.prepared as LibraryStorageViewModel.Prepared.ImportFolder
+            assertTrue(prepared.preview.hasAlbums)
+            assertEquals(selected, review.issuing)
+            assertArrayEquals(beforeCopy, manifest.readBytes())
+            val readGrant = (witness.inventory(app).keys - withTarget.keys).single()
+            assertTrue(Uri.parse(readGrant) in witness.spellings(source))
+            assertEquals(withTarget + (readGrant to (true to false)), witness.inventory(app))
+            // API 28 DocumentsUI may offer transient write even for a read-only request. Require persisted read only and independently compare every source byte.
+            compose.onNodeWithText(app.getString(R.string.library_copy_confirm, checkNotNull(review.active), review.picked)).assertIsDisplayed()
+            compose.onNodeWithTag("library-storage-open").assertTextEquals(app.getString(R.string.library_copy_and_merge)).performClick()
+            compose.waitUntil(50_000) { !owner.state.value.busy && (owner.state.value.location?.activation?.number == 14L || owner.state.value.error) }
+            assertFalse(owner.state.value.error)
+            val adopted = checkNotNull(owner.state.value.location).activation
+            assertEquals(selected.copy(number = 14), adopted)
+            assertEquals(withTarget, witness.inventory(app))
+            Files.write(File(app.filesDir.canonicalFile, "library-settings-import-pointer-$parent").toPath(), manifest.readBytes(), CREATE_NEW)
+            val pages = runBlocking { app.services.loadLibraryAlbum(adopted, album).pages }
+            assertEquals(listOf(0, 1), pages.map { it.ordinal })
+            for (page in pages) {
+                val opened = runBlocking { app.services.loadLibraryEditorPage(EditorIdentity(album, page.pageId, adopted)) }
+                assertEquals(2L, opened.recipeRevision)
+                assertEquals(1, opened.recipe.geometry.outputQuarterTurns)
+            }
+            compose.waitUntil(15_000) { enabled("library-storage-use-default") }
+            compose.onNodeWithTag("library-storage-use-default").performScrollTo().performClick()
+            compose.onNode(hasTestTag("library-storage-use-default").not() and hasText(app.getString(R.string.library_use_default)) and hasClickAction())
+                .performClick()
+            compose.waitUntil(20_000) { owner.state.value.location?.activation == initial.copy(number = 15) && !owner.state.value.busy }
+            assertTrue(runBlocking { app.services.imports().store.catalog.list(null, 2) }.isEmpty())
+        } finally {
+            app.contentResolver.releasePersistableUriPermission(Uri.parse(targetGrant),
+                Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION)
+        }
+        assertEquals(baseline, witness.inventory(app))
+        witness.refuseParentAccess(app, parent)
+    }
+
+    @Test fun mainSettingsReconnectsAnInterruptedEditWithoutRepublishingIt() =
+        mainSettingsJourney(applyEdit = false, reconnectEdit = true)
+
+    @Test fun mainSettingsCancelsTheExactHintedFilesLocationWithoutChangingTheLibrary() {
+        val instrumentation = InstrumentationRegistry.getInstrumentation()
+        val app = instrumentation.targetContext.applicationContext as PristinePageApplication
+        val folder = settingsFixtureFolder()
+        val location = runBlocking { app.services.storageLocation() }
+        check(location.folderLabel == null && !location.needsReconnect)
+        val pointer = File(app.filesDir.canonicalFile, "library-settings/active-library")
+        val before = pointer.readBytes()
+        val grants = LibraryIndependentRootGrants.inventory(app)
+        val storage = compose.runOnUiThread { ViewModelProvider(compose.activity)[LibraryStorageViewModel::class.java] }
+        compose.onNodeWithTag("atelier-settings").performClick()
+        compose.onNodeWithTag("settings-open-library_storage").performClick()
+        selectHintedSettingsFiles(instrumentation, app, storage, location.activation, folder, select = false)
+        compose.waitUntil(10_000) { storage.state.value.let { it.picker == null && !it.busy } }
+        val outcome = storage.state.value
+        assertFalse(outcome.error)
+        assertEquals(null, outcome.review)
+        assertEquals(null, outcome.change)
+        assertEquals(location.activation, runBlocking { app.services.storageLocation() }.activation)
+        assertArrayEquals(before, pointer.readBytes())
+        assertEquals(grants, LibraryIndependentRootGrants.inventory(app))
+    }
+
+    private fun selectHintedSettingsFiles(instrumentation: Instrumentation, app: Context, storage: LibraryStorageViewModel,
+        activation: LibraryActivation, folder: String, select: Boolean,
+        action: LibraryStorageViewModel.Action = LibraryStorageViewModel.Action.CHANGE,
+    ) {
+        val expected = LibraryFolderPickerContract(writable = action != LibraryStorageViewModel.Action.IMPORT).createIntent(app, Unit)
+        val component = checkNotNull(expected.component)
+        val initial = DocumentsContract.buildDocumentUri("com.android.externalstorage.documents", "primary:Documents/$folder")
+        val hinted = AtomicBoolean()
+        val unexpected = AtomicReference<String>()
+        // Only the outgoing launch is hinted. Returning null lets the real Files activity and real cancellation run normally.
+        val monitor = object : Instrumentation.ActivityMonitor() {
+            override fun onStartActivity(intent: Intent): Instrumentation.ActivityResult? {
+                if (intent.action != Intent.ACTION_OPEN_DOCUMENT_TREE) return null
+                if (intent.component != component || intent.flags != expected.flags ||
+                    !intent.getBooleanExtra(Intent.EXTRA_LOCAL_ONLY, false) || intent.data != null ||
+                    intent.hasExtra(DocumentsContract.EXTRA_INITIAL_URI)) {
+                    unexpected.compareAndSet(null, "The outgoing Settings intent did not match the app's writable Files contract")
+                } else if (!hinted.compareAndSet(false, true)) {
+                    unexpected.compareAndSet(null, "The Settings request launched Files more than once")
+                } else {
+                    intent.putExtra(DocumentsContract.EXTRA_INITIAL_URI, initial)
+                }
+                return null
+            }
+        }
+        val button = if (action == LibraryStorageViewModel.Action.IMPORT) "library-storage-import" else "library-storage-folder"
+        compose.waitUntil(10_000) { compose.onAllNodes(hasTestTag(button) and isEnabled()).fetchSemanticsNodes().size == 1 }
+        instrumentation.addMonitor(monitor)
+        try {
+            compose.onNodeWithTag(button).performScrollTo().performClick()
+            // Drive Compose recomposition through the Settings launch effect before waiting on the separate Files UI.
+            try {
+                compose.waitUntil(12_000) {
+                    unexpected.get() != null || storage.state.value.error ||
+                        instrumentation.uiAutomation.rootInActiveWindow?.packageName?.toString() == component.packageName
+                }
+            } catch (failure: ComposeTimeoutException) {
+                throw AssertionError("The Settings chooser did not foreground; hinted=${hinted.get()}, pending=${storage.state.value.picker != null}", failure)
+            }
+            check(unexpected.get() == null) { checkNotNull(unexpected.get()) }
+            assertTrue("The real Settings launch did not receive the test hint", hinted.get())
+            assertFalse("Settings rejected the chooser launch", storage.state.value.error)
+            fun requirePendingAction() {
+                val pending = checkNotNull(storage.state.value.picker) { "Settings settled before the real Files action" }
+                assertEquals(action, pending.action)
+                assertEquals(activation, pending.ticket.issuedAt)
+            }
+            if (select) requirePendingAction()
+            selectSettingsDestination(instrumentation, component.packageName, folder.substringAfterLast('/'), selectFolder = select,
+                navigateFromRoot = false, allowExactWindowTitle = true)
+            if (!select) {
+                requirePendingAction()
+                assertTrue("The Files chooser did not receive Back", cancelExactFiles(instrumentation, component.packageName, app.packageName) > 0)
+            }
+            check(unexpected.get() == null) { checkNotNull(unexpected.get()) }
+        } finally {
+            instrumentation.removeMonitor(monitor)
+        }
+    }
+
+    private fun reconnectPublication(resolver: ContentResolver, tree: Uri, operation: String): List<Triple<Long, Long, String>> {
+        val root = DocumentsContract.getTreeDocumentId(tree)
+        return listOf("generations/$operation.complete" to 256L, "catalogs/$operation.sqlite" to 2L * 1024 * 1024).map { (leaf, cap) ->
+            val uri = DocumentsContract.buildDocumentUriUsingTree(tree, "$root/$leaf")
+            android.os.ParcelFileDescriptor.AutoCloseInputStream(checkNotNull(resolver.openFileDescriptor(uri, "r"))).use { input ->
+                val node = Os.fstat(input.fd)
+                check(node.st_size in 1..cap)
+                val bytes = ByteArray(node.st_size.toInt())
+                val reader = java.io.DataInputStream(input)
+                reader.readFully(bytes)
+                check(reader.read() == -1)
+                Triple(node.st_dev, node.st_ino, sha256(bytes))
+            }
+        }
+    }
+
+    private fun mainSettingsJourney(applyEdit: Boolean, reconnectEdit: Boolean = false, ordinaryApply: Boolean = false) {
+        val args = InstrumentationRegistry.getArguments()
+        check(!(applyEdit && reconnectEdit) && (!ordinaryApply || applyEdit))
+        val mode = if (ordinaryApply) "ordinary-apply" else if (reconnectEdit) "reconnect-edit" else if (applyEdit) "apply" else "fresh"
+        check(args.getString("librarySettingsOpenFixture") == mode) {
+            "This journey requires an independently admitted synthetic app graph"
+        }
+        val instrumentation = InstrumentationRegistry.getInstrumentation()
+        val app = instrumentation.targetContext.applicationContext as PristinePageApplication
+        val folder = settingsFixtureFolder()
+        val graph = runBlocking { app.services.imports() }
+        val initial = graph.activation
+        assertEquals(if (ordinaryApply) 9L else if (reconnectEdit) 6L else if (applyEdit) 3L else 1L, initial.number)
+        assertTrue(runBlocking { graph.store.catalog.list(null, 2) }.isEmpty())
+        val witness = LibraryIndependentRootGrants
+        val before = witness.inventory(app)
+        if (applyEdit || reconnectEdit) {
+            val priorFolder = args.getString("librarySettingsPriorFolder")
+                ?.takeIf { it != folder && it.matches(Regex("PristinePage-tree-[0-9a-f]{12}")) }
+                ?: error("No distinct retained Files grant baseline")
+            val retainedFolders = setOf(priorFolder) + args.getString("librarySettingsSecondPriorFolder").let {
+                if (it == null) emptySet() else {
+                    check(reconnectEdit && it != folder && it != priorFolder && it.matches(Regex("PristinePage-tree-[0-9a-f]{12}")))
+                    setOf(it)
+                }
+            }
+            assertEquals(retainedFolders.size, before.size)
+            for (retainedFolder in retainedFolders) {
+                val previous = before.keys.map(Uri::parse).single { it in witness.spellings(retainedFolder) }
+                assertEquals(true to true, before.getValue(previous.toString()))
+            }
+        } else assertTrue(before.isEmpty())
+        val album = DocumentId("aaaaaaaa-aaaa-4aaa-8aaa-000000000001")
+        val editor = compose.runOnUiThread { ViewModelProvider(compose.activity)[EditorViewModel::class.java] }
+        val picker = checkNotNull(LibraryFolderPickerContract(writable = true).createIntent(app, Unit).component).packageName
+        val folderButton = "library-storage-folder"
+        fun openStorage() {
+            compose.onNodeWithTag("atelier-settings").performClick()
+            compose.onNodeWithTag("settings-open-library_storage").performClick()
+        }
+        fun enabled(tag: String) = compose.onAllNodes(hasTestTag(tag) and isEnabled()).fetchSemanticsNodes().size == 1
+        openStorage()
+        val storage = compose.runOnUiThread { ViewModelProvider(compose.activity)[LibraryStorageViewModel::class.java] }
+        val restoreHidden = args.getString("librarySettingsRestoreHidden") == "true"
+        val hint = args.getString("librarySettingsExactHint") == "true"
+        check(!restoreHidden || applyEdit)
+        check(!reconnectEdit || hint)
+        if (hint) {
+            check((applyEdit || reconnectEdit) && !restoreHidden && Build.VERSION.SDK_INT == 28)
+            selectHintedSettingsFiles(instrumentation, app, storage, initial, folder, select = true)
+        } else {
+            compose.waitUntil(10_000) { enabled(folderButton) }
+            compose.onNodeWithTag(folderButton).performScrollTo().performClick()
+            compose.waitUntil(12_000) { instrumentation.uiAutomation.rootInActiveWindow?.packageName?.toString() == picker }
+            selectSettingsDestination(instrumentation, picker, folder, touchNavigation = true, restorePreviouslyHidden = restoreHidden)
+        }
+        compose.waitUntil(20_000) { storage.state.value.review != null }
+        val review = checkNotNull(storage.state.value.review)
+        check(review.picked == folder || review.picked == "Documents/$folder")
+        assertEquals(initial, runBlocking { app.services.storageLocation().activation })
+        compose.onNodeWithText(app.getString(R.string.library_open_folder_confirm,
+            app.getString(R.string.library_default_location), review.picked)).assertIsDisplayed()
+        compose.onNodeWithTag("library-storage-open").performClick()
+        compose.waitUntil(20_000) {
+            val location = storage.state.value.location
+            location?.activation?.libraryId == "9e940d7b-76c7-45ea-b5e4-0ad86f26ea13" &&
+                location.activation.number > initial.number && !storage.state.value.busy
+        }
+        var selected = checkNotNull(storage.state.value.location).activation
+        assertEquals(initial.number + 1, selected.number)
+        val retained = witness.inventory(app)
+        val exact = Uri.parse((retained.keys - before.keys).single())
+        assertTrue(exact in witness.spellings(folder))
+        assertEquals(before + (exact.toString() to (true to true)), retained)
+        compose.onNodeWithTag("settings-back").performClick()
+        compose.onNodeWithTag("settings-back").performClick()
+        val albumTag = "atelier-album-${album.value}"
+        compose.waitUntil(20_000) { enabled(albumTag) }
+        if (reconnectEdit) {
+            val operation = requireNotNull(args.getString("librarySelectedAppendOperation"))
+            check(UUID.fromString(operation).toString() == operation)
+            val pointer = File(app.filesDir.canonicalFile, "library-settings/active-library")
+            val issuingPointer = pointer.readBytes()
+            val issuingPage = runBlocking { app.services.loadLibraryAlbum(selected, album).pages.single().pageId }
+            // Set up one completed but unadopted edit. From here on only the real Home/Settings and picker may recover it.
+            val scratch = File(app.filesDir.canonicalFile, "recipe-reconnect-witness-$operation").apply { check(mkdir()) }
+            val receipt = runBlocking {
+                try {
+                    LibraryDescriptorAncestryWitness.publishBoundRecipeEdit(app, scratch, selected, operation, album, issuingPage, 2, 2)
+                } finally {
+                    // Nonrecursive: never sweep unexpected evidence left by a failed scratch operation.
+                    Files.delete(scratch.toPath())
+                    check(!scratch.exists())
+                }
+            }
+            assertEquals(operation, receipt.generationId)
+            assertEquals(3L, receipt.revision)
+            assertArrayEquals(issuingPointer, pointer.readBytes())
+            val published = reconnectPublication(app.contentResolver, exact, operation)
+            compose.onNodeWithTag(albumTag).performClick()
+            compose.waitUntil(20_000) { enabled("library-reconnect") }
+            assertArrayEquals(issuingPointer, pointer.readBytes())
+            compose.onNodeWithTag("library-reconnect").performClick()
+            selectHintedSettingsFiles(instrumentation, app, storage, selected, folder, select = true,
+                action = LibraryStorageViewModel.Action.RECONNECT)
+            val expected = selected.copy(number = selected.number + 1)
+            compose.waitUntil(20_000) { storage.state.value.let { it.location?.activation == expected && !it.busy } }
+            assertFalse(storage.state.value.error)
+            assertEquals(expected, runBlocking { app.services.storageLocation() }.activation)
+            assertEquals(retained, witness.inventory(app))
+            assertEquals(published, reconnectPublication(app.contentResolver, exact, operation))
+            Files.write(File(app.filesDir.canonicalFile, "library-settings-apply-pointer-$folder").toPath(),
+                pointer.readBytes(), CREATE_NEW)
+            selected = expected
+            compose.onNodeWithTag("settings-back").performClick()
+            compose.onNodeWithTag("settings-back").performClick()
+            compose.waitUntil(20_000) { enabled(albumTag) }
+        }
+        compose.onNodeWithTag(albumTag).performClick()
+        val page = runBlocking { app.services.loadLibraryAlbum(selected, album).pages.single() }
+        val pageTag = "original-page-${page.pageId.value}"
+        compose.waitUntil(20_000) { enabled(pageTag) }
+        fun openPage() {
+            compose.onNodeWithTag(pageTag).performClick()
+            compose.waitUntil(20_000) { editor.session.value?.preview?.value?.display != null }
+            assertEquals(EditorIdentity(album, page.pageId, selected), editor.state.value.identity)
+        }
+        fun checkOriginal() {
+            compose.onNodeWithTag("editor-tool-original").performClick()
+            compose.waitUntil(20_000) {
+                editor.session.value?.preview?.value?.let { it.view == EditorView.ORIGINAL && !it.previous && it.display != null } == true
+            }
+            compose.runOnUiThread {
+                val original = checkNotNull(editor.session.value?.preview?.value?.display).bitmap
+                assertEquals(0xff637b89.toInt(), original.getPixel(2, 1))
+            }
+        }
+        openPage()
+        if (reconnectEdit) {
+            val pageState = checkNotNull(editor.session.value?.state?.value?.page)
+            assertEquals(3L, pageState.recipeRevision)
+            assertEquals(2, pageState.recipe.geometry.outputQuarterTurns)
+            val result = checkNotNull(editor.session.value?.preview?.value)
+            assertEquals(EditorView.RESULT, result.view)
+            assertFalse(result.previous)
+            val rendered = checkNotNull(result.display)
+            assertEquals(3L, rendered.request.recipeRevision)
+            assertEquals(pageState.recipe, rendered.request.recipe)
+        }
+        checkOriginal()
+        if (reconnectEdit) {
+            compose.onNodeWithTag("editor-tool-rotate").performClick()
+            compose.onNodeWithTag("editor-rotate").performScrollTo().performClick()
+            assertTrue(checkNotNull(editor.session.value).state.value.dirty)
+            compose.onNodeWithTag("editor-apply").assertIsEnabled()
+        }
+        if (applyEdit) {
+            compose.onNodeWithTag("editor-tool-shape").performClick()
+            compose.onNodeWithTag("editor-shape-perspective").performScrollTo().performClick()
+            val frame = hasAnyAncestor(hasTestTag("atelier-frame-canvas")) and
+                hasContentDescription(app.getString(R.string.editor_original_description))
+            compose.waitUntil(20_000) { compose.onAllNodes(frame, useUnmergedTree = true).fetchSemanticsNodes().size == 1 }
+            compose.onNode(frame, useUnmergedTree = true).performScrollTo().assertIsDisplayed()
+            compose.onNodeWithTag("editor-back").performClick()
+            compose.onNodeWithTag("editor-discard-exit").performClick()
+            compose.waitUntil(15_000) { editor.session.value == null && enabled(pageTag) }
+            openPage()
+            val live = checkNotNull(editor.session.value)
+            assertEquals(2L, live.state.value.page?.recipeRevision)
+            compose.onNodeWithTag("editor-tool-rotate").performClick()
+            compose.onNodeWithTag("editor-rotate").performScrollTo().performClick()
+            compose.onNodeWithTag("editor-apply").assertIsEnabled().performClick() // One save; uncertain delivery does not authorize a second tap.
+            compose.waitUntil(45_000) { !live.state.value.saving }
+            val accepted = live.state.value
+            assertEquals(null, accepted.error)
+            assertFalse(accepted.dirty)
+            assertEquals(3L, accepted.page?.recipeRevision)
+            assertEquals(2, accepted.page?.recipe?.geometry?.outputQuarterTurns)
+            selected = selected.copy(number = selected.number + 1)
+            assertEquals(EditorIdentity(album, page.pageId, selected), editor.state.value.identity)
+            assertEquals(selected, runBlocking { app.services.storageLocation().activation })
+            val pointer = File(app.filesDir.canonicalFile, "library-settings/active-library")
+            check(pointer.length() in 1..320)
+            val record = File(app.filesDir.canonicalFile, "library-settings-apply-pointer-$folder")
+            Files.write(record.toPath(), pointer.readBytes(), CREATE_NEW)
+            if (ordinaryApply) {
+                val operation = pointer.readLines()[4].also { check(UUID.fromString(it).toString() == it) }
+                assertFalse(File(app.filesDir, "catalog-recipe-attempts-v1/$operation").exists())
+                assertTrue(File(app.filesDir, "catalog-recipe-acknowledged-v1/$operation/recipe-edit.adopted").isFile)
+            }
+            compose.onNodeWithTag("editor-back").performClick()
+            compose.waitUntil(15_000) { editor.session.value == null && enabled(pageTag) }
+            openPage()
+            val reopened = checkNotNull(editor.session.value?.state?.value?.page)
+            assertEquals(accepted.page, reopened)
+            val result = checkNotNull(editor.session.value?.preview?.value)
+            assertEquals(EditorView.RESULT, result.view)
+            assertFalse(result.previous)
+            val rendered = checkNotNull(result.display)
+            assertEquals(3L, rendered.request.recipeRevision)
+            assertEquals(reopened.recipe, rendered.request.recipe)
+            compose.runOnUiThread { assertEquals(0xff637b89.toInt(), rendered.bitmap.getPixel(0, 0)) }
+            checkOriginal()
+        }
+        compose.onNodeWithTag("editor-back").performClick()
+        if (reconnectEdit) compose.onNodeWithTag("editor-discard-exit").performClick()
+        compose.waitUntil(15_000) { editor.state.value.identity == null && enabled(pageTag) }
+        assertTrue(instrumentation.uiAutomation.performGlobalAction(AccessibilityService.GLOBAL_ACTION_BACK))
+        compose.waitUntil(15_000) { enabled("atelier-settings") }
+        openStorage()
+        compose.waitUntil(15_000) { enabled("library-storage-use-default") }
+        compose.onNodeWithTag("library-storage-use-default").performScrollTo().performClick()
+        compose.onNodeWithText(app.getString(R.string.library_open_folder_confirm, review.picked,
+            app.getString(R.string.library_default_location))).assertIsDisplayed()
+        compose.onNode(hasTestTag("library-storage-use-default").not() and
+            hasText(app.getString(R.string.library_use_default)) and hasClickAction()).performClick()
+        compose.waitUntil(20_000) {
+            val location = storage.state.value.location
+            location?.folderLabel == null && location?.activation?.libraryId == initial.libraryId &&
+                location.activation.number == selected.number + 1 && !storage.state.value.busy
+        }
+        val returned = checkNotNull(storage.state.value.location).activation
+        val backup = compose.runOnUiThread { ViewModelProvider(compose.activity)[LibraryBackupViewModel::class.java].session }
+        compose.waitUntil(20_000) {
+            backup.state.value.issuedAt == returned && enabled("library-backup-export")
+        }
+        val reopened = runBlocking { app.services.imports() }
+        assertTrue(runBlocking { reopened.store.catalog.list(null, 2) }.isEmpty())
+        assertEquals(retained, witness.inventory(app))
+        app.contentResolver.releasePersistableUriPermission(exact,
+            Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION)
+        assertEquals(before, witness.inventory(app))
+    }
+
     private fun cancelExactFiles(instrumentation: Instrumentation, picker: String, appPackage: String,
         wait: (Long, () -> Boolean) -> Unit = { timeout, condition -> compose.waitUntil(timeout, condition) },
-    ) {
+    ): Int {
         val automation = instrumentation.uiAutomation
         fun foreground() = automation.rootInActiveWindow?.packageName?.toString()
         var backSteps = 0
@@ -242,6 +706,7 @@ class LibraryFolderFilesJourneyTest {
             }
         }
         assertEquals(appPackage, foreground())
+        return backSteps
     }
 
     private fun settingsFixtureFolder(): String =
@@ -416,6 +881,7 @@ class LibraryFolderFilesJourneyTest {
     private fun selectSettingsDestination(instrumentation: Instrumentation, picker: String, folder: String,
         selectFolder: Boolean = true, navigateFromRoot: Boolean = true,
         expectedChildren: Set<String> = setOf("catalogs", "generations", "objects"), allowExactWindowTitle: Boolean = false,
+        touchNavigation: Boolean = false, restorePreviouslyHidden: Boolean = false,
     ) {
         val affirmative = setOf("SELECT", "Select", "SÉLECTIONNER", "Sélectionner", "Use this folder", "USE THIS FOLDER", "Choose this folder")
         fun containsUnder(root: AccessibilityNodeInfo, text: String, within: String) =
@@ -470,7 +936,9 @@ class LibraryFolderFilesJourneyTest {
                 true
             }
             val control = checkNotNull(confirmed)
-            if (control.isClickable) check(control.performAction(AccessibilityNodeInfo.ACTION_CLICK)) { "Files did not acknowledge $step" }
+            // A semantic acknowledgment did not establish navigation on this picker. Exercise real user touches while keeping the same live identity and geometry checks.
+            if (touchNavigation) tap(instrumentation, control)
+            else if (control.isClickable) check(control.performAction(AccessibilityNodeInfo.ACTION_CLICK)) { "Files did not acknowledge $step" }
             else {
                 check(parent == "dir_list")
                 tap(instrumentation, control)
@@ -509,6 +977,31 @@ class LibraryFolderFilesJourneyTest {
             select("Files options for $step", options)
             return await(instrumentation, picker, step, ::hasVisibilityChoice)
         }
+        fun isFilesToolbar(root: AccessibilityNodeInfo) =
+            !hasVisibilityChoice(root) && unique(root, options) != null && unique(root, drawer) != null
+        fun dismissPreferenceMenu() {
+            if (touchNavigation) {
+                val live = await(instrumentation, picker, "current Files overflow or toolbar") {
+                    hasVisibilityChoice(it) || isFilesToolbar(it)
+                }
+                if (isFilesToolbar(live)) return
+                val down = SystemClock.uptimeMillis()
+                for (action in listOf(KeyEvent.ACTION_DOWN, KeyEvent.ACTION_UP)) {
+                    val key = KeyEvent(down, SystemClock.uptimeMillis(), action, KeyEvent.KEYCODE_BACK, 0)
+                    key.source = InputDevice.SOURCE_KEYBOARD
+                    check(automation.injectInputEvent(key, true))
+                }
+            } else check(automation.performGlobalAction(AccessibilityService.GLOBAL_ACTION_BACK))
+            if (touchNavigation) await(instrumentation, picker, "Files toolbar after menu dismissal", ::isFilesToolbar)
+        }
+        fun reconcilePreferenceToggle(shown: Set<String>) {
+            if (!touchNavigation) return
+            val settled = await(instrumentation, picker, "Files toolbar or updated overflow menu") {
+                isFilesToolbar(it) || unique(it, shown) != null
+            }
+            // A changed menu item proves the toggle took effect. Close that positively observed popup, never issue a second toggle.
+            if (!isFilesToolbar(settled)) dismissPreferenceMenu()
+        }
         // Inspect the real platform menu once; the primary-storage root is hidden by default on the fresh API 28 guest.
         val menu = preferenceMenu("initial internal storage preference")
         val wasHidden = unique(menu, showStorage) != null
@@ -516,28 +1009,35 @@ class LibraryFolderFilesJourneyTest {
         var navigationFailure: Throwable? = null
         try {
             if (wasHidden) {
+                changed = true // Reconcile even if the touch is accepted but its effect is not delivered cleanly.
                 select("show internal storage", showStorage)
-                changed = true
-            } else check(automation.performGlobalAction(AccessibilityService.GLOBAL_ACTION_BACK))
+                reconcilePreferenceToggle(hideStorage)
+            } else dismissPreferenceMenu()
             select("root drawer", drawer)
             select("primary storage", setOf(Build.MODEL, "Internal storage", "Stockage interne", "Stockage interne partagé"), "roots_list")
             select("Documents", setOf("Documents"), "dir_list")
+            if (touchNavigation) await(instrumentation, picker, "Documents breadcrumb") {
+                containsUnder(it, "Documents", "dropdown_breadcrumb")
+            }
             select("synthetic folder", setOf(folder), "dir_list") { containsUnder(it, "Documents", "dropdown_breadcrumb") }
             await(instrumentation, picker, "exact destination before restoring Files preference", ::atTarget)
         } catch (failure: Throwable) {
             navigationFailure = failure
             throw failure
         } finally {
-            if (changed) {
+            if (changed || restorePreviouslyHidden) {
                 try {
                     val visible = preferenceMenu("restore internal storage preference")
-                    if (unique(visible, hideStorage) != null) select("restore hidden internal storage", hideStorage)
+                    if (unique(visible, hideStorage) != null) {
+                        select("restore hidden internal storage", hideStorage)
+                        reconcilePreferenceToggle(showStorage)
+                    }
                     await(instrumentation, picker, "settled Files restoration menu or toolbar") {
                         unique(it, showStorage) != null || (!hasVisibilityChoice(it) && unique(it, options) != null)
                     }
                     val restored = preferenceMenu("verify restored internal storage preference")
                     check(unique(restored, showStorage) != null) { "Files did not restore the hidden internal storage preference" }
-                    check(automation.performGlobalAction(AccessibilityService.GLOBAL_ACTION_BACK))
+                    dismissPreferenceMenu()
                 } catch (restorationFailure: Throwable) {
                     val original = navigationFailure
                     if (original == null) throw restorationFailure
@@ -635,6 +1135,7 @@ class LibraryFolderFilesJourneyTest {
 
     @Test fun selectedFilesMergeAppendsOnlyTheMissingOriginalAndKeepsItsPredecessor() {
         val args = InstrumentationRegistry.getArguments()
+        val witness = LibraryDescriptorAncestryWitness
         val operation = UUID.fromString(requireNotNull(args.getString("librarySelectedAppendOperation"))).toString()
         val expectedMissing = requireNotNull(args.getString("librarySelectedAppendBytes")).toLong()
         check(expectedMissing in 70_000..71_000)
@@ -646,7 +1147,7 @@ class LibraryFolderFilesJourneyTest {
             }
             val scratch = File(app.filesDir.canonicalFile, "tree-read-${UUID.randomUUID()}").apply { check(mkdir()) }
             runBlocking {
-                val witness = LibraryDescriptorAncestryWitness
+                assertEquals(null, witness.completedMerge(app, operation))
                 val inputs = witness.verifyPairWithSharedOwner(app, scratch, selected[0], selected[1], ::requireAuthority)
                 assertEquals(selected, inputs.map { it.tree })
                 assertTrue(inputs.all { it.albums == 1 && it.scans == 1 })
@@ -664,18 +1165,695 @@ class LibraryFolderFilesJourneyTest {
             }
             requireAuthority()
         }
+        // Construct a new private reader only after the Files fixture grants are restored.
+        val app = InstrumentationRegistry.getInstrumentation().targetContext.applicationContext
+        runBlocking { assertEquals(operation, witness.completedMerge(app, operation)) }
     }
 
-    private fun withIndependentFilesSelections(chooseAnchor: Boolean, writableDestination: Boolean = false,
+    @Test fun selectedFilesMergeCanAppendTwiceWithoutReusingAnOlderStage() {
+        val args = InstrumentationRegistry.getArguments()
+        val first = UUID.fromString(requireNotNull(args.getString("librarySelectedAppendOperation"))).toString()
+        val second = UUID.fromString(requireNotNull(args.getString("librarySelectedRepeatOperation"))).toString()
+        val expectedMissing = requireNotNull(args.getString("librarySelectedAppendBytes")).toLong()
+        check(first != second && expectedMissing in 70_000..71_000)
+        val witness = LibraryDescriptorAncestryWitness
+        lateinit var isolated: Context
+        withIndependentFilesSelections(chooseAnchor = false, writableDestination = true) { app, folder, selected, before ->
+            fun requireAuthority() {
+                val expected = before + mapOf(selected[0].toString() to (true to true), selected[1].toString() to (true to false))
+                assertEquals(expected, LibraryIndependentRootGrants.inventory(app))
+                LibraryIndependentRootGrants.refuseParentAccess(app, folder)
+            }
+            // The earlier one-shot witness remains in the ordinary app-files root. Only this exact synthetic batch can use its fresh private scope.
+            val files = File(app.filesDir.canonicalFile, "library-selected-repeat-$first").apply { check(mkdir()) }
+            isolated = object : ContextWrapper(app) {
+                override fun getApplicationContext(): Context = this
+                override fun getFilesDir(): File = files
+            }
+            val scratch = File(files, "read-scratch").apply { check(mkdir()) }
+            val destination = selected[0]
+            val source = selected[1]
+            fun openFirstStage(): ParcelFileDescriptor {
+                val root = DocumentsContract.getTreeDocumentId(destination)
+                val id = DocumentsContract.buildDocumentUriUsingTree(destination, "$root/merge-staging-$first")
+                return checkNotNull(app.contentResolver.openFileDescriptor(id, "r"))
+            }
+            runBlocking {
+                val initial = witness.verifyPairWithSharedOwner(isolated, scratch, destination, source, ::requireAuthority)
+                assertEquals(1, initial[0].scans)
+                assertEquals(expectedMissing, witness.estimateMerge(isolated, scratch, initial[0], initial[1], ::requireAuthority).missingBytes)
+                assertEquals(first, witness.publishMerge(isolated, scratch, first, initial[0], initial[1], ::requireAuthority))
+                val once = witness.verifyPairWithSharedOwner(isolated, scratch, destination, source, ::requireAuthority)
+                assertEquals(first, once[0].generationId)
+                assertEquals(2, once[0].scans)
+                assertEquals(initial[1].generationId, once[1].generationId)
+                openFirstStage().use { priorStage ->
+                    val dryRun = witness.estimateMerge(isolated, scratch, once[0], once[1], ::requireAuthority)
+                    assertEquals(0L, dryRun.missingBytes)
+                    assertEquals(1, dryRun.matchedOriginals)
+                    assertEquals(second, witness.publishMerge(isolated, scratch, second, once[0], once[1], ::requireAuthority))
+                    openFirstStage().use { witness.requireSameIdentity(priorStage, it) }
+                }
+                val twice = witness.verifyPairWithSharedOwner(isolated, scratch, destination, source, ::requireAuthority)
+                assertEquals(second, twice[0].generationId)
+                assertEquals(1, twice[0].albums)
+                assertEquals(2, twice[0].scans)
+                assertEquals(initial[1].generationId, twice[1].generationId)
+            }
+            requireAuthority()
+        }
+        // A fresh reader of the exact private receipts does not require either of the fixture grants.
+        runBlocking {
+            assertEquals(first, witness.completedMerge(isolated, first))
+            assertEquals(second, witness.completedMerge(isolated, second))
+        }
+    }
+
+    @Test fun endsProcessAfterSelectedAppendCompletionBeforeDelivery() {
+        val instrumentation = InstrumentationRegistry.getInstrumentation()
+        val operation = UUID.fromString(requireNotNull(InstrumentationRegistry.getArguments()
+            .getString("librarySelectedAppendOperation"))).toString()
+        val witness = LibraryDescriptorAncestryWitness
+        withIndependentFilesSelections(chooseAnchor = false, writableDestination = true) { app, folder, selected, before ->
+            val grants = LibraryIndependentRootGrants
+            fun requireAuthority() {
+                assertEquals(before + mapOf(selected[0].toString() to (true to true), selected[1].toString() to (true to false)),
+                    grants.inventory(app))
+                grants.refuseParentAccess(app, folder)
+            }
+            val files = File(app.filesDir.canonicalFile, "library-selected-death-$operation").apply { check(mkdir()) }
+            val scope = object : ContextWrapper(app) {
+                override fun getApplicationContext(): Context = this
+                override fun getFilesDir(): File = files
+            }
+            val scratch = File(files, "read-scratch").apply { check(mkdir()) }
+            runBlocking {
+                val inputs = witness.verifyPairWithSharedOwner(scope, scratch, selected[0], selected[1], ::requireAuthority)
+                witness.publishMergeBeforeDelivery(scope, scratch, operation, inputs[0], inputs[1], ::requireAuthority) { generation ->
+                    assertEquals(operation, generation)
+                    requireAuthority()
+                    // These two modes were issued only to this synthetic case. Restore them before deliberately ending the app process.
+                    app.contentResolver.releasePersistableUriPermission(selected[0], Intent.FLAG_GRANT_WRITE_URI_PERMISSION)
+                    grants.releaseReadDelta(app, selected) { assertEquals(before, grants.inventory(app)) }
+                    suspendCancellableCoroutine<Nothing> {
+                        instrumentation.sendStatus(72, Bundle().apply {
+                            putString("selectedAppendDeathOperation", operation)
+                            putInt("selectedAppendDeathPid", Process.myPid())
+                            putString("selectedAppendDeathGrantInventory", LibraryAncestryGrantWitness.fingerprint(before))
+                        })
+                        Process.killProcess(Process.myPid())
+                    }
+                }
+            }
+            error("The selected append must lose its process before delivering success")
+        }
+    }
+
+    @Test fun oneFilesSelectionPublishesOnlyAClosedEditedCatalog() {
+        val operation = requireNotNull(InstrumentationRegistry.getArguments().getString("librarySelectedAppendOperation"))
+        require(UUID.fromString(operation).toString() == operation)
+        withIndependentFilesSelections(chooseAnchor = false, writableDestination = true, singleDestination = true) { app, folder, selections, before ->
+            val tree = selections.single()
+            val grants = LibraryIndependentRootGrants
+            fun requireAuthority() {
+                assertEquals(before + (tree.toString() to (true to true)), grants.inventory(app))
+                grants.refuseParentAccess(app, folder)
+            }
+            val files = File(app.filesDir.canonicalFile, "library-selected-editor-$operation").apply { check(mkdir()) }
+            val isolated = object : ContextWrapper(app) {
+                override fun getApplicationContext(): Context = this
+                override fun getFilesDir(): File = files
+            }
+            val scratch = File(files, "scratch").apply { check(mkdir()) }
+            val reader = AndroidLibraryTreeRead(isolated, scratch)
+            val album = DocumentId("aaaaaaaa-aaaa-4aaa-8aaa-000000000001")
+            val witness = LibraryDescriptorAncestryWitness
+            runBlocking {
+                val unbound = reader.verify(tree)
+                val baseline = witness.verifyRecipeEditTarget(reader, tree)
+                val page = reader.openWorkingCatalog(baseline) { it.load(album).pages.single() }
+                assertEquals(2L, page.recipeRevision)
+                val unboundError = runCatching {
+                    witness.appendSelectedRecipeEdit(isolated, scratch, operation, unbound, album, page.pageId,
+                        page.recipeRevision, 2) { error("An unbound verification attempted edit admission") }
+                }.exceptionOrNull()
+                assertTrue(unboundError is IOException)
+                assertEquals("The selected catalog edit requires the confirmed physical root", unboundError?.message)
+                val edited = witness.appendSelectedRecipeEdit(isolated, scratch, operation, baseline, album, page.pageId,
+                    page.recipeRevision, 2, ::requireAuthority)
+                assertEquals(operation, edited)
+                val reopened = reader.verify(tree)
+                assertEquals(operation, reopened.generationId)
+                assertEquals(baseline.libraryId, reopened.libraryId)
+                val current = reader.openWorkingCatalog(reopened) { it.load(album).pages.single() }
+                assertEquals(page.pageId, current.pageId)
+                assertEquals(page.sourceId, current.sourceId)
+                assertEquals(3L, current.recipeRevision)
+                val forbidProvider = object : ContextWrapper(isolated) {
+                    override fun getApplicationContext(): Context = this
+                    override fun getContentResolver(): ContentResolver = error("Spent edit attempted provider access")
+                }
+                val refusal = runCatching {
+                    witness.appendSelectedRecipeEdit(forbidProvider, scratch, operation, baseline, album, page.pageId,
+                        page.recipeRevision, 2) {}
+                }.exceptionOrNull()
+                assertTrue(refusal is IOException)
+                assertEquals("The catalog revision attempt is already spent", refusal?.message)
+                assertEquals(operation, reader.verify(tree).generationId)
+                requireAuthority()
+                // Remove only this test's write mode. The remaining read grant may inspect the successor, not nominate a new edit.
+                app.contentResolver.releasePersistableUriPermission(tree, Intent.FLAG_GRANT_WRITE_URI_PERMISSION)
+                assertEquals(before + (tree.toString() to (true to false)), grants.inventory(app))
+                val readOnly = runCatching { witness.verifyRecipeEditTarget(reader, tree) }.exceptionOrNull()
+                assertTrue(readOnly is IOException)
+                assertEquals("The exact library folder is not writable", readOnly?.message)
+            }
+            assertFalse(File(files, "library-settings").exists())
+            assertFalse(files.walkTopDown().any { it.name == "original.bin" })
+        }
+    }
+
+    @Test fun selectedRecipeReceiptBindsTheExactIssuingActivation() {
+        val operation = requireNotNull(InstrumentationRegistry.getArguments().getString("librarySelectedAppendOperation"))
+        require(UUID.fromString(operation).toString() == operation)
+        withIndependentFilesSelections(chooseAnchor = false, writableDestination = true, singleDestination = true) { app, folder, selections, before ->
+            val tree = selections.single()
+            val files = File(app.filesDir.canonicalFile, "library-selected-editor-$operation").apply { check(mkdir()) }
+            val isolated = object : ContextWrapper(app) {
+                override fun getApplicationContext(): Context = this
+                override fun getFilesDir(): File = files
+            }
+            val scratch = File(files, "scratch").apply { check(mkdir()) }
+            val witness = LibraryDescriptorAncestryWitness
+            val album = DocumentId("aaaaaaaa-aaaa-4aaa-8aaa-000000000001")
+            runBlocking {
+                val activation = witness.seedRecipeEditBinding(isolated, scratch, tree)
+                val startup = AndroidLibraryStartup(isolated)
+                val page = startup.useSelectedCatalog(scratch) { _, catalog -> catalog.load(album).pages.single() }
+                val activePointer = File(files, "library-settings/active-library")
+                val expectedPointer = activePointer.readBytes().toList()
+                val recover = InstrumentationRegistry.getArguments().getString("libraryRecoverSelectedRecipePointer") == "true"
+                val stale = activation.copy(number = activation.number - 1)
+                val unused = File(files, "never-open-this-scratch")
+                val forbidProvider = object : ContextWrapper(isolated) {
+                    override fun getApplicationContext(): Context = this
+                    override fun getContentResolver(): ContentResolver = error("Refused edit or private inspection attempted provider access")
+                }
+                assertEquals("library_activation_changed", (runCatching {
+                    witness.publishBoundRecipeEdit(forbidProvider, unused, stale, operation, album, page.pageId, 2, 2)
+                }.exceptionOrNull() as RepositoryFailure).error.safeMessageKey)
+                assertFalse(unused.exists())
+                assertFalse(File(files, "catalog-recipe-attempts-v1").exists())
+                assertEquals(null, witness.observeInterruptedRecipeSuccessor(isolated, scratch, activation))
+                val child = witness.publishBoundRecipeEdit(isolated, scratch, activation, operation, album, page.pageId, 2, 2)
+                assertEquals(operation, child.generationId)
+                assertEquals(activation, child.issuedAt)
+                assertEquals(page.pageId, child.page)
+                assertEquals(3L, child.revision)
+                assertTrue(child.reopenWithoutProvider(forbidProvider))
+                assertEquals(operation, witness.observeInterruptedRecipeSuccessor(isolated, scratch, activation))
+                val staged = File(files, "catalog-recipe-attempts-v1/$operation")
+                // This operation is created by this test, not retained predecessor evidence. Temporarily withhold one leaf without modifying its bytes.
+                for (leaf in listOf(File(staged, "recipe-edit.complete"), File(files, "catalog-revision-spends/$operation.spent"))) {
+                    val parked = File(files, "withheld-${leaf.name}-$operation").toPath()
+                    val path = leaf.toPath()
+                    val exactBytes = leaf.readBytes()
+                    check(Files.notExists(parked) && Files.isRegularFile(path))
+                    Files.move(path, parked, ATOMIC_MOVE)
+                    try {
+                        val failure = runCatching { witness.observeInterruptedRecipeSuccessor(isolated, scratch, activation) }.exceptionOrNull()
+                        assertTrue(failure is IOException)
+                        if (recover) {
+                            val refused = runCatching { witness.recoverInterruptedRecipeSuccessor(isolated, scratch, activation) }.exceptionOrNull()
+                            assertTrue(refused is IOException)
+                            assertEquals("The selected edit could not be settled", refused?.message)
+                        }
+                        assertFalse(leaf.exists())
+                        assertEquals(expectedPointer, activePointer.readBytes().toList())
+                        assertEquals(before + (tree.toString() to (true to true)), LibraryIndependentRootGrants.inventory(app))
+                    } finally {
+                        check(Files.notExists(path))
+                        Files.move(parked, path, ATOMIC_MOVE)
+                    }
+                    assertArrayEquals(exactBytes, leaf.readBytes())
+                }
+                val spent = runCatching {
+                    witness.publishBoundRecipeEdit(forbidProvider, unused, activation, operation, album, page.pageId, 2, 2)
+                }.exceptionOrNull()
+                assertTrue(spent is IOException)
+                assertEquals("The catalog revision attempt is already spent", spent?.message)
+                assertEquals(expectedPointer, activePointer.readBytes().toList())
+                assertEquals(operation, AndroidLibraryTreeRead(isolated, scratch).verify(tree).generationId)
+                assertTrue(File(staged, "recipe-edit.intent").isFile)
+                assertTrue(File(staged, "recipe-edit.complete").isFile)
+                assertEquals(before + (tree.toString() to (true to true)), LibraryIndependentRootGrants.inventory(app))
+                LibraryIndependentRootGrants.refuseParentAccess(app, folder)
+                // The retained bound-only case deliberately leaves the predecessor active for its existing host oracle.
+                if (recover) {
+                    val advanced = witness.recoverInterruptedRecipeSuccessor(isolated, scratch, activation)
+                    assertEquals(activation.copy(number = activation.number + 1), advanced)
+                    val current = checkNotNull(advanced)
+                    val reopened = AndroidLibraryStartup(isolated).loadSelectedEditablePage(scratch, current, album, page.pageId)
+                    assertEquals(child.revision, reopened.recipeRevision)
+                    assertEquals(2, reopened.recipe.geometry.outputQuarterTurns)
+                    assertEquals(null, witness.recoverInterruptedRecipeSuccessor(isolated, scratch, current))
+                    assertEquals(before + (tree.toString() to (true to true)), LibraryIndependentRootGrants.inventory(app))
+                    // Remove only the write mode acquired by this test. No second picker or reacquisition is needed.
+                    val advancedPointer = activePointer.readBytes()
+                    app.contentResolver.releasePersistableUriPermission(tree, Intent.FLAG_GRANT_WRITE_URI_PERMISSION)
+                    assertEquals(before + (tree.toString() to (true to false)), LibraryIndependentRootGrants.inventory(app))
+                    val refused = runCatching { witness.recoverInterruptedRecipeSuccessor(isolated, scratch, current) }.exceptionOrNull()
+                    assertTrue(refused is IOException)
+                    assertEquals("The exact library folder is not writable", refused?.message)
+                    assertArrayEquals(advancedPointer, activePointer.readBytes())
+                }
+            }
+        }
+    }
+
+    @Test fun selectedRecipeAdvancesOnlyTheVerifiedDirectSuccessor() {
+        val operation = requireNotNull(InstrumentationRegistry.getArguments().getString("librarySelectedAppendOperation"))
+        require(UUID.fromString(operation).toString() == operation)
+        withIndependentFilesSelections(chooseAnchor = false, writableDestination = true, singleDestination = true) { app, folder, selections, before ->
+            val tree = selections.single()
+            val files = File(app.filesDir.canonicalFile, "library-selected-editor-$operation").apply { check(mkdir()) }
+            val isolated = object : ContextWrapper(app) {
+                override fun getApplicationContext(): Context = this
+                override fun getFilesDir(): File = files
+            }
+            val scratch = File(files, "scratch").apply { check(mkdir()) }
+            val witness = LibraryDescriptorAncestryWitness
+            val album = DocumentId("aaaaaaaa-aaaa-4aaa-8aaa-000000000001")
+            runBlocking {
+                val old = witness.seedRecipeEditBinding(isolated, scratch, tree)
+                val startup = AndroidLibraryStartup(isolated)
+                val page = startup.useSelectedCatalog(scratch) { _, catalog -> catalog.load(album).pages.single() }
+                val (advanced, saved) = witness.saveAndAdvanceSelectedRecipe(isolated, scratch, old, operation, album, page.pageId, 2, 2)
+                assertEquals(old.copy(number = old.number + 1), advanced)
+                assertEquals(page.pageId, saved.pageId)
+                assertEquals(3L, saved.recipeRevision)
+                val reopened = AndroidLibraryStartup(isolated)
+                assertEquals(advanced, reopened.useSelectedCatalog(scratch) { activation, _ -> activation })
+                val exact = reopened.loadSelectedEditablePage(scratch, advanced, album, page.pageId)
+                assertEquals(saved.recipeRevision, exact.recipeRevision)
+                assertEquals(saved.recipeHash, exact.recipeHash)
+                assertEquals(2, exact.recipe.geometry.outputQuarterTurns)
+                val obsolete = runCatching { reopened.loadSelectedEditablePage(scratch, old, album, page.pageId) }.exceptionOrNull()
+                assertEquals("library_activation_changed", (obsolete as RepositoryFailure).error.safeMessageKey)
+                assertEquals(before + (tree.toString() to (true to true)), LibraryIndependentRootGrants.inventory(app))
+                LibraryIndependentRootGrants.refuseParentAccess(app, folder)
+            }
+        }
+    }
+
+    @Test fun selectedRecipeSettlesTwoEditsWithoutRetainingCatalogStages() {
+        val args = InstrumentationRegistry.getArguments()
+        val ids = listOf("librarySelectedAppendOperation", "librarySelectedSecondOperation").map { key ->
+            requireNotNull(args.getString(key)).also { check(UUID.fromString(it).toString() == it) }
+        }
+        check(ids.distinct().size == 2)
+        withIndependentFilesSelections(chooseAnchor = false, writableDestination = true, singleDestination = true) { app, folder, selections, before ->
+            val tree = selections.single()
+            val files = File(app.filesDir.canonicalFile, "library-selected-editor-${ids.first()}").apply { check(mkdir()) }
+            val isolated = object : ContextWrapper(app) {
+                override fun getApplicationContext(): Context = this
+                override fun getFilesDir(): File = files
+            }
+            val scratch = File(files, "scratch").apply { check(mkdir()) }
+            val witness = LibraryDescriptorAncestryWitness
+            val album = DocumentId("aaaaaaaa-aaaa-4aaa-8aaa-000000000001")
+            runBlocking {
+                var active = witness.seedRecipeEditBinding(isolated, scratch, tree)
+                val startup = AndroidLibraryStartup(isolated)
+                val page = startup.useSelectedCatalog(scratch) { _, catalog -> catalog.load(album).pages.single() }
+                var revision = 2L
+                val firstPublication = ids.mapIndexed { index, operation ->
+                    val turns = index + 2
+                    val (adopted, saved) = witness.saveAndAdvanceSelectedRecipe(
+                        isolated, scratch, active, operation, album, page.pageId, revision, turns, requireSettled = true)
+                    assertEquals(active.copy(number = active.number + 1), adopted)
+                    assertEquals(page.pageId, saved.pageId)
+                    val reopened = startup.loadSelectedEditablePage(scratch, adopted, album, page.pageId)
+                    assertEquals(revision + 1, reopened.recipeRevision)
+                    assertEquals(saved.recipeHash, reopened.recipeHash)
+                    assertEquals(turns, reopened.recipe.geometry.outputQuarterTurns)
+                    assertFalse(File(files, "catalog-recipe-attempts-v1/$operation").exists())
+                    val archived = File(files, "catalog-recipe-acknowledged-v1/$operation").list().orEmpty().toSet()
+                    assertEquals(5, archived.size)
+                    assertTrue(archived.containsAll(setOf("recipe-edit.intent", "recipe-edit.complete", "recipe-edit.adopted")))
+                    assertTrue(archived.count { it.matches(Regex("[a-f0-9]{64}\\.spent")) } == 2)
+                    active = adopted
+                    revision = reopened.recipeRevision
+                    reconnectPublication(app.contentResolver, tree, operation)
+                }.first()
+                assertEquals(firstPublication, reconnectPublication(app.contentResolver, tree, ids.first()))
+                assertEquals(before + (tree.toString() to (true to true)), LibraryIndependentRootGrants.inventory(app))
+                LibraryIndependentRootGrants.refuseParentAccess(app, folder)
+            }
+        }
+    }
+
+    @Test fun selectedRecipeDoesNotReclaimOrWriteAgainAfterLosingWriteAuthority() {
+        val args = InstrumentationRegistry.getArguments()
+        val (first, refusedOperation) = listOf("librarySelectedAppendOperation", "librarySelectedSecondOperation").map { key ->
+            requireNotNull(args.getString(key)).also { check(UUID.fromString(it).toString() == it) }
+        }
+        check(first != refusedOperation)
+        withIndependentFilesSelections(chooseAnchor = false, writableDestination = true, singleDestination = true) { app, folder, selections, before ->
+            val tree = selections.single()
+            val files = File(app.filesDir.canonicalFile, "library-selected-editor-$first").apply { check(mkdir()) }
+            val isolated = object : ContextWrapper(app) {
+                override fun getApplicationContext(): Context = this
+                override fun getFilesDir(): File = files
+            }
+            val scratch = File(files, "scratch").apply { check(mkdir()) }
+            val pointer = File(files, "library-settings/active-library")
+            val attempt = File(files, "catalog-recipe-attempts-v1/$first")
+            val catalog = File(attempt, "catalog.sqlite")
+            val owner = File(attempt, "recipe-edit.catalog-owner")
+            val witness = LibraryIndependentRootGrants
+            val album = DocumentId("aaaaaaaa-aaaa-4aaa-8aaa-000000000001")
+            runBlocking {
+                val issuing = LibraryDescriptorAncestryWitness.seedRecipeEditBinding(isolated, scratch, tree)
+                val adopted = issuing.copy(number = issuing.number + 1)
+                val startup = AndroidLibraryStartup(isolated)
+                val page = startup.useSelectedCatalog(scratch) { _, loaded -> loaded.load(album).pages.single() }
+                var capturedPointer: ByteArray? = null
+                val firstResult = runCatching {
+                    startup.advanceSelectedRecipeEdit(scratch, issuing, first, album, page.pageId, 2,
+                        RecipeAdmission { _, _ -> null },
+                        onPointerVerified = { observed ->
+                            assertEquals(adopted, observed)
+                            assertEquals(null, capturedPointer)
+                            capturedPointer = pointer.readBytes()
+                            app.contentResolver.releasePersistableUriPermission(tree, Intent.FLAG_GRANT_WRITE_URI_PERMISSION)
+                            assertEquals(before + (tree.toString() to (true to false)), witness.inventory(app))
+                        }) { it.copy(geometry = it.geometry.withOutputQuarterTurns(2)) }
+                }
+                assertEquals("library_reconnect_required", (firstResult.exceptionOrNull() as RepositoryFailure).error.safeMessageKey)
+                val exactPointer = checkNotNull(capturedPointer)
+                assertEquals(first, pointer.readLines()[4])
+                assertArrayEquals(exactPointer, pointer.readBytes())
+                val publication = reconnectPublication(app.contentResolver, tree, first)
+                val reader = AndroidLibraryTreeRead(isolated, scratch)
+                assertEquals(first, reader.verify(tree).generationId)
+                val privateBefore = attempt.listFiles()!!.associate { it.name to sha256(it.readBytes()) }
+                assertTrue(privateBefore.keys.containsAll(setOf("recipe-edit.intent", "recipe-edit.complete", catalog.name, owner.name)))
+                assertFalse("recipe-edit.adopted" in privateBefore)
+                assertTrue(Files.isSameFile(catalog.toPath(), owner.toPath()))
+                val refused = runCatching {
+                    startup.advanceSelectedRecipeEdit(scratch, adopted, refusedOperation, album, page.pageId, 3,
+                        RecipeAdmission { _, _ -> null },
+                        onPublicationStarted = { error("Revoked authority reached publication") }) {
+                        error("Revoked authority reached the recipe mutation")
+                    }
+                }
+                assertEquals("library_reconnect_required", (refused.exceptionOrNull() as RepositoryFailure).error.safeMessageKey)
+                assertArrayEquals(exactPointer, pointer.readBytes())
+                assertEquals(privateBefore, attempt.listFiles()!!.associate { it.name to sha256(it.readBytes()) })
+                assertTrue(Files.isSameFile(catalog.toPath(), owner.toPath()))
+                assertFalse(File(files, "catalog-recipe-attempts-v1/$refusedOperation").exists())
+                assertFalse(File(files, "catalog-revision-spends/$refusedOperation.spent").exists())
+                assertEquals(publication, reconnectPublication(app.contentResolver, tree, first))
+                assertEquals(before + (tree.toString() to (true to false)), witness.inventory(app))
+                witness.refuseParentAccess(app, folder)
+            }
+        }
+    }
+
+    @Test fun opensSelectedAlbumGridAndVerifiedOriginalWhileBrowsing() {
+        withIndependentFilesSelections(chooseAnchor = false, writableDestination = true, singleDestination = true) { app, _, selections, _ ->
+            val tree = selections.single()
+            val files = File(app.filesDir.canonicalFile, "library-open-fixture-${UUID.randomUUID()}").apply { check(mkdir()) }
+            val isolated = object : ContextWrapper(app) {
+                override fun getApplicationContext(): Context = this
+                override fun getFilesDir(): File = files
+            }
+            val scratch = File(files, "scratch").apply { check(mkdir()) }
+            val start = AndroidLibraryStartup(isolated)
+            runBlocking {
+                val previous = start.requireDefaultActivation()
+                val preview = start.prepareOpenExistingFolder(scratch, previous, tree)
+                assertEquals(previous, start.recordedDefaultActivation())
+                assertEquals(1, preview.albums)
+                val selected = start.openVerifiedExistingFolder(scratch, preview)
+                assertEquals(previous.number + 1, selected.number)
+                assertEquals(null, start.recordedDefaultActivation())
+                val catalog = AndroidLibraryStartup(isolated).useSelectedCatalog(scratch) { active, current ->
+                    assertEquals(selected, active)
+                    current.list(null, 10)
+                }
+                assertEquals(1, catalog.single().pageCount)
+                val services = ApplicationServices(isolated)
+                val document = catalog.single().documentId
+                val page = services.loadLibraryAlbum(selected, document).pages.single()
+                val editor = EditorIdentity(document, page.pageId, selected)
+                coroutineScope {
+                    val originals = async { services.originalLibraryEditor(editor, page.sourceId.value).use { it.bitmap.getPixel(0, 0) } }
+                    val metadata = async { services.loadLibraryEditorPage(editor) }
+                    assertEquals(page.pageId, metadata.await().pageId)
+                    assertEquals(0xff132b47.toInt(), originals.await())
+                }
+                val owner = SupervisorJob()
+                val clicked = AtomicReference<EditorIdentity?>()
+                try {
+                    interruptionCompose.runOnUiThread {
+                        val session = ImportLibrarySession(ApplicationLibraryActions(isolated, null, services), LibraryIdentity(),
+                            CoroutineScope(owner + Dispatchers.Main.immediate))
+                        val preferences = AtelierPreferences(isolated)
+                        interruptionCompose.activity.setContent {
+                            val state by session.state.collectAsStateWithLifecycle()
+                            MaterialTheme {
+                                AtelierLibraryScreen(session, state, preferences,
+                                    { services.loadLibraryAlbum(selected, it) },
+                                    { album, tile -> services.renderLibraryThumbnail(selected, album, tile) },
+                                    onSettings = {},
+                                    onEdit = { documentId, pageId -> clicked.set(EditorIdentity(documentId, pageId, selected)) },
+                                )
+                            }
+                        }
+                    }
+                    fun awaitTag(tag: String) = interruptionCompose.waitUntil(25_000) {
+                        interruptionCompose.onAllNodes(hasTestTag(tag) and isEnabled()).fetchSemanticsNodes().isNotEmpty()
+                    }
+                    val albumTag = "atelier-album-${document.value}"
+                    awaitTag(albumTag)
+                    interruptionCompose.onNodeWithTag(albumTag).performClick()
+                    val pageTag = "original-page-${page.pageId.value}"
+                    interruptionCompose.waitUntil(25_000) {
+                        interruptionCompose.onAllNodes(hasTestTag(pageTag)).fetchSemanticsNodes().isNotEmpty()
+                    }
+                    interruptionCompose.onNodeWithTag("atelier-add-pages").assertIsNotEnabled()
+                    interruptionCompose.onNodeWithTag(pageTag).assertIsEnabled().performClick()
+                    assertEquals(editor, clicked.get())
+                } finally {
+                    // As in EditorHostTest, stop the actual task rather than depend on ActivityScenario's API 28 helper Activity.
+                    val host = interruptionCompose.activity
+                    assertTrue(interruptionCompose.runOnUiThread { host.moveTaskToBack(true) })
+                    owner.cancelAndJoin()
+                    withTimeout(15_000) {
+                        while (withContext(Dispatchers.Main) { host.lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED) } ||
+                            services.budget.usedBytes != 0L) delay(20)
+                    }
+                    assertEquals(Lifecycle.State.CREATED, withContext(Dispatchers.Main) { host.lifecycle.currentState })
+                }
+                val accepted = services.loadLibraryEditorPage(editor)
+                services.originalLibraryEditor(editor, page.sourceId.value).use { original ->
+                    assertEquals(page.sourceId.value, original.sourceId)
+                    assertEquals(accepted.recipe.geometry.source.sourceSize, original.inspection.normalizedSize)
+                    assertEquals(0xff132b47.toInt(), original.bitmap.getPixel(0, 0))
+                    assertEquals(0xff637b89.toInt(), original.bitmap.getPixel(2, 1))
+                    assertTrue(services.budget.usedBytes > 0)
+                }
+                assertEquals(0L, services.budget.usedBytes)
+                val foreign = runCatching { services.originalLibraryEditor(editor, UUID.randomUUID().toString()).close() }.exceptionOrNull()
+                assertEquals("editor_page_unavailable", (foreign as RepositoryFailure).error.safeMessageKey)
+                val repeated = runCatching { start.openVerifiedExistingFolder(scratch, preview) }.exceptionOrNull() as RepositoryFailure
+                assertEquals("library_activation_changed", repeated.error.safeMessageKey)
+                app.contentResolver.releasePersistableUriPermission(tree, Intent.FLAG_GRANT_WRITE_URI_PERMISSION)
+                val writeRevoked = runCatching { services.originalLibraryEditor(editor, page.sourceId.value).close() }.exceptionOrNull()
+                assertEquals("library_reconnect_required", (writeRevoked as RepositoryFailure).error.safeMessageKey)
+                assertTrue(start.location().needsReconnect)
+                app.contentResolver.releasePersistableUriPermission(tree, Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                val unavailable = runCatching {
+                    AndroidLibraryStartup(isolated).useSelectedCatalog(scratch) { _, _ -> error("A removed grant cannot open the catalog") }
+                }.exceptionOrNull() as RepositoryFailure
+                assertEquals("library_reconnect_required", unavailable.error.safeMessageKey)
+                val deniedOriginal = runCatching { services.originalLibraryEditor(editor, page.sourceId.value).close() }.exceptionOrNull()
+                assertEquals("library_reconnect_required", (deniedOriginal as RepositoryFailure).error.safeMessageKey)
+                assertEquals(0L, services.budget.usedBytes)
+                assertEquals(null, start.recordedDefaultActivation())
+            }
+        }
+    }
+
+    @Test fun startEmptyRefusesANestedStageOfTheCurrentFilesLibrary() {
+        val leaf = requireNotNull(InstrumentationRegistry.getArguments().getString("libraryNestedEmptyStage"))
+        require(leaf.startsWith("merge-staging-") && UUID.fromString(leaf.removePrefix("merge-staging-")).toString() ==
+            leaf.removePrefix("merge-staging-"))
+        withIndependentFilesSelections(chooseAnchor = false, writableDestination = true, nestedEmptyLeaf = leaf) { app, _, selections, _ ->
+            val (current, nested) = selections
+            val files = File(app.filesDir.canonicalFile, "library-nested-start-${UUID.randomUUID()}").apply { check(mkdir()) }
+            val isolated = object : ContextWrapper(app) {
+                override fun getApplicationContext(): Context = this
+                override fun getFilesDir(): File = files
+            }
+            val scratch = File(files, "scratch").apply { check(mkdir()) }
+            val startup = AndroidLibraryStartup(isolated)
+            fun contents(): Int {
+                val children = DocumentsContract.buildChildDocumentsUriUsingTree(nested, DocumentsContract.getTreeDocumentId(nested))
+                return checkNotNull(app.contentResolver.query(children, arrayOf(DocumentsContract.Document.COLUMN_DOCUMENT_ID), null, null, null))
+                    .use { it.count }
+            }
+            runBlocking {
+                val before = LibraryDescriptorAncestryWitness.seedRecipeEditBinding(isolated, scratch, current)
+                val pointer = File(files, "library-settings/active-library")
+                val retained = pointer.readBytes().toList()
+                assertEquals(0, contents())
+                val preview = startup.prepareFolder(scratch, before, nested) as AndroidLibraryStartup.FolderPreview.Empty
+                val refusal = runCatching { startup.startVerifiedEmptyFolder(scratch, preview) }.exceptionOrNull()
+                assertTrue(refusal is IOException)
+                assertEquals("The selected library folders have no usable common-ancestry hint", refusal?.message)
+                assertEquals(retained, pointer.readBytes().toList())
+                assertEquals(0, contents())
+                assertEquals(before, startup.useSelectedCatalog(scratch) { activation, _ -> activation })
+            }
+        }
+    }
+
+    @Test fun unconfirmedDefaultGraphCloseFencesBothSuccessorAndReturn() {
+        withIndependentFilesSelections(chooseAnchor = false, writableDestination = true, singleDestination = true) { app, _, selections, _ ->
+            val tree = selections.single()
+            val isolated = File(app.filesDir.canonicalFile, "library-cutover-observer-${UUID.randomUUID()}").apply { check(mkdir()) }
+            val files = File(isolated, "files").apply { check(mkdir()) }
+            val databases = File(isolated, "databases").apply { check(mkdir()) }
+            val context = object : ContextWrapper(app) {
+                override fun getApplicationContext(): Context = this
+                override fun getFilesDir(): File = files
+                override fun getDatabasePath(name: String): File = File(databases, name)
+            }
+            runBlocking {
+                val services = ApplicationServices(context)
+                val graph = services.imports()
+                val issuing = graph.activation
+                graph.store.documents.createDocument("Retained Default graph witness")
+                val preview = services.inspectLibraryFolder(issuing, tree)
+                // Hold the real store through its Room invalidation collector, without starting or exposing any OCR job.
+                val ready = CompletableDeferred<Unit>()
+                val observer = launch {
+                    graph.store.savedOcr.observeSearchChanges().collect {
+                        ready.complete(Unit)
+                        awaitCancellation()
+                    }
+                }
+                try {
+                    withTimeout(15_000) { ready.await() }
+                    val failedClose = runCatching { services.selectLibraryFolder(issuing, preview) {} }.exceptionOrNull() as RepositoryFailure
+                    assertEquals("ordinary_export_store_in_use", failedClose.error.safeMessageKey)
+                    val selected = services.storageLocation()
+                    assertEquals(issuing.number + 1, selected.activation.number)
+                    assertNotNull(selected.folderLabel)
+                    val startup = runCatching { services.openLibraryPresentation() }.exceptionOrNull() as RepositoryFailure
+                    assertEquals("library_graph_close_unconfirmed", startup.error.safeMessageKey)
+                    val returnToDefault = runCatching { services.returnToDefaultLibrary(selected.activation) }.exceptionOrNull() as RepositoryFailure
+                    assertEquals("library_graph_close_unconfirmed", returnToDefault.error.safeMessageKey)
+                    assertEquals(selected, services.storageLocation())
+                } finally {
+                    observer.cancelAndJoin()
+                    graph.close()
+                }
+            }
+        }
+    }
+
+    @Test fun selectedEditorDisplaysActualOriginalAndFrameWithoutWrite() {
+        withIndependentFilesSelections(chooseAnchor = false, writableDestination = true, singleDestination = true) { app, _, selections, _ ->
+            val tree = selections.single()
+            val files = File(app.filesDir.canonicalFile, "library-editor-controls-${UUID.randomUUID()}").apply { check(mkdir()) }
+            val isolated = object : ContextWrapper(app) {
+                override fun getApplicationContext(): Context = this
+                override fun getFilesDir(): File = files
+            }
+            val services = ApplicationServices(isolated)
+            runBlocking {
+                val startup = AndroidLibraryStartup(isolated)
+                val previous = startup.requireDefaultActivation()
+                val scratch = File(files, "scratch").apply { check(mkdir()) }
+                val preview = startup.prepareOpenExistingFolder(scratch, previous, tree)
+                val selected = startup.openVerifiedExistingFolder(scratch, preview)
+                val album = startup.useSelectedCatalog(scratch) { _, catalog -> catalog.list(null, 10).single() }
+                val page = services.loadLibraryAlbum(selected, album.documentId).pages.single()
+                val identity = EditorIdentity(album.documentId, page.pageId, selected)
+                val framePixel = AtomicReference<Int?>(null)
+                val exited = java.util.concurrent.atomic.AtomicBoolean()
+                val model = interruptionCompose.runOnUiThread {
+                    val factory = object : ViewModelProvider.Factory {
+                        @Suppress("UNCHECKED_CAST")
+                        override fun <T : androidx.lifecycle.ViewModel> create(modelClass: Class<T>): T =
+                            EditorViewModel(services) { _, _, _ -> error("A preview-only route cannot publish a saved edit") } as T
+                    }
+                    val editor = ViewModelProvider(interruptionCompose.activity, factory)[EditorViewModel::class.java]
+                    editor.open(identity)
+                    interruptionCompose.activity.setContent {
+                        val session by editor.session.collectAsStateWithLifecycle()
+                        MaterialTheme {
+                            session?.let {
+                                PageEditorScreen(allowSave = false, loadOriginal = { source ->
+                                    services.originalLibraryEditor(identity, source).also { preview ->
+                                        framePixel.set(preview.bitmap.getPixel(0, 0))
+                                    }
+                                }).Content(it) { exited.set(true) }
+                            }
+                        }
+                    }
+                    editor
+                }
+                try {
+                    interruptionCompose.waitUntil(25_000) { model.session.value?.preview?.value?.display != null }
+                    assertEquals(identity, model.state.value.identity)
+                    interruptionCompose.onNodeWithTag("editor-tool-original").performClick()
+                    interruptionCompose.waitUntil(25_000) {
+                        model.session.value?.preview?.value?.let { it.view == EditorView.ORIGINAL && !it.previous && it.display != null } == true
+                    }
+                    interruptionCompose.runOnUiThread {
+                        val bitmap = checkNotNull(model.session.value?.preview?.value?.display).bitmap
+                        assertEquals(3, bitmap.width)
+                        assertEquals(2, bitmap.height)
+                        assertEquals(0xff637b89.toInt(), bitmap.getPixel(2, 1))
+                    }
+                    interruptionCompose.onNodeWithTag("editor-tool-shape").performClick()
+                    interruptionCompose.onNodeWithTag("editor-shape-perspective").performScrollTo().performClick()
+                    interruptionCompose.waitUntil(25_000) { framePixel.get() == 0xff132b47.toInt() }
+                    interruptionCompose.onNodeWithTag("atelier-frame-canvas").assertExists()
+                    interruptionCompose.onNodeWithTag("editor-apply").assertIsNotEnabled()
+                    interruptionCompose.onNodeWithTag("editor-back").performClick()
+                    interruptionCompose.onNodeWithTag("editor-apply-exit").assertDoesNotExist()
+                    interruptionCompose.onNodeWithTag("editor-discard-exit").performClick()
+                    interruptionCompose.waitUntil(15_000) { exited.get() }
+                    assertEquals(2L, services.loadLibraryEditorPage(identity).recipeRevision)
+                    assertEquals(selected, services.storageLocation().activation)
+                } finally {
+                    interruptionCompose.runOnUiThread { model.closeEditor() }
+                    interruptionCompose.waitUntil(15_000) { services.budget.usedBytes == 0L }
+                }
+            }
+        }
+    }
+
+    private fun withIndependentFilesSelections(chooseAnchor: Boolean, writableDestination: Boolean = false, singleDestination: Boolean = false,
+        nestedEmptyLeaf: String? = null,
         use: (Context, String, List<Uri>, Map<String, Pair<Boolean, Boolean>>) -> Unit,
     ) {
         check(!writableDestination || !chooseAnchor)
+        check(!singleDestination || writableDestination)
+        check(nestedEmptyLeaf == null || (!chooseAnchor && writableDestination && !singleDestination))
         val instrumentation = InstrumentationRegistry.getInstrumentation()
         val app = instrumentation.targetContext.applicationContext
         val folder = requireNotNull(InstrumentationRegistry.getArguments().getString("libraryFixtureFolder"))
         val witness = LibraryIndependentRootGrants
         val paths = witness.paths(folder)
-        val all = paths.flatMap(witness::spellings)
+        val nested = nestedEmptyLeaf?.let { "${paths.first()}/$it" }
+        val all = (paths + listOfNotNull(nested)).flatMap(witness::spellings)
         val before = witness.inventory(app)
         if (!chooseAnchor) {
             // This witness is pinned to the API 28 guest. Admit only a sparse starting inventory; never ask Android to prune someone else's grant to make room.
@@ -693,12 +1871,14 @@ class LibraryFolderFilesJourneyTest {
         witness.requireNewRecord(app, folder)
         witness.refuseEffectiveWrite(app, all)
         val selected = ArrayList<Uri>(paths.size)
-        fun expectedModes() = selected.mapIndexed { index, uri -> uri.toString() to (true to (writableDestination && index == 0)) }.toMap()
+        fun isWritable(index: Int) = writableDestination && (index == 0 || nested != null)
+        fun expectedModes() = selected.mapIndexed { index, uri -> uri.toString() to (true to isWritable(index)) }.toMap()
         var handedOff = false
         try {
-            for ((index, path) in (if (chooseAnchor) paths else paths.take(2)).withIndex()) {
+            val targets = if (nested != null) listOf(paths.first(), nested) else if (chooseAnchor) paths else paths.take(if (singleDestination) 1 else 2)
+            for ((index, path) in targets.withIndex()) {
                 val result = AtomicReference<ActivityResult>()
-                val platform = LibraryFolderPickerContract(writable = writableDestination && index == 0)
+                val platform = LibraryFolderPickerContract(writable = isWritable(index))
                 val (picker, launcher) = interruptionCompose.runOnUiThread {
                     val host = interruptionCompose.activity
                     val intent = platform.createIntent(host, Unit).putExtra(DocumentsContract.EXTRA_INITIAL_URI,
@@ -714,8 +1894,9 @@ class LibraryFolderFilesJourneyTest {
                         selectSettingsDestination(instrumentation, picker, folder, navigateFromRoot = false,
                             expectedChildren = paths.take(2).map { it.substringAfterLast('/') }.toSet(), allowExactWindowTitle = true)
                     } else {
-                        selectSettingsDestination(instrumentation, picker, path.substringAfterLast('/'),
-                            navigateFromRoot = false, allowExactWindowTitle = true)
+                         selectSettingsDestination(instrumentation, picker, path.substringAfterLast('/'),
+                             navigateFromRoot = false, expectedChildren = if (path == nested) emptySet() else setOf("catalogs", "generations", "objects"),
+                             allowExactWindowTitle = true)
                     }
                     interruptionCompose.waitUntil(10_000) { result.get() != null }
                     val raw = requireNotNull(result.get())
@@ -726,7 +1907,7 @@ class LibraryFolderFilesJourneyTest {
                     // Remember the exact previously absent URI before the platform persistence call; reconcile on failure.
                     selected += picked.uri
                     val handoff = LibraryFolderGrantHandoff(app)
-                    val exact = if (writableDestination && index == 0) handoff.persistWrite(picked) else handoff.persistRead(picked)
+                    val exact = if (isWritable(index)) handoff.persistWrite(picked) else handoff.persistRead(picked)
                     assertEquals(picked.uri, exact)
                     check(witness.inventory(app) == before + expectedModes())
                 } catch (failure: Throwable) {
@@ -751,10 +1932,11 @@ class LibraryFolderFilesJourneyTest {
         } finally {
             if (!handedOff) {
                 try {
-                    val destination = selected.firstOrNull()
-                    if (writableDestination && destination != null && witness.inventory(app)[destination.toString()]?.second == true) {
-                        // This URI was absent from the entire prior inventory and only this exact synthetic picker asked for its write mode.
-                        app.contentResolver.releasePersistableUriPermission(destination, Intent.FLAG_GRANT_WRITE_URI_PERMISSION)
+                    for ((index, destination) in selected.withIndex()) {
+                        if (isWritable(index) && witness.inventory(app)[destination.toString()]?.second == true) {
+                            // This URI was absent from the entire prior inventory and only this exact synthetic picker asked for its write mode.
+                            app.contentResolver.releasePersistableUriPermission(destination, Intent.FLAG_GRANT_WRITE_URI_PERMISSION)
+                        }
                     }
                 } finally {
                     witness.releaseReadDelta(app, selected) { assertEquals(before, witness.inventory(app)) }
@@ -891,6 +2073,24 @@ class LibraryFolderFilesJourneyTest {
             selectWith(marker)
             runBlocking {
                 val album = DocumentId("aaaaaaaa-aaaa-4aaa-8aaa-000000000001")
+                val startup = AndroidLibraryStartup(context)
+                val expected = LibraryActivation(selected.libraryId, 2)
+                val listed = startup.useSelectedCatalog(spool) { _, catalog -> catalog.load(album).pages.single() }
+                val reopened = startup.loadSelectedEditablePage(spool, expected, album, listed.pageId)
+                assertEquals(album, reopened.documentId)
+                assertEquals(listed.pageId, reopened.pageId)
+                assertEquals(listed.sourceId, reopened.sourceId)
+                assertEquals(2L, reopened.recipeRevision)
+                // Revision 2's literal digest from the independent host fixture, not a hash recomputed with the app's codec.
+                assertEquals("0d0d5f0f7fe4177c302382deebd3ac931e9102137593dabeb50b27977b53222d", reopened.recipeHash)
+                assertTrue(spool.list().orEmpty().isEmpty())
+                val unavailableScratch = File(files, "no-stale-editor-scratch")
+                val obsoleteEditor = runCatching {
+                    startup.loadSelectedEditablePage(unavailableScratch, expected.copy(number = 1), album, listed.pageId)
+                }.exceptionOrNull() as RepositoryFailure
+                assertEquals("library_activation_changed", obsoleteEditor.error.safeMessageKey)
+                assertFalse(unavailableScratch.exists())
+                assertTrue(spool.list().orEmpty().isEmpty())
                 repeat(2) {
                     AndroidLibraryStartup(context).useSelectedCatalog(spool) { activation, catalog ->
                         assertEquals(LibraryActivation(selected.libraryId, 2), activation)

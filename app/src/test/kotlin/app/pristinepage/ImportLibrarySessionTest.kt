@@ -9,9 +9,11 @@ import java.lang.reflect.InvocationTargetException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.test.TestScope
 import kotlinx.coroutines.test.advanceUntilIdle
+import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.*
 import org.junit.Test
@@ -65,6 +67,131 @@ class ImportLibrarySessionTest {
         session.accept(LibraryEvent.PhotoResult(exact, f.selected))
         advanceUntilIdle()
         assertEquals(1, f.deliveries)
+    }
+
+    @Test fun selectedRecipeApplyRequiresTheVerifiedWritableCurrentPresentation() = runTest {
+        val f = Fixture()
+        val original = LibraryActivation("aaaaaaaa-aaaa-4aaa-8aaa-000000000001", 2)
+        val advanced = original.copy(number = 3)
+        var opened = LibraryStartup(f.startup(), original, selectedFolder = true)
+        val actions = object : LibraryActions by f {
+            override suspend fun openLibrary() = opened
+        }
+        val session = ImportLibrarySession(actions, LibraryIdentity(), this)
+        advanceUntilIdle()
+        assertFalse(session.state.value.canApplyRecipe(original))
+        opened = LibraryStartup(f.startup(), advanced, selectedFolder = true, selectedRecipeWritable = true)
+        session.reloadAfterLibraryChange(original)
+        assertFalse(session.state.value.canApplyRecipe(advanced))
+        advanceUntilIdle()
+        assertTrue(session.state.value.canApplyRecipe(advanced))
+        assertFalse(session.state.value.canApplyRecipe(original))
+
+        val checking = CompletableDeferred<Boolean>()
+        val check = launch { session.refreshSelectedRecipeWritability { checkIt ->
+            assertEquals(advanced, checkIt)
+            checking.await()
+        } }
+        runCurrent()
+        assertFalse(session.state.value.canApplyRecipe(advanced))
+        session.invalidateSelectedRecipeWritability(advanced)
+        checking.complete(true)
+        check.join()
+        assertFalse(session.state.value.canApplyRecipe(advanced))
+        session.refreshSelectedRecipeWritability { error("An observed provider refusal requires full presentation verification") }
+        assertFalse(session.state.value.canApplyRecipe(advanced))
+        assertEquals(advanced, session.state.value.settingsReconnectAt)
+        session.reloadAfterLibraryChange(advanced)
+        advanceUntilIdle()
+        assertTrue(session.state.value.canApplyRecipe(advanced))
+        assertNull(session.state.value.settingsReconnectAt)
+        session.refreshSelectedRecipeWritability { it == advanced }
+        assertTrue(session.state.value.canApplyRecipe(advanced))
+        session.refreshSelectedRecipeWritability { false }
+        assertFalse(session.state.value.canApplyRecipe(advanced))
+
+        val unavailable = advanced.copy(number = 4)
+        opened = LibraryStartup(f.startup(), unavailable, selectedFolder = true, reconnect = true)
+        session.reloadAfterLibraryChange(advanced)
+        advanceUntilIdle()
+        assertTrue(session.state.value.reconnect)
+        assertFalse(session.state.value.canApplyRecipe(unavailable))
+    }
+
+    @Test fun aVerifiedCutoverClearsTheOldAlbumAndRefusesItsLateMetadataEvenWithTheSameIds() = runTest {
+        val old = LibraryActivation("aaaaaaaa-aaaa-4aaa-8aaa-000000000001", 1)
+        val next = LibraryActivation("aaaaaaaa-aaaa-4aaa-8aaa-000000000002", 2)
+        val f = Fixture()
+        val lateOld = CompletableDeferred<Unit>()
+        val entered = CompletableDeferred<Unit>()
+        var active = old
+        var blockOld = false
+        val actions = object : LibraryActions by f {
+            override suspend fun openLibrary() = LibraryStartup(f.startup(), active)
+            override suspend fun list(after: DocumentId?, limit: Int) =
+                if (active == next) listOf(f.load(f.first).document.copy(title = "New library, same ID")) else f.list(after, limit)
+            override suspend fun loadIssued(id: DocumentId, issuedAt: LibraryActivation): DocumentOverview {
+                if (issuedAt == old && blockOld) withContext(NonCancellable) { entered.complete(Unit); lateOld.await() }
+                return f.load(id)
+            }
+        }
+        val session = ImportLibrarySession(actions, LibraryIdentity(), this)
+        advanceUntilIdle()
+        assertEquals(old, session.state.value.activation)
+        session.accept(LibraryEvent.Open(f.first))
+        advanceUntilIdle()
+        assertEquals(f.first, session.state.value.document?.document?.documentId)
+        blockOld = true
+        session.accept(LibraryEvent.RefreshAlbum)
+        advanceUntilIdle()
+        assertTrue(entered.isCompleted)
+        try {
+            active = next
+            session.reloadAfterLibraryChange(old)
+            assertNull(session.state.value.document)
+            assertNull(session.state.value.selectedId)
+            assertTrue(session.state.value.documents.isEmpty())
+            advanceUntilIdle()
+            lateOld.complete(Unit)
+            advanceUntilIdle()
+            assertEquals(next, session.state.value.activation)
+            assertEquals("New library, same ID", session.state.value.documents.single().title)
+            assertNull(session.state.value.document)
+            assertNull(session.state.value.error)
+        } finally { lateOld.complete(Unit) }
+    }
+
+    @Test fun aCompletedCreateFromTheOldLibraryCannotSelectAnAlbumInItsSuccessor() = runTest {
+        val old = LibraryActivation("aaaaaaaa-aaaa-4aaa-8aaa-000000000001", 1)
+        val next = LibraryActivation("aaaaaaaa-aaaa-4aaa-8aaa-000000000002", 2)
+        val fixture = Fixture()
+        val finish = CompletableDeferred<Unit>()
+        var active = old
+        val actions = object : LibraryActions by fixture {
+            override suspend fun openLibrary() = LibraryStartup(fixture.startup(), active)
+            override suspend fun create(title: String): DocumentId {
+                finish.await()
+                return fixture.first
+            }
+            override suspend fun createIssued(title: String, issuedAt: LibraryActivation?): DocumentId {
+                assertEquals(old, issuedAt)
+                return create(title)
+            }
+        }
+        val session = ImportLibrarySession(actions, LibraryIdentity(), this)
+        advanceUntilIdle()
+        session.accept(LibraryEvent.NewDocument("Old write"))
+        runCurrent()
+
+        active = next
+        session.reloadAfterLibraryChange(old)
+        advanceUntilIdle()
+        finish.complete(Unit)
+        advanceUntilIdle()
+
+        assertEquals(next, session.state.value.activation)
+        assertNull(session.state.value.selectedId)
+        assertNull(session.state.value.document)
     }
 
     @Test fun aRefusedRestoredCallbackDoesNotRetryFailedStartupOrTrapTheAlbum() = runTest {
@@ -281,7 +408,7 @@ class ImportLibrarySessionTest {
     @Test fun navigationCannotAdmitASecondPreparationWhileTheFirstReservationIsSuspended() = runTest {
         val f = Fixture(); val gate = CompletableDeferred<Unit>(); val begun = mutableListOf<DocumentId>()
         val actions = object : LibraryActions by f {
-            override suspend fun begin(document: DocumentSummary): PhotoImportRequest {
+            override suspend fun beginIssued(document: DocumentSummary, issuedAt: LibraryActivation?): PhotoImportRequest {
                 begun += document.documentId
                 if (document.documentId == f.first) gate.await()
                 return PhotoImportRequest(if (document.documentId == f.first) f.batch.value else f.otherBatch.value)

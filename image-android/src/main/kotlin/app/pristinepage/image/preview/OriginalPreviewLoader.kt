@@ -18,8 +18,19 @@ import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.withContext
 import kotlin.math.floor
 
-/** A bounded display-only consumer of the existing verified original. No provider, recipe, cache/file write or new source identity. The caller retains the page/history/source owner throughout this call and while using the returned raster. */
-class OriginalPreviewLoader @JvmOverloads constructor(private val sources: CommittedSources, private val decoder: SourceDecoder, private val budget: ImageAllocationBudget, private val dispatcher: CoroutineDispatcher = PreviewProcessing.dispatcher) {
+/** A bounded display-only consumer of the existing verified original. Storage access stays inside SourceDecoder's loan; no recipe, durable copy or new source identity is created. The caller retains the page/history/source owner. */
+class OriginalPreviewLoader private constructor(
+    private val decoder: SourceDecoder, private val budget: ImageAllocationBudget, private val dispatcher: CoroutineDispatcher,
+    private val privateSources: CommittedSources?,
+) {
+    @JvmOverloads constructor(decoder: SourceDecoder, budget: ImageAllocationBudget, dispatcher: CoroutineDispatcher = PreviewProcessing.dispatcher) :
+        this(decoder, budget, dispatcher, null)
+
+    // Preserve the independent legacy private lookup and binding check for existing callers.
+    @JvmOverloads constructor(sources: CommittedSources, decoder: SourceDecoder, budget: ImageAllocationBudget,
+        dispatcher: CoroutineDispatcher = PreviewProcessing.dispatcher,
+    ) : this(decoder, budget, dispatcher, sources)
+
     suspend fun load(sourceId: String, longEdge: Int = 1024): OriginalPreviewRaster {
         var completed: OriginalPreviewRaster? = null
         try {
@@ -28,13 +39,15 @@ class OriginalPreviewLoader @JvmOverloads constructor(private val sources: Commi
                 context.ensureActive()
                 val id = try { SourceId(sourceId) } catch (_: IllegalArgumentException) { refuse(OperationErrorCode.INVALID_INPUT, "invalid_source_id", null) }
                 if (longEdge !in 1..1024) refuse(OperationErrorCode.INVALID_INPUT, "invalid_preview_limit", id)
-                val retained = sources.load(id)
-                if (retained.sourceId != id) refuse(OperationErrorCode.INTEGRITY_FAILED, "committed_source_binding_mismatch", id)
-                val size = Coordinates.limitLongEdge(retained.inspection.normalizedSize, longEdge, geometric = false)
-                val output = OutputSpec(size, RenderPurpose.PREVIEW)
-                decoder.decode(sourceId, output).use { full ->
+                val retained = privateSources?.load(id)
+                if (retained != null && retained.sourceId != id) refuse(OperationErrorCode.INTEGRITY_FAILED, "committed_source_binding_mismatch", id)
+                decoder.decodeForOriginalPreview(sourceId).use { full ->
                     context.ensureActive()
-                    if (full.inspection != retained.inspection || full.sourceByteHash != retained.sourceByteHash) refuse(OperationErrorCode.INTEGRITY_FAILED, "preview_source_binding_changed", id)
+                    if (retained != null && (full.inspection != retained.inspection || full.sourceByteHash != retained.sourceByteHash)) {
+                        refuse(OperationErrorCode.INTEGRITY_FAILED, "preview_source_binding_changed", id)
+                    }
+                    val size = Coordinates.limitLongEdge(full.inspection.normalizedSize, longEdge, geometric = false)
+                    val output = OutputSpec(size, RenderPurpose.PREVIEW)
                     // At most1024² pixels. Charge both the packed scratch and immutable RgbImage copy before allocating either, in addition to the still-live full-source permit. Retaining the conservative charge until close is intentional; a later bitmap/display bridge needs its own reservation.
                     val permit = budget.reserve(6L * size.pixelCount)
                     var image: RgbImage? = null

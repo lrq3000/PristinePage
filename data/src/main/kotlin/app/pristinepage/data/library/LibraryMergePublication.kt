@@ -17,6 +17,12 @@ internal class LibraryMergePublication(
     private val checkpoint: () -> Unit = {},
 ) {
     interface Destination : LibraryMergePayloads.Destination, LibraryBackupRead.Source, LibraryCatalogPublication.Store {
+        /** The revision journal must be an independent, cooperating private owner, not a folder supplied by the provider. */
+        fun requireIndependentRevisionJournal(path: Path)
+
+        /** Check the live owner before staging and again immediately before making the closed catalog visible. */
+        fun createGuardedCatalog(generation: LibraryGeneration, requireCurrent: () -> Unit, write: (OutputStream) -> Unit)
+
         /** Complete staging first; call [requireCurrent] immediately before the externally visible move or link. */
         fun createMergeMarker(generation: LibraryGeneration, bytes: ByteArray, requireStage: () -> Unit, requireCurrent: () -> Unit)
     }

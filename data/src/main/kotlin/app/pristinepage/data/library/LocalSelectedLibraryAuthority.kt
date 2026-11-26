@@ -2,6 +2,7 @@ package app.pristinepage.data.library
 
 import app.pristinepage.data.files.DirectorySync
 import app.pristinepage.data.files.PlatformDirectorySync
+import app.pristinepage.data.library.ActiveLibraryFence.Identity
 import app.pristinepage.data.library.ActiveLibraryFence.Location
 import app.pristinepage.data.library.ActiveLibraryFence.Selection
 import java.io.File
@@ -49,8 +50,105 @@ internal class LocalSelectedLibraryAuthority(root: File, sync: DirectorySync = P
 
     fun initializeDefault(next: Selection): Boolean = pointer.replace(null, next)
 
+    /** Historical private receipts may be shown only after proving continuity of the same default library. */
+    fun verifiedDefaultOrigin(current: Selected.Default): LibraryActivation? {
+        if (read() != current) throw IOException("The default library is no longer active")
+        val origin = if (current.selection.identity.activation == 1L) null else {
+            pointer.readDefaultOrigin()?.takeIf { it.identity.libraryId == current.selection.identity.libraryId }
+                ?: throw IOException("The original default library identity is unavailable")
+        }
+        if (read() != current) throw IOException("The default library changed during history admission")
+        return origin?.identity?.let { LibraryActivation(it.libraryId, it.activation) }
+    }
+
+    /** Explicit return only. A missing or inconsistent private origin can never mint a new default library. */
+    fun returnToDefault(expected: Selection, requireCurrent: () -> Unit): Selected.Default {
+        if (expected.location !is Location.Folder || read()?.selection != expected) throw IOException("The folder is no longer selected")
+        val origin = pointer.readDefaultOrigin() ?: throw IOException("The original default library identity is unavailable")
+        val next = origin.copy(identity = origin.identity.copy(activation = Math.addExact(expected.identity.activation, 1L)))
+        val confirmed = Selected.Default(next)
+        try {
+            if (!pointer.replace(expected, next, requireCurrent)) throw IOException("The default library was not selected")
+        } catch (failure: IOException) {
+            if (read() != confirmed) throw failure
+        }
+        if (read() != confirmed || pointer.readDefaultOrigin() != origin) throw IOException("The default selection could not be acknowledged")
+        return confirmed
+    }
+
+    /** Advance the exact current writable binding, without switching folders. The settings owner must hold its lane and supply a verified live publication; this private swap does not authenticate or replay a provider write. */
+    fun advanceVerifiedFolderGeneration(
+        expected: Selected.Folder, successor: LibraryGeneration, beforePointerReplace: () -> Unit = {}, requireCurrent: () -> Unit,
+    ): Selected.Folder {
+        val next = advancedFolderSelection(expected, successor)
+            ?: throw IOException("The edited generation is not a successor to the active writable folder")
+        if (read() != expected) throw IOException("The expected folder generation is no longer active")
+        val bound = chooseFolder(expected.selection, next, expected.grant, successor, beforePointerReplace) {
+            if (read() != expected) throw IOException("The active folder binding changed before publication")
+            // A disk barrier may outlast provider access; keep the live check last, immediately before the pointer move.
+            requireCurrent()
+        }
+        val admitted = Selected.Folder(bound, expected.grant, successor)
+        if (read() != admitted) throw IOException("The advanced folder binding could not be acknowledged")
+        return admitted
+    }
+
+    /** Observe a possibly acknowledged atomically published pointer. This never advances the pointer or inspects the provider. */
+    fun readAdvancedFolderGeneration(expected: Selected.Folder, successor: LibraryGeneration): Selected.Folder? {
+        val next = advancedFolderSelection(expected, successor) ?: return null
+        val bound = boundSelection(next, expected.grant, successor)
+        return (read() as? Selected.Folder)?.takeIf { it == Selected.Folder(bound, expected.grant, successor) }
+    }
+
+    /** Reconstruct the candidate issuing binding; only the exact private intent can prove it issued the current child. */
+    fun readVerifiedRecipePredecessor(adopted: Selected.Folder): Selected.Folder? {
+        if (read() != adopted) throw IOException("The adopted folder binding changed")
+        val identity = adopted.selection.identity
+        if (identity.activation <= 1 || adopted.grant.returnedModes != 3) return null
+        val predecessorId = adopted.expectedGeneration.predecessorId ?: return null
+        val location = Location.Folder(adopted.grant.grantId, predecessorId)
+        val predecessor = readVerifiedGeneration(location) ?: return null
+        if (predecessor.libraryId != identity.libraryId) return null
+        val issuing = Selection(location, identity.copy(activation = identity.activation - 1))
+        val binding = Selected.Folder(boundSelection(issuing, adopted.grant, predecessor), adopted.grant, predecessor)
+        val successor = advancedFolderSelection(binding, adopted.expectedGeneration) ?: return null
+        if (boundSelection(successor, adopted.grant, adopted.expectedGeneration) != adopted.selection || read() != adopted) {
+            throw IOException("The adopted folder binding changed during predecessor readback")
+        }
+        return binding
+    }
+
+    /** Resolve one archive locator against immutable private records. This is never authority for a current operation. */
+    fun readArchivedRecipePredecessor(activation: Long, grantId: String, candidate: LibraryGeneration): Selected.Folder? {
+        val location = Location.Folder(grantId, candidate.id)
+        val grant = grants.readVerified(grantId)?.takeIf { it.returnedModes == 3 } ?: return null
+        val predecessor = readVerifiedGeneration(location)?.takeIf { it == candidate } ?: return null
+        val selection = Selection(location, Identity(predecessor.libraryId, activation))
+        return Selected.Folder(boundSelection(selection, grant, predecessor), grant, predecessor)
+    }
+
+    fun advanceOrReadVerifiedFolderGeneration(
+        expected: Selected.Folder, successor: LibraryGeneration, beforePointerReplace: () -> Unit = {}, requireCurrent: () -> Unit,
+    ): Selected.Folder = try {
+        advanceVerifiedFolderGeneration(expected, successor, beforePointerReplace, requireCurrent)
+    } catch (failure: IOException) {
+        // The atomic replacement may have occurred before its final force/readback failed. Never repeat the swap or the provider write.
+        readAdvancedFolderGeneration(expected, successor) ?: throw failure
+    }
+
+    private fun advancedFolderSelection(expected: Selected.Folder, successor: LibraryGeneration): Selection? {
+        val previous = expected.expectedGeneration
+        val identity = expected.selection.identity
+        if (expected.grant.returnedModes != 3 || successor.libraryId != previous.libraryId ||
+            successor.predecessorId != previous.id || successor.id == previous.predecessorId ||
+            successor.catalogSchema != previous.catalogSchema || identity.activation == Long.MAX_VALUE
+        ) return null
+        return Selection(Location.Folder(expected.grant.grantId, successor.id), identity.copy(activation = identity.activation + 1))
+    }
+
     /** Called only after verifying the exact next folder and candidate graph. Stage records before publishing the pointer; never delete an old binding on refusal. */
     fun chooseFolder(expected: Selection, next: Selection, grant: LibraryFolderGrantRecord, generation: LibraryGeneration,
+        beforePointerReplace: () -> Unit = {},
         checkpoint: () -> Unit = {},
     ): Selection {
         val location = next.location as? Location.Folder ?: throw IOException("Expected a verified folder selection")
@@ -61,13 +159,25 @@ internal class LocalSelectedLibraryAuthority(root: File, sync: DirectorySync = P
         val bound = boundSelection(next, grant, generation)
         if (pointer.readVerified() != expected) throw IOException("The expected selection is no longer active")
         checkpoint()
+        if (expected.location == Location.Default) {
+            val origin = expected.copy(identity = expected.identity.copy(activation = 1L))
+            if (pointer.readDefaultOrigin() == null && expected.identity.activation == 1L) {
+                try { verifications.createDefaultOrigin(pointer.encodeDefaultOrigin(origin)) }
+                catch (_: FileAlreadyExistsException) { /* Require exact durable readback below. */ }
+            }
+            if (pointer.readDefaultOrigin() != origin) throw IOException("The default library origin cannot be retained")
+        }
         grants.writeVerified(grant)
         if (readVerifiedGeneration(location) == null) {
             try { verifications.createFolderVerification(grant.grantId, generation) }
             catch (_: FileAlreadyExistsException) { /* Require an exact durable immutable match below. */ }
         }
         if (readVerifiedGeneration(location) != generation) throw IOException("The folder generation verification conflicts")
-        if (!pointer.replace(expected, bound, checkpoint)) throw IOException("The selected folder was not published")
+        if (!pointer.replace(expected, bound) {
+                checkpoint()
+                // No provider work or cancellation point may separate the grant handoff from attempting the atomic pointer move.
+                beforePointerReplace()
+            }) throw IOException("The selected folder was not published")
         return bound
     }
 

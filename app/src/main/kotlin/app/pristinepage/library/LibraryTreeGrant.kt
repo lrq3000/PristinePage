@@ -2,6 +2,29 @@ package app.pristinepage.library
 
 import android.content.Intent
 import java.io.IOException
+import java.util.concurrent.atomic.AtomicBoolean
+
+/** An exact Android grant must not look pre-existing to a second preview while the first can still release it. */
+internal class ProvisionalFolderGrants {
+    private val active = HashSet<String>()
+
+    @Synchronized fun claim(exactUri: String): Claim {
+        val claim = Claim(exactUri)
+        if (!active.add(exactUri)) throw IOException("Another review is using this folder permission")
+        return claim
+    }
+
+    inner class Claim internal constructor(private val exactUri: String) {
+        private val finished = AtomicBoolean()
+
+        /** Keep the key claimed through the platform release; a subsequent owner must take a fresh baseline. */
+        fun finish(cleanup: () -> Unit) {
+            if (!finished.compareAndSet(false, true)) return
+            try { cleanup() }
+            finally { synchronized(this@ProvisionalFolderGrants) { check(active.remove(exactUri)) } }
+        }
+    }
+}
 
 /** The picker capability and the currently persisted access modes are separate facts. */
 internal class LibraryTreeGrant private constructor(val exactUri: String, val returnedWrite: Boolean) {

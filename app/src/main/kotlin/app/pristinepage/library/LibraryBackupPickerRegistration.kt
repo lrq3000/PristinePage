@@ -9,6 +9,7 @@ internal class LibraryBackupPickerRegistration(
     private val confirmation: LibraryBackupConfirmation,
     private val ticket: LibraryBackupConfirmation.Ticket,
     deliver: (Delivery) -> Unit,
+    writable: Boolean = true,
 ) : AutoCloseable {
     sealed interface Delivery {
         val ticket: LibraryBackupConfirmation.Ticket
@@ -28,7 +29,7 @@ internal class LibraryBackupPickerRegistration(
         override fun cancel() = owner.cancel(ticket)
     }
 
-    private val launcher = registry.register(ticket.registryKey, LibraryFolderPickerContract(writable = true)) { selection ->
+    private val launcher = registry.register(ticket.registryKey, LibraryFolderPickerContract(writable = writable)) { selection ->
         if (confirmation.bindResult(ticket)) deliver(RegisteredDelivery(confirmation, ticket, selection))
     }
 
