@@ -45,6 +45,25 @@ internal class LocalSelectedRecipeAttempts(
         return active.resolve(id)
     }
 
+    /** False is unresolved private cleanup, not a judgment about the already-adopted pointer or the provider write. */
+    fun settleAdopted(
+        intent: LocalLibraryRecipeEditJournal.Intent,
+        adopted: LocalSelectedLibraryAuthority.Selected.Folder,
+        requireCurrent: () -> Unit,
+    ): Boolean = try {
+        if (adopted != intent.adoptedSelection()) unavailable()
+        requireCurrent()
+        val path = find(intent.successor.id) ?: unavailable()
+        if (path.parent == active) {
+            val journal = open(path)
+            journal.acknowledgeAdopted(intent, adopted, requireCurrent)
+            journal.reclaimAdoptedCatalog(intent, adopted, requireCurrent)
+        }
+        archiveReclaimed(intent, adopted, requireCurrent)
+        true
+    } catch (_: IOException) { false }
+    catch (_: DirectoryIteratorException) { false }
+
     fun archiveReclaimed(
         intent: LocalLibraryRecipeEditJournal.Intent,
         adopted: LocalSelectedLibraryAuthority.Selected.Folder,
@@ -55,9 +74,8 @@ internal class LocalSelectedRecipeAttempts(
         requireCurrent()
         val current = find(id) ?: unavailable()
         val target = history.resolve(id)
-        fun evidence(path: Path) = LocalLibraryRecipeEditJournal(path.toFile(), sync, checkpoint, nodeIdentity).reclaimedEvidence(intent)
         var parents = parentKeys()
-        val before = evidence(current)
+        val before = open(current).reclaimedEvidence(intent)
         requireParents(parents)
         if (current != target) {
             requireCapacity(history, 128)
@@ -69,19 +87,21 @@ internal class LocalSelectedRecipeAttempts(
         }
         if (parents[active] == null || parents[history] == null) unavailable()
         forceParents(parents)
-        if (find(id) != current || evidence(current) != before) unavailable()
+        if (find(id) != current || open(current).reclaimedEvidence(intent) != before) unavailable()
         if (current != target) {
             if (!Files.notExists(target, NOFOLLOW_LINKS)) unavailable()
             requireParents(parents)
             requireCurrent()
             Files.move(current, target, ATOMIC_MOVE)
             forceParents(parents)
-            if (find(id) != target || evidence(target) != before) unavailable()
+            if (find(id) != target || open(target).reclaimedEvidence(intent) != before) unavailable()
         }
         requireParents(parents)
         requireCurrent()
         return target
     }
+
+    private fun open(path: Path) = LocalLibraryRecipeEditJournal(path.toFile(), sync, checkpoint, nodeIdentity)
 
     private fun parentKeys(): Map<Path, Any?> {
         val owner = directoryKey(files) ?: unavailable()

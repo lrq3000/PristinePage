@@ -462,6 +462,40 @@ class LocalLibraryRecipeEditJournalTest {
         assertEquals(archived, attempts(files).find(next.id))
     }
 
+    @Test fun settlementConsumesOnlyTheCurrentAdoptedEditAndCanFinishAnUnacknowledgedArchive() {
+        val files = roots.newFolder().canonicalFile
+        val active = attempts(files).requireNew(next.id)
+        Files.createDirectory(active.parent)
+        Files.createDirectory(active)
+        active.resolve("catalog.sqlite").toFile().writeBytes(staged)
+        val intent = LocalLibraryRecipeEditJournal.Intent(binding(3), "c".repeat(64), next)
+        val adopted = binding(4, predecessor = next)
+        val writer = journal(active.toFile())
+        writer.start(intent) {}.recordAfterProviderClosure(next)
+        assertFalse(attempts(files).settleAdopted(intent, binding(5, predecessor = next)) {})
+        assertEquals(LocalLibraryRecipeEditJournal.Phase.COMPLETED, writer.inspect(intent))
+        val failed = attempts(files, DirectorySync { Files.exists(active) })
+        assertFalse(failed.settleAdopted(intent, adopted) {})
+        assertFalse(Files.exists(active))
+        val cold = attempts(files)
+        assertEquals(true, cold.settleAdopted(intent, adopted) {})
+        val archived = checkNotNull(cold.find(next.id))
+        assertEquals(setOf("recipe-edit.intent", "recipe-edit.complete", "recipe-edit.adopted"), archived.toFile().list()!!.toSet())
+        assertFailsWith<IOException> { cold.requireNew(next.id) }
+    }
+
+    @Test fun cancellationIsNotASettlementRefusalAndDoesNotRemoveBytes() {
+        val (files, active, intent) = reclaimedAttempt()
+        val before = active.toFile().list()!!.toSet()
+        assertFailsWith<kotlinx.coroutines.CancellationException> {
+            attempts(files).settleAdopted(intent, binding(4, predecessor = next)) {
+                throw kotlinx.coroutines.CancellationException("The caller was canceled")
+            }
+        }
+        assertEquals(before, active.toFile().list()!!.toSet())
+        assertEquals(active, attempts(files).find(next.id))
+    }
+
     private fun reclaimedAttempt(withSpend: Boolean = false): Triple<File, java.nio.file.Path, LocalLibraryRecipeEditJournal.Intent> {
         val files = roots.newFolder().canonicalFile
         val active = attempts(files).requireNew(next.id)
