@@ -13,8 +13,15 @@ import kotlinx.coroutines.sync.Mutex
 private const val SELECTED_LIBRARY_WRITE_LOCK = "library-selected-merge-v1.lock"
 private val selectedLibraryProcessLane = Mutex()
 
+internal class SelectedLibraryWriteLease(private val owner: Path, private val check: () -> Unit) {
+    fun requireCurrent(files: Path) {
+        if (files != owner) throw IOException("The selected library write lease belongs to another private owner")
+        check()
+    }
+}
+
 /** Both selected append and edit use the exact canonical app-files owner. Refuse same-process contention before opening another lock descriptor. */
-internal inline fun <T> withSelectedLibraryWriteLane(files: Path, block: (() -> Unit) -> T): T {
+internal inline fun <T> withSelectedLibraryWriteLane(files: Path, block: (SelectedLibraryWriteLease) -> T): T {
     if (!selectedLibraryProcessLane.tryLock()) throw IOException("Another selected library publication owns the write lane")
     try {
         requireSelectedPrivateWriteRoot(files)
@@ -22,10 +29,10 @@ internal inline fun <T> withSelectedLibraryWriteLane(files: Path, block: (() -> 
             val lock = try { channel.tryLock() } catch (_: OverlappingFileLockException) { null }
                 ?: throw IOException("Another process owns the selected library write lane")
             return lock.use {
-                block {
+                block(SelectedLibraryWriteLease(files) {
                     requireSelectedPrivateWriteRoot(files)
                     if (!lock.isValid) throw IOException("The selected library lost its write lane")
-                }
+                })
             }
         }
     } finally {

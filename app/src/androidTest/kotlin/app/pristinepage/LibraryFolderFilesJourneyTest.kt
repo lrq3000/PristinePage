@@ -116,7 +116,8 @@ class LibraryFolderFilesJourneyTest {
     private val chooseHost = TestRule { next, description ->
         val rule = if (description.methodName in setOf("endsProcessAfterPayloadBeforeTheCompletionMarker", "persistsIndependentFilesRootsAndAnchor",
                  "separatesIndependentlySelectedRootsWithoutAParentGrant", "selectedFilesMergeAppendsOnlyTheMissingOriginalAndKeepsItsPredecessor",
-                 "selectedFilesMergeCanAppendTwiceWithoutReusingAnOlderStage", "endsProcessAfterSelectedAppendCompletionBeforeDelivery"))
+                 "selectedFilesMergeCanAppendTwiceWithoutReusingAnOlderStage", "endsProcessAfterSelectedAppendCompletionBeforeDelivery",
+                 "oneFilesSelectionPublishesOnlyAClosedEditedCatalog"))
             interruptionCompose else compose
         rule.apply(next, description)
     }
@@ -771,10 +772,75 @@ class LibraryFolderFilesJourneyTest {
         }
     }
 
-    private fun withIndependentFilesSelections(chooseAnchor: Boolean, writableDestination: Boolean = false,
+    @Test fun oneFilesSelectionPublishesOnlyAClosedEditedCatalog() {
+        val operation = requireNotNull(InstrumentationRegistry.getArguments().getString("librarySelectedAppendOperation"))
+        require(UUID.fromString(operation).toString() == operation)
+        withIndependentFilesSelections(chooseAnchor = false, writableDestination = true, singleDestination = true) { app, folder, selections, before ->
+            val tree = selections.single()
+            val grants = LibraryIndependentRootGrants
+            fun requireAuthority() {
+                assertEquals(before + (tree.toString() to (true to true)), grants.inventory(app))
+                grants.refuseParentAccess(app, folder)
+            }
+            val files = File(app.filesDir.canonicalFile, "library-selected-editor-$operation").apply { check(mkdir()) }
+            val isolated = object : ContextWrapper(app) {
+                override fun getApplicationContext(): Context = this
+                override fun getFilesDir(): File = files
+            }
+            val scratch = File(files, "scratch").apply { check(mkdir()) }
+            val reader = AndroidLibraryTreeRead(isolated, scratch)
+            val album = DocumentId("aaaaaaaa-aaaa-4aaa-8aaa-000000000001")
+            val witness = LibraryDescriptorAncestryWitness
+            runBlocking {
+                val unbound = reader.verify(tree)
+                val baseline = witness.verifyRecipeEditTarget(reader, tree)
+                val page = reader.openWorkingCatalog(baseline) { it.load(album).pages.single() }
+                assertEquals(2L, page.recipeRevision)
+                val unboundError = runCatching {
+                    witness.appendSelectedRecipeEdit(isolated, scratch, operation, unbound, album, page.pageId,
+                        page.recipeRevision, 2) { error("An unbound verification attempted edit admission") }
+                }.exceptionOrNull()
+                assertTrue(unboundError is IOException)
+                assertEquals("The selected catalog edit requires the confirmed physical root", unboundError?.message)
+                val edited = witness.appendSelectedRecipeEdit(isolated, scratch, operation, baseline, album, page.pageId,
+                    page.recipeRevision, 2, ::requireAuthority)
+                assertEquals(operation, edited)
+                val reopened = reader.verify(tree)
+                assertEquals(operation, reopened.generationId)
+                assertEquals(baseline.libraryId, reopened.libraryId)
+                val current = reader.openWorkingCatalog(reopened) { it.load(album).pages.single() }
+                assertEquals(page.pageId, current.pageId)
+                assertEquals(page.sourceId, current.sourceId)
+                assertEquals(3L, current.recipeRevision)
+                val forbidProvider = object : ContextWrapper(isolated) {
+                    override fun getApplicationContext(): Context = this
+                    override fun getContentResolver(): ContentResolver = error("Spent edit attempted provider access")
+                }
+                val refusal = runCatching {
+                    witness.appendSelectedRecipeEdit(forbidProvider, scratch, operation, baseline, album, page.pageId,
+                        page.recipeRevision, 2) {}
+                }.exceptionOrNull()
+                assertTrue(refusal is IOException)
+                assertEquals("The catalog revision attempt is already spent", refusal?.message)
+                assertEquals(operation, reader.verify(tree).generationId)
+                requireAuthority()
+                // Remove only this test's write mode. The remaining read grant may inspect the successor, not nominate a new edit.
+                app.contentResolver.releasePersistableUriPermission(tree, Intent.FLAG_GRANT_WRITE_URI_PERMISSION)
+                assertEquals(before + (tree.toString() to (true to false)), grants.inventory(app))
+                val readOnly = runCatching { witness.verifyRecipeEditTarget(reader, tree) }.exceptionOrNull()
+                assertTrue(readOnly is IOException)
+                assertEquals("The exact library folder is not writable", readOnly?.message)
+            }
+            assertFalse(File(files, "library-settings").exists())
+            assertFalse(files.walkTopDown().any { it.name == "original.bin" })
+        }
+    }
+
+    private fun withIndependentFilesSelections(chooseAnchor: Boolean, writableDestination: Boolean = false, singleDestination: Boolean = false,
         use: (Context, String, List<Uri>, Map<String, Pair<Boolean, Boolean>>) -> Unit,
     ) {
         check(!writableDestination || !chooseAnchor)
+        check(!singleDestination || writableDestination)
         val instrumentation = InstrumentationRegistry.getInstrumentation()
         val app = instrumentation.targetContext.applicationContext
         val folder = requireNotNull(InstrumentationRegistry.getArguments().getString("libraryFixtureFolder"))
@@ -801,7 +867,7 @@ class LibraryFolderFilesJourneyTest {
         fun expectedModes() = selected.mapIndexed { index, uri -> uri.toString() to (true to (writableDestination && index == 0)) }.toMap()
         var handedOff = false
         try {
-            for ((index, path) in (if (chooseAnchor) paths else paths.take(2)).withIndex()) {
+            for ((index, path) in (if (chooseAnchor) paths else paths.take(if (singleDestination) 1 else 2)).withIndex()) {
                 val result = AtomicReference<ActivityResult>()
                 val platform = LibraryFolderPickerContract(writable = writableDestination && index == 0)
                 val (picker, launcher) = interruptionCompose.runOnUiThread {

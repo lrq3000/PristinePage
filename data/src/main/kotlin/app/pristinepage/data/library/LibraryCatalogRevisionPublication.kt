@@ -23,7 +23,19 @@ internal class LibraryCatalogRevisionPublication(
         originalObjects: Collection<ObjectId>, editedObjects: Collection<ObjectId>,
         availableBytes: Long, catalogAndJournalBytes: Long,
         openStage: () -> InputStream, verifyReopened: (File) -> Unit,
+    ): LibraryGeneration = withSelectedLibraryWriteLane(journal.rootPath) { lease ->
+        publishUnderLease(lease, predecessor, successor, originalObjects, editedObjects, availableBytes,
+            catalogAndJournalBytes, openStage, verifyReopened)
+    }
+
+    /** A provider adapter already holds the private lane before borrowing any provider handles. Do not reacquire it. */
+    fun publishUnderLease(
+        lease: SelectedLibraryWriteLease, predecessor: LibraryGeneration, successor: LibraryGeneration,
+        originalObjects: Collection<ObjectId>, editedObjects: Collection<ObjectId>,
+        availableBytes: Long, catalogAndJournalBytes: Long,
+        openStage: () -> InputStream, verifyReopened: (File) -> Unit,
     ): LibraryGeneration {
+        lease.requireCurrent(journal.rootPath)
         if (successor.libraryId != predecessor.libraryId || successor.predecessorId != predecessor.id ||
             successor.catalogSchema != predecessor.catalogSchema || predecessor.catalog.byteCount > MAX_PORTABLE_BYTES ||
             successor.catalog.byteCount > MAX_PORTABLE_BYTES
@@ -49,11 +61,9 @@ internal class LibraryCatalogRevisionPublication(
         requireOwner()
         destination.requireIndependentScratch(scratch)
         destination.requireIndependentRevisionJournal(journal.rootPath)
-        return withSelectedLibraryWriteLane(journal.rootPath) { requireLane ->
-            publishOwned(predecessor, successor, originals, openStage, verifyReopened) {
-                requireLane()
-                requireOwner()
-            }
+        return publishOwned(predecessor, successor, originals, openStage, verifyReopened) {
+            lease.requireCurrent(journal.rootPath)
+            requireOwner()
         }
     }
 
@@ -91,7 +101,7 @@ internal class LibraryCatalogRevisionPublication(
         }
 
         requireTip(predecessor)
-        journal.requireUnspentCatalogRevision(successor)
+        journal.requireUnspentCatalogRevision(successor.id)
         if (destination.openCatalog(successor)?.use { true } == true) {
             throw IOException("The edited catalog is already present; do not replay the write")
         }

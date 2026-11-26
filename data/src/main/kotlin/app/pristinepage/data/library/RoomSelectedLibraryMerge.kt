@@ -30,9 +30,9 @@ internal class RoomSelectedLibraryMerge(context: Context, private val scratchDir
         val files = app.filesDir.toPath().toRealPath()
         checkpoint()
         requireAuthority()
-        val published = withSelectedLibraryWriteLane(files) { requireLane ->
+        val published = withSelectedLibraryWriteLane(files) { lane ->
             appendOwned(operationId, destination, incoming, files, checkpoint) {
-                requireLane()
+                lane.requireCurrent(files)
                 requireAuthority()
             }
         }

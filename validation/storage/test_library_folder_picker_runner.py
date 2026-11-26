@@ -21,6 +21,18 @@ from run_local_ocr_guest import read_boot_serial
 
 
 class LibraryFolderPickerRunnerTest(unittest.TestCase):
+    def test_selected_recipe_admission_refuses_a_candidate_pair_or_drifted_retained_state(self):
+        from run_library_folder_picker_ldplayer import require_selected_recipe_predecessor
+        pair = {"app": "prior", "test": "prior-test"}
+        ordinary = {"pointer": "prior-pointer"}
+        grants = {"quantity": 1, "sha256": "original-grant-digest"}
+        require_selected_recipe_predecessor(pair, pair, ordinary, ordinary, grants, grants)
+        for actual in (({"app": "candidate", "test": "candidate-test"}, ordinary, grants),
+                       (pair, {"pointer": "different"}, grants),
+                       (pair, ordinary, {"quantity": 1, "sha256": "different"})):
+            with self.subTest(actual=actual), self.assertRaisesRegex(RuntimeError, "selected edit predecessor"):
+                require_selected_recipe_predecessor(actual[0], pair, actual[1], ordinary, actual[2], grants)
+
     def test_repeat_refuses_contradictory_release_and_cleanup_metadata(self):
         original = dict(name="synthetic", installation="installed", index=3, created="creation", worktree="owned",
                         purpose="library", api=28, created_by_agent=True, generation="exact", runtime_processes=[[15, 42], [17, 47]])
@@ -225,6 +237,50 @@ class LibraryFolderPickerRunnerTest(unittest.TestCase):
         for enabled, mixed, derived in ((False, False, True), (True, True, True), (True, False, False)):
             with self.assertRaisesRegex(RuntimeError, "standalone"):
                 select_independent_roots(enabled, mixed, derived=derived, append=True)
+
+    def test_selected_recipe_oracle_refuses_truncated_titles_or_unbound_undo(self):
+        from run_library_folder_picker_ldplayer import verify_selected_recipe_catalog
+        from make_library_folder_picker_fixture import make_fixture, synthetic_scan
+        with TemporaryDirectory(prefix="pristinepage-recipe-oracle-") as temporary:
+            root = Path(temporary)
+            before = root / "baseline"
+            make_fixture(before, with_scan=True)
+            baseline, = (before / "catalogs").glob("*.sqlite")
+            candidate = root / "edited.sqlite"
+            shutil.copyfile(baseline, candidate)
+            with closing(sqlite3.connect(candidate)) as db:
+                document, = db.execute("SELECT documentId FROM Document").fetchone()
+                page, source = db.execute("SELECT pageId,sourceId FROM Page").fetchone()
+                prior, = db.execute("SELECT canonicalRecipe FROM RecipeRevision WHERE recipeRevision=2").fetchone()
+                recipe = json.loads(prior)
+                recipe["geometry"]["outputQuarterTurns"] = 2
+                encoded = json.dumps(recipe, sort_keys=True, separators=(",", ":")).encode()
+                digest = sha256(b"pristinepage-recipe-json-v1\0" + len(encoded).to_bytes(4, "big") + encoded).hexdigest()
+                db.execute("INSERT INTO RecipeRevision VALUES (?,3,?,1,?,?,2,20)", (page, source, encoded, digest))
+                db.execute("UPDATE Document SET documentRevision=3,updatedAt=20")
+                db.execute("UPDATE Page SET currentRecipeRevision=3")
+                def state(revision):
+                    return json.dumps(dict(version=1, pages=[dict(pageId=page, sourceId=source, recipeRevision=revision)]),
+                                      separators=(",", ":")).encode()
+                undo = self._uuid(8)
+                db.execute("INSERT INTO UndoEntry VALUES (?,?,?,?, 'RECIPE_EDIT',3,86400020,'AVAILABLE')",
+                           (undo, document, state(2), state(3)))
+                db.execute("INSERT INTO SourceReference VALUES ('RECIPE_HISTORY',?,?,20)", (f"recipe-v1/{page}/3", source))
+                db.execute("INSERT INTO SourceReference VALUES ('UNDO',?,?,20)", (undo, source))
+                db.execute("UPDATE Source SET refCount=5")
+                db.commit()
+            good = candidate.read_bytes()
+            verify_selected_recipe_catalog(candidate, baseline, synthetic_scan()[0])
+            self.assertEqual(good, candidate.read_bytes())
+            for sql in ("UPDATE Document SET title='Synthetic'",
+                        "UPDATE UndoEntry SET afterState=beforeState",
+                        "UPDATE RecipeRevision SET parentRevision=1 WHERE recipeRevision=3"):
+                candidate.write_bytes(good)
+                with closing(sqlite3.connect(candidate)) as db:
+                    db.execute(sql)
+                    db.commit()
+                with self.assertRaisesRegex(RuntimeError, "selected recipe catalog"):
+                    verify_selected_recipe_catalog(candidate, baseline, synthetic_scan()[0])
 
     def test_selected_append_host_oracle_rejects_missing_recipe_history(self):
         with TemporaryDirectory(prefix="pristinepage-append-catalog-test-") as temporary:

@@ -52,13 +52,13 @@ internal class LocalLibraryDirectory(root: File, private val directorySync: Dire
         create(generation.catalogPath, beforeStage = requireCurrent, beforeLink = requireCurrent, write = write)
     override fun openMarker(generation: LibraryGeneration) = open(markerPath(generation))
 
-    fun requireUnspentCatalogRevision(generation: LibraryGeneration) {
-        open(catalogRevisionSpend(generation))?.use { throw IOException("The catalog revision attempt is already spent") }
+    fun requireUnspentCatalogRevision(operation: String) {
+        open(catalogRevisionSpend(operation))?.use { throw IOException("The catalog revision attempt is already spent") }
     }
 
     /** A one-use admission record, not completion. It must be durable before any writable destination stage is opened. */
     fun spendCatalogRevision(predecessor: LibraryGeneration, successor: LibraryGeneration, requireOwner: () -> Unit) =
-        create(catalogRevisionSpend(successor), privateSupport = true, beforeStage = requireOwner, beforeLink = requireOwner) {
+        create(catalogRevisionSpend(successor.id), privateSupport = true, beforeStage = requireOwner, beforeLink = requireOwner) {
             it.write(catalogRevisionSpendBytes(predecessor, successor))
         }
 
@@ -68,7 +68,10 @@ internal class LocalLibraryDirectory(root: File, private val directorySync: Dire
     private fun catalogRevisionSpendBytes(predecessor: LibraryGeneration, successor: LibraryGeneration): ByteArray =
         CATALOG_REVISION_SPEND_HEADER.toByteArray(Charsets.US_ASCII) + predecessor.encode() + successor.encode()
 
-    private fun catalogRevisionSpend(generation: LibraryGeneration) = "catalog-revision-spends/${generation.id}.spent"
+    private fun catalogRevisionSpend(operation: String): String {
+        requireOpaqueId(operation)
+        return "catalog-revision-spends/$operation.spent"
+    }
 
     /** Private merge-journal use only. An operation ID is never supplied by SQLite rows or a display label. */
     fun openMergeIntent(generation: String) = open(mergeStagePath(generation) + "/merge.intent")

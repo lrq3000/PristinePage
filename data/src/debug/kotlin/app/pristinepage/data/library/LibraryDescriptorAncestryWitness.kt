@@ -3,6 +3,9 @@ package app.pristinepage.data.library
 import android.content.Context
 import android.net.Uri
 import android.os.ParcelFileDescriptor
+import app.pristinepage.data.model.DocumentId
+import app.pristinepage.data.model.PageId
+import app.pristinepage.data.repository.RecipeAdmission
 import java.io.File
 import java.util.UUID
 
@@ -76,6 +79,22 @@ object LibraryDescriptorAncestryWitness {
 
     suspend fun completedMerge(context: Context, operation: String): String? =
         RoomSelectedLibraryMerge.inspect(context, operation)?.takeIf { it.completed }?.intent?.candidate?.id
+
+    suspend fun verifyRecipeEditTarget(reader: AndroidLibraryTreeRead, tree: Uri): AndroidLibraryTreeRead.Verified =
+        reader.verifyRecipeEditTarget(tree)
+
+    suspend fun appendSelectedRecipeEdit(
+        context: Context, scratch: File, operation: String, verified: AndroidLibraryTreeRead.Verified,
+        document: DocumentId, page: PageId,
+        expectedRevision: Long, turns: Int, requireAuthority: () -> Unit,
+    ): String {
+        val reader = AndroidLibraryTreeRead(context, scratch)
+        val result = reader.appendSelectedRecipeEdit(verified, operation, document, page, expectedRevision,
+            RecipeAdmission { _, _ -> null }, requireAuthority) { previous ->
+            previous.copy(geometry = previous.geometry.withOutputQuarterTurns(turns))
+        }
+        return (result as AndroidLibraryTreeRead.SelectedRecipeEdit.Published).generation.id
+    }
 
     fun requireSameIdentity(held: ParcelFileDescriptor, reopened: ParcelFileDescriptor) {
         check(AndroidLibraryDescriptorAncestry.observe(held) == AndroidLibraryDescriptorAncestry.observe(reopened)) {
