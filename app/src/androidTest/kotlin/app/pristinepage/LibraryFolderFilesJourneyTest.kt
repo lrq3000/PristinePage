@@ -13,6 +13,7 @@ import android.database.sqlite.SQLiteDatabase
 import android.graphics.Rect
 import android.net.Uri
 import android.os.Build
+import android.os.ParcelFileDescriptor
 import android.os.Bundle
 import android.os.Process
 import android.os.SystemClock
@@ -114,7 +115,8 @@ class LibraryFolderFilesJourneyTest {
     }
     private val chooseHost = TestRule { next, description ->
         val rule = if (description.methodName in setOf("endsProcessAfterPayloadBeforeTheCompletionMarker", "persistsIndependentFilesRootsAndAnchor",
-                "separatesIndependentlySelectedRootsWithoutAParentGrant", "selectedFilesMergeAppendsOnlyTheMissingOriginalAndKeepsItsPredecessor"))
+                 "separatesIndependentlySelectedRootsWithoutAParentGrant", "selectedFilesMergeAppendsOnlyTheMissingOriginalAndKeepsItsPredecessor",
+                 "selectedFilesMergeCanAppendTwiceWithoutReusingAnOlderStage"))
             interruptionCompose else compose
         rule.apply(next, description)
     }
@@ -668,6 +670,65 @@ class LibraryFolderFilesJourneyTest {
         // Construct a new private reader only after the Files fixture grants are restored.
         val app = InstrumentationRegistry.getInstrumentation().targetContext.applicationContext
         runBlocking { assertEquals(operation, witness.completedMerge(app, operation)) }
+    }
+
+    @Test fun selectedFilesMergeCanAppendTwiceWithoutReusingAnOlderStage() {
+        val args = InstrumentationRegistry.getArguments()
+        val first = UUID.fromString(requireNotNull(args.getString("librarySelectedAppendOperation"))).toString()
+        val second = UUID.fromString(requireNotNull(args.getString("librarySelectedRepeatOperation"))).toString()
+        val expectedMissing = requireNotNull(args.getString("librarySelectedAppendBytes")).toLong()
+        check(first != second && expectedMissing in 70_000..71_000)
+        val witness = LibraryDescriptorAncestryWitness
+        lateinit var isolated: Context
+        withIndependentFilesSelections(chooseAnchor = false, writableDestination = true) { app, folder, selected, before ->
+            fun requireAuthority() {
+                val expected = before + mapOf(selected[0].toString() to (true to true), selected[1].toString() to (true to false))
+                assertEquals(expected, LibraryIndependentRootGrants.inventory(app))
+                LibraryIndependentRootGrants.refuseParentAccess(app, folder)
+            }
+            // The earlier one-shot witness remains in the ordinary app-files root. Only this exact synthetic batch can use its fresh private scope.
+            val files = File(app.filesDir.canonicalFile, "library-selected-repeat-$first").apply { check(mkdir()) }
+            isolated = object : ContextWrapper(app) {
+                override fun getApplicationContext(): Context = this
+                override fun getFilesDir(): File = files
+            }
+            val scratch = File(files, "read-scratch").apply { check(mkdir()) }
+            val destination = selected[0]
+            val source = selected[1]
+            fun openFirstStage(): ParcelFileDescriptor {
+                val root = DocumentsContract.getTreeDocumentId(destination)
+                val id = DocumentsContract.buildDocumentUriUsingTree(destination, "$root/merge-staging-$first")
+                return checkNotNull(app.contentResolver.openFileDescriptor(id, "r"))
+            }
+            runBlocking {
+                val initial = witness.verifyPairWithSharedOwner(isolated, scratch, destination, source, ::requireAuthority)
+                assertEquals(1, initial[0].scans)
+                assertEquals(expectedMissing, witness.estimateMerge(isolated, scratch, initial[0], initial[1], ::requireAuthority).missingBytes)
+                assertEquals(first, witness.publishMerge(isolated, scratch, first, initial[0], initial[1], ::requireAuthority))
+                val once = witness.verifyPairWithSharedOwner(isolated, scratch, destination, source, ::requireAuthority)
+                assertEquals(first, once[0].generationId)
+                assertEquals(2, once[0].scans)
+                assertEquals(initial[1].generationId, once[1].generationId)
+                openFirstStage().use { priorStage ->
+                    val dryRun = witness.estimateMerge(isolated, scratch, once[0], once[1], ::requireAuthority)
+                    assertEquals(0L, dryRun.missingBytes)
+                    assertEquals(1, dryRun.matchedOriginals)
+                    assertEquals(second, witness.publishMerge(isolated, scratch, second, once[0], once[1], ::requireAuthority))
+                    openFirstStage().use { witness.requireSameIdentity(priorStage, it) }
+                }
+                val twice = witness.verifyPairWithSharedOwner(isolated, scratch, destination, source, ::requireAuthority)
+                assertEquals(second, twice[0].generationId)
+                assertEquals(1, twice[0].albums)
+                assertEquals(2, twice[0].scans)
+                assertEquals(initial[1].generationId, twice[1].generationId)
+            }
+            requireAuthority()
+        }
+        // A fresh reader of the exact private receipts does not require either of the fixture grants.
+        runBlocking {
+            assertEquals(first, witness.completedMerge(isolated, first))
+            assertEquals(second, witness.completedMerge(isolated, second))
+        }
     }
 
     private fun withIndependentFilesSelections(chooseAnchor: Boolean, writableDestination: Boolean = false,

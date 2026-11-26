@@ -53,6 +53,21 @@ class LibraryFolderPickerRunnerTest(unittest.TestCase):
                     INSERT INTO RecipeRevision VALUES(9,1,NULL),(9,2,1),(2,1,NULL),(2,2,1);
                 """)
                 verify_selected_append_catalog(path, "old", "incoming")
+                with self.assertRaisesRegex(RuntimeError, "recipe history"):
+                    verify_selected_append_catalog(path, "old", "incoming", repeated=True)
+                db.executescript("""
+                    UPDATE Page SET currentRecipeRevision=4 WHERE pageId=2;
+                    INSERT INTO RecipeRevision VALUES(2,3,NULL),(2,4,3);
+                """)
+                verify_selected_append_catalog(path, "old", "incoming", repeated=True)
+                db.execute("UPDATE RecipeRevision SET parentRevision=1 WHERE pageId=2 AND recipeRevision=4")
+                db.commit()
+                with self.assertRaisesRegex(RuntimeError, "recipe history"):
+                    verify_selected_append_catalog(path, "old", "incoming", repeated=True)
+                db.executescript("""
+                    UPDATE Page SET currentRecipeRevision=2 WHERE pageId=2;
+                    DELETE FROM RecipeRevision WHERE pageId=2 AND recipeRevision>2;
+                """)
                 db.execute("DELETE FROM RecipeRevision WHERE pageId=2 AND recipeRevision=1")
                 db.commit()
                 with self.assertRaisesRegex(RuntimeError, "recipe history"):

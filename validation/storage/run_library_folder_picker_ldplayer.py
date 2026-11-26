@@ -633,21 +633,29 @@ def exercise_selected_append(run, adb, ns, raw, guest_root, folder, files, recei
                  "The selected append changed predecessor or unreferenced fixture bytes")
 
 
-def verify_selected_append_catalog(catalog, destination_digest, incoming_digest):
+def verify_selected_append_catalog(catalog, destination_digest, incoming_digest, *, repeated=False):
     with closing(sqlite3.connect(catalog.resolve().as_uri() + "?mode=ro", uri=True)) as db:
         rows = db.execute("""
             SELECT d.title, n.filename, p.ordinal, b.byteSha256, p.currentRecipeRevision, r.recipeRevision, r.parentRevision
             FROM Document d JOIN Page p USING(documentId) JOIN LibraryScanName n USING(pageId)
             JOIN Source s USING(sourceId) JOIN SourceBlob b USING(sourceBlobId) JOIN RecipeRevision r ON p.pageId=r.pageId
-            ORDER BY p.ordinal, r.recipeRevision LIMIT 5
+            ORDER BY p.ordinal, r.recipeRevision LIMIT 7
         """).fetchall()
-        need(rows == [
+        incoming_current = 4 if repeated else 2
+        expected = [
             ("Synthetic folder test", "Synthetic.png", 0, destination_digest, 2, 1, None),
             ("Synthetic folder test", "Synthetic.png", 0, destination_digest, 2, 2, 1),
-            ("Synthetic folder test", "Additional synthetic.png", 1, incoming_digest, 2, 1, None),
-            ("Synthetic folder test", "Additional synthetic.png", 1, incoming_digest, 2, 2, 1),
-        ] and db.execute("SELECT count(*) FROM Document").fetchone() == (1,),
-            "The actual selected append catalog lost the album order, originals or full recipe history")
+            ("Synthetic folder test", "Additional synthetic.png", 1, incoming_digest, incoming_current, 1, None),
+            ("Synthetic folder test", "Additional synthetic.png", 1, incoming_digest, incoming_current, 2, 1),
+        ]
+        if repeated:
+            expected += [
+                ("Synthetic folder test", "Additional synthetic.png", 1, incoming_digest, 4, 3, None),
+                ("Synthetic folder test", "Additional synthetic.png", 1, incoming_digest, 4, 4, 3),
+            ]
+        need(rows == expected and db.execute("SELECT count(*) FROM Document").fetchone() == (1,)
+             and db.execute("SELECT count(*) FROM Page").fetchone() == (2,),
+             "The actual selected append catalog lost the album order, originals or full recipe history")
 
 
 def exercise_independent_roots(run, adb, ns, guest_root, folder, files, hashes, prior_folder, retained_record=None, *, derived=False):
