@@ -23,6 +23,8 @@ TEARDOWN_STOP = "picker-adapter-selected-open-8f4e46542f1e"
 TEARDOWN_STOP_SHA = "6c28baa2732db0ecc835481d744820daed50aff77ca04b6159b4ee496a7b09ca"
 PREVIEW_PASS = "picker-adapter-selected-open-3282172e6e63"
 PREVIEW_PASS_SHA = "caaa401ed4963a2788fa189cb487a1ca1ac0e2f2a173b836daae79f7f39b45b8"
+CONTROLS_PASS = "picker-adapter-selected-open-287dec362e4a"
+CONTROLS_PASS_SHA = "4d7de14e7acd4077a87e86119d5f0576bf4aca767e5d84afdf4263fca2a466a5"
 FIRST_CASE = "app.pristinepage.LibraryFolderFilesJourneyTest#confirmedOpenSwitchesToTheSelectedFilesCatalogAndRevocationDoesNotFallBack"
 CASE = "app.pristinepage.LibraryFolderFilesJourneyTest#opensSelectedAlbumGridAndVerifiedOriginalWhileBrowsing"
 CONTROLS_CASE = "app.pristinepage.LibraryFolderFilesJourneyTest#selectedEditorDisplaysActualOriginalAndFrameWithoutWrite"
@@ -56,14 +58,32 @@ def verify_preview_pass(record, guest, pair, outcome, preservation, trace):
                 "The exact selected preview predecessor is not a preserved read-only pass")
 
 
+def verify_unlaunched_cutover(record, guest, serial, folder, commit, previous, installed, candidate, transcript, trace):
+    launches = [i for i, row in enumerate(trace) if "instrument" in row["argv"]]
+    checks.need(record["source"] == commit and record["predecessor"] == PREVIEW_PASS_SHA and record["guest"] == guest and
+                record["reusedReadFixture"] is True and record["previous"] == previous and candidate == installed and
+                checks.read_results(transcript, (CONTROLS_CASE,)) == ([CONTROLS_CASE], []) and len(launches) == 1 and
+                not any({"push", "force-stop"}.intersection(row["argv"]) for row in trace),
+                "Cannot prove the exact unlaunched cutover predecessor")
+    launch = trace[launches[0]]
+    expected = ["-s", serial, "shell", "am", "instrument", "-w", "-r", "-e", "class", CONTROLS_CASE,
+                "-e", "libraryFixtureFolder", folder, checks.RUNNER]
+    subsequent_process_reads = [row for row in trace[launches[0] + 1:] if "pidof" in row["argv"]]
+    checks.need(launch["argv"][1:] == expected and launch["exit"] == 0 and launch["stdout"].strip() == transcript.strip() and
+                len(subsequent_process_reads) == 1 and subsequent_process_reads[0]["exit"] == 0 and
+                subsequent_process_reads[0]["argv"][1:] == ["-s", serial, "shell", "pidof", checks.APP, checks.TEST] and
+                re.fullmatch(r"[1-9][0-9]*( [1-9][0-9]*)?", subsequent_process_reads[0]["stdout"].strip()),
+                "Cannot prove the exact process refusal before the unlaunched cutover")
+
+
 def run_open(commit, app_sha, test_sha, build_receipt, *, after_contention=False, reuse_read_fixture=False, after_teardown=False,
-             after_preview=False):
+             after_preview=False, only_unlaunched_cutover=False):
     root = checks.ROOT
     checks.need(__debug__ and Path.cwd().resolve() == root and not any(os.environ.get(key) for key in checks.LOCAL_ADB_OVERRIDES),
                 "Use the exact worktree and the ordinary scoped transport")
     checks.need(re.fullmatch(r"[a-f0-9]{40}", commit), "The candidate must name a complete source commit")
     if not reuse_read_fixture:
-        checks.need(subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip() == commit and
+        checks.need((only_unlaunched_cutover or subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip() == commit) and
                     not subprocess.check_output(["git", "diff", commit, "--", *checks.INPUTS]) and
                     not subprocess.check_output(["git", "ls-files", "--others", "--exclude-standard", "--", *checks.INPUTS]),
                     "The production or instrumentation inputs do not match the named candidate")
@@ -95,6 +115,7 @@ def run_open(commit, app_sha, test_sha, build_receipt, *, after_contention=False
     failed_fixture = None
     untouched_pending = None
     predecessor = BASELINE_SHA
+    after_preview |= only_unlaunched_cutover
     if after_contention or reuse_read_fixture or after_teardown or after_preview:
         failed = history / CONTENTION
         latest_manifest = failed / f"{CONTENTION}-final-manifest.json"
@@ -182,9 +203,25 @@ def run_open(commit, app_sha, test_sha, build_receipt, *, after_contention=False
 
     paths = {checks.APP: root / "app/build/outputs/apk/debug/app-debug.apk",
              checks.TEST: root / "app/build/outputs/apk/androidTest/debug/app-debug-androidTest.apk"}
-    if reuse_read_fixture:
-        paths = {package: history / STAGING_STOP / f"{package}.apk" for package in paths}
     pair = {checks.APP: app_sha, checks.TEST: test_sha}
+    if only_unlaunched_cutover:
+        stopped = history / CONTROLS_PASS
+        partial = checks.settings_run_anchors(stopped, CONTROLS_PASS_SHA)
+        record = json.loads(partial("artifacts.json"))
+        released = json.loads(partial("claim.json"))
+        installed = {package: record["proof"][package]["sha256"] for package in previous}
+        checks.need(released["name"] == guest and released["ownership_history"][-1]["generation"] == claim["generation"] and
+                    json.loads(partial("selected-open-attempt.json")) == failed_fixture | {"siblingFiles": failed_fixture["files"]} and
+                    not (stopped / f"{CONTROLS_PASS}-instrumentation-2.txt").exists(),
+                    "The controls release or unlaunched observer fixture does not match")
+        verify_unlaunched_cutover(record, guest, released["serial"], failed_fixture["folder"], commit, previous, installed, pair,
+                                  partial("instrumentation.txt"), [json.loads(line) for line in partial("commands.jsonl").splitlines()])
+        paths = {package: stopped / f"{package}.apk" for package in paths}
+        previous, claim, predecessor = installed, released, CONTROLS_PASS_SHA
+        manifest = stopped / f"{CONTROLS_PASS}-final-manifest.json"
+        snapshot = json.loads(manifest.read_bytes())["recordSnapshot"]
+    elif reuse_read_fixture:
+        paths = {package: history / STAGING_STOP / f"{package}.apk" for package in paths}
     receipt = json.loads(build_receipt.read_bytes())
     checks.need(receipt == dict(source=commit, sha256=pair),
                 "The retained exact build receipt does not bind this source and APK pair")
@@ -192,18 +229,21 @@ def run_open(commit, app_sha, test_sha, build_receipt, *, after_contention=False
                 "The retained guest and APK evidence need more disk space")
     inputs = root / "validation/raw/providers/ocr-app-standard-full"
     proof = {package: checks.exact_apk(path, pair[package], inputs, package == checks.TEST) for package, path in paths.items()}
-    checks.need(reuse_read_fixture or pair[checks.TEST] != previous[checks.TEST], "The selected preview requires the current test APK, not the old test")
+    checks.need(reuse_read_fixture or only_unlaunched_cutover or pair[checks.TEST] != previous[checks.TEST],
+                "The selected preview requires the current test APK, not the old test")
     checks.require_independent_manifests(proof.values())
     prefix = "picker-adapter-selected-open-" + uuid.uuid4().hex[:12]
     raw = history / prefix
     raw.mkdir()
-    saved = {package: raw / f"{package}.apk" for package in paths}
-    for package, path in paths.items():
-        shutil.copyfile(path, saved[package])
-        checks.need(checks.sha(saved[package]) == pair[package], "Candidate changed during evidence retention")
+    saved = paths if only_unlaunched_cutover else {package: raw / f"{package}.apk" for package in paths}
+    if not only_unlaunched_cutover:
+        for package, path in paths.items():
+            shutil.copyfile(path, saved[package])
+            checks.need(checks.sha(saved[package]) == pair[package], "Candidate changed during evidence retention")
     (raw / f"{prefix}-artifacts.json").write_text(
         json.dumps(dict(source=commit, proof=proof, previous=previous,
-                         predecessor=predecessor, guest=guest, reusedReadFixture=reuse_folders)), encoding="ascii")
+                         predecessor=predecessor, guest=guest, reusedReadFixture=reuse_folders,
+                         **({"reusedArtifactRun": CONTROLS_PASS} if only_unlaunched_cutover else {}))), encoding="ascii")
     ns = checks.load_allocator(root, guest, raw, "pristinepage-tree-" + os.environ["OPENCODE_SESSION_ID"])
     base = checks.run_type(ns, purpose="pristinepage-library-app-tree", operation="PristinePage selected catalog and frame",
                            admit_released=lambda record: checks.verify_bound_recipe_release(claim, record, manifest, snapshot))
@@ -253,9 +293,9 @@ def run_open(commit, app_sha, test_sha, build_receipt, *, after_contention=False
             checks.need(re.fullmatch(r"[0-9]+:[1-9][0-9]*:[0-9]+:[0-9]+", pending_before),
                         "The retained partial fixture directory is unavailable")
         try:
+            cases = (CUTOVER_CASE,) if only_unlaunched_cutover else (CONTROLS_CASE, CUTOVER_CASE) if after_preview else (CASE,)
             passed, failed = exercise(runner, adb, ns, raw, saved, pair, previous, installed,
-                                      failed_fixture if reuse_folders else None,
-                                      (CONTROLS_CASE, CUTOVER_CASE) if after_preview else (CASE,))
+                                      failed_fixture if reuse_folders else None, cases)
         finally:
             check_protected()
             if untouched_pending:
@@ -337,7 +377,9 @@ if __name__ == "__main__":
     resume.add_argument("--reuse-read-fixture", action="store_true", help="Use the installed pair from the exact staging timeout and read the earlier complete fixture without reinstalling or staging new files")
     resume.add_argument("--after-teardown", action="store_true", help="Use the exact teardown failure as the immediate predecessor without staging new files")
     resume.add_argument("--after-preview", action="store_true", help="Verify the editor controls and cutover observer on the unchanged fixture after the exact preview pass")
+    resume.add_argument("--only-unlaunched-cutover", action="store_true", help="Run only the unlaunched Room observer case using the exact retained controls APKs")
     args = parser.parse_args()
     raise SystemExit(run_open(args.commit, args.app_sha, args.test_sha, args.build_receipt,
                               after_contention=args.after_contention, reuse_read_fixture=args.reuse_read_fixture,
-                              after_teardown=args.after_teardown, after_preview=args.after_preview))
+                              after_teardown=args.after_teardown, after_preview=args.after_preview,
+                              only_unlaunched_cutover=args.only_unlaunched_cutover))

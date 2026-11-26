@@ -22,6 +22,34 @@ from run_local_ocr_guest import read_boot_serial
 
 
 class LibraryFolderPickerRunnerTest(unittest.TestCase):
+    def test_cutover_continuation_accepts_only_an_unlaunched_observer_on_the_exact_installed_pair(self):
+        from run_selected_folder_open_ldplayer import CONTROLS_CASE, CUTOVER_CASE, PREVIEW_PASS_SHA, verify_unlaunched_cutover
+        pair = {"app.pristinepage.debug": "a" * 64, "app.pristinepage.debug.test": "b" * 64}
+        guest, serial, folder = "test-guest", "emulator-5556", "PristinePage-tree-1234567890ab"
+        record = {"source": "c" * 40, "predecessor": PREVIEW_PASS_SHA, "guest": guest, "reusedReadFixture": True, "previous": {}}
+        transcript = (f"INSTRUMENTATION_STATUS: class={CONTROLS_CASE.split('#')[0]}\n"
+                      f"INSTRUMENTATION_STATUS: test={CONTROLS_CASE.split('#')[1]}\n"
+                      "INSTRUMENTATION_STATUS_CODE: 1\n"
+                      f"INSTRUMENTATION_STATUS: class={CONTROLS_CASE.split('#')[0]}\n"
+                      f"INSTRUMENTATION_STATUS: test={CONTROLS_CASE.split('#')[1]}\n"
+                      "INSTRUMENTATION_STATUS_CODE: 0\nINSTRUMENTATION_RESULT: stream=\nOK (1 test)\nINSTRUMENTATION_CODE: -1\n")
+        command = ["adb", "-s", serial, "shell", "am", "instrument", "-w", "-r", "-e", "class",
+                   CONTROLS_CASE, "-e", "libraryFixtureFolder", folder,
+                   "app.pristinepage.debug.test/androidx.test.runner.AndroidJUnitRunner"]
+        trace = [
+            {"argv": command, "exit": 0, "stdout": transcript},
+            {"argv": ["adb", "-s", serial, "shell", "pidof", *pair], "exit": 0, "stdout": "4058\n"},
+        ]
+        verify_unlaunched_cutover(record, guest, serial, folder, record["source"], {}, pair, pair, transcript, trace)
+        for changed in (trace + [{"argv": ["adb", "instrument", CUTOVER_CASE]}],
+                        trace[:1], [trace[0], trace[1] | {"stdout": ""}],
+                        trace + [{"argv": ["adb", "push", "payload"]}]):
+            with self.assertRaisesRegex(RuntimeError, "unlaunched cutover"):
+                verify_unlaunched_cutover(record, guest, serial, folder, record["source"], {}, pair, pair, transcript, changed)
+        with self.assertRaisesRegex(RuntimeError, "unlaunched cutover"):
+            verify_unlaunched_cutover(record, guest, serial, folder, record["source"], {}, pair,
+                                     pair | {"app.pristinepage.debug.test": "d" * 64}, transcript, trace)
+
     def test_read_only_preview_batch_refuses_a_spent_or_incomplete_predecessor(self):
         from run_selected_folder_open_ldplayer import CASE, TEARDOWN_STOP_SHA, verify_preview_pass
         pair = {"app.pristinepage.debug": "a" * 64, "app.pristinepage.debug.test": "b" * 64}
