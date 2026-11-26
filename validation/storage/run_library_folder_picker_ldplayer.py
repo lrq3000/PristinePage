@@ -327,6 +327,28 @@ def verify_released_independent_guest(original, stopped):
          "The released guest does not match the exact independent-root predecessor")
 
 
+def verify_released_append_guest(original, stopped, generation):
+    """Accept only an explicitly named intervening release on the same disk, retaining the dry-run provenance."""
+    stable = ("name", "installation", "index", "created", "api", "created_by_agent")
+    history = stopped.get("ownership_history", [])
+    prior = history[-1] if history else {}
+    cleanup = stopped.get("cleanup_attempt") or {}
+    prior_cleanup = prior.get("cleanup_attempt") or {}
+    processes = stopped.get("runtime_processes", [])
+    need(all(stopped.get(key) == original[key] for key in stable) and original["api"] == 28 and original["created_by_agent"] is True
+         and stopped.get("generation") == stopped.get("claim_generation") == generation and generation != original["generation"]
+         and stopped.get("owner") is None and stopped.get("state") == "stopped-released"
+         and stopped.get("shutdown_verified") is True and stopped.get("shutdown_ready") is True and stopped.get("evidence_saved") is True
+         and stopped.get("consumers") == [] and stopped.get("reservedKiB") == 0 and not stopped.get("keep_running")
+         and not stopped.get("handoff_to") and len(processes) == 2 and stopped.get("shutdown_processes") == processes
+         and cleanup.get("generation") == generation and cleanup.get("state") == "completed"
+         and prior.get("generation") == original["generation"] and prior.get("worktree") == original["worktree"]
+         and prior.get("state") == "stopped-released" and prior.get("owner") is None
+         and prior.get("shutdown_processes") == original["runtime_processes"]
+         and prior_cleanup.get("generation") == original["generation"] and prior_cleanup.get("state") == "completed",
+         "The selected append guest does not match the exact intervening released claim and dry-run predecessor")
+
+
 def verify_independent_derived_installed(installed, previous):
     need(installed == previous, "The exact installed predecessor is required for the derived-root witness")
 
@@ -533,6 +555,16 @@ def stage_synthetic_files(adb, fixture, destination, files):
     for relative in files:
         adb("push", fixture / relative, f"{destination}/{relative}")
     verify_unchanged_settings_destination(adb, destination, files)
+
+
+def stage_independent_fixture_pair(adb, guest_root, folder, fixtures, admit):
+    children = independent_fixture_children(folder)
+    need(guest_root == f"/sdcard/Documents/{folder}" and len(fixtures) == len(children),
+         "The staged independent fixtures must match the exact fresh guest folder")
+    admit()
+    adb("shell", "mkdir", guest_root)
+    for name, (fixture, files) in zip(children, fixtures):
+        stage_synthetic_files(adb, fixture, f"{guest_root}/{name}", files)
 
 
 def exercise_selected_append(run, adb, ns, raw, guest_root, folder, files, received, hashes, operation, missing, missing_bytes):
@@ -1113,6 +1145,9 @@ def run(args):
              "Pre-marker death needs an exact retained guest and a standalone invocation")
     independent_derived = args.independent_roots_derived
     selected_append = args.selected_root_append
+    append_release = args.selected_append_released_generation
+    need(append_release is None or (selected_append and re.fullmatch(UUID_TEXT, append_release)),
+         "Reassignment is valid only for a standalone selected append and one exact released generation")
     independent_cases = select_independent_roots(args.independent_roots,
         any((args.fresh, args.backup_delivery_death, args.backup_death_retry, death_receipt, death_picker_case,
              ancestry_cases, before_marker, capacity_case, picker_case, recovery_case, backup_case, args.probe_write,
@@ -1433,15 +1468,21 @@ def run(args):
                         treeAncestryHandoff=ancestry_resume, backupPreMarker=before_marker,
                         backupPreMarkerHandoff=pre_marker_handoff, independentRoots=bool(independent_cases),
                         independentRootsRetry=args.independent_roots_retry, independentRootsHandoff=independent_handoff,
-                         independentRootsDerived=independent_derived, selectedRootAppend=append_operation, incomingFixture=received)),
+                         independentRootsDerived=independent_derived, selectedRootAppend=append_operation,
+                         appendInterveningRelease=append_release, incomingFixture=received)),
         encoding="utf-8",
     )
     ns = load_allocator(ROOT, args.guest, raw, "pristinepage-tree-" + os.environ["OPENCODE_SESSION_ID"])
 
-    admit = None if independent_claim is None else lambda record: verify_released_independent_guest(independent_claim, record)
+    def admit_independent(record):
+        if append_release:
+            verify_released_append_guest(independent_claim, record, append_release)
+        else:
+            verify_released_independent_guest(independent_claim, record)
 
     class FolderRun(run_type(ns, purpose="pristinepage-library-app-tree", operation="PristinePage Files tree",
-                             fresh_disk_floor_gib=16, add_statuses=(0, 1, 2, 3), admit_released=admit)):
+                             fresh_disk_floor_gib=16, add_statuses=(0, 1, 2, 3),
+                             admit_released=admit_independent if independent_claim else None, reassign_released=bool(append_release))):
         def process(self, pid):
             return inspect_prior_pid(super().process, pid)
 
@@ -1459,7 +1500,7 @@ def run(args):
         if independent_claim:
             current = run.owned()
             verify_completed_guest(independent_claim, current)
-            need(current["ownership_history"][-1]["generation"] == independent_claim["generation"],
+            need(current["ownership_history"][-1]["generation"] == (append_release or independent_claim["generation"]),
                  "The independent-roots predecessor is no longer the guest's immediately preceding claim")
         if pre_marker_claim:
             current = run.owned()
@@ -1500,6 +1541,9 @@ def run(args):
         run.save(run.path("installed-before.json"), installed, durable=True)
         if independent_cases:
             require_cold_backup_app(adb)
+        if selected_append:
+            need("library-selected-merge-v1" not in adb("shell", "run-as", APP, "ls", "-A", "-1", "files").splitlines(),
+                 "A retained selected append must never be repeated")
         if completed:
             verify_completed_guest(publication_claim, run.owned())
             require_cold_backup_app(adb)
@@ -1646,10 +1690,19 @@ def run(args):
             folder = independent_retained[0] if independent_retained else "PristinePage-tree-" + uuid.uuid4().hex[:12]
             guest_root = f"/sdcard/Documents/{folder}"
             if not independent_retained:
-                adb("shell", "mkdir", guest_root)
-                for index, name in enumerate(independent_fixture_children(folder)):
-                    incoming = selected_append and index == 1
-                    stage_synthetic_files(adb, alternate_fixture if incoming else fixture, f"{guest_root}/{name}", received if incoming else files)
+                def admit_fixtures():
+                    recheck_target(run, ns)
+                    if selected_append:
+                        for check in independent_preservation:
+                            check()
+                        need({p: run.installed_hash(p) for p in hashes} == hashes,
+                             "The selected append APK pair changed after installation")
+                        require_cold_backup_app(adb)
+                        need("library-selected-merge-v1" not in adb("shell", "run-as", APP, "ls", "-A", "-1", "files").splitlines(),
+                             "A retained selected append must never be repeated")
+                        recheck_target(run, ns)
+                stage_independent_fixture_pair(adb, guest_root, folder,
+                    ((fixture, files), (alternate_fixture, received) if selected_append else (fixture, files)), admit_fixtures)
             if selected_append:
                 independent_outcome = exercise_selected_append(run, adb, ns, raw, guest_root, folder, files, received,
                                                                hashes, append_operation, missing, missing_bytes)
@@ -1871,6 +1924,8 @@ if __name__ == "__main__":
                          help="With --independent-roots, select only two roots and verify ancestry without a parent grant")
     parser.add_argument("--selected-root-append", action="store_true",
                         help="With standalone derived roots, append one missing original to the fresh synthetic destination")
+    parser.add_argument("--selected-append-released-generation", metavar="GENERATION",
+                        help="Reconcile one exact intervening released claim; still require the installed dry-run pair and preserved fixtures")
     parser.add_argument("--provider-capacity", action="store_true",
                         help="Verify the real Files capacity gate with an unattainable synthetic requirement and no publication")
     parser.add_argument("--settings-retry", metavar="CANCEL_MANIFEST_SHA", help="Permit one new confirmation on the exact retained, independently canceled fixture")

@@ -13,7 +13,8 @@ from unittest.mock import patch
 from run_library_folder_picker_ldplayer import (
     check_fixture_root, read_backup_delivery_death, recheck_target, require_independent_manifests, select_backup_case, select_backup_death_picker_case, select_independent_roots, select_provider_capacity, select_settings_picker_case, select_settings_recovery_case, select_tree_ancestry, settings_completed_destination, spend_settings_retry, verify_released_independent_guest,
     finish_pre_marker_outcome, independent_fixture_children, read_independent_grant_record, retry_pre_marker_checksum, verify_ancestry_cold_handoff, verify_ancestry_grant_refusal, verify_backup_death_control, verify_backup_death_intent, verify_backup_receipt_only, verify_pre_marker_handoff, verify_pre_marker_read_refusal, verify_settings_catalog, verify_settings_ocr, verify_settings_retry_evidence,
-    verify_independent_derived_installed, verify_derived_receipt, verify_selected_append_catalog,
+    verify_independent_derived_installed, verify_derived_receipt, verify_selected_append_catalog, verify_released_append_guest,
+    stage_independent_fixture_pair,
 )
 from run_local_ocr_guest import read_boot_serial
 
@@ -115,6 +116,33 @@ class LibraryFolderPickerRunnerTest(unittest.TestCase):
         for mismatch in (dict(generation="later"), dict(shutdown_processes=[]), dict(owner="other"), dict(index=2)):
             with self.assertRaisesRegex(RuntimeError, "released.*predecessor"):
                 verify_released_independent_guest(original, stopped | mismatch)
+
+    def test_append_reconciles_one_exact_release_without_forgetting_its_dry_run_guest(self):
+        original = dict(name="synthetic", installation="installed", index=3, created="creation", worktree="owned",
+                        purpose="library", api=28, created_by_agent=True, generation="dry-run", runtime_processes=[[15, 42], [17, 47]])
+        history = dict(generation="dry-run", worktree="owned", state="stopped-released", owner=None,
+                       cleanup_attempt={"state": "completed", "generation": "dry-run"}, shutdown_processes=original["runtime_processes"])
+        released = original | dict(worktree="other", purpose="other", generation="later", claim_generation="later",
+                                   state="stopped-released", shutdown_verified=True, shutdown_ready=True, evidence_saved=True,
+                                   owner=None, keep_running=False, handoff_to=None, consumers=[], reservedKiB=0,
+                                   cleanup_attempt={"state": "completed", "generation": "later"},
+                                   runtime_processes=[[25, 62], [27, 67]], shutdown_processes=[[25, 62], [27, 67]],
+                                   ownership_history=[history])
+        verify_released_append_guest(original, released, "later")
+        for mismatch in (dict(generation="changed"), dict(claim_generation="earlier"), dict(owner="active"), dict(index=2),
+                         dict(ownership_history=[]), dict(cleanup_attempt={"state": "running", "generation": "later"}),
+                         dict(reservedKiB=4), dict(shutdown_processes=[[25, 62], [27, 68]]), dict(consumers=["ongoing"])):
+            with self.assertRaisesRegex(RuntimeError, "selected append guest"):
+                verify_released_append_guest(original, released | mismatch, "later")
+
+    def test_a_failed_post_install_preservation_check_prevents_any_fixture_staging(self):
+        def refuse():
+            raise RuntimeError("Protected fixture changed after installation")
+        def adb(*args, **kwargs):
+            self.fail("Guest mutation was reached before post-install admission")
+        folder = "PristinePage-tree-0123456789ab"
+        with self.assertRaisesRegex(RuntimeError, "after installation"):
+            stage_independent_fixture_pair(adb, f"/sdcard/Documents/{folder}", folder, (("local", {}), ("source", {})), refuse)
 
     def test_interruption_checksum_retries_only_timeout_on_the_same_read(self):
         calls = []

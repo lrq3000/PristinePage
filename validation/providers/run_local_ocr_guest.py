@@ -197,8 +197,9 @@ def load_allocator(root, guest, raw, owner):
 
 
 def run_type(ns, *, purpose="pristinepage-ocr-qualification", operation="PristinePage local OCR guest",
-             fresh_disk_floor_gib=12, add_statuses=(0, 1, 2), admit_released=None):
+             fresh_disk_floor_gib=12, add_statuses=(0, 1, 2), admit_released=None, reassign_released=False):
     base, console, adb, now = (ns[key] for key in ("PickerAdapterRun", "CONSOLE", "ADB", "now"))
+    need(not reassign_released or admit_released is not None, "Reassignment requires a release-specific admission check")
 
     class Run(base):
         def exact(self, rows):
@@ -251,7 +252,7 @@ def run_type(ns, *, purpose="pristinepage-ocr-qualification", operation="Pristin
                 else:
                     record = json.loads(self.record.read_text())
                     need(record["name"] == name and record["installation"] == str(console.parent)
-                         and record.get("purpose") == purpose
+                         and (record.get("purpose") == purpose or reassign_released)
                          and record["owner"] is None and record["state"] == "stopped-released" and record["shutdown_verified"]
                           and not record["keep_running"] and not record["handoff_to"]
                          and not record.get("radio_recovery_required"), "Not this released test guest, or radio restoration needs reconciliation")
@@ -262,7 +263,12 @@ def run_type(ns, *, purpose="pristinepage-ocr-qualification", operation="Pristin
                         need(not process or process["start"] != start or not process["running"], "Prior owned process is live")
                     if admit_released is not None:
                         admit_released(record)
-                    record["ownership_history"].append({k: record[k] for k in ("generation", "stopped", "shutdown_processes")})
+                    history = ("generation", "stopped", "shutdown_processes")
+                    if reassign_released:
+                        history += ("worktree", "purpose", "state", "owner", "cleanup_attempt")
+                    record["ownership_history"].append({k: record[k] for k in history})
+                    if reassign_released:
+                        record.update(worktree=str(ns["ROOT"]), purpose=purpose)
 
                 record.update(owner=ns["OWNER"], generation=self.generation, claim_generation=self.generation,
                               state="provisioning" if create else "launching", claimed=now(), shutdown_ready=False,
