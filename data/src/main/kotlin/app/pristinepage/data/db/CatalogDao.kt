@@ -197,6 +197,8 @@ internal data class SavedCaptureDayLocator(val documentId: String, val pageId: S
     @Query("SELECT EXISTS(SELECT 1 FROM ImportSession WHERE documentId=:documentId AND kind='BATCH' AND state NOT IN ('COMMITTED','CANCELED','FAILED','QUARANTINED'))") abstract override fun hasPendingImport(documentId: String): Boolean
     @Insert(onConflict = OnConflictStrategy.ABORT) abstract override fun insertDocument(row: DocumentRow)
     @Update(onConflict = OnConflictStrategy.ABORT) abstract override fun updateDocument(row: DocumentRow): Int
+    @Query("UPDATE Document SET documentRevision=:revision,updatedAt=:updatedAt WHERE documentId=:id AND documentRevision=:expected")
+    abstract override fun advanceDocumentRevision(id: String, expected: Long, revision: Long, updatedAt: Long): Int
     @Insert(onConflict = OnConflictStrategy.ABORT) abstract override fun insertPage(row: PageRow)
     @Update(onConflict = OnConflictStrategy.ABORT) abstract override fun updatePage(row: PageRow): Int
     @Insert(onConflict = OnConflictStrategy.ABORT) abstract override fun insertRecipe(row: RecipeRevisionRow)

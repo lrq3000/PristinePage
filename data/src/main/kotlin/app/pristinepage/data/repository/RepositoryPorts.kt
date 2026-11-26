@@ -34,6 +34,11 @@ interface CatalogQueries {
     fun hasPendingImport(documentId: String): Boolean
     fun insertDocument(row: DocumentRow)
     fun updateDocument(row: DocumentRow): Int
+    /** A recipe save changes only the album's revision and modification time, never its title or other metadata. */
+    fun advanceDocumentRevision(id: String, expected: Long, revision: Long, updatedAt: Long): Int {
+        val row = document(id)?.takeIf { it.documentRevision == expected } ?: return 0
+        return updateDocument(row.copy(documentRevision = revision, updatedAt = updatedAt))
+    }
     fun insertPage(row: PageRow)
     fun updatePage(row: PageRow): Int
     fun insertRecipe(row: RecipeRevisionRow)

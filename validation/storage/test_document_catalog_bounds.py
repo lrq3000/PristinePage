@@ -87,6 +87,15 @@ class DocumentCatalogBoundsTest(unittest.TestCase):
         self.db.execute("UPDATE Document SET title=?", ("é" * 160,))
         self.assertEqual(1, self.document_gate())
 
+    def test_recipe_revision_update_keeps_exact_title_and_refuses_an_old_document_revision(self):
+        title = "\ufeff\ufeff Cafe\u0301 \0 scan".encode("utf-8")
+        self.db.execute("UPDATE Document SET title=CAST(? AS TEXT) WHERE documentId=?", (title, self.doc))
+        self.assertEqual(1, self.query("advanceDocumentRevision", id=self.doc, expected=1, revision=2, updatedAt=42).rowcount)
+        self.assertEqual(0, self.query("advanceDocumentRevision", id=self.doc, expected=1, revision=3, updatedAt=99).rowcount)
+        self.assertEqual((title, 2, "ACTIVE", 0, 42, None), self.db.execute(
+            "SELECT CAST(title AS BLOB),documentRevision,lifecycle,createdAt,updatedAt,deletedAt FROM Document WHERE documentId=?",
+            (self.doc,)).fetchone())
+
     def test_document_raw_types_revision_and_title_bounds_precede_materialization(self):
         for field, bad, original in [("title", b"bad", "Synthetic"), ("title", "x" * 161, "Synthetic"), ("documentRevision", 0, 1), ("documentRevision", 1.5, 1), ("documentRevision", "9223372036854775808", 1), ("createdAt", b"bad", 0), ("updatedAt", 1.5, 0), ("lifecycle", "UNKNOWN", "ACTIVE"), ("deletedAt", b"bad", None)]:
             with self.subTest(field=field, value=repr(bad)[:40]):

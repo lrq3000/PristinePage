@@ -4,12 +4,16 @@ import android.content.Context
 import android.content.ContextWrapper
 import androidx.room.Room
 import androidx.room.RoomDatabase
+import app.pristinepage.core.pipeline.Recipe
 import app.pristinepage.data.db.PristineDatabase
 import app.pristinepage.data.model.DocumentId
 import app.pristinepage.data.model.PageId
+import app.pristinepage.data.model.SaveRecipeResult
 import app.pristinepage.data.repository.DocumentCatalog
 import app.pristinepage.data.repository.EditablePages
+import app.pristinepage.data.repository.RecipeAdmission
 import app.pristinepage.data.repository.RoomDocumentCatalog
+import app.pristinepage.data.repository.RoomDocumentRepository
 import app.pristinepage.data.repository.RoomEditablePages
 import app.pristinepage.data.repository.RoomMetadataAccess
 import java.io.File
@@ -19,11 +23,67 @@ import java.nio.file.LinkOption.NOFOLLOW_LINKS
 import java.nio.file.StandardOpenOption.READ
 import java.security.MessageDigest
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.withContext
 
 /** Fresh, bounded, closed catalog writer for an exclusively owned stage. Never opens the portable input with Room. */
 internal class RoomLibraryCatalogStage(private val application: Context) {
-    suspend fun write(snapshot: RoomLibrarySavedCatalog.Snapshot, file: File, acknowledgeClose: () -> Unit = {}): Int {
+    sealed interface RecipeEdit {
+        data class Refused(val result: SaveRecipeResult) : RecipeEdit
+        data class Ready(
+            val saved: SaveRecipeResult.Saved, val schema: Int, val snapshot: RoomLibrarySavedCatalog.Snapshot,
+            val catalog: LibraryObjectTransfer.ObjectId,
+        ) : RecipeEdit
+    }
+
+    suspend fun write(snapshot: RoomLibrarySavedCatalog.Snapshot, file: File, acknowledgeClose: () -> Unit = {}): Int =
+        withFreshStage(snapshot, file, acknowledgeClose) { _, schema -> schema }
+
+    /** Apply the standard revision transaction only to a new app-owned catalog. The closed candidate conveys no publication authority. */
+    suspend fun stageRecipeEdit(
+        baseline: RoomLibrarySavedCatalog.Snapshot, file: File, document: DocumentId, page: PageId,
+        expectedRevision: Long, recipe: Recipe, admission: RecipeAdmission, acknowledgeClose: () -> Unit = {},
+    ): RecipeEdit = withContext(Dispatchers.IO) {
+        val checkpoint = { coroutineContext.ensureActive() }
+        checkpoint()
+        // The edited page will have a new accepted revision. Do not seed its old result into the disposable candidate;
+        // the predecessor still owns that exact OCR and no unrelated producer is removed or rebound.
+        val working = RoomLibrarySavedCatalog.Snapshot(baseline.albums.map { album ->
+            if (album.row.documentId != document.value) album else RoomLibrarySavedCatalog.Album(album.row, album.pages.map { entry ->
+                if (entry.row.pageId != page.value || entry.savedOcr == null) entry
+                else RoomLibrarySavedCatalog.Page(entry.row, entry.filename, entry.revisions, savedOcr = null)
+            }, album.undo)
+        }, baseline.sources, baseline.originals, baseline.days)
+        val staged = withFreshStage(working, file, acknowledgeClose) { stage, schema ->
+            val metadata = RoomMetadataAccess(stage)
+            // Reject an ID from another album before the ordinary save transaction, which is keyed by page.
+            RoomEditablePages(metadata, stage.catalog()).load(document, page)
+            val result = RoomDocumentRepository(metadata, admission).saveRecipe(page, expectedRevision, recipe)
+            Triple(result, schema, if (result is SaveRecipeResult.Saved) RoomLibrarySavedCatalog(stage).capture() else null)
+        }
+        checkpoint()
+        val (saved, schema, snapshot) = staged
+        if (saved !is SaveRecipeResult.Saved) return@withContext RecipeEdit.Refused(saved)
+        val edited = checkNotNull(snapshot)
+        val beforeRows = baseline.albums.associateBy { it.row.documentId }
+        if (edited.albums.size != beforeRows.size || edited.albums.any { album ->
+                val prior = beforeRows[album.row.documentId]?.row ?: return@any true
+                val expected = if (prior.documentId != document.value) prior else
+                    prior.copy(documentRevision = saved.documentRevision, updatedAt = album.row.updatedAt)
+                album.row != expected
+            }) throw IOException("The edited catalog changed unrelated album metadata")
+        val proof = fingerprintClosedLibraryCatalog(file, checkpoint)
+        RoomLibraryCatalogReader(application, RoomLibraryCatalogReader.MAX_PORTABLE_BYTES).verifyStagedProjection(file, edited, checkpoint)
+        if (fingerprintClosedLibraryCatalog(file, checkpoint) != proof) throw IOException("The edited catalog changed after reopening")
+        RecipeEdit.Ready(saved, schema, edited, proof)
+    }
+
+    private suspend fun <T : Any> withFreshStage(
+        snapshot: RoomLibrarySavedCatalog.Snapshot, file: File, acknowledgeClose: () -> Unit,
+        block: suspend (PristineDatabase, Int) -> T,
+    ): T {
         if (!Files.notExists(file.toPath(), NOFOLLOW_LINKS)) throw IOException("Library staging catalog already exists")
         val stage = database(file)
         var primary: Throwable? = null
@@ -40,7 +100,7 @@ internal class RoomLibraryCatalogStage(private val application: Context) {
                 if (!it.moveToFirst() || it.getLong(0) !in 1..pageCap) throw IOException("Library stage capacity could not be set")
             }
             RoomLibrarySavedCatalog(stage).writeFresh(snapshot)
-            return sql.version
+            return block(stage, sql.version)
         } catch (failure: Throwable) {
             primary = failure
             throw failure

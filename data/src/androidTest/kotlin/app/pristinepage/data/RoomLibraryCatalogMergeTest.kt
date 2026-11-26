@@ -27,6 +27,7 @@ import app.pristinepage.data.library.verifyStagedProjection
 import app.pristinepage.data.model.DocumentMutationResult
 import app.pristinepage.data.model.IngestResult
 import app.pristinepage.data.model.JobId
+import app.pristinepage.data.model.SaveRecipeResult
 import app.pristinepage.data.repository.OcrJobInput
 import app.pristinepage.data.repository.RecipeAdmission
 import app.pristinepage.data.repository.RoomDocumentRepository
@@ -42,6 +43,80 @@ import org.junit.runner.RunWith
 
 @RunWith(AndroidJUnit4::class)
 class RoomLibraryCatalogMergeTest {
+    @Test fun stagingOneSelectedEditReopensWithItsParentAndUndoWithoutCopyingTheOriginal() = runBlocking<Unit> {
+        RoomSourceIngestIntegrationTest.Fixture().use { source ->
+            val committed = source.store.ingest(source.reference, source.reserve().single()) as IngestResult.Committed
+            val title = "\ufeff\ufeff Cafe\u0301 scan"
+            source.database.openHelper.writableDatabase.execSQL("UPDATE Document SET title=CAST(? AS TEXT) WHERE documentId=?",
+                arrayOf<Any>(title.encodeToByteArray(), source.document.value))
+            val current = RoomEditablePages(RoomMetadataAccess(source.database), source.database.catalog())
+                .load(source.document, committed.pageId)
+            val initial = RoomLibrarySavedCatalog(source.database).capture()
+            val original = initial.originals.single()
+            val context = InstrumentationRegistry.getInstrumentation().context
+            val root = File(context.filesDir.canonicalFile, "library-edit-candidate-${UUID.randomUUID()}").apply { check(mkdir()) }
+            val file = File(root, "edit.sqlite")
+            val recipe = current.recipe.copy(geometry = current.recipe.geometry.withOutputQuarterTurns(1))
+            val stage = RoomLibraryCatalogStage(context)
+            val prepared = stage.stageRecipeEdit(initial, file, source.document, committed.pageId, current.recipeRevision,
+                recipe, RecipeAdmission { _, _ -> null }) as RoomLibraryCatalogStage.RecipeEdit.Ready
+            assertEquals(current.recipeRevision + 1, prepared.saved.recipeRevision)
+            assertEquals(file.length(), prepared.catalog.byteCount)
+            assertEquals(listOf("edit.sqlite"), root.list().orEmpty().toList())
+            val reader = RoomLibraryCatalogReader(context, RoomLibraryCatalogReader.MAX_PORTABLE_BYTES)
+            val reopened = reader.read(file) { LibraryPortableCatalogProjection(it) {}.snapshot() }
+            val album = reopened.albums.single()
+            val page = album.pages.single()
+            assertEquals(current.documentRevision + 1, album.row.documentRevision)
+            assertEquals(title, album.row.title)
+            assertEquals(original.byteSha256, reopened.originals.single().byteSha256)
+            assertEquals(original.byteCount, reopened.originals.single().byteCount)
+            assertEquals(listOf(current.recipeHash, RecipeCodec.hash(recipe)), page.revisions.map { it.recipeSha256 })
+            assertEquals(listOf(null, current.recipeRevision), page.revisions.map { it.parentRevision })
+            assertEquals("RECIPE_EDIT", album.undo.single().row.action)
+            assertEquals(current, RoomEditablePages(RoomMetadataAccess(source.database), source.database.catalog()).load(source.document, committed.pageId))
+
+            val stale = stage.stageRecipeEdit(prepared.snapshot, File(root, "stale.sqlite"), source.document, committed.pageId,
+                current.recipeRevision, recipe, RecipeAdmission { _, _ -> null })
+            assertTrue(stale is RoomLibraryCatalogStage.RecipeEdit.Refused && stale.result is SaveRecipeResult.Conflict)
+        }
+    }
+
+    @Test fun stagedRecipeEditKeepsUntouchedOcrWithoutRelabelingTheEditedPagesResult() = runBlocking<Unit> {
+        RoomSourceIngestIntegrationTest.Fixture().use { source ->
+            val pages = source.reserve(2).map { source.store.ingest(source.reference, it) as IngestResult.Committed }
+            val metadata = RoomMetadataAccess(source.database)
+            val editable = RoomEditablePages(metadata, source.database.catalog())
+            val config = OcrConfiguration("fixture-ocr", 1, OcrLayout.SPARSE_TEXT,
+                OcrLanguagePacks(listOf(OcrLanguagePack("eng", "e".repeat(64)))))
+            val originalResults = pages.mapIndexed { index, saved ->
+                val current = editable.load(source.document, saved.pageId)
+                val intent = OcrJobInput(source.document, OcrInput(saved.pageId.value, current.recipeRevision, saved.sourcePixelHash),
+                    saved.sourceId, current.recipeHash, 1, config)
+                LibrarySavedOcr(JobId(UUID.randomUUID().toString()), intent, OcrText("  Synthetic recognition $index cafe\u0301\r\n"), 1, 11, 12)
+                    .also { result -> metadata.transaction { RoomLibrarySavedOcr(source.database).restoreInTransaction(result) } }
+            }
+            val baseline = RoomLibrarySavedCatalog(source.database).capture()
+            val changing = editable.load(source.document, pages.first().pageId)
+            val edited = changing.recipe.copy(geometry = changing.recipe.geometry.withOutputQuarterTurns(1))
+            val context = InstrumentationRegistry.getInstrumentation().context
+            val directory = File(context.filesDir.canonicalFile, "library-editor-ocr-${UUID.randomUUID()}").apply { check(mkdir()) }
+            val catalog = File(directory, "edit.sqlite")
+            assertTrue(RoomLibraryCatalogStage(context).stageRecipeEdit(baseline, catalog, source.document, changing.pageId,
+                changing.recipeRevision, edited, RecipeAdmission { _, _ -> null }) is RoomLibraryCatalogStage.RecipeEdit.Ready)
+            val reopened = RoomLibraryCatalogReader(context, RoomLibraryCatalogReader.MAX_PORTABLE_BYTES)
+                .read(catalog) { LibraryPortableCatalogProjection(it, verifyDerivedOcr = true) {}.snapshot() }
+            assertNull(reopened.albums.single().pages.first().savedOcr)
+            val untouched = checkNotNull(reopened.albums.single().pages.last().savedOcr)
+            assertEquals(originalResults.last().producerId, untouched.producerId)
+            assertEquals(originalResults.last().intent, untouched.intent)
+            assertTrue(originalResults.last().text.value == untouched.text.value)
+            val retained = RoomLibrarySavedCatalog(source.database).capture().albums.single().pages
+            assertEquals(originalResults.map { it.producerId }, retained.map { it.savedOcr?.producerId })
+            assertTrue(retained.zip(originalResults).all { (page, result) -> page.savedOcr?.text?.value == result.text.value })
+        }
+    }
+
     @Test fun closedPortableProjectionRefusesAnOtherwiseValidCatalogWithAnUnusableTitle() = runBlocking<Unit> {
         RoomSourceIngestIntegrationTest.Fixture().use { source ->
             val context = InstrumentationRegistry.getInstrumentation().context
