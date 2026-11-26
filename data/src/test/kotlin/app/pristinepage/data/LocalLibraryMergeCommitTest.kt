@@ -145,6 +145,68 @@ class LocalLibraryMergeCommitTest {
         assertEquals(next, f.commit { })
     }
 
+    @Test fun aSourceTipChangeDuringTheDestinationPayloadBarrierCannotPublishTheMarker() {
+        val successor = source.copy(id = id(7), predecessorId = source.id)
+        var changeAtBarrier: ((File) -> Unit)? = null
+        val f = Fixture(DirectorySync { dir -> changeAtBarrier?.invoke(dir); true })
+        changeAtBarrier = { dir ->
+            if (dir == f.targetRoot && File(dir, next.catalogPath).isFile) {
+                changeAtBarrier = null
+                f.backup.createCatalog(successor) { it.write(stageText.encodeToByteArray()) }
+                f.backup.createMarker(successor, successor.encode())
+            }
+        }
+        assertThrows(IOException::class.java) { f.commit { } }
+        assertEquals(successor, f.backup.readTip())
+        assertEquals(baseline, f.destination.readTip())
+        assertFalse(File(f.targetRoot, "generations/${next.id}.complete").exists())
+    }
+
+    @Test fun aSourceTipChangeDuringMarkerStagingCannotPublishTheMarker() {
+        val successor = source.copy(id = id(7), predecessorId = source.id)
+        var changeAtBarrier: ((File) -> Unit)? = null
+        val f = Fixture(DirectorySync { dir -> changeAtBarrier?.invoke(dir); true })
+        changeAtBarrier = { dir ->
+            if (dir == File(f.targetRoot, "generations") && !File(dir, "${next.id}.complete").exists()) {
+                changeAtBarrier = null
+                f.backup.createCatalog(successor) { it.write(stageText.encodeToByteArray()) }
+                f.backup.createMarker(successor, successor.encode())
+            }
+        }
+        assertThrows(IOException::class.java) { f.commit { } }
+        assertEquals(successor, f.backup.readTip())
+        assertEquals(baseline, f.destination.readTip())
+    }
+
+    @Test fun aChangedChildCatalogDuringPayloadSyncCannotBecomeTheTip() {
+        var changeAtBarrier: ((File) -> Unit)? = null
+        val f = Fixture(DirectorySync { dir -> changeAtBarrier?.invoke(dir); true })
+        changeAtBarrier = { dir ->
+            if (dir == f.targetRoot && File(dir, next.catalogPath).isFile) {
+                changeAtBarrier = null
+                File(dir, next.catalogPath).writeText("x".repeat(512))
+            }
+        }
+        assertThrows(IOException::class.java) { f.commit { } }
+        assertEquals(baseline, f.destination.readTip())
+        assertEquals(stageText, f.destination.openCatalog(baseline)?.use { it.readBytes().decodeToString() })
+    }
+
+    @Test fun replayCannotAcknowledgeAChangedOriginalAfterMarkerSync() {
+        var changeAtBarrier: ((File) -> Unit)? = null
+        val f = Fixture(DirectorySync { dir -> changeAtBarrier?.invoke(dir); true })
+        assertEquals(next, f.commit { })
+        changeAtBarrier = { dir ->
+            if (dir == File(f.targetRoot, "generations")) {
+                changeAtBarrier = null
+                File(f.targetRoot, "objects/${hello.sha256}").writeText("other")
+            }
+        }
+        assertThrows(IOException::class.java) { f.commit { } }
+        assertEquals(next, f.destination.readTip())
+        assertEquals("other", f.destination.open(hello)?.use { it.readBytes().decodeToString() })
+    }
+
     private inner class Fixture(sync: DirectorySync = DirectorySync { true }, withIntent: Boolean = true,
         predecessors: Int = 0, reuseOldAncestor: Boolean = false,
     ) {

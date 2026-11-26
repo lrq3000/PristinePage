@@ -22,7 +22,7 @@ import java.nio.file.attribute.BasicFileAttributes
 
 /** Local filesystem only. The caller owns a stable, exclusively controlled app-managed directory; provider URIs cannot be translated into this capability. */
 internal class LocalLibraryDirectory(root: File, private val directorySync: DirectorySync = PlatformDirectorySync) :
-    LibraryObjectTransfer.Store, LibraryMergePayloads.Destination, LibraryCatalogPublication.Store, LibraryBackupRead.Source {
+    LibraryObjectTransfer.Store, LibraryMergePublication.Destination {
     private val paths = PrivateStorePaths(root)
 
     init {
@@ -255,6 +255,11 @@ internal class LocalLibraryDirectory(root: File, private val directorySync: Dire
     override fun createMarker(generation: LibraryGeneration, bytes: ByteArray) {
         require(bytes.contentEquals(generation.encode()))
         create(markerPath(generation)) { it.write(bytes) }
+    }
+
+    override fun createMergeMarker(generation: LibraryGeneration, bytes: ByteArray, requireStage: () -> Unit, requireCurrent: () -> Unit) {
+        require(bytes.contentEquals(generation.encode()))
+        create(markerPath(generation), beforeLink = requireCurrent, beforeStage = requireStage) { it.write(bytes) }
     }
 
     /** Iterates a bounded inventory and refuses uncertainty rather than silently opening an older generation. Does not publish, remove or repair anything. */

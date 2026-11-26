@@ -135,10 +135,9 @@ internal class RoomLibraryLocalMerge(context: Context, private val sync: Directo
             journal.publish(LibraryMergeIntent(targetKey, backupKey, baseline, incoming, child), checkpoint)
         }
         checkLocations()
-        val child = LocalLibraryMergeCommit(destination, source, journal, checkpoint)
+        val child = LocalLibraryMergeCommit(destination, source, journal, checkpoint, ::checkLocations)
             .commit(operationId, targetKey, backupKey, schema, candidate, current.originals, imported.originals) { file ->
                 reader.verifyStagedProjection(file, candidate.catalog, checkpoint)
-                checkLocations()
             }
         checkLocations()
         return child
