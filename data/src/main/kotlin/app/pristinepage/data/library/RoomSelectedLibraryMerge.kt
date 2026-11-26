@@ -6,13 +6,18 @@ import android.system.Os
 import app.pristinepage.data.model.requireOpaqueId
 import java.io.File
 import java.io.IOException
+import java.nio.channels.FileChannel
+import java.nio.channels.OverlappingFileLockException
 import java.nio.file.Files
 import java.nio.file.LinkOption.NOFOLLOW_LINKS
 import java.nio.file.NoSuchFileException
 import java.nio.file.Path
+import java.nio.file.StandardOpenOption.CREATE
+import java.nio.file.StandardOpenOption.WRITE
 import java.nio.file.attribute.BasicFileAttributes
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.withContext
 
 /** Detached selected-folder append qualification. No activation switch, retired source, or new write following an uncertain result. */
@@ -26,18 +31,25 @@ internal class RoomSelectedLibraryMerge(context: Context, private val scratchDir
         requireOpaqueId(operationId)
         if (destination.expected == null || incoming.expected == null) throw IOException("The selected write needs both exact input generations")
         val checkpoint = { coroutineContext.ensureActive() }
+        val files = app.filesDir.toPath().toRealPath()
+        checkpoint()
+        requireAuthority()
+        withWriteLane(files) { appendOwned(operationId, destination, incoming, files, checkpoint, requireAuthority) }
+    }
+
+    private suspend fun appendOwned(operationId: String, destination: AndroidLibraryTreeRead.PairInput, incoming: AndroidLibraryTreeRead.PairInput,
+        files: Path, checkpoint: () -> Unit, requireAuthority: () -> Unit,
+    ): LibraryGeneration {
         val reader = AndroidLibraryTreeRead(app, scratchDirectory)
         val plan = reader.planMerge(operationId, destination, incoming, requireAuthority)
-        val files = app.filesDir.toPath().toRealPath()
         val storage = files.resolve(STORAGE)
         if (files.toFile().usableSpace < 3 * maximum) throw IOException("Not enough private space to stage the merged library")
         requireAuthority()
         checkpoint()
-        // A fresh directory is the one-shot private owner. This qualification deliberately refuses any later append or replay until the owner can be settled.
-        Files.createDirectory(storage)
-        val root = canonicalLibraryDirectory(storage.toFile(), files)
+        // A repeat is a fresh confirmed operation, not replay. Retained unresolved evidence still blocks admission.
+        val (journal, attempt) = LocalSelectedMergeAttempts(storage) { journal(it, files) }.allocate(operationId, checkpoint, requireAuthority)
+        val root = journal.rootPath
         val key = localLibraryRootKey(root)
-        val attempt = Files.createDirectory(Files.createDirectory(root.resolve("merge-stages")).resolve(operationId))
         val attemptKey = localLibraryRootKey(attempt)
         fun requireOwner() {
             checkpoint()
@@ -55,8 +67,8 @@ internal class RoomSelectedLibraryMerge(context: Context, private val scratchDir
         val proof = fingerprintClosedLibraryCatalog(file, ::requireOwner)
         verifier.verifyStagedProjection(file, plan.candidate.catalog, ::requireOwner)
         if (fingerprintClosedLibraryCatalog(file, ::requireOwner) != proof) throw IOException("The private selected library catalog changed")
-        val child = LibraryGeneration(destination.expected.libraryId, operationId, destination.expected.id, schema, proof)
-        val journal = journal(root, files)
+        val baseline = checkNotNull(plan.destination.expected)
+        val child = LibraryGeneration(baseline.libraryId, operationId, baseline.id, schema, proof)
         val published = reader.appendMerge(plan, child, attempt, journal, LocalLibraryMoveAuthorization(attempt.toFile()), ::requireOwner) {
             verifier.verifyStagedProjection(it, plan.candidate.catalog, ::requireOwner)
         }
@@ -66,11 +78,26 @@ internal class RoomSelectedLibraryMerge(context: Context, private val scratchDir
             if (verification.iterator().hasNext()) throw IOException("The selected library readback scratch was not retired")
         }
         published.completion.recordCompletion(published.generation, checkpoint, ::requireOwner)
-        published.generation
+        return published.generation
+    }
+
+    private suspend fun <T> withWriteLane(files: Path, block: suspend () -> T): T {
+        if (!writeLane.tryLock()) throw IOException("Another selected library merge owns private storage")
+        try {
+            // The same app-private lock covers allocation, staging, provider unwind and the completion barrier.
+            FileChannel.open(files.resolve("$STORAGE.lock"), CREATE, WRITE, NOFOLLOW_LINKS).use { channel ->
+                val lock = try { channel.tryLock() } catch (_: OverlappingFileLockException) { null }
+                if (lock == null) throw IOException("Another process owns the selected library merge")
+                lock.use { return block() }
+            }
+        } finally {
+            writeLane.unlock()
+        }
     }
 
     companion object {
         private const val STORAGE = "library-selected-merge-v1"
+        private val writeLane = Mutex()
 
         private fun journal(root: Path, files: Path) = LocalLibraryMergeJournal(root.toFile(), files, nodeIdentity = { path, _ ->
             try { Os.lstat(path.toString()).let { it.st_dev to it.st_ino } }
