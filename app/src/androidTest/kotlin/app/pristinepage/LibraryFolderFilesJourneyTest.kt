@@ -37,6 +37,7 @@ import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performScrollTo
 import androidx.compose.ui.test.performClick
 import androidx.lifecycle.ViewModelProvider
+import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
@@ -92,9 +93,12 @@ import kotlinx.coroutines.async
 import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeout
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -1008,10 +1012,15 @@ class LibraryFolderFilesJourneyTest {
                     interruptionCompose.onNodeWithTag(pageTag).assertIsEnabled().performClick()
                     assertEquals(editor, clicked.get())
                 } finally {
-                    // Stopping the host is a real lifecycle barrier. A newly requested empty composition can still leave an in-flight thumbnail that has not reserved its bitmap yet.
-                    interruptionCompose.activityRule.scenario.moveToState(androidx.lifecycle.Lifecycle.State.CREATED)
+                    // As in EditorHostTest, stop the actual task rather than depend on ActivityScenario's API 28 helper Activity.
+                    val host = interruptionCompose.activity
+                    assertTrue(interruptionCompose.runOnUiThread { host.moveTaskToBack(true) })
                     owner.cancelAndJoin()
-                    interruptionCompose.waitUntil(15_000) { services.budget.usedBytes == 0L }
+                    withTimeout(15_000) {
+                        while (withContext(Dispatchers.Main) { host.lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED) } ||
+                            services.budget.usedBytes != 0L) delay(20)
+                    }
+                    assertEquals(Lifecycle.State.CREATED, withContext(Dispatchers.Main) { host.lifecycle.currentState })
                 }
                 val accepted = services.loadLibraryEditorPage(editor)
                 services.originalLibraryEditor(editor, page.sourceId.value).use { original ->
