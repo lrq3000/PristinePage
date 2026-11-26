@@ -41,6 +41,29 @@ class LibraryFolderPickerRunnerTest(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "standalone fresh"):
                 select_main_settings_open(Namespace(**(vars(exact) | changed)))
 
+    def test_main_settings_open_retry_requires_its_exact_preselection_failure_and_pair(self):
+        from run_library_folder_picker_ldplayer import MAIN_SETTINGS_OPEN_CASE, SETTINGS_OPEN_CANCELED_GUEST, SETTINGS_OPEN_NAVIGATION_MANIFEST, select_main_settings_open
+        exact = Namespace(settings_open=True, fresh=False, settings_open_retry=SETTINGS_OPEN_NAVIGATION_MANIFEST,
+                          guest=SETTINGS_OPEN_CANCELED_GUEST, previous=["app.apk", "test.apk"])
+        self.assertEqual(MAIN_SETTINGS_OPEN_CASE, select_main_settings_open(exact))
+        for changed in ({"settings_open_retry": "f" * 64}, {"guest": "other"}, {"previous": None},
+                        {"settings_open_reuse": True}, {"fresh": True}, {"backup_export": True}):
+            with self.assertRaisesRegex(RuntimeError, "standalone fresh"):
+                select_main_settings_open(Namespace(**(vars(exact) | changed)))
+
+    def test_main_settings_open_retry_rejects_an_advanced_or_uncertain_pointer(self):
+        from run_library_folder_picker_ldplayer import require_initial_settings_pointer
+        def encoded(body):
+            return body + sha256(body.encode("ascii")).hexdigest() + "\n"
+        header = "pristinepage-active-library-v1\nb3d000d6-44ce-48f8-a66d-5737add1db3c\n"
+        initial = encoded(header + "1\n-\n-\n")
+        require_initial_settings_pointer(initial, ["active-library"])
+        for pointer, leaves in ((encoded(header + "3\n-\n-\n"), ["active-library"]),
+                                (initial, ["active-library", "default-origin"]),
+                                (initial[:-3] + "ff\n", ["active-library"]), ("", [])):
+            with self.assertRaisesRegex(RuntimeError, "unchanged initial Default"):
+                require_initial_settings_pointer(pointer, leaves)
+
     def test_cutover_continuation_accepts_only_an_unlaunched_observer_on_the_exact_installed_pair(self):
         from run_selected_folder_open_ldplayer import CONTROLS_CASE, CUTOVER_CASE, PREVIEW_PASS_SHA, verify_unlaunched_cutover
         pair = {"app.pristinepage.debug": "a" * 64, "app.pristinepage.debug.test": "b" * 64}

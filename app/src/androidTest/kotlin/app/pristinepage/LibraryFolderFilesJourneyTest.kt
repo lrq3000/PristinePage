@@ -284,7 +284,7 @@ class LibraryFolderFilesJourneyTest {
         compose.waitUntil(10_000) { enabled(folderButton) }
         compose.onNodeWithTag(folderButton).performScrollTo().performClick()
         compose.waitUntil(12_000) { instrumentation.uiAutomation.rootInActiveWindow?.packageName?.toString() == picker }
-        selectSettingsDestination(instrumentation, picker, folder)
+        selectSettingsDestination(instrumentation, picker, folder, touchDirectoryRows = true)
         val storage = compose.runOnUiThread { ViewModelProvider(compose.activity)[LibraryStorageViewModel::class.java] }
         compose.waitUntil(20_000) { storage.state.value.review != null }
         val review = checkNotNull(storage.state.value.review)
@@ -545,6 +545,7 @@ class LibraryFolderFilesJourneyTest {
     private fun selectSettingsDestination(instrumentation: Instrumentation, picker: String, folder: String,
         selectFolder: Boolean = true, navigateFromRoot: Boolean = true,
         expectedChildren: Set<String> = setOf("catalogs", "generations", "objects"), allowExactWindowTitle: Boolean = false,
+        touchDirectoryRows: Boolean = false,
     ) {
         val affirmative = setOf("SELECT", "Select", "SÉLECTIONNER", "Sélectionner", "Use this folder", "USE THIS FOLDER", "Choose this folder")
         fun containsUnder(root: AccessibilityNodeInfo, text: String, within: String) =
@@ -599,7 +600,9 @@ class LibraryFolderFilesJourneyTest {
                 true
             }
             val control = checkNotNull(confirmed)
-            if (control.isClickable) check(control.performAction(AccessibilityNodeInfo.ACTION_CLICK)) { "Files did not acknowledge $step" }
+            // This API 28 picker acknowledged the accessibility click on Documents without navigating. Use the real row touch for this witness, keeping the same identity and geometry checks.
+            if (touchDirectoryRows && parent == "dir_list") tap(instrumentation, control)
+            else if (control.isClickable) check(control.performAction(AccessibilityNodeInfo.ACTION_CLICK)) { "Files did not acknowledge $step" }
             else {
                 check(parent == "dir_list")
                 tap(instrumentation, control)
@@ -651,6 +654,9 @@ class LibraryFolderFilesJourneyTest {
             select("root drawer", drawer)
             select("primary storage", setOf(Build.MODEL, "Internal storage", "Stockage interne", "Stockage interne partagé"), "roots_list")
             select("Documents", setOf("Documents"), "dir_list")
+            if (touchDirectoryRows) await(instrumentation, picker, "Documents breadcrumb") {
+                containsUnder(it, "Documents", "dropdown_breadcrumb")
+            }
             select("synthetic folder", setOf(folder), "dir_list") { containsUnder(it, "Documents", "dropdown_breadcrumb") }
             await(instrumentation, picker, "exact destination before restoring Files preference", ::atTarget)
         } catch (failure: Throwable) {
