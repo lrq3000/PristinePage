@@ -273,7 +273,7 @@ class AndroidLibraryStartup(context: Context) {
         scratchDirectory: File, issuedAt: LibraryActivation, operation: String, document: DocumentId, page: PageId,
         expectedRevision: Long, admission: RecipeAdmission, edit: (Recipe) -> Recipe,
     ): AndroidLibraryTreeRead.SelectedRecipeEdit = withSelectedRecipePublication(scratchDirectory, issuedAt, operation, document, page,
-        expectedRevision, admission, edit) { _, _, result, _, _ -> result }
+        expectedRevision, admission, edit, {}) { _, _, result, _, _ -> result }
 
     sealed interface SelectedRecipeSave {
         data class Activated(val activation: LibraryActivation, val saved: SaveRecipeResult.Saved) : SelectedRecipeSave
@@ -283,9 +283,10 @@ class AndroidLibraryStartup(context: Context) {
     /** A verified persistence result, not user-visible delivery. The foreground must accept it under its adopted activation after dispatch. */
     suspend fun advanceSelectedRecipeEdit(
         scratchDirectory: File, issuedAt: LibraryActivation, operation: String, document: DocumentId, page: PageId,
-        expectedRevision: Long, admission: RecipeAdmission, edit: (Recipe) -> Recipe,
+        expectedRevision: Long, admission: RecipeAdmission, onPublicationStarted: () -> Unit = {},
+        onPointerVerified: (LibraryActivation) -> Unit = {}, edit: (Recipe) -> Recipe,
     ): SelectedRecipeSave = withSelectedRecipePublication(scratchDirectory, issuedAt, operation, document, page,
-        expectedRevision, admission, edit) { reader, authority, result, lease, requirePredecessor ->
+        expectedRevision, admission, edit, { onPublicationStarted() }) { reader, authority, result, lease, requirePredecessor ->
         when (result) {
             is AndroidLibraryTreeRead.SelectedRecipeEdit.Refused -> SelectedRecipeSave.Refused(result.result)
             is AndroidLibraryTreeRead.SelectedRecipeEdit.Published -> throw IOException("The active edit has no live receipt")
@@ -293,7 +294,11 @@ class AndroidLibraryStartup(context: Context) {
                 val (binding, _, successor) = result.receipt.intent
                 val next = reader.withBoundRecipeAdoption(result, lease, requirePredecessor,
                     advance = { beforeSwap -> authority.advanceOrReadVerifiedFolderGeneration(binding, successor, beforeSwap) },
-                    requireAdvanced = { if (authority.read() != it) reconnect() })
+                    requireAdvanced = {
+                        if (authority.read() != it) reconnect()
+                        // Notify the caller while the exact pointer proof is still held, before later provider checks or dispatcher delivery.
+                        onPointerVerified(it.activation())
+                    })
                 SelectedRecipeSave.Activated(next.activation(), result.projection)
             }
         }
@@ -302,6 +307,7 @@ class AndroidLibraryStartup(context: Context) {
     private suspend fun <T : Any> withSelectedRecipePublication(
         scratchDirectory: File, issuedAt: LibraryActivation, operation: String, document: DocumentId, page: PageId,
         expectedRevision: Long, admission: RecipeAdmission, edit: (Recipe) -> Recipe,
+        onPublicationStarted: (LibraryGeneration) -> Unit,
         consume: suspend (AndroidLibraryTreeRead, LocalSelectedLibraryAuthority, AndroidLibraryTreeRead.SelectedRecipeEdit,
             SelectedLibraryWriteLease, () -> Unit) -> T,
     ): T {
@@ -320,7 +326,7 @@ class AndroidLibraryStartup(context: Context) {
         }
         val reader = AndroidLibraryTreeRead(app, scratchDirectory)
         return try {
-            reader.appendBoundRecipeEdit(selected, operation, document, page, expectedRevision, admission, ::requireSelected, edit) { result, lease ->
+            reader.appendBoundRecipeEdit(selected, operation, document, page, expectedRevision, admission, ::requireSelected, edit, onPublicationStarted) { result, lease ->
                 consume(reader, authority, result, lease, ::requireSelected)
             }
         } catch (_: LibraryTreeUnavailable) { reconnect() }

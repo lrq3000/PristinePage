@@ -17,6 +17,7 @@ internal class LibraryCatalogRevisionPublication(
     private val journal: LocalLibraryDirectory,
     private val requireOwner: () -> Unit,
     private val checkpoint: () -> Unit = {},
+    private val onPublicationStarted: (LibraryGeneration) -> Unit = {},
 ) {
     fun publish(
         predecessor: LibraryGeneration, successor: LibraryGeneration,
@@ -109,6 +110,8 @@ internal class LibraryCatalogRevisionPublication(
         verifyOriginals()
         requireTip(predecessor)
         journal.spendCatalogRevision(predecessor, successor) { requireTip(predecessor) }
+        // This attempt has spent its write authority. The observer receives an obligation, not proof that any destination bytes are visible.
+        onPublicationStarted(successor)
         val guarded = object : LibraryCatalogPublication.Store by destination {
             override fun createCatalog(generation: LibraryGeneration, write: (OutputStream) -> Unit) {
                 requireTip(predecessor)

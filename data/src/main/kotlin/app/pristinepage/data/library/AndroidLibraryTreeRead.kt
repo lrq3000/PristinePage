@@ -239,13 +239,14 @@ class AndroidLibraryTreeRead(context: Context, private val scratchDirectory: Fil
         val checkpoint = { coroutineContext.ensureActive() }
         withSelectedLibraryWriteLane(files) { lease ->
             appendRecipeUnderLease(files, lease, verified, operation, document, page, expectedRevision, admission,
-                requireAuthority, checkpoint, null, edit)
+                requireAuthority, checkpoint, null, edit = edit)
         }
     }
 
     internal suspend fun <T : Any> appendBoundRecipeEdit(
         binding: LocalSelectedLibraryAuthority.Selected.Folder, operation: String, document: DocumentId, page: PageId,
         expectedRevision: Long, admission: RecipeAdmission, requireAuthority: () -> Unit, edit: (Recipe) -> Recipe,
+        onPublicationStarted: (LibraryGeneration) -> Unit,
         consume: suspend (SelectedRecipeEdit, SelectedLibraryWriteLease) -> T,
     ): T = withContext(Dispatchers.IO) {
         requireOpaqueId(operation)
@@ -262,7 +263,7 @@ class AndroidLibraryTreeRead(context: Context, private val scratchDirectory: Fil
             requireUnusedRecipeOperation(files, operation)
             val verified = verifyRecipeEditTarget(Uri.parse(binding.grant.exactUri), binding.expectedGeneration, ::requireSelection)
             val result = appendRecipeUnderLease(files, lease, verified, operation, document, page, expectedRevision, admission,
-                ::requireSelection, checkpoint, binding, edit)
+                ::requireSelection, checkpoint, binding, onPublicationStarted, edit)
             consume(result, lease)
         }
     }
@@ -326,7 +327,7 @@ class AndroidLibraryTreeRead(context: Context, private val scratchDirectory: Fil
         files: Path, lease: SelectedLibraryWriteLease, verified: Verified, operation: String, document: DocumentId,
         page: PageId, expectedRevision: Long, admission: RecipeAdmission, requireAuthority: () -> Unit,
         checkpoint: () -> Unit, binding: LocalSelectedLibraryAuthority.Selected.Folder?,
-        edit: (Recipe) -> Recipe,
+        onPublicationStarted: (LibraryGeneration) -> Unit = {}, edit: (Recipe) -> Recipe,
     ): SelectedRecipeEdit {
         requireOpaqueId(operation)
         val selection = requireVerifiedTree(verified)
@@ -394,7 +395,7 @@ class AndroidLibraryTreeRead(context: Context, private val scratchDirectory: Fil
                     pending = PendingRecipeCompletion(receiptJournal, intent, live, candidate.saved)
                 }
                 SelectedRecipeEdit.Published(publishSelectedRecipeCandidate(selection, identity, anchor, attempt,
-                    file, successor, baseline, candidate, lease, journal, providerCheckpoint, ::requireAttempt))
+                    file, successor, baseline, candidate, lease, journal, providerCheckpoint, ::requireAttempt, onPublicationStarted))
             }
             requirePrivateOwner()
             // Check write access again after the last descriptor closes; a completed detached marker is not grant renewal.
@@ -441,7 +442,7 @@ class AndroidLibraryTreeRead(context: Context, private val scratchDirectory: Fil
         selection: VerifiedTree, identity: AndroidLibraryDescriptorAncestry.Observation, anchor: ParcelFileDescriptor,
         attempt: Path, file: Path, successor: LibraryGeneration, baseline: RoomLibrarySavedCatalog.Snapshot,
         candidate: RoomLibraryCatalogStage.RecipeEdit.Ready, lease: SelectedLibraryWriteLease, journal: LocalLibraryDirectory,
-        checkpoint: () -> Unit, requireAuthority: () -> Unit,
+        checkpoint: () -> Unit, requireAuthority: () -> Unit, onPublicationStarted: (LibraryGeneration) -> Unit,
     ): LibraryGeneration = withRevisionIo(selection, attempt, anchor, checkpoint, requireAuthority) { root ->
         val predecessor = selection.generation
         root.read.requireCurrent(predecessor)
@@ -452,7 +453,7 @@ class AndroidLibraryTreeRead(context: Context, private val scratchDirectory: Fil
                 successor, root.requireCurrent) { target ->
                 target.requireReady(objects.mapTo(HashSet(), ObjectId::sha256))
                 val catalogBudget = candidate.catalog.byteCount + 128L * 1024
-                LibraryCatalogRevisionPublication(target, attempt, journal, root.requireCurrent, root.checkpoint)
+                LibraryCatalogRevisionPublication(target, attempt, journal, root.requireCurrent, root.checkpoint, onPublicationStarted)
                     .publishUnderLease(lease, predecessor, successor, objects, editedObjects,
                         root.writable.capacity(root.writable.root, anchor), catalogBudget, { Files.newInputStream(file, READ, NOFOLLOW_LINKS) }) { reopened ->
                         reader.verifyStagedProjection(reopened, candidate.snapshot, root.checkpoint)

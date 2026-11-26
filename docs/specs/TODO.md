@@ -632,6 +632,8 @@ Foreground Save remains the next activation boundary after the isolated read wit
 
 First foreground delivery control: after `editor_save_delivery_unconfirmed`, the editor regression reproduced a second save under the same stale editor (`expected 1, observed 2`). The guard now keeps the warning after draft edits, allows Back/Discard and prevents another Apply or Apply-and-leave until a fresh guarded open. The strict-offline app suite and Android instrumentation compilation passed. This guard by itself does not recognize an interrupted external write or authorize selected Save.
 
+Next narrow data prerequisite: report the exact selected-recipe publication obligation immediately after the durable one-shot spend, before opening the destination catalog, and report a separately verified activation before post-swap provider checks or dispatcher return. Neither notification is a UI Save result. Capacity refusal does not issue a publication notification. The focused filesystem tests use the real private journal and destination and first reproduced the absent notification seam. This does not add cold adoption, source retirement, or automatic retry.
+
 ### Current coordination: transition to `main`
 
 - [x] Operator approved the local fast-forward and `main`-based PR/handoff cadence; see [operational authority](OPERATIONAL_PLAN.md) and [queue rules](PARALLEL_EXECUTION_PLAN.md#coordination). Earlier branch/base references below describe their historical claims.

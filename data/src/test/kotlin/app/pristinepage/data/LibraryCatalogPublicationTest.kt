@@ -108,6 +108,40 @@ class LibraryCatalogPublicationTest {
         assertThrows(IOException::class.java) { local.publish(local.writer {}, openStage = { error("A visible marker can only be inspected") }) }
     }
 
+    @Test fun publicationOwnerReceivesTheExactSpentSuccessorBeforeOpeningTheDestinationCatalog() {
+        val local = localRevisionFixture()
+        val delivered = mutableListOf<LibraryGeneration>()
+        val writer = LibraryCatalogRevisionPublication(local.store, temporary.newFolder().canonicalFile.toPath(),
+            local.journal, requireOwner = {}, onPublicationStarted = { next ->
+                assertFalse(local.catalog.exists())
+                assertFalse(local.marker.exists())
+                assertThrows(IOException::class.java) { local.journal.requireUnspentCatalogRevision(next.id) }
+                delivered += next
+            })
+        assertThrows(IOException::class.java) {
+            local.publish(writer, openStage = {
+                assertEquals(listOf(generation), delivered)
+                throw IOException("Synthetic failure while transferring the closed catalog")
+            })
+        }
+        assertFalse(local.marker.exists())
+        assertThrows(IOException::class.java) { local.publish(writer) }
+        assertEquals(listOf(generation), delivered)
+    }
+
+    @Test fun preflightCapacityRefusalDoesNotReportPublicationStarted() {
+        val local = localRevisionFixture()
+        val writer = LibraryCatalogRevisionPublication(local.store, temporary.newFolder().canonicalFile.toPath(),
+            local.journal, requireOwner = {}, onPublicationStarted = { error("A refused candidate cannot reach publication") })
+        assertThrows(IOException::class.java) {
+            writer.publish(local.prior, generation, listOf(local.objectId), listOf(local.objectId), 0, 1024,
+                { error("Capacity refusal cannot read the staged catalog") }, { error("Capacity refusal cannot read back") })
+        }
+        local.journal.requireUnspentCatalogRevision(generation.id)
+        assertFalse(local.catalog.exists())
+        assertFalse(local.marker.exists())
+    }
+
     @Test fun localRevisionRequiresTheExactTipAndExcludesACompetingWriteLane() {
         val local = localRevisionFixture()
         val sibling = generation.copy(id = "19f959f4-1ab6-489f-beed-fbfb09acde8c")
