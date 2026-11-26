@@ -273,15 +273,31 @@ class LibraryFolderFilesJourneyTest {
         val instrumentation = InstrumentationRegistry.getInstrumentation()
         val app = instrumentation.targetContext.applicationContext as PristinePageApplication
         val folder = settingsFixtureFolder()
-        val expected = LibraryFolderPickerContract(writable = true).createIntent(app, Unit)
-        val component = checkNotNull(expected.component)
-        val initial = DocumentsContract.buildDocumentUri("com.android.externalstorage.documents", "primary:Documents/$folder")
         val location = runBlocking { app.services.storageLocation() }
         check(location.folderLabel == null && !location.needsReconnect)
         val pointer = File(app.filesDir.canonicalFile, "library-settings/active-library")
         val before = pointer.readBytes()
         val grants = LibraryIndependentRootGrants.inventory(app)
         val storage = compose.runOnUiThread { ViewModelProvider(compose.activity)[LibraryStorageViewModel::class.java] }
+        compose.onNodeWithTag("atelier-settings").performClick()
+        compose.onNodeWithTag("settings-open-library_storage").performClick()
+        selectHintedSettingsFiles(instrumentation, app, storage, location.activation, folder, select = false)
+        compose.waitUntil(10_000) { storage.state.value.let { it.picker == null && !it.busy } }
+        val outcome = storage.state.value
+        assertFalse(outcome.error)
+        assertEquals(null, outcome.review)
+        assertEquals(null, outcome.change)
+        assertEquals(location.activation, runBlocking { app.services.storageLocation() }.activation)
+        assertArrayEquals(before, pointer.readBytes())
+        assertEquals(grants, LibraryIndependentRootGrants.inventory(app))
+    }
+
+    private fun selectHintedSettingsFiles(instrumentation: Instrumentation, app: Context, storage: LibraryStorageViewModel,
+        activation: LibraryActivation, folder: String, select: Boolean,
+    ) {
+        val expected = LibraryFolderPickerContract(writable = true).createIntent(app, Unit)
+        val component = checkNotNull(expected.component)
+        val initial = DocumentsContract.buildDocumentUri("com.android.externalstorage.documents", "primary:Documents/$folder")
         val hinted = AtomicBoolean()
         val unexpected = AtomicReference<String>()
         // Only the outgoing launch is hinted. Returning null lets the real Files activity and real cancellation run normally.
@@ -300,8 +316,6 @@ class LibraryFolderFilesJourneyTest {
                 return null
             }
         }
-        compose.onNodeWithTag("atelier-settings").performClick()
-        compose.onNodeWithTag("settings-open-library_storage").performClick()
         val button = "library-storage-folder"
         compose.waitUntil(10_000) { compose.onAllNodes(hasTestTag(button) and isEnabled()).fetchSemanticsNodes().size == 1 }
         instrumentation.addMonitor(monitor)
@@ -319,24 +333,22 @@ class LibraryFolderFilesJourneyTest {
             check(unexpected.get() == null) { checkNotNull(unexpected.get()) }
             assertTrue("The real Settings launch did not receive the test hint", hinted.get())
             assertFalse("Settings rejected the chooser launch", storage.state.value.error)
-            selectSettingsDestination(instrumentation, component.packageName, folder, selectFolder = false,
+            fun requirePendingChange() {
+                val pending = checkNotNull(storage.state.value.picker) { "Settings settled before the real Files action" }
+                assertEquals(LibraryStorageViewModel.Action.CHANGE, pending.action)
+                assertEquals(activation, pending.ticket.issuedAt)
+            }
+            if (select) requirePendingChange()
+            selectSettingsDestination(instrumentation, component.packageName, folder, selectFolder = select,
                 navigateFromRoot = false, allowExactWindowTitle = true)
-            val pending = checkNotNull(storage.state.value.picker) { "Settings settled before the real Files cancellation" }
-            assertEquals(LibraryStorageViewModel.Action.CHANGE, pending.action)
-            assertEquals(location.activation, pending.ticket.issuedAt)
-            assertTrue("The Files chooser did not receive Back", cancelExactFiles(instrumentation, component.packageName, app.packageName) > 0)
-            compose.waitUntil(10_000) { storage.state.value.let { it.picker == null && !it.busy } }
+            if (!select) {
+                requirePendingChange()
+                assertTrue("The Files chooser did not receive Back", cancelExactFiles(instrumentation, component.packageName, app.packageName) > 0)
+            }
+            check(unexpected.get() == null) { checkNotNull(unexpected.get()) }
         } finally {
             instrumentation.removeMonitor(monitor)
         }
-        val outcome = storage.state.value
-        assertTrue("The real Settings launch did not receive the test hint", hinted.get())
-        assertFalse(outcome.error)
-        assertEquals(null, outcome.review)
-        assertEquals(null, outcome.change)
-        assertEquals(location.activation, runBlocking { app.services.storageLocation() }.activation)
-        assertArrayEquals(before, pointer.readBytes())
-        assertEquals(grants, LibraryIndependentRootGrants.inventory(app))
     }
 
     private fun mainSettingsJourney(applyEdit: Boolean) {
@@ -370,13 +382,19 @@ class LibraryFolderFilesJourneyTest {
         }
         fun enabled(tag: String) = compose.onAllNodes(hasTestTag(tag) and isEnabled()).fetchSemanticsNodes().size == 1
         openStorage()
-        compose.waitUntil(10_000) { enabled(folderButton) }
-        compose.onNodeWithTag(folderButton).performScrollTo().performClick()
-        compose.waitUntil(12_000) { instrumentation.uiAutomation.rootInActiveWindow?.packageName?.toString() == picker }
-        val restoreHidden = InstrumentationRegistry.getArguments().getString("librarySettingsRestoreHidden") == "true"
-        check(!restoreHidden || applyEdit)
-        selectSettingsDestination(instrumentation, picker, folder, touchNavigation = true, restorePreviouslyHidden = restoreHidden)
         val storage = compose.runOnUiThread { ViewModelProvider(compose.activity)[LibraryStorageViewModel::class.java] }
+        val restoreHidden = InstrumentationRegistry.getArguments().getString("librarySettingsRestoreHidden") == "true"
+        val hint = InstrumentationRegistry.getArguments().getString("librarySettingsExactHint") == "true"
+        check(!restoreHidden || applyEdit)
+        if (hint) {
+            check(applyEdit && !restoreHidden && Build.VERSION.SDK_INT == 28)
+            selectHintedSettingsFiles(instrumentation, app, storage, initial, folder, select = true)
+        } else {
+            compose.waitUntil(10_000) { enabled(folderButton) }
+            compose.onNodeWithTag(folderButton).performScrollTo().performClick()
+            compose.waitUntil(12_000) { instrumentation.uiAutomation.rootInActiveWindow?.packageName?.toString() == picker }
+            selectSettingsDestination(instrumentation, picker, folder, touchNavigation = true, restorePreviouslyHidden = restoreHidden)
+        }
         compose.waitUntil(20_000) { storage.state.value.review != null }
         val review = checkNotNull(storage.state.value.review)
         check(review.picked == folder || review.picked == "Documents/$folder")
