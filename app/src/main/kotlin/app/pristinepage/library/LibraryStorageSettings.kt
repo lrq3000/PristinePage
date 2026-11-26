@@ -33,6 +33,8 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
@@ -61,12 +63,7 @@ internal class LibraryStorageViewModel(context: Context, private val services: A
     val state = current.asStateFlow()
 
     fun refresh() {
-        if (current.value.busy) return
-        viewModelScope.launch {
-            try { current.value = current.value.copy(location = services.storageLocation()) }
-            catch (canceled: CancellationException) { throw canceled }
-            catch (_: Exception) { current.value = current.value.copy(error = true) }
-        }
+        viewModelScope.launch { refreshStorageLocation(current, services::storageLocation) }
     }
 
     fun pick(action: Action) {
@@ -82,6 +79,19 @@ internal class LibraryStorageViewModel(context: Context, private val services: A
         if (current.value.picker !== picker) return
         picker.gate.cancel(picker.ticket)
         current.value = current.value.copy(picker = null, error = true)
+    }
+
+    suspend fun mayLaunch(picker: Picker): Boolean {
+        if (current.value.picker !== picker || !picker.gate.awaitsLaunch(picker.ticket)) return false
+        val verified = try { services.storageLocation().activation }
+        catch (canceled: CancellationException) { throw canceled }
+        catch (_: Exception) { null }
+        currentCoroutineContext().ensureActive()
+        if (current.value.picker !== picker || !picker.gate.awaitsLaunch(picker.ticket)) return false
+        if (verified == picker.ticket.issuedAt) return true
+        pickerUnavailable(picker)
+        refresh()
+        return false
     }
 
     fun accept(delivery: LibraryBackupPickerRegistration.Delivery) {
@@ -198,6 +208,22 @@ internal class LibraryStorageViewModel(context: Context, private val services: A
     }
 }
 
+/** A status refresh has no authority to replace a transition or a picker that began while it was suspended. */
+internal suspend fun refreshStorageLocation(current: MutableStateFlow<LibraryStorageViewModel.State>,
+    read: suspend () -> AndroidLibraryStartup.Location,
+) {
+    val before = current.value
+    if (before.busy) return
+    try {
+        val observed = read()
+        currentCoroutineContext().ensureActive()
+        if (current.value === before) current.value = before.copy(location = observed)
+    } catch (canceled: CancellationException) { throw canceled }
+    catch (_: Exception) {
+        if (current.value === before) current.value = before.copy(error = true)
+    }
+}
+
 private object AndroidLibraryTreeReadLabel {
     fun forUri(uri: android.net.Uri) = app.pristinepage.data.library.AndroidLibraryTreeRead.localTreeDocumentId(uri)?.substringAfter(':')
 }
@@ -213,8 +239,11 @@ private object AndroidLibraryTreeReadLabel {
         onDispose { binding?.close() }
     }
     LaunchedEffect(picker, registration, allowLaunch) {
-        if (allowLaunch && picker != null && registration != null && picker.gate.awaitsLaunch(picker.ticket)) {
-            try { registration?.launch(state.location?.activation) }
+        val binding = registration
+        if (allowLaunch && picker != null && binding != null && owner.mayLaunch(picker)) {
+            try {
+                if (!binding.launch(picker.ticket.issuedAt) && picker.gate.awaitsLaunch(picker.ticket)) owner.pickerUnavailable(picker)
+            }
             catch (_: RuntimeException) { owner.pickerUnavailable(picker) }
         }
     }
@@ -224,6 +253,7 @@ internal fun AndroidLibraryStartup.Location.requiresLibraryReconnect(refusedActi
     folderLabel != null && (needsReconnect || activation == refusedActivation)
 
 @Composable internal fun LibraryStorageSettings(owner: LibraryStorageViewModel, backup: LibraryBackupSession,
+    active: LibraryActivation?,
     refusedActivation: LibraryActivation? = null,
 ) {
     val state by owner.state.collectAsStateWithLifecycle()
@@ -234,9 +264,9 @@ internal fun AndroidLibraryStartup.Location.requiresLibraryReconnect(refusedActi
     val fallback = stringResource(R.string.library_selected_folder)
     val default = stringResource(R.string.library_default_location)
     val label = location?.folderLabel?.ifBlank { fallback } ?: default
-    val selectable = location != null && !state.busy && state.picker == null && state.review == null && !state.returnReview &&
+    val selectable = location != null && location.activation == active && !state.busy && state.picker == null && state.review == null && !state.returnReview &&
         !backupState.busy && !backupState.reviewing && backupState.picker == null
-    LaunchedEffect(owner) { owner.refresh() }
+    LaunchedEffect(owner, active) { owner.refresh() }
     Column {
         if (location?.folderLabel != null) Text(label, style = MaterialTheme.typography.titleMedium)
         Button(onClick = { owner.pick(if (reconnect) LibraryStorageViewModel.Action.RECONNECT
@@ -256,7 +286,8 @@ internal fun AndroidLibraryStartup.Location.requiresLibraryReconnect(refusedActi
         }
         if (state.busy) LinearProgressIndicator(Modifier.fillMaxWidth())
         if (state.error) Text(stringResource(R.string.library_folder_unavailable))
-        LibraryBackupSettings(backup, allowExport = !reconnect && !state.busy && state.picker == null && state.review == null)
+        LibraryBackupSettings(backup, allowExport = location?.activation == active && !reconnect &&
+            !state.busy && state.picker == null && state.review == null && !state.returnReview)
     }
     if (state.returnReview) AlertDialog(
         onDismissRequest = owner::cancelDefaultReview,

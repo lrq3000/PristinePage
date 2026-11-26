@@ -339,6 +339,11 @@ class LibraryFolderFilesJourneyTest {
             location?.folderLabel == null && location?.activation?.libraryId == initial.libraryId &&
                 location.activation.number > selected.number && !storage.state.value.busy
         }
+        val returned = checkNotNull(storage.state.value.location).activation
+        val backup = compose.runOnUiThread { ViewModelProvider(compose.activity)[LibraryBackupViewModel::class.java].session }
+        compose.waitUntil(20_000) {
+            backup.state.value.issuedAt == returned && enabled("library-backup-export")
+        }
         val reopened = runBlocking { app.services.imports() }
         assertTrue(runBlocking { reopened.store.catalog.list(null, 2) }.isEmpty())
         assertEquals(retained, witness.inventory(app))

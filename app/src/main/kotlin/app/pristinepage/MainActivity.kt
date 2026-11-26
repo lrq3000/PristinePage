@@ -52,7 +52,6 @@ import app.pristinepage.editor.EditorViewModel
 import app.pristinepage.editor.PageEditorScreen
 import app.pristinepage.library.LibraryEvent
 import app.pristinepage.library.LibraryBackupPickerHost
-import app.pristinepage.library.LibraryBackupSettings
 import app.pristinepage.library.LibraryStoragePicker
 import app.pristinepage.library.LibraryStorageSettings
 import app.pristinepage.library.LibraryStorageViewModel
@@ -256,9 +255,7 @@ class MainActivity : ComponentActivity() {
                  val ocrReady by app.ocrRuntimeReady.collectAsStateWithLifecycle()
                  AtelierSettingsScreen(checkNotNull(settingsPage), app.atelierPreferences, ocrReady,
                       libraryStorage = {
-                          // Keep the existing backup usable while the selected-folder write and cutover paths are qualified.
-                           if (library.selectedFolder) LibraryStorageSettings(storage, backup, library.activation.takeIf { library.reconnect })
-                           else LibraryBackupSettings(backup)
+                           LibraryStorageSettings(storage, backup, library.activation, library.activation.takeIf { library.reconnect })
                       }) {
                       if (storageState.busy) return@AtelierSettingsScreen
                       if (settingsPage == SettingsPage.LIBRARY_STORAGE && it != SettingsPage.LIBRARY_STORAGE) storage.cancelReview()
