@@ -43,23 +43,23 @@ internal object AndroidLibraryDescriptorAncestry {
     }
 
     /** Both walks must independently arrive at the same directory. The descriptors support metadata proof only and never escape this callback. */
-    fun withDerivedAnchor(left: ParcelFileDescriptor, right: ParcelFileDescriptor, hops: Pair<Int, Int>,
-        checkpoint: () -> Unit = {}, block: (requireCurrent: () -> Unit) -> Unit,
-    ) {
+    fun <T> withDerivedAnchor(left: ParcelFileDescriptor, right: ParcelFileDescriptor, hops: Pair<Int, Int>,
+        checkpoint: () -> Unit = {}, block: (requireCurrent: () -> Unit) -> T,
+    ): T {
         if (hops.first !in 1 until MAX_CHAIN || hops.second !in 1 until MAX_CHAIN) unavailable()
         checkpoint()
         val a = observe(left)
         val b = observe(right)
         if (a == b || !a.sameFilesystem(b)) unavailable()
 
-        fun walk(leaf: ParcelFileDescriptor, steps: Int, start: Observation,
-            use: (ParcelFileDescriptor, Observation, List<Identity>) -> Unit,
-        ) {
+        fun <R> walk(leaf: ParcelFileDescriptor, steps: Int, start: Observation,
+            use: (ParcelFileDescriptor, Observation, List<Identity>) -> R,
+        ): R {
             val seen = hashSetOf(start.identity)
             val first = arrayListOf(start.identity)
             var owner: ParcelFileDescriptor? = null
             var observed = start
-            try {
+            return try {
                 repeat(steps) {
                     checkpoint()
                     val old = owner
@@ -76,7 +76,7 @@ internal object AndroidLibraryDescriptorAncestry {
             }
         }
 
-        walk(left, hops.first, a) { leftAnchor, anchor, leftBefore ->
+        return walk(left, hops.first, a) { leftAnchor, anchor, leftBefore ->
             walk(right, hops.second, b) { rightAnchor, rightObserved, rightBefore ->
                 if (anchor != rightObserved) unavailable()
                 val proof = LibraryRootSeparation.admitObserved(leftBefore, rightBefore,
@@ -88,8 +88,7 @@ internal object AndroidLibraryDescriptorAncestry {
                 }
                 try {
                     requireCurrent()
-                    block(::requireCurrent)
-                    requireCurrent()
+                    block(::requireCurrent).also { requireCurrent() }
                 } finally { live = false }
             }
         }

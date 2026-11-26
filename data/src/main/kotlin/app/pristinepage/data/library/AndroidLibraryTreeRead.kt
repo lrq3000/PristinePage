@@ -5,6 +5,7 @@ import android.content.pm.ApplicationInfo
 import android.net.Uri
 import android.os.CancellationSignal
 import android.os.OperationCanceledException
+import android.os.ParcelFileDescriptor
 import android.provider.DocumentsContract
 import app.pristinepage.core.io.transferExactBytes
 import app.pristinepage.core.pipeline.PixelSize
@@ -66,18 +67,81 @@ class AndroidLibraryTreeRead(context: Context, private val scratchDirectory: Fil
     /** A durable private selection supplies the full expected marker; reject a different tip before projecting rows or opening originals. */
     private suspend fun verifyExact(tree: Uri, expected: LibraryGeneration?, scratch: File = scratchDirectory): Verified =
         readTree(tree, scratch) { read, checkpoint ->
-            try { read.read(reader.schemaVersion, expected, expected, MAX_TREE_ORIGINAL_BYTES) { generation, file ->
-                reader.read(file) { sql ->
-                    val catalog = LibraryPortableCatalogProjection(sql, checkpoint = checkpoint).snapshot()
-                    val originals = catalog.originals.associate { it.sourceBlobId to ObjectId(it.byteSha256, it.byteCount) }
-                    LibraryBackupRead.Projection(
-                        VerifiedTree(tree.toString(), generation, catalog.albums.size, catalog.albums.sumOf { it.pages.size }, originals),
-                        originals.values,
-                    )
-                }
-            }.value } catch (_: UnexpectedLibraryTip) {
-                throw LibraryTreeUnavailable("Unexpected library tip during catalog admission")
+            readCatalog(read, expected, checkpoint) { generation, catalog ->
+                val originals = catalog.originals.associate { it.sourceBlobId to ObjectId(it.byteSha256, it.byteCount) }
+                VerifiedTree(tree.toString(), generation, catalog.albums.size, catalog.albums.sumOf { it.pages.size }, originals)
+            }.value
+        }
+
+    internal data class PairInput(val tree: Uri, val expected: LibraryGeneration? = null)
+    internal data class PairMember(val tree: Uri, val generation: LibraryGeneration, val snapshot: RoomLibrarySavedCatalog.Snapshot)
+
+    /** Prepare a detached, resource-free result without delivering it or causing visible side effects from the projection. Not publication or activation authority. */
+    internal suspend fun <T : Any> withVerifiedPair(left: PairInput, right: PairInput, requireAuthority: () -> Unit,
+        project: (PairMember, PairMember) -> T,
+    ): T = withContext(Dispatchers.IO) {
+        LibraryProviderAttempt.runOwned { owner ->
+            val checkpoint = owner::requireCurrent
+            fun requireIssuingAuthority() {
+                checkpoint()
+                requireAuthority()
+                checkpoint()
             }
+            requireIssuingAuthority()
+            val a = localTreeDocumentId(left.tree) ?: throw LibraryTreeUnavailable("This folder provider is not supported")
+            val b = localTreeDocumentId(right.tree) ?: throw LibraryTreeUnavailable("This folder provider is not supported")
+            val hints = LibraryTreeAncestryHint.parentHops(a, b)
+            val scratch = canonicalLibraryDirectory(scratchDirectory, app.filesDir.toPath().toRealPath())
+            val detached = withLibraryProviderSignal { signal ->
+                val first = Backend(app, left.tree, a, scratch, signal, checkpoint)
+                val second = Backend(app, right.tree, b, scratch, signal, checkpoint)
+                first.openRootDirectory().use { heldLeft ->
+                    second.openRootDirectory().use { heldRight ->
+                        val leftIdentity = AndroidLibraryDescriptorAncestry.observe(heldLeft)
+                        val rightIdentity = AndroidLibraryDescriptorAncestry.observe(heldRight)
+                        AndroidLibraryDescriptorAncestry.withDerivedAnchor(heldLeft, heldRight, hints, checkpoint) { requireAncestry ->
+                            fun requireCurrent() {
+                                requireIssuingAuthority()
+                                first.rebindRoot(leftIdentity)
+                                second.rebindRoot(rightIdentity)
+                                requireAncestry()
+                                requireIssuingAuthority()
+                            }
+                            val leftRead = backupRead(a, first, scratch, checkpoint)
+                            val rightRead = backupRead(b, second, scratch, checkpoint)
+                            requireCurrent()
+                            val verifiedLeft = readCatalog(leftRead, left.expected, checkpoint, first::member).value
+                            requireCurrent()
+                            val verifiedRight = readCatalog(rightRead, right.expected, checkpoint, second::member).value
+                            fun requireBothTips() {
+                                requireCurrent()
+                                leftRead.requireCurrent(verifiedLeft.generation)
+                                rightRead.requireCurrent(verifiedRight.generation)
+                                requireCurrent()
+                            }
+                            requireBothTips()
+                            val projected = project(verifiedLeft, verifiedRight)
+                            requireBothTips()
+                            projected
+                        }
+                    }
+                }
+            }
+            requireIssuingAuthority()
+            detached
+        }
+    }
+
+    private fun <T : Any> readCatalog(read: LibraryBackupRead, expected: LibraryGeneration?, checkpoint: () -> Unit,
+        project: (LibraryGeneration, RoomLibrarySavedCatalog.Snapshot) -> T,
+    ): LibraryBackupRead.Verified<T> =
+        try { read.read(reader.schemaVersion, expected, expected, MAX_TREE_ORIGINAL_BYTES) { generation, file ->
+            reader.read(file) { sql ->
+                val catalog = LibraryPortableCatalogProjection(sql, checkpoint = checkpoint).snapshot()
+                LibraryBackupRead.Projection(project(generation, catalog), catalog.originals.map { ObjectId(it.byteSha256, it.byteCount) })
+            }
+        } } catch (_: UnexpectedLibraryTip) {
+            throw LibraryTreeUnavailable("Unexpected library tip during catalog admission")
         }
 
     /** Stream one original into caller-owned disposable output. The caller must discard that output on any failure and verify closure before using it. */
@@ -233,13 +297,15 @@ class AndroidLibraryTreeRead(context: Context, private val scratchDirectory: Fil
                 val scratch = canonicalLibraryDirectory(scratchLocation, app.filesDir.toPath().toRealPath())
                 val backend = Backend(app, tree, root, scratch, signal, checkpoint)
                 backend.requireRoot()
-                val source = LibraryTreeReadSource(root, backend)
-                val result = block(LibraryBackupRead(source, scratch, MAX_PORTABLE_BYTES, checkpoint), checkpoint)
+                val result = block(backupRead(root, backend, scratch, checkpoint), checkpoint)
                 backend.requireRoot()
                 result
             }
         }
     }
+
+    private fun backupRead(root: String, backend: Backend, scratch: Path, checkpoint: () -> Unit) =
+        LibraryBackupRead(LibraryTreeReadSource(root, backend), scratch, MAX_PORTABLE_BYTES, checkpoint)
 
     private class Backend(
         private val app: Context, private val tree: Uri, private val rootId: String,
@@ -249,11 +315,38 @@ class AndroidLibraryTreeRead(context: Context, private val scratchDirectory: Fil
         private val admitted = HashMap<String, Binding>()
         private data class Binding(val parent: String, val entry: LibraryTreeReadSource.Entry)
 
+        fun member(generation: LibraryGeneration, catalog: RoomLibrarySavedCatalog.Snapshot) = PairMember(tree, generation, catalog)
+
         fun requireRoot() {
             checkAccess()
             val rows = query(document(rootId), 1, checkpoint)
             if (rows.singleOrNull()?.let { it.id == rootId && it.directory } != true) {
                 throw LibraryTreeUnavailable("The selected library root could not be verified")
+            }
+        }
+
+        fun openRootDirectory(): ParcelFileDescriptor {
+            requireRoot()
+            val descriptor = try {
+                resolver.openFileDescriptor(document(rootId), "r", signal)
+            } catch (_: SecurityException) {
+                throw LibraryTreeUnavailable("The selected library directory is unavailable")
+            } catch (_: OperationCanceledException) {
+                checkpoint()
+                throw LibraryTreeUnavailable("The selected library directory open was canceled")
+            } ?: throw LibraryTreeUnavailable("The selected library directory is unavailable")
+            try {
+                checkAccess()
+                return descriptor
+            } catch (failure: Throwable) {
+                try { descriptor.close() } catch (closeFailure: Exception) { failure.addSuppressed(closeFailure) }
+                throw failure
+            }
+        }
+
+        fun rebindRoot(held: AndroidLibraryDescriptorAncestry.Observation) {
+            openRootDirectory().use {
+                if (AndroidLibraryDescriptorAncestry.observe(it) != held) throw LibraryTreeUnavailable("The selected library directory changed")
             }
         }
 

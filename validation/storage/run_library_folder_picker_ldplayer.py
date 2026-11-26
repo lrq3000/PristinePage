@@ -98,6 +98,7 @@ PRE_MARKER_RECOVERY_PASSED = "c5919cf91cda1c7222554f32fc7d339b0870458922dc227909
 INDEPENDENT_FIRST_PICKER_REFUSAL = "2bf9bd0595719b47826ce3f9d0460791599ddbdaf11aef0666a04a3e7bde0f7e"
 INDEPENDENT_GRANTS_RETAINED = "f8d8e889ef209c4aaba178c9737d16881ee3afb362cd67ec621ce59793886084"
 INDEPENDENT_COLD_PASSED = "10354effa50ebdf210c7d4d8b5d1fd2709a9388b779414518c2674ffc309095b"
+INDEPENDENT_DERIVED_PASSED = "550461e2206a8f887853ded659da4a494215144c64ba53f14f22a5212d3ccdd9"
 UUID_TEXT = r"[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}"
 BACKUP_ORIGINAL = "ebd602840377a3b3cf763cb6828fee67861ff77c444e8fe5894457ef6d99a24d"
 OCR_ACTIVATION_CASES = tuple(f"app.pristinepage.ocr.OcrWorkManagerIntegrationTest#{method}" for method in (
@@ -324,6 +325,19 @@ def verify_released_independent_guest(original, stopped):
 
 def verify_independent_derived_installed(installed, previous):
     need(installed == previous, "The exact installed predecessor is required for the derived-root witness")
+
+
+def verify_derived_receipt(anchor, guest, pair):
+    artifacts = json.loads(anchor("artifacts.json"))
+    status = json.loads(anchor("independent-roots-grants.json"))
+    folder = status["fixture"]
+    independent_fixture_children(folder)
+    need(artifacts["guest"] == guest and artifacts["independentRoots"] is True and artifacts["independentRootsDerived"] is True and
+         artifacts["independentRootsRetry"] is None and artifacts["independentRootsHandoff"] is None and
+         status["state"] == "prior-inventory-restored" and json.loads(anchor("installed-before.json")) == artifacts["previous"] and
+         json.loads(anchor("outcomes.json")) == {"passed": [INDEPENDENT_DERIVED_CASE], "failed": [], "installedSha256": pair},
+         "The derived predecessor did not restore the exact grant inventory on the admitted pair")
+    return folder, artifacts["fixture"], artifacts["previous"]
 
 
 def settings_run_anchors(raw, expected_sha):
@@ -1074,6 +1088,7 @@ def run(args):
     independent_prior = None
     independent_retained = None
     independent_protected = None
+    prior_derived = None
     protect_interrupted = None
     death_authority = CAPACITY_PASSED if before_marker else args.backup_death_retry or SETTINGS_COLD_MANIFEST
     death_operation = str(uuid.uuid4()) if args.backup_delivery_death or before_marker else None
@@ -1098,19 +1113,24 @@ def run(args):
             recovery_pair = previous
             if args.independent_roots_retry or independent_handoff or independent_derived:
                 if independent_derived:
-                    cold = settings_run_anchors(root, INDEPENDENT_COLD_PASSED)
+                    latest = settings_run_anchors(root, INDEPENDENT_DERIVED_PASSED)
+                    folder, contents, prior_pair = verify_derived_receipt(latest, args.guest, previous)
+                    need(read_results(latest("independent-roots-derived-instrumentation.txt"), (INDEPENDENT_DERIVED_CASE,)) ==
+                         ([INDEPENDENT_DERIVED_CASE], []), "The exact derived predecessor did not pass its instrumented case")
+                    prior_derived = folder, contents
+                    independent_claim = json.loads(latest("claim.json"))
+                    cold = settings_run_anchors(raw.parent / "picker-adapter-library-tree-2cb71680ebd0", INDEPENDENT_COLD_PASSED)
                     granted = settings_run_anchors(raw.parent / "picker-adapter-library-tree-185be1bd3f81",
                                                   INDEPENDENT_GRANTS_RETAINED)
-                    folder, contents, record, refused_pair = verify_independent_cold_handoff(granted, args.guest, previous)
+                    folder, contents, record, refused_pair = verify_independent_cold_handoff(granted, args.guest, prior_pair)
                     cold_artifact = json.loads(cold("artifacts.json"))
                     need(cold_artifact["guest"] == args.guest and cold_artifact["fixture"] == contents and
                          cold_artifact["independentRootsHandoff"] == INDEPENDENT_GRANTS_RETAINED and
-                         json.loads(cold("outcomes.json")) == {"passed": [INDEPENDENT_COLD_CASE], "failed": [], "installedSha256": previous} and
+                         json.loads(cold("outcomes.json")) == {"passed": [INDEPENDENT_COLD_CASE], "failed": [], "installedSha256": prior_pair} and
                          json.loads(cold("independent-roots-grants.json")) == {"fixture": folder, "state": "prior-inventory-restored"} and
                          read_results(cold("independent-roots-cold-instrumentation.txt"), (INDEPENDENT_COLD_CASE,)) ==
                          ([INDEPENDENT_COLD_CASE], []), "The exact predecessor did not prove cold read and grant restoration")
                     independent_protected = folder, contents, record
-                    independent_claim = json.loads(cold("claim.json"))
                     root = raw.parent / "picker-adapter-library-tree-ec1a12a0878f"
                 elif independent_handoff:
                     need(previous == hashes, "Cold independent-root readback must not replace either APK")
@@ -1453,6 +1473,21 @@ def run(args):
                              "The earlier independent fixture record changed")
                     check_prior_cold()
                     independent_preservation = (*independent_preservation, check_prior_cold)
+                if prior_derived:
+                    def check_prior_derived():
+                        recheck_target(run, ns)
+                        prior_folder, inventory = prior_derived
+                        root = f"/sdcard/Documents/{prior_folder}"
+                        children = independent_fixture_children(prior_folder)
+                        need(adb("shell", "ls", "-A", "-1", root).splitlines() == sorted(children),
+                             "The previous derived roots fixture changed")
+                        for name in children:
+                            verify_unchanged_settings_destination(adb, f"{root}/{name}", inventory)
+                        need(f"independent-ancestry-grants-{prior_folder}" not in
+                             adb("shell", "run-as", APP, "ls", "-A", "-1", "files").splitlines(),
+                             "The previous derived roots unexpectedly retained a grant handoff")
+                    check_prior_derived()
+                    independent_preservation = (*independent_preservation, check_prior_derived)
             else:
                 pre_marker_preservation = checks
         for p, path in retained.items():

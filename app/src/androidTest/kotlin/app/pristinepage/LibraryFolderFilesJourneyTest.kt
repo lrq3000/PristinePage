@@ -38,6 +38,7 @@ import app.pristinepage.core.pipeline.RenderPurpose
 import app.pristinepage.core.recipe.GeometryRecipe
 import app.pristinepage.core.recipe.RecipeCodec
 import app.pristinepage.data.library.AndroidLibraryTreeRead
+import app.pristinepage.data.library.LibraryDescriptorAncestryWitness
 import app.pristinepage.data.library.AndroidLibraryStartup
 import app.pristinepage.data.library.AndroidLibraryWritableFolder
 import app.pristinepage.data.library.LibraryActivation
@@ -594,16 +595,15 @@ class LibraryFolderFilesJourneyTest {
             }
             requireNoParentAccess()
             val scratch = File(app.filesDir.canonicalFile, "tree-read-${UUID.randomUUID()}").apply { check(mkdir()) }
-            val reader = AndroidLibraryTreeRead(app, scratch)
-            LibraryProviderDirectoryProbe.verifyDerivedRoots(app.contentResolver, selected[0], selected[1]) {
-                for (tree in selected) {
-                    requireNoParentAccess()
-                    val catalog = runBlocking { reader.verify(tree) }
-                    assertEquals("9e940d7b-76c7-45ea-b5e4-0ad86f26ea13", catalog.libraryId)
-                    assertEquals("25c49d9b-02d8-418f-b982-154980d89cfb", catalog.generationId)
-                    assertEquals(1, catalog.albums)
-                    assertEquals(1, catalog.scans)
-                }
+            val catalogs = runBlocking {
+                LibraryDescriptorAncestryWitness.verifyPairWithSharedOwner(app, scratch, selected[0], selected[1], ::requireNoParentAccess)
+            }
+            assertEquals(selected, catalogs.map { it.tree })
+            for (catalog in catalogs) {
+                assertEquals("9e940d7b-76c7-45ea-b5e4-0ad86f26ea13", catalog.libraryId)
+                assertEquals("25c49d9b-02d8-418f-b982-154980d89cfb", catalog.generationId)
+                assertEquals(1, catalog.albums)
+                assertEquals(1, catalog.scans)
             }
             requireNoParentAccess()
         }
