@@ -1682,8 +1682,13 @@ def preserve_detached_recipe(adb, files, attempt, readback):
          readback["moveSpends"], "The detached edit private evidence changed")
 
 
-def exercise_selected_recipe_edit(run, adb, ns, raw, fixture, files, hashes, *, fresh=False, bound=False, advanced=False):
+def exercise_selected_recipe_edit(run, adb, ns, raw, fixture, files, hashes, *, fresh=False, bound=False, advanced=False,
+                                  recovery_authority=None):
     """One picker and one new operation; preserve an ambiguous result rather than rerunning it."""
+    recover = recovery_authority is not None
+    need(not recover or (bound and not fresh and not advanced and re.fullmatch(r"[0-9a-f]{64}", recovery_authority)
+                         and not (raw.parent / f"settings-retry-spent-{recovery_authority}.json").exists()),
+         "Pointer recovery requires a new isolated bound edit and an unspent admission")
     folder = "PristinePage-tree-" + uuid.uuid4().hex[:12]
     operation = str(uuid.uuid4())
     parent = f"/sdcard/Documents/{folder}"
@@ -1717,7 +1722,9 @@ def exercise_selected_recipe_edit(run, adb, ns, raw, fixture, files, hashes, *, 
     run.save(run.path("selected-recipe-attempt.json"), {"folder": folder, "operation": operation, "before": before}, durable=True)
     try:
         admit()
-        if advanced:
+        if recover:
+            authority = recovery_authority
+        elif advanced:
             authority = (sha256(f"selected-recipe-advance-fresh-v1:{ns['NAME']}".encode("ascii")).hexdigest()
                          if fresh else BOUND_RECIPE_READBACK)
         else:
@@ -1725,8 +1732,10 @@ def exercise_selected_recipe_edit(run, adb, ns, raw, fixture, files, hashes, *, 
                          if fresh else SELECTED_RECIPE_BASELINE)
         spend_settings_retry(raw.parent, authority, dict(operation=operation, destination=folder, kind="selected-recipe-edit"))
         case = ADVANCED_RECIPE_CASE if advanced else BOUND_RECIPE_CASE if bound else SELECTED_RECIPE_CASE
+        recovery_args = ("-e", "libraryRecoverSelectedRecipePointer", "true") if recover else ()
         output = adb("shell", "am", "instrument", "-w", "-r", "-e", "class", case,
-                     "-e", "libraryFixtureFolder", folder, "-e", "librarySelectedAppendOperation", operation, RUNNER, timeout=190)
+                     "-e", "libraryFixtureFolder", folder, "-e", "librarySelectedAppendOperation", operation,
+                     *recovery_args, RUNNER, timeout=190)
         run.path("selected-recipe-instrumentation.txt").write_text(output, encoding="utf-8")
         passed, failed = read_results(output, (case,))
         if not failed:
@@ -1758,7 +1767,7 @@ def exercise_selected_recipe_edit(run, adb, ns, raw, fixture, files, hashes, *, 
             extras = {"catalog.sqlite"}
             receipt_digest = None
             if bound or advanced:
-                receipt_digest = read_bound_recipe_evidence(adb, private, attempt, left, initial, marker, fields[6], advanced=advanced)
+                receipt_digest = read_bound_recipe_evidence(adb, private, attempt, left, initial, marker, fields[6], advanced=advanced or recover)
                 extras.update(("recipe-edit.intent", "recipe-edit.complete", "recipe-edit.catalog-owner"))
             move_spends = verify_library_move_spends(adb, attempt, leaves - extras,
                 {catalog_leaf: (int(fields[5]), fields[6]), marker_leaf: (len(marker.encode("ascii")), marker_hash)})

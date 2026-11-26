@@ -27,6 +27,7 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.compose.setContent
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.runtime.getValue
+import androidx.compose.ui.test.ComposeTimeoutException
 import androidx.compose.ui.test.assertIsEnabled
 import androidx.compose.ui.test.assertIsNotEnabled
 import androidx.compose.ui.test.hasAnyAncestor
@@ -93,6 +94,7 @@ import java.security.MessageDigest
 import java.util.UUID
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicReference
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
@@ -267,6 +269,76 @@ class LibraryFolderFilesJourneyTest {
 
     @Test fun mainSettingsAppliesOneSelectedEditAndReopensTheSamePage() = mainSettingsJourney(applyEdit = true)
 
+    @Test fun mainSettingsCancelsTheExactHintedFilesLocationWithoutChangingTheLibrary() {
+        val instrumentation = InstrumentationRegistry.getInstrumentation()
+        val app = instrumentation.targetContext.applicationContext as PristinePageApplication
+        val folder = settingsFixtureFolder()
+        val expected = LibraryFolderPickerContract(writable = true).createIntent(app, Unit)
+        val component = checkNotNull(expected.component)
+        val initial = DocumentsContract.buildDocumentUri("com.android.externalstorage.documents", "primary:Documents/$folder")
+        val location = runBlocking { app.services.storageLocation() }
+        check(location.folderLabel == null && !location.needsReconnect)
+        val pointer = File(app.filesDir.canonicalFile, "library-settings/active-library")
+        val before = pointer.readBytes()
+        val grants = LibraryIndependentRootGrants.inventory(app)
+        val storage = compose.runOnUiThread { ViewModelProvider(compose.activity)[LibraryStorageViewModel::class.java] }
+        val hinted = AtomicBoolean()
+        val unexpected = AtomicReference<String>()
+        // Only the outgoing launch is hinted. Returning null lets the real Files activity and real cancellation run normally.
+        val monitor = object : Instrumentation.ActivityMonitor() {
+            override fun onStartActivity(intent: Intent): Instrumentation.ActivityResult? {
+                if (intent.action != Intent.ACTION_OPEN_DOCUMENT_TREE) return null
+                if (intent.component != component || intent.flags != expected.flags ||
+                    !intent.getBooleanExtra(Intent.EXTRA_LOCAL_ONLY, false) || intent.data != null ||
+                    intent.hasExtra(DocumentsContract.EXTRA_INITIAL_URI)) {
+                    unexpected.compareAndSet(null, "The outgoing Settings intent did not match the app's writable Files contract")
+                } else if (!hinted.compareAndSet(false, true)) {
+                    unexpected.compareAndSet(null, "The Settings request launched Files more than once")
+                } else {
+                    intent.putExtra(DocumentsContract.EXTRA_INITIAL_URI, initial)
+                }
+                return null
+            }
+        }
+        compose.onNodeWithTag("atelier-settings").performClick()
+        compose.onNodeWithTag("settings-open-library_storage").performClick()
+        val button = "library-storage-folder"
+        compose.waitUntil(10_000) { compose.onAllNodes(hasTestTag(button) and isEnabled()).fetchSemanticsNodes().size == 1 }
+        instrumentation.addMonitor(monitor)
+        try {
+            compose.onNodeWithTag(button).performScrollTo().performClick()
+            // Drive Compose recomposition through the Settings launch effect before waiting on the separate Files UI.
+            try {
+                compose.waitUntil(12_000) {
+                    unexpected.get() != null || storage.state.value.error ||
+                        instrumentation.uiAutomation.rootInActiveWindow?.packageName?.toString() == component.packageName
+                }
+            } catch (failure: ComposeTimeoutException) {
+                throw AssertionError("The Settings chooser did not foreground; hinted=${hinted.get()}, pending=${storage.state.value.picker != null}", failure)
+            }
+            check(unexpected.get() == null) { checkNotNull(unexpected.get()) }
+            assertTrue("The real Settings launch did not receive the test hint", hinted.get())
+            assertFalse("Settings rejected the chooser launch", storage.state.value.error)
+            selectSettingsDestination(instrumentation, component.packageName, folder, selectFolder = false,
+                navigateFromRoot = false, allowExactWindowTitle = true)
+            val pending = checkNotNull(storage.state.value.picker) { "Settings settled before the real Files cancellation" }
+            assertEquals(LibraryStorageViewModel.Action.CHANGE, pending.action)
+            assertEquals(location.activation, pending.ticket.issuedAt)
+            assertTrue("The Files chooser did not receive Back", cancelExactFiles(instrumentation, component.packageName, app.packageName) > 0)
+            compose.waitUntil(10_000) { storage.state.value.let { it.picker == null && !it.busy } }
+        } finally {
+            instrumentation.removeMonitor(monitor)
+        }
+        val outcome = storage.state.value
+        assertTrue("The real Settings launch did not receive the test hint", hinted.get())
+        assertFalse(outcome.error)
+        assertEquals(null, outcome.review)
+        assertEquals(null, outcome.change)
+        assertEquals(location.activation, runBlocking { app.services.storageLocation() }.activation)
+        assertArrayEquals(before, pointer.readBytes())
+        assertEquals(grants, LibraryIndependentRootGrants.inventory(app))
+    }
+
     private fun mainSettingsJourney(applyEdit: Boolean) {
         check(InstrumentationRegistry.getArguments().getString("librarySettingsOpenFixture") == if (applyEdit) "apply" else "fresh") {
             "This journey requires an independently admitted synthetic app graph"
@@ -424,7 +496,7 @@ class LibraryFolderFilesJourneyTest {
 
     private fun cancelExactFiles(instrumentation: Instrumentation, picker: String, appPackage: String,
         wait: (Long, () -> Boolean) -> Unit = { timeout, condition -> compose.waitUntil(timeout, condition) },
-    ) {
+    ): Int {
         val automation = instrumentation.uiAutomation
         fun foreground() = automation.rootInActiveWindow?.packageName?.toString()
         var backSteps = 0
@@ -441,6 +513,7 @@ class LibraryFolderFilesJourneyTest {
             }
         }
         assertEquals(appPackage, foreground())
+        return backSteps
     }
 
     private fun settingsFixtureFolder(): String =
@@ -1086,6 +1159,7 @@ class LibraryFolderFilesJourneyTest {
                 val page = startup.useSelectedCatalog(scratch) { _, catalog -> catalog.load(album).pages.single() }
                 val activePointer = File(files, "library-settings/active-library")
                 val expectedPointer = activePointer.readBytes().toList()
+                val recover = InstrumentationRegistry.getArguments().getString("libraryRecoverSelectedRecipePointer") == "true"
                 val stale = activation.copy(number = activation.number - 1)
                 val unused = File(files, "never-open-this-scratch")
                 val forbidProvider = object : ContextWrapper(isolated) {
@@ -1116,6 +1190,11 @@ class LibraryFolderFilesJourneyTest {
                     try {
                         val failure = runCatching { witness.observeInterruptedRecipeSuccessor(isolated, scratch, activation) }.exceptionOrNull()
                         assertTrue(failure is IOException)
+                        if (recover) {
+                            val refused = runCatching { witness.recoverInterruptedRecipeSuccessor(isolated, scratch, activation) }.exceptionOrNull()
+                            assertTrue(refused is IOException)
+                            assertEquals("The selected edit could not be settled", refused?.message)
+                        }
                         assertFalse(leaf.exists())
                         assertEquals(expectedPointer, activePointer.readBytes().toList())
                         assertEquals(before + (tree.toString() to (true to true)), LibraryIndependentRootGrants.inventory(app))
@@ -1137,7 +1216,7 @@ class LibraryFolderFilesJourneyTest {
                 assertEquals(before + (tree.toString() to (true to true)), LibraryIndependentRootGrants.inventory(app))
                 LibraryIndependentRootGrants.refuseParentAccess(app, folder)
                 // The retained bound-only case deliberately leaves the predecessor active for its existing host oracle.
-                if (InstrumentationRegistry.getArguments().getString("libraryRecoverSelectedRecipePointer") == "true") {
+                if (recover) {
                     val advanced = witness.recoverInterruptedRecipeSuccessor(isolated, scratch, activation)
                     assertEquals(activation.copy(number = activation.number + 1), advanced)
                     val current = checkNotNull(advanced)
@@ -1146,6 +1225,14 @@ class LibraryFolderFilesJourneyTest {
                     assertEquals(2, reopened.recipe.geometry.outputQuarterTurns)
                     assertEquals(null, witness.recoverInterruptedRecipeSuccessor(isolated, scratch, current))
                     assertEquals(before + (tree.toString() to (true to true)), LibraryIndependentRootGrants.inventory(app))
+                    // Remove only the write mode acquired by this test. No second picker or reacquisition is needed.
+                    val advancedPointer = activePointer.readBytes()
+                    app.contentResolver.releasePersistableUriPermission(tree, Intent.FLAG_GRANT_WRITE_URI_PERMISSION)
+                    assertEquals(before + (tree.toString() to (true to false)), LibraryIndependentRootGrants.inventory(app))
+                    val refused = runCatching { witness.recoverInterruptedRecipeSuccessor(isolated, scratch, current) }.exceptionOrNull()
+                    assertTrue(refused is IOException)
+                    assertEquals("The exact library folder is not writable", refused?.message)
+                    assertArrayEquals(advancedPointer, activePointer.readBytes())
                 }
             }
         }
