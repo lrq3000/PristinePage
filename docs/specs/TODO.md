@@ -798,6 +798,10 @@ Next eligible storage boundary after the foreground receipt: factor the current-
 
 The exact readback-only continuation closed the ordinary Apply gate on API 28: one adopted child, one bounded archive with no staged catalog links, original bytes and Default activation 12 intact, no writer replay, and verified release after both runs. Evidence and the exact limits are in the [foreground receipt](../../validation/storage/library-folder-android.md#ordinary-foreground-apply-and-settlement). The 42 focused JVM and 72 runner host tests remain the relevant host result. Keep selected Import, Move, safe retirement and genuine selected recipe writer-death recovery open.
 
+`LIBRARY-PORTABILITY-01`, `SELECTED-IMPORT-RECIPE-SETTLEMENT`, input `eed500e`: reuse exact current recipe settlement under the existing selected-write lock before confirmed Import stages or publishes anything. Allow an already archived current child to verify even when there is no slot for a new recipe attempt; retaining a last verified private catalog on a bad provider read is still mandatory. Target the new file-backed admission control, the bounded journal suite, and Android consumer compilation; no further device write in this slice. Recheck at the host result and independent persistence review.
+
+All 43 focused JVM cases passed under strict offline verification, including verification of the current archived child at full recipe quota and refusal if its exact completion was corrupted. Android instrumentation compiled, the owned JVM scratch root was empty, and independent source review confirmed the lease and pre-staging order. No native Import ran. The next native target is one confirmed Settings Copy and merge using distinct synthetic originals, with source read-only, source and predecessor unchanged, exact selected activation and closed-catalog readback.
+
 ### Current coordination: transition to `main`
 
 - [x] Operator approved the local fast-forward and `main`-based PR/handoff cadence; see [operational authority](OPERATIONAL_PLAN.md) and [queue rules](PARALLEL_EXECUTION_PLAN.md#coordination). Earlier branch/base references below describe their historical claims.

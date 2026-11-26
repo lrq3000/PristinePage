@@ -611,6 +611,26 @@ class LocalLibraryRecipeEditJournalTest {
         assertEquals(before, archive.toFile().listFiles()!!.associate { it.name to it.readBytes().toList() })
     }
 
+    @Test fun aNonRecipeWriteVerifiesCurrentArchiveEvenWhenTheRecipeQuotaIsFull() = runBlocking {
+        val (files, _, intent) = reclaimedAttempt()
+        val selected = binding(4, predecessor = next)
+        val attempts = attempts(files)
+        val archive = attempts.archiveReclaimed(intent, selected) {}
+        repeat(127) { Files.createDirectory(archive.parent.resolve(UUID.randomUUID().toString())) }
+        assertFailsWith<IOException> { attempts.requireNew(UUID.randomUUID().toString()) }
+        attempts.settleCurrentForPublication(selected, { error("An archive is not an active attempt") }, {
+            assertEquals(intent, it)
+        }, { selected }, verifyCurrentChild = { error("The archive must not open Files") },
+            readArchivedPredecessor = { _, _, _ -> intent.binding }) {}
+        assertEquals(archive, attempts.find(next.id))
+        archive.resolve("recipe-edit.complete").toFile().appendText("changed")
+        assertFailsWith<IOException> {
+            attempts.settleCurrentForPublication(selected, { error("An archive is not an active attempt") }, {}, { selected },
+                verifyCurrentChild = { error("The archive must not open Files") }, readArchivedPredecessor = { _, _, _ -> intent.binding }) {}
+        }
+        Unit
+    }
+
     @Test fun aFollowingWriteKeepsTheOnlyPrivateCatalogUntilTheAdoptedChildIsVerified() = runBlocking {
         val files = roots.newFolder().canonicalFile
         val active = attempts(files).requireNew(next.id)

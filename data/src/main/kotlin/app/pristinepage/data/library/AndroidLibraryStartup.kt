@@ -172,8 +172,9 @@ class AndroidLibraryStartup(context: Context) {
             coroutineContext.ensureActive()
             if (authority.read() != selected) activationChanged()
         }
-        RoomSelectedLibraryMerge(app, scratchDirectory).appendAndAdopt(preview.operation, preview.destination, preview.source, ::requireActive) { published, requireLane ->
-            val reader = AndroidLibraryTreeRead(app, scratchDirectory)
+        val reader = AndroidLibraryTreeRead(app, scratchDirectory)
+        RoomSelectedLibraryMerge(app, scratchDirectory).appendAndAdopt(preview.operation, preview.destination, preview.source, ::requireActive,
+            prepare = { lease -> reader.requireCurrentRecipeSettlement(selected, authority, lease, ::requireActive) }) { published, requireLane ->
             val verified = reader.verifyRecipeEditTarget(preview.destination.tree, published, ::requireActive)
             reader.requireConfirmedRoot(verified, checkNotNull(preview.destination.root))
             val next = reader.openConfirmedFolder(verified, { requireLane(); requireActive() }) { generation, checkDestination ->

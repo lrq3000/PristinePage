@@ -32,7 +32,8 @@ internal class RoomSelectedLibraryMerge(context: Context, private val scratchDir
 
     /** An active merge consumes the one live result under the exact lane. No cold inspection can enter this continuation. */
     suspend fun <T> appendAndAdopt(operationId: String, destination: AndroidLibraryTreeRead.PairInput, incoming: AndroidLibraryTreeRead.PairInput,
-        requireAuthority: () -> Unit, adopt: suspend (LibraryGeneration, () -> Unit) -> T,
+        requireAuthority: () -> Unit, prepare: suspend (SelectedLibraryWriteLease) -> Unit = {},
+        adopt: suspend (LibraryGeneration, () -> Unit) -> T,
     ): T = withContext(Dispatchers.IO) {
         requireOpaqueId(operationId)
         if (destination.expected == null || incoming.expected == null) throw IOException("The selected write needs both exact input generations")
@@ -46,6 +47,9 @@ internal class RoomSelectedLibraryMerge(context: Context, private val scratchDir
                 lane.requireCurrent(files)
                 requireAuthority()
             }
+            requireLane()
+            prepare(lane)
+            requireLane()
             val published = appendOwned(operationId, destination, incoming, files, checkpoint, ::requireLane)
             requireLane()
             adopt(published) { checkpoint(); lane.requireCurrent(files) }

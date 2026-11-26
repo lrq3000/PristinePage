@@ -41,6 +41,7 @@ import java.nio.file.StandardOpenOption.READ
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.sync.Mutex
@@ -252,27 +253,54 @@ class AndroidLibraryTreeRead(context: Context, private val scratchDirectory: Fil
                 checkpoint()
             }
             requireSelection()
-            suspend fun verifyChild(): Verified =
-                verifyRecipeEditTarget(Uri.parse(binding.grant.exactUri), binding.expectedGeneration, ::requireSelection)
-            var verifiedChild: Verified? = null
-            androidRecipeAttempts(files, checkpoint).prepareFollowingEdit(binding, operation,
-                readPredecessor = { authority.readVerifiedRecipePredecessor(binding) },
-                verifySpend = { intent ->
-                    LocalLibraryDirectory(files.toFile()).requireAndroidRevisionSpend(
-                        intent.binding.expectedGeneration, intent.successor, ::requireSelection, checkpoint)
-                },
-                readCurrent = authority::read, readArchivedPredecessor = authority::readArchivedRecipePredecessor,
-                verifyCurrentChild = { intent ->
-                    val verified = requireVerifiedTree(verifyChild())
-                    val root = verified.editRoot ?: throw UnsettledSelectedRecipeEdit()
-                    if (recipeRootKey(verified.tree, root) != intent.rootSha256) throw UnsettledSelectedRecipeEdit()
-                    verifiedChild = verified
-                }, requireOwner = ::requireSelection)
-            val verified = verifiedChild ?: verifyChild()
+            val verified = confirmRecipeBeforePublication(files, binding, authority, checkpoint, ::requireSelection, operation)
+                ?: verifyRecipeEditTarget(Uri.parse(binding.grant.exactUri), binding.expectedGeneration, ::requireSelection)
             val result = appendRecipeUnderLease(files, lease, verified, operation, document, page, expectedRevision, admission,
                 ::requireSelection, checkpoint, binding, onPublicationStarted, edit)
             consume(result, lease)
         }
+    }
+
+    /** An active Import holds the same lane as the recipe writer. It must not advance past unresolved recipe cleanup. */
+    internal suspend fun requireCurrentRecipeSettlement(
+        binding: LocalSelectedLibraryAuthority.Selected.Folder, authority: LocalSelectedLibraryAuthority,
+        lease: SelectedLibraryWriteLease, requireActive: () -> Unit,
+    ) {
+        val context = currentCoroutineContext()
+        val files = app.filesDir.toPath().toRealPath()
+        confirmRecipeBeforePublication(files, binding, authority, context::ensureActive, requireSelection = {
+            context.ensureActive()
+            lease.requireCurrent(files)
+            requireActive()
+        })
+    }
+
+    private suspend fun confirmRecipeBeforePublication(
+        files: Path, binding: LocalSelectedLibraryAuthority.Selected.Folder, authority: LocalSelectedLibraryAuthority,
+        checkpoint: () -> Unit, requireSelection: () -> Unit, recipeOperation: String? = null,
+    ): Verified? {
+        val attempts = androidRecipeAttempts(files, checkpoint)
+        val readPredecessor = { authority.readVerifiedRecipePredecessor(binding) }
+        val verifySpend: (LocalLibraryRecipeEditJournal.Intent) -> Unit = { intent ->
+            LocalLibraryDirectory(files.toFile()).requireAndroidRevisionSpend(
+                intent.binding.expectedGeneration, intent.successor, requireSelection, checkpoint)
+        }
+        var verifiedChild: Verified? = null
+        val verifyChild: suspend (LocalLibraryRecipeEditJournal.Intent) -> Unit = { intent ->
+            val verified = requireVerifiedTree(
+                verifyRecipeEditTarget(Uri.parse(binding.grant.exactUri), binding.expectedGeneration, requireSelection))
+            val root = verified.editRoot ?: throw UnsettledSelectedRecipeEdit()
+            if (recipeRootKey(verified.tree, root) != intent.rootSha256) throw UnsettledSelectedRecipeEdit()
+            verifiedChild = verified
+        }
+        if (recipeOperation == null) {
+            attempts.settleCurrentForPublication(binding, readPredecessor, verifySpend, authority::read, verifyChild,
+                authority::readArchivedRecipePredecessor, requireSelection)
+        } else {
+            attempts.prepareFollowingEdit(binding, recipeOperation, readPredecessor, verifySpend, authority::read, verifyChild,
+                authority::readArchivedRecipePredecessor, requireSelection)
+        }
+        return verifiedChild
     }
 
     /** Scope a cold read to the exact selected folder and one completed direct successor. */

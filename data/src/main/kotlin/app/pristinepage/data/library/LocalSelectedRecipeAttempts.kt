@@ -60,15 +60,37 @@ internal class LocalSelectedRecipeAttempts(
         readArchivedPredecessor: (Long, String, LibraryGeneration) -> LocalSelectedLibraryAuthority.Selected.Folder? = { _, _, _ -> null },
         requireOwner: () -> Unit,
     ): Path {
+        requireOwner()
+        if (readCurrent() != selected) unavailable()
+        requireOwner()
+        requireUnused(operation)
+        val generation = selected.expectedGeneration
+        if (operation == generation.id || operation == generation.predecessorId) unavailable()
+        settleCurrentForPublication(selected, readPredecessor, verifySpend, readCurrent, verifyCurrentChild, readArchivedPredecessor, requireOwner)
+        val attempt = requireNew(operation)
+        requireOwner()
+        if (readCurrent() != selected) unavailable()
+        requireOwner()
+        return attempt
+    }
+
+    /** Check or settle the exact current recipe before another writer replaces its active pointer. This reserves no recipe slot. */
+    suspend fun settleCurrentForPublication(
+        selected: LocalSelectedLibraryAuthority.Selected.Folder,
+        readPredecessor: () -> LocalSelectedLibraryAuthority.Selected.Folder?,
+        verifySpend: (LocalLibraryRecipeEditJournal.Intent) -> Unit,
+        readCurrent: () -> LocalSelectedLibraryAuthority.Selected?,
+        verifyCurrentChild: suspend (LocalLibraryRecipeEditJournal.Intent) -> Unit,
+        readArchivedPredecessor: (Long, String, LibraryGeneration) -> LocalSelectedLibraryAuthority.Selected.Folder?,
+        requireOwner: () -> Unit,
+    ) {
         fun requireSelected() {
             requireOwner()
             if (readCurrent() != selected) unavailable()
             requireOwner()
         }
         requireSelected()
-        requireUnused(operation)
         val generation = selected.expectedGeneration
-        if (operation == generation.id || operation == generation.predecessorId) unavailable()
         val currentAttempt = find(generation.id)
         if (currentAttempt == null) {
             // A matching private spend with neither attempt present is not an empty history.
@@ -88,9 +110,7 @@ internal class LocalSelectedRecipeAttempts(
             verifySpend(intent)
             requireArchiveEvidence(intent, ::requireSelected)
         }
-        val attempt = requireNew(operation)
         requireSelected()
-        return attempt
     }
 
     private fun requireArchiveEvidence(intent: LocalLibraryRecipeEditJournal.Intent, requireSelected: () -> Unit) {
