@@ -58,6 +58,8 @@ def run_open(commit, app_sha, test_sha):
     for package, path in paths.items():
         shutil.copyfile(path, saved[package])
         checks.need(checks.sha(saved[package]) == pair[package], "Candidate changed during evidence retention")
+    (raw / f"{prefix}-artifacts.json").write_text(
+        json.dumps(dict(source=commit, proof=proof, previous=previous, predecessor=BASELINE_SHA, guest=guest)), encoding="ascii")
     ns = checks.load_allocator(root, guest, raw, "pristinepage-tree-" + os.environ["OPENCODE_SESSION_ID"])
     base = checks.run_type(ns, purpose="pristinepage-library-app-tree", operation="PristinePage selected catalog and frame",
                            admit_released=lambda record: checks.verify_bound_recipe_release(claim, record, manifest, snapshot))
@@ -67,7 +69,6 @@ def run_open(commit, app_sha, test_sha):
             return checks.inspect_prior_pid(super().process, pid)
 
     runner = OpenRun(prefix, None, 0)
-    runner.save(runner.path("artifacts.json"), dict(source=commit, proof=proof, previous=previous, predecessor=BASELINE_SHA, guest=guest), durable=True)
     print(f"Selected Open evidence: {raw.relative_to(root)}", flush=True)
     try:
         checks.wait_for_allocator(runner, lambda: runner.prepare(False, None, False), before_claim=True)
