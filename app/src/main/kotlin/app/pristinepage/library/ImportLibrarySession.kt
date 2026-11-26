@@ -51,6 +51,29 @@ class ImportLibrarySession(private val actions: LibraryActions, restored: Librar
 
     init { refresh(true) }
 
+    /** Only the foreground cutover owner may invalidate this presentation, after fencing the issuing graph. */
+    internal fun reloadAfterLibraryChange(expected: LibraryActivation, reopen: LibraryIdentity? = null) {
+        val previous = current.value
+        if (previous.activation != expected) return
+        ++navigation
+        ++metadataGeneration
+        cancelOpeningHit()
+        metadataRead?.cancel()
+        copying?.cancel()
+        copying = null
+        pendingSelection = reopen
+        if (reopen != null) navigation = 0L
+        albumCursor = null
+        pageCursor = null
+        pageWindows = 0
+        retryFirstAlbumPage = false
+        started = false
+        // IDs may be identical on both sides. Drop all old view and continuation state in one publication.
+        current.value = LibraryState(albumOrder = previous.albumOrder, canSearchAlbums = actions is SearchableLibraryActions,
+            canSearchPages = actions is SearchablePageActions, restoringSelection = reopen != null)
+        refresh(reset = true)
+    }
+
     override fun identity() = current.value.let { value ->
         val waiting = pendingSelection.takeIf { navigation == 0L }
         LibraryIdentity(waiting?.selected ?: value.selectedId, value.request?.session, waiting?.selectedPage ?: value.selectedPage,
@@ -61,7 +84,7 @@ class ImportLibrarySession(private val actions: LibraryActions, restored: Librar
     override suspend fun observePageSearch(query: String, issuedAt: LibraryActivation?) {
         val search = actions as? SearchablePageActions ?: return
         if (query.isBlank()) return
-        fun stillOnQuery() = current.value.let { it.activation == issuedAt && it.selectedId == null && it.albumSearch == query }
+        fun stillOnQuery() = current.value.let { it.canSearchPages && it.activation == issuedAt && it.selectedId == null && it.albumSearch == query }
         if (!stillOnQuery()) return
         search.pageSearchChanges(query, issuedAt).catch {
             if (it is CancellationException) throw it
@@ -144,7 +167,11 @@ class ImportLibrarySession(private val actions: LibraryActions, restored: Librar
                     } finally { if (event.importAfterCreate) current.value = current.value.copy(preparingImport = false) }
                 }
             }
-            LibraryEvent.Refresh -> { current.value = current.value.copy(error = null); refresh(true) }
+            LibraryEvent.Refresh -> {
+                val value = current.value
+                if (value.reconnect && value.activation != null) reloadAfterLibraryChange(value.activation)
+                else { current.value = value.copy(error = null); refresh(true) }
+            }
             LibraryEvent.RefreshAlbum -> { current.value = current.value.copy(error = null); refresh(true, includeList = false) }
             LibraryEvent.More -> if (!current.value.loading && current.value.hasMore) {
                 current.value = current.value.copy(error = null); refresh(false)
@@ -328,6 +355,7 @@ class ImportLibrarySession(private val actions: LibraryActions, restored: Librar
         val nav = navigation
         current.value = current.value.copy(loading = true)
         return run(onFailure = { error -> if (token == metadataGeneration && nav == navigation) failed(error) }) {
+            if (current.value.reconnect) return@run
             if (debounceSearch) delay(220)
             if (includeList) reload(reset, token)
             if (token == metadataGeneration && nav == navigation) loadSelected(current.value.selectedId, nav, token)
@@ -378,12 +406,14 @@ class ImportLibrarySession(private val actions: LibraryActions, restored: Librar
             val albums = (if (firstAlbum) emptyList() else current.value.documents) + found.albums
             current.value = current.value.copy(documents = owned(albums.distinctBy { it.documentId }), albumSearchUnavailable = false)
         } catch (canceled: CancellationException) { throw canceled }
-        catch (_: Exception) {
+        catch (failure: Exception) {
             if (!stillCurrent()) return
+            if (value.selectedFolder && failure is RepositoryFailure && failure.error.safeMessageKey == "library_reconnect_required") throw failure
             retryFirstAlbumPage = firstAlbum
             current.value = current.value.copy(documents = if (reset) emptyList() else current.value.documents, albumSearchUnavailable = true)
         }
-        reloadSearchPages(reset, value, actions as? SearchablePageActions, stillCurrent)
+        if (value.canSearchPages) reloadSearchPages(reset, value, actions as? SearchablePageActions, stillCurrent)
+        else if (stillCurrent()) current.value = current.value.copy(hasMore = retryFirstAlbumPage || albumCursor != null)
     }
 
     private suspend fun refreshPageWindow(query: String, search: SearchablePageActions, issuedAt: LibraryActivation?, currentRead: () -> Boolean) {
@@ -469,8 +499,10 @@ class ImportLibrarySession(private val actions: LibraryActions, restored: Librar
                 if (!started) {
                     val opened = actions.openLibrary()
                     currentCoroutineContext().ensureActive()
-                    var value = current.value.copy(recovery = opened.report, activation = opened.activation, restoringSelection = false)
-                    pendingSelection?.takeIf { navigation == 0L && it.selectedAt == opened.activation }?.let {
+                    var value = current.value.copy(recovery = opened.report, activation = opened.activation, restoringSelection = false,
+                        selectedFolder = opened.selectedFolder, reconnect = opened.reconnect, loading = !opened.reconnect,
+                        canSearchPages = !opened.selectedFolder && actions is SearchablePageActions)
+                    pendingSelection?.takeIf { !opened.reconnect && navigation == 0L && it.selectedAt == opened.activation }?.let {
                         value = value.copy(selectedId = it.selected, selectedPage = it.selectedPage)
                     }
                     pendingSelection = null
@@ -489,7 +521,16 @@ class ImportLibrarySession(private val actions: LibraryActions, restored: Librar
     }
 
     private fun failed(error: OperationError) {
-        current.value = current.value.copy(loading = false, error = error)
+        val value = current.value
+        if (value.selectedFolder && error.safeMessageKey == "library_reconnect_required") {
+            ++navigation
+            ++metadataGeneration
+            cancelOpeningHit()
+            albumCursor = null
+            pageCursor = null
+            current.value = LibraryState(loading = false, activation = value.activation, recovery = value.recovery,
+                selectedFolder = true, reconnect = true, albumOrder = value.albumOrder)
+        } else current.value = value.copy(loading = false, error = error)
     }
     private fun <T> owned(values: List<T>): List<T> = Collections.unmodifiableList(ArrayList(values))
 }

@@ -53,6 +53,9 @@ import app.pristinepage.editor.PageEditorScreen
 import app.pristinepage.library.LibraryEvent
 import app.pristinepage.library.LibraryBackupPickerHost
 import app.pristinepage.library.LibraryBackupSettings
+import app.pristinepage.library.LibraryStoragePicker
+import app.pristinepage.library.LibraryStorageSettings
+import app.pristinepage.library.LibraryStorageViewModel
 import app.pristinepage.library.LibraryBackupViewModel
 import app.pristinepage.library.errorText
 import app.pristinepage.editor.BatchEditScreen
@@ -118,7 +121,10 @@ class MainActivity : ComponentActivity() {
         val editorFactory = object : ViewModelProvider.Factory {
             @Suppress("UNCHECKED_CAST") override fun <T : ViewModel> create(modelClass: Class<T>): T {
                 require(modelClass == EditorViewModel::class.java)
-                return EditorViewModel(services, app.savedOcrSignals::onPagesSaved) as T
+                 return EditorViewModel(services, app.savedOcrSignals::onPagesSaved) { before, after ->
+                     retained.reloadAfterLibraryChange(before.issuedAt,
+                         LibraryIdentity(selected = after.documentId, selectedPage = after.pageId, selectedAt = after.issuedAt))
+                 } as T
             }
         }
         val editorOwner = ViewModelProvider(this, editorFactory)[EditorViewModel::class.java]
@@ -146,6 +152,12 @@ class MainActivity : ComponentActivity() {
                 return LibraryBackupViewModel(services) as T
             }
         })[LibraryBackupViewModel::class.java].session
+        val storage = ViewModelProvider(this, object : ViewModelProvider.Factory {
+            @Suppress("UNCHECKED_CAST") override fun <T : ViewModel> create(modelClass: Class<T>): T {
+                require(modelClass == LibraryStorageViewModel::class.java)
+                return LibraryStorageViewModel(applicationContext, services) as T
+            }
+        })[LibraryStorageViewModel::class.java]
         val acquisition = ViewModelProvider(this, object : ViewModelProvider.Factory {
             @Suppress("UNCHECKED_CAST") override fun <T : ViewModel> create(modelClass: Class<T>): T {
                 require(modelClass == AtelierCaptureViewModel::class.java)
@@ -181,8 +193,16 @@ class MainActivity : ComponentActivity() {
             val host by editorOwner.state.collectAsStateWithLifecycle()
             val editing by editorOwner.session.collectAsStateWithLifecycle()
              val library by retained.state.collectAsStateWithLifecycle()
-              LaunchedEffect(library.activation) {
-                  backup.show(library.activation)
+             val storageState by storage.state.collectAsStateWithLifecycle()
+             LaunchedEffect(storageState.change) {
+                 storageState.change?.let { change ->
+                     editorOwner.closeEditor()
+                     retained.reloadAfterLibraryChange(change.old)
+                     storage.acknowledge(change)
+                 }
+             }
+               LaunchedEffect(library.activation, library.selectedFolder) {
+                   backup.show(library.activation.takeUnless { library.selectedFolder })
                   textSave.show(library.activation)
                   exportOwner.show(library.activation)
               }
@@ -235,7 +255,12 @@ class MainActivity : ComponentActivity() {
             else if (atHome && settingsPage != null) {
                  val ocrReady by app.ocrRuntimeReady.collectAsStateWithLifecycle()
                  AtelierSettingsScreen(checkNotNull(settingsPage), app.atelierPreferences, ocrReady,
-                     libraryStorage = { LibraryBackupSettings(backup) }) {
+                      libraryStorage = {
+                          // Keep the existing backup usable while the selected-folder write and cutover paths are qualified.
+                          if (library.selectedFolder) LibraryStorageSettings(storage, backup) else LibraryBackupSettings(backup)
+                      }) {
+                      if (storageState.busy) return@AtelierSettingsScreen
+                      if (settingsPage == SettingsPage.LIBRARY_STORAGE && it != SettingsPage.LIBRARY_STORAGE) storage.cancelReview()
                      if (settingsPage == SettingsPage.LIBRARY_STORAGE && it != SettingsPage.LIBRARY_STORAGE) backup.leaveSettings()
                      settingsPage = it
                  }
@@ -246,13 +271,13 @@ class MainActivity : ComponentActivity() {
                  val loadThumbnail: suspend (DocumentSummary, DocumentPage) -> RenderedPreviewBitmap = { album, tile ->
                      // Lazy tiles retain only their small displays. Serialize expensive full-source decoding; the existing process-owned budget still governs every allocation.
                      thumbnailPermit.withPermit {
-                         services.renderDefaultLibraryThumbnail(checkNotNull(issuing), album, tile)
+                          services.renderLibraryThumbnail(checkNotNull(issuing), album, tile)
                      }
                  }
                  // Identical album/page IDs and revisions in a successor are not keys for an old display or in-flight effect.
                  key(issuing) {
                      AtelierLibraryScreen(
-                         retained, library, app.atelierPreferences, { services.loadDefaultAlbum(checkNotNull(issuing), it) }, loadThumbnail,
+                          retained, library, app.atelierPreferences, { services.loadLibraryAlbum(checkNotNull(issuing), it) }, loadThumbnail,
                          onBatch = { activation, album -> batchOwner.open(activation, album) }, onSelectPages = batchOwner::open,
                          onExport = { album -> issuing?.let { exportOwner.review(it, album, null) } },
                          batchUndo = batch.undo?.takeIf { batch.savedDocument == library.selectedId && batch.issuingActivation == library.activation },
@@ -273,7 +298,9 @@ class MainActivity : ComponentActivity() {
                          openAtelier = { title, target ->
                              retained.accept(LibraryEvent.LeaveHomeSearch)
                              issuing?.let { acquisition.open(it, title, target) }
-                         }, onSettings = {
+                          }, onReconnect = {
+                              settingsPage = SettingsPage.LIBRARY_STORAGE
+                          }, onSettings = {
                              retained.accept(LibraryEvent.LeaveHomeSearch)
                              settingsPage = SettingsPage.ROOT
                          },
@@ -350,6 +377,7 @@ class MainActivity : ComponentActivity() {
             AlbumExportDialog(exportOwner)
              OcrTextSaveHost(textSave, activityResultRegistry)
              LibraryBackupPickerHost(backup, activityResultRegistry, allowLaunch = atHome && settingsPage == SettingsPage.LIBRARY_STORAGE)
+             LibraryStoragePicker(storage, activityResultRegistry, allowLaunch = atHome && settingsPage == SettingsPage.LIBRARY_STORAGE)
         } }
     }
 

@@ -67,6 +67,49 @@ class ImportLibrarySessionTest {
         assertEquals(1, f.deliveries)
     }
 
+    @Test fun aVerifiedCutoverClearsTheOldAlbumAndRefusesItsLateMetadataEvenWithTheSameIds() = runTest {
+        val old = LibraryActivation("aaaaaaaa-aaaa-4aaa-8aaa-000000000001", 1)
+        val next = LibraryActivation("aaaaaaaa-aaaa-4aaa-8aaa-000000000002", 2)
+        val f = Fixture()
+        val lateOld = CompletableDeferred<Unit>()
+        val entered = CompletableDeferred<Unit>()
+        var active = old
+        var blockOld = false
+        val actions = object : LibraryActions by f {
+            override suspend fun openLibrary() = LibraryStartup(f.startup(), active)
+            override suspend fun list(after: DocumentId?, limit: Int) =
+                if (active == next) listOf(f.load(f.first).document.copy(title = "New library, same ID")) else f.list(after, limit)
+            override suspend fun loadIssued(id: DocumentId, issuedAt: LibraryActivation): DocumentOverview {
+                if (issuedAt == old && blockOld) withContext(NonCancellable) { entered.complete(Unit); lateOld.await() }
+                return f.load(id)
+            }
+        }
+        val session = ImportLibrarySession(actions, LibraryIdentity(), this)
+        advanceUntilIdle()
+        assertEquals(old, session.state.value.activation)
+        session.accept(LibraryEvent.Open(f.first))
+        advanceUntilIdle()
+        assertEquals(f.first, session.state.value.document?.document?.documentId)
+        blockOld = true
+        session.accept(LibraryEvent.RefreshAlbum)
+        advanceUntilIdle()
+        assertTrue(entered.isCompleted)
+        try {
+            active = next
+            session.reloadAfterLibraryChange(old)
+            assertNull(session.state.value.document)
+            assertNull(session.state.value.selectedId)
+            assertTrue(session.state.value.documents.isEmpty())
+            advanceUntilIdle()
+            lateOld.complete(Unit)
+            advanceUntilIdle()
+            assertEquals(next, session.state.value.activation)
+            assertEquals("New library, same ID", session.state.value.documents.single().title)
+            assertNull(session.state.value.document)
+            assertNull(session.state.value.error)
+        } finally { lateOld.complete(Unit) }
+    }
+
     @Test fun aRefusedRestoredCallbackDoesNotRetryFailedStartupOrTrapTheAlbum() = runTest {
         val f = Fixture()
         val issued = LibraryActivation("aaaaaaaa-aaaa-4aaa-8aaa-000000000001", 1)

@@ -13,7 +13,8 @@ import kotlinx.coroutines.ensureActive
 import java.time.ZoneId
 import java.util.Locale
 
-data class LibraryStartup(val report: RecoveryReport, val activation: LibraryActivation? = null)
+data class LibraryStartup(val report: RecoveryReport, val activation: LibraryActivation? = null,
+    val selectedFolder: Boolean = false, val reconnect: Boolean = false)
 
 /** Immediate foreground commands against the existing Application-owned store. These ports carry no Activity, live bitmap, private path or persistable-grant promise. Real adapter delegates to the already tested repositories/controller. */
 interface LibraryActions {
@@ -112,6 +113,8 @@ data class LibraryState(
     val pageSearchUnavailable: Boolean = false,
     val albumSearchUnavailable: Boolean = false,
     val restoringSelection: Boolean = false,
+    val selectedFolder: Boolean = false,
+    val reconnect: Boolean = false,
 ) {
     // Keep transient search input (which can contain a private quote) out of incidental diagnostics.
     override fun toString() = "LibraryState(loading=$loading, albumCount=${documents.size}, hasMore=$hasMore, phase=$phase)"

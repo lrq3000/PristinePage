@@ -63,6 +63,34 @@ internal class LibraryFolderGrantHandoff(context: Context) {
     fun persistWrite(picked: LibraryFolderPickerContract.Picked, checkpoint: () -> Unit = {}): Uri =
         persist(picked, write = true, checkpoint)
 
+    /** Settings owns this one preview. Cancel returns only modes introduced by this preview, never an earlier grant. */
+    fun previewGrant(picked: LibraryFolderPickerContract.Picked, writable: Boolean): PreviewGrant {
+        val exact = picked.uri
+        val previous = held().singleOrNull { it.exactUri == exact.toString() }
+        val added = (if (previous?.read == true) 0 else Intent.FLAG_GRANT_READ_URI_PERMISSION) or
+            (if (!writable || previous?.write == true) 0 else Intent.FLAG_GRANT_WRITE_URI_PERMISSION)
+        val owner = PreviewGrant(exact, added)
+        try { if (writable) persistWrite(picked) else persistRead(picked) }
+        catch (failure: Exception) {
+            try { owner.close() } catch (cleanup: Exception) { failure.addSuppressed(cleanup) }
+            throw failure
+        }
+        return owner
+    }
+
+    internal inner class PreviewGrant(val tree: Uri, private val introduced: Int) : AutoCloseable {
+        private val finished = java.util.concurrent.atomic.AtomicBoolean()
+        fun retain() { finished.set(true) }
+        override fun close() {
+            if (!finished.compareAndSet(false, true) || introduced == 0) return
+            val current = held().singleOrNull { it.exactUri == tree.toString() } ?: return
+            val present = (if (current.read) Intent.FLAG_GRANT_READ_URI_PERMISSION else 0) or
+                (if (current.write) Intent.FLAG_GRANT_WRITE_URI_PERMISSION else 0)
+            val release = introduced and present
+            if (release != 0) resolver.releasePersistableUriPermission(tree, release)
+        }
+    }
+
     /** One-shot export uses only the live picker capability. The provider writer verifies actual platform access at each boundary. */
     fun resolveLiveWrite(picked: LibraryFolderPickerContract.Picked): Uri {
         if (!picked.grant.returnedWrite || picked.uri.toString() != picked.grant.exactUri) {

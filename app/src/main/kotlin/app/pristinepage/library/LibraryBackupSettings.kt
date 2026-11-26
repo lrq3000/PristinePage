@@ -64,7 +64,7 @@ internal fun LibraryBackupPickerHost(session: LibraryBackupSession, registry: Ac
 }
 
 @Composable
-internal fun LibraryBackupSettings(session: LibraryBackupSession) {
+internal fun LibraryBackupSettings(session: LibraryBackupSession, allowExport: Boolean = true) {
     val state by session.state.collectAsStateWithLifecycle()
     if (state.issuedAt == null) {
         Text(stringResource(R.string.library_backup_unavailable))
@@ -72,7 +72,7 @@ internal fun LibraryBackupSettings(session: LibraryBackupSession) {
     }
     Text(stringResource(R.string.library_default_location), style = MaterialTheme.typography.titleMedium)
     Text(stringResource(R.string.library_backup_description))
-    Button(onClick = session::review, enabled = state.canReview,
+    Button(onClick = session::review, enabled = state.canReview && allowExport,
         modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp).testTag("library-backup-export")) {
         Text(stringResource(R.string.library_backup_export))
     }

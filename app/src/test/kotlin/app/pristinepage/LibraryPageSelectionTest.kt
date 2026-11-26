@@ -409,6 +409,40 @@ class LibraryPageSelectionTest {
         assertFalse(session.state.value.hasMore)
     }
 
+    @Test fun selectedFolderSearchDoesNotBorrowDefaultPageSearch() = runTest {
+        val f = Fixture().apply { selectedFolder = true }
+        var defaultQueries = 0
+        f.textMatches = { defaultQueries++; HomePageSearchPage(emptyList(), null) }
+        val session = ImportLibrarySession(f, LibraryIdentity(), this)
+        advanceUntilIdle()
+
+        session.accept(LibraryEvent.SetAlbumSearch("receipt", ZoneOffset.UTC))
+        advanceUntilIdle()
+
+        assertEquals(listOf(f.other), session.state.value.documents.map { it.documentId })
+        assertEquals(0, defaultQueries)
+    }
+
+    @Test fun selectedFolderLossDuringSearchClearsResultsAndRequestsReconnect() = runTest {
+        val f = Fixture().apply { selectedFolder = true }
+        val session = ImportLibrarySession(f, LibraryIdentity(), this)
+        advanceUntilIdle()
+        session.accept(LibraryEvent.SetAlbumSearch("receipt", ZoneOffset.UTC))
+        advanceUntilIdle()
+        assertEquals(listOf(f.other), session.state.value.documents.map { it.documentId })
+
+        f.find = { _, _ ->
+            throw RepositoryFailure(OperationError(OperationErrorCode.PERMISSION_LOST, true, "library_reconnect_required", null))
+        }
+        session.accept(LibraryEvent.Refresh)
+        advanceUntilIdle()
+
+        assertTrue(session.state.value.reconnect)
+        assertEquals(f.activation, session.state.value.activation)
+        assertTrue(session.state.value.documents.isEmpty())
+        assertFalse(session.state.value.albumSearchUnavailable)
+    }
+
     @Test fun obsoleteResultCannotResurrectAClosedAlbum() = runTest {
         val f = Fixture()
         val session = ImportLibrarySession(f, LibraryIdentity(f.doc), this)
@@ -509,7 +543,8 @@ class LibraryPageSelectionTest {
             startupGate?.await()
             return RecoveryReport(0, 0, 0, 0, 0, emptyList())
         }
-        override suspend fun openLibrary() = LibraryStartup(startup(), activation)
+        var selectedFolder = false
+        override suspend fun openLibrary() = LibraryStartup(startup(), activation, selectedFolder = selectedFolder)
         var catalogUnavailable = false
         var refuseIssuedLoads = false
         var revision = 1L

@@ -76,6 +76,7 @@ import app.pristinepage.library.AlbumExportReview
 import app.pristinepage.library.HomePageCursor
 import app.pristinepage.library.HomePageSearchHit
 import app.pristinepage.library.HomePageSearchPage
+import app.pristinepage.library.LibraryStartup
 import app.pristinepage.library.LibraryFolderPickerContract
 import app.pristinepage.library.queryHomePages
 import java.io.FileNotFoundException
@@ -105,6 +106,8 @@ class ApplicationServices(context: Context, internal val budget: ImageAllocation
     private data class AtelierPhoto(val draftId: String, val generation: Long, val request: PhotoImportRequest)
     private var atelierPhoto: AtelierPhoto? = null // One reservation in the sole unfinished Atelier draft; never restored from picker data.
     private val libraryStartup = AndroidLibraryStartup(this.context)
+    private val selectedLibraryTransition = Mutex()
+    private val selectedDecodeQueue = Mutex()
     private var initialized: ApplicationImports? = null
     private var defaultOperations: DefaultLibraryOperations<ApplicationImports>? = null
     private data class OperationDelivery<T : Any>(val value: T?)
@@ -112,6 +115,153 @@ class ApplicationServices(context: Context, internal val budget: ImageAllocation
     private data class ActiveImport(val batch: ImportSessionId?)
 
     internal suspend fun recordedDefaultActivation(): LibraryActivation? = libraryStartup.recordedDefaultActivation()
+
+    internal suspend fun storageLocation() = libraryStartup.location()
+
+    private suspend fun selectedLibraryScratch(): File = withContext(Dispatchers.IO) {
+        val files = context.filesDir.canonicalFile
+        val requested = File(files, "library-working-scratch")
+        if ((!requested.isDirectory && !requested.mkdir()) || requested.canonicalFile != requested || !requested.isDirectory) {
+            throw IOException("The selected library scratch directory is unavailable")
+        }
+        requested
+    }
+
+    internal suspend fun openLibraryPresentation(): LibraryStartup {
+        val location = storageLocation()
+        if (location.folderLabel == null) return imports().let { LibraryStartup(it.startupRecovery, it.activation) }
+        val activation = location.activation
+        val report = RecoveryReport(0, 0, 0, 0, 0, emptyList())
+        if (location.needsReconnect) return LibraryStartup(report, activation, selectedFolder = true, reconnect = true)
+        return try {
+            libraryStartup.useIssuedSelectedCatalog(selectedLibraryScratch(), activation) { _, _ ->
+                LibraryStartup(report, activation, selectedFolder = true)
+            }
+        } catch (failure: RepositoryFailure) {
+            if (failure.error.safeMessageKey != "library_reconnect_required") throw failure
+            LibraryStartup(report, activation, selectedFolder = true, reconnect = true)
+        }
+    }
+
+    internal suspend fun inspectLibraryFolder(activation: LibraryActivation, tree: Uri): AndroidLibraryStartup.FolderPreview =
+        libraryStartup.prepareFolder(selectedLibraryScratch(), activation, tree)
+
+    internal suspend fun reconnectLibrary(activation: LibraryActivation, tree: Uri): LibraryActivation =
+        selectedLibraryTransition.withLock { libraryStartup.reconnectSelectedFolder(selectedLibraryScratch(), activation, tree) }
+
+    internal suspend fun returnToDefaultLibrary(activation: LibraryActivation): LibraryActivation =
+        selectedLibraryTransition.withLock { libraryStartup.returnToDefault(activation) }
+
+    internal suspend fun inspectSelectedImport(activation: LibraryActivation, source: Uri): AndroidLibraryStartup.SelectedImportPreview =
+        libraryStartup.prepareSelectedImport(selectedLibraryScratch(), activation, source)
+
+    internal suspend fun importIntoSelected(preview: AndroidLibraryStartup.SelectedImportPreview): LibraryActivation =
+        selectedLibraryTransition.withLock { libraryStartup.importIntoSelected(selectedLibraryScratch(), preview) }
+
+    internal suspend fun selectLibraryFolder(activation: LibraryActivation, preview: AndroidLibraryStartup.FolderPreview): LibraryActivation =
+        selectedLibraryTransition.withLock {
+            val old = storageLocation()
+            if (old.activation != activation) activationChanged()
+            val scratch = selectedLibraryScratch()
+            suspend fun adopt() = when (preview) {
+                is AndroidLibraryStartup.FolderPreview.Existing -> libraryStartup.openVerifiedExistingFolder(scratch, preview.token)
+                is AndroidLibraryStartup.FolderPreview.Empty -> libraryStartup.startVerifiedEmptyFolder(scratch, preview)
+            }
+            if (old.folderLabel != null) return@withLock adopt()
+            initialization.withLock {
+                requireSameDefault(activation)
+                val graph = initialized ?: openDefault(activation)
+                val oldOperations = checkNotNull(defaultOperations)
+                oldOperations.exclusiveCutover(activation) {
+                    graph.store.requireNoUnfinishedLibraryWork()
+                    adopt().also {
+                        // Default-only entry points check the pointer even when a previous UI holds the cached graph.
+                        initialized = null
+                        defaultOperations = null
+                        withContext(Dispatchers.IO) { graph.close() }
+                    }
+                } ?: throw RepositoryFailure(OperationError(OperationErrorCode.STORAGE_FAILED, true, "library_busy", null))
+            }
+        }
+
+    internal suspend fun loadLibraryAlbum(issuedAt: LibraryActivation, document: DocumentId): DocumentOverview {
+        val active = storageLocation()
+        if (active.activation != issuedAt) activationChanged()
+        if (active.folderLabel == null) return loadDefaultAlbum(issuedAt, document)
+        return libraryStartup.useIssuedSelectedCatalog(selectedLibraryScratch(), issuedAt) { catalog, _ -> catalog.load(document) }
+    }
+
+    internal suspend fun readLibraryHomeAlbums(issuedAt: LibraryActivation?, query: AlbumSearchQuery?, order: AlbumOrder,
+        locale: Locale, after: AlbumPosition?, limit: Int,
+    ): AlbumPage {
+        val active = storageLocation()
+        if (active.activation != issuedAt) activationChanged()
+        if (active.folderLabel == null) return readDefaultHomeAlbums(issuedAt, query, order, locale, after, limit)
+        return libraryStartup.useIssuedSelectedCatalog(selectedLibraryScratch(), active.activation) { _, albums ->
+            if (query == null) albums.listAlbums(order, locale, after, limit)
+            else albums.searchAlbums(query, order, locale, after, limit)
+        }
+    }
+
+    internal suspend fun renderLibraryThumbnail(issuedAt: LibraryActivation, album: DocumentSummary, tile: DocumentPage): RenderedPreviewBitmap {
+        val active = storageLocation()
+        if (active.activation != issuedAt) activationChanged()
+        if (active.folderLabel == null) return renderDefaultLibraryThumbnail(issuedAt, album, tile)
+        return selectedLibraryPixels(issuedAt) { pages, renderer ->
+            AtelierThumbnailLoader(pages::load, renderer, RenderedPreviewBitmapLoader(budget)).load(album, tile)
+        }
+    }
+
+    internal suspend fun loadLibraryEditorPage(identity: EditorIdentity): EditablePage {
+        val active = storageLocation()
+        if (active.activation != identity.issuedAt) activationChanged()
+        if (active.folderLabel == null) return loadDefaultEditorPage(identity)
+        return libraryStartup.loadSelectedEditablePage(selectedLibraryScratch(), identity.issuedAt, identity.documentId, identity.pageId)
+    }
+
+    internal suspend fun renderLibraryEditor(identity: EditorIdentity, request: RenderRequest): RenderResult {
+        val active = storageLocation()
+        if (active.activation != identity.issuedAt) activationChanged()
+        if (active.folderLabel == null) return renderDefaultEditor(identity, request)
+        return selectedLibraryPixels(identity.issuedAt) { pages, renderer ->
+            val page = pages.load(identity.documentId, identity.pageId)
+            if (request.pageId != page.pageId.value || request.sourceId != page.sourceId.value ||
+                request.recipeRevision != page.recipeRevision) activationChanged()
+            renderer.render(request)
+        }
+    }
+
+    private suspend fun <T : AutoCloseable> selectedLibraryPixels(issuedAt: LibraryActivation,
+        produce: suspend (app.pristinepage.data.repository.EditablePages, RenderCoordinator) -> T,
+    ): T {
+        var provisional: T? = null
+        try {
+            libraryStartup.useIssuedSelectedPageSources(selectedLibraryScratch(), issuedAt) { pages, originals ->
+                val decoder = SourceDecoder(originals, AndroidSourceInspector(budget))
+                val renderer = DefaultRenderCoordinator(decoder, GeometryEngine(budget), AppearanceEngine(budget), queue = selectedDecodeQueue)
+                provisional = produce(pages, renderer)
+            }
+            currentCoroutineContext().ensureActive()
+            return checkNotNull(provisional).also { provisional = null }
+        } finally { provisional?.close() }
+    }
+
+    internal suspend fun saveLibraryEditorPage(identity: EditorIdentity, revision: Long, recipe: Recipe): Pair<LibraryActivation, SaveRecipeResult> {
+        val active = storageLocation()
+        if (active.activation != identity.issuedAt) activationChanged()
+        if (active.folderLabel == null) return identity.issuedAt to saveDefaultEditorPage(identity, revision, recipe)
+        return selectedLibraryTransition.withLock {
+            when (val result = libraryStartup.advanceSelectedRecipeEdit(selectedLibraryScratch(), identity.issuedAt,
+                java.util.UUID.randomUUID().toString(), identity.documentId, identity.pageId, revision, ClassicalRecipeAdmission()) { recipe }) {
+                is AndroidLibraryStartup.SelectedRecipeSave.Refused -> identity.issuedAt to result.result
+                is AndroidLibraryStartup.SelectedRecipeSave.Activated -> {
+                    val reopen = libraryStartup.loadSelectedEditablePage(selectedLibraryScratch(), result.activation, identity.documentId, identity.pageId)
+                    if (reopen.recipeRevision != result.saved.recipeRevision || reopen.recipeHash != result.saved.recipeHash) activationChanged()
+                    result.activation to result.saved
+                }
+            }
+        }
+    }
 
     /** Only a live, launched confirmation can enter the exact Files grant and provider-write lane. */
     internal suspend fun exportConfirmedDefaultLibrary(
@@ -187,7 +337,8 @@ class ApplicationServices(context: Context, internal val budget: ImageAllocation
     )
 
     suspend fun imports(): ApplicationImports = initialization.withLock {
-        initialized ?: openDefault(libraryStartup.requireDefaultActivation())
+        val expected = libraryStartup.requireDefaultActivation()
+        initialized?.takeIf { it.activation == expected } ?: openDefault(expected)
     }
 
     internal suspend fun reconcileDefaultOcrBatch(

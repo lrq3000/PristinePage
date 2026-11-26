@@ -87,6 +87,7 @@ import kotlinx.coroutines.launch
     thumbnailsCurrent: (DocumentSummary) -> Boolean = { true },
     observeOcrPending: ((DocumentId, DocumentPage) -> Flow<AlbumOcrPending.State?>)? = null,
     openAtelier: ((String, DocumentSummary?) -> Unit)? = null,
+    onReconnect: () -> Unit = {},
     onSettings: () -> Unit,
     onEdit: (DocumentId, PageId) -> Unit,
 ) {
@@ -99,7 +100,7 @@ import kotlinx.coroutines.launch
     fun nextTitle() = defaultAlbumTitle(template = preferencesState.albumTitleTemplate)
     val home = state.selectedId == null
     val overview = state.document
-    val canAcquire = !state.loading && !state.preparingImport && state.request == null && !state.renaming
+    val canAcquire = !state.selectedFolder && !state.loading && !state.preparingImport && state.request == null && !state.renaming
     val canClose = state.request == null && !state.preparingImport && !state.renaming
     fun acquire(kind: PhotoImportKind) {
         sheet = null
@@ -150,7 +151,7 @@ import kotlinx.coroutines.launch
                     session.observePageSearch(query, state.activation)
                 }
             }
-            if (state.canSearchAlbums) OutlinedTextField(
+            if (state.canSearchAlbums && !state.reconnect) OutlinedTextField(
                 value = state.albumSearch,
                 onValueChange = { session.accept(LibraryEvent.SetAlbumSearch(it, ZoneId.systemDefault())) },
                 label = { Text(stringResource(R.string.home_search_scans)) },
@@ -174,13 +175,20 @@ import kotlinx.coroutines.launch
                 item { Text(stringResource(preferencesState.order.label()), style = MaterialTheme.typography.labelMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant) }
                 item { LibraryFeedback(state, session) }
+                if (state.reconnect) item {
+                    Column {
+                        Text(stringResource(R.string.library_folder_unavailable))
+                        TextButton(onClick = onReconnect, modifier = Modifier.heightIn(min = AtelierStyle.touchTarget)
+                            .testTag("library-reconnect")) { Text(stringResource(R.string.library_reconnect)) }
+                    }
+                }
                 if (searching && state.pageSearchUnavailable) item {
                     Text(stringResource(R.string.home_page_search_unavailable), Modifier.padding(vertical = 4.dp))
                 }
                 if (searching && state.albumSearchUnavailable) item {
                     Text(stringResource(R.string.home_album_search_unavailable), Modifier.padding(vertical = 4.dp))
                 }
-                if (state.documents.isEmpty() && state.pageMatches.isEmpty() && !state.loading && !state.hasMore && state.error == null &&
+                if (!state.reconnect && state.documents.isEmpty() && state.pageMatches.isEmpty() && !state.loading && !state.hasMore && state.error == null &&
                     !state.albumSearchUnavailable && !state.pageSearchUnavailable) {
                     item { Text(stringResource(if (!searching) R.string.atelier_empty
                         else if (state.canSearchPages) R.string.home_search_no_page_or_album_matches

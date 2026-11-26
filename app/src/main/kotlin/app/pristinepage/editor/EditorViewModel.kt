@@ -21,7 +21,11 @@ data class EditorHostState(val identity: EditorIdentity? = null, val loading: Bo
 class EditorViewModel(
     private val services: ApplicationServices,
     private val onPagesSaved: (LibraryActivation, DocumentId, List<PageId>) -> Unit,
+    private val onActivationAdvanced: (EditorIdentity, EditorIdentity) -> Unit,
 ) : ViewModel() {
+    constructor(services: ApplicationServices, onPagesSaved: (LibraryActivation, DocumentId, List<PageId>) -> Unit) :
+        this(services, onPagesSaved, { _, _ -> })
+
     private val current = MutableStateFlow<EditorSession?>(null)
     val session: StateFlow<EditorSession?> = current.asStateFlow()
     private val host = MutableStateFlow(EditorHostState())
@@ -40,25 +44,36 @@ class EditorViewModel(
         opening = viewModelScope.launch {
             try {
                 // Do not change the retained selection or release the visible editor until the exact target can open.
-                val accepted = services.loadDefaultEditorPage(identity)
+                val accepted = services.loadLibraryEditorPage(identity)
                 currentCoroutineContext().ensureActive()
                 if (generation != attempt) return@launch
                 if (previous?.state?.value?.let { it.dirty || it.saving || it.confirmExit || it.exitReady } == true) {
                     host.value = EditorHostState(checkNotNull(previousIdentity))
                     return@launch
                 }
+                var live = identity
                 val actions = object : EditorActions {
                     private var first: EditablePage? = accepted
                     override suspend fun load(documentId: DocumentId, pageId: PageId): EditablePage =
-                        first?.also { first = null } ?: services.loadDefaultEditorPage(identity)
-                    override suspend fun save(pageId: PageId, expectedRevision: Long, recipe: Recipe) =
-                        services.saveDefaultEditorPage(identity, expectedRevision, recipe)
+                        first?.also { first = null } ?: services.loadLibraryEditorPage(live)
+                    override suspend fun save(pageId: PageId, expectedRevision: Long, recipe: Recipe): SaveRecipeResult {
+                        val (activation, result) = services.saveLibraryEditorPage(live, expectedRevision, recipe)
+                        currentCoroutineContext().ensureActive()
+                        if (host.value.identity != live) throw CancellationException("The editor no longer owns delivery")
+                        if (activation != live.issuedAt) {
+                            val next = live.copy(issuedAt = activation)
+                            onActivationAdvanced(live, next)
+                            live = next
+                            host.value = EditorHostState(next)
+                        }
+                        return result
+                    }
                 }
                 val renderer = object : RenderCoordinator {
-                    override suspend fun render(request: RenderRequest) = services.renderDefaultEditor(identity, request)
+                    override suspend fun render(request: RenderRequest) = services.renderLibraryEditor(live, request)
                 }
                 val editor = EditorSession(identity.documentId.value, identity.pageId.value, actions, renderer, viewModelScope,
-                     RenderedPreviewBitmapLoader(services.budget), services.budget, { album, pages -> onPagesSaved(identity.issuedAt, album, pages) })
+                     RenderedPreviewBitmapLoader(services.budget), services.budget, { album, pages -> onPagesSaved(live.issuedAt, album, pages) })
                 // Construction can begin guarded metadata loading, but rendering belongs to a STARTED composition, not an invisible retained ViewModel.
                 editor.setActive(false)
                 try { onAdmitted() } catch (failure: Exception) { editor.close(); throw failure }

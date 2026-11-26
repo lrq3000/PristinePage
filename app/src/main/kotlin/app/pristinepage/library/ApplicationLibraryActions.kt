@@ -39,17 +39,17 @@ class ApplicationLibraryActions private constructor(
         services: ApplicationServices) : this(context, onPagesSaved, services::imports, services)
 
     override suspend fun startup() = open().startupRecovery
-    override suspend fun openLibrary() = open().let { LibraryStartup(it.startupRecovery, it.activation) }
+    override suspend fun openLibrary() = scoped?.openLibraryPresentation() ?: open().let { LibraryStartup(it.startupRecovery, it.activation) }
     override suspend fun list(after: DocumentId?, limit: Int) = open().store.catalog.list(after, limit)
     override suspend fun listAlbums(order: AlbumOrder, locale: Locale, after: AlbumPosition?, limit: Int, issuedAt: LibraryActivation?): AlbumPage {
         val services = scoped ?: return open().store.albums.listAlbums(order, locale, after, limit)
-        return services.readDefaultHomeAlbums(issuedAt, null, order, locale, after, limit)
+        return services.readLibraryHomeAlbums(issuedAt, null, order, locale, after, limit)
     }
 
     override suspend fun searchAlbums(query: AlbumSearchQuery, order: AlbumOrder, locale: Locale, after: AlbumPosition?, limit: Int,
         issuedAt: LibraryActivation?): AlbumPage {
         val services = scoped ?: return open().store.albumSearch.searchAlbums(query, order, locale, after, limit)
-        return services.readDefaultHomeAlbums(issuedAt, query, order, locale, after, limit)
+        return services.readLibraryHomeAlbums(issuedAt, query, order, locale, after, limit)
     }
 
     override suspend fun searchPages(query: String, issuedAt: LibraryActivation?): HomePageSearchPage {
@@ -70,7 +70,7 @@ class ApplicationLibraryActions private constructor(
     override suspend fun rename(document: DocumentId, revision: Long, title: String) = open().store.documents.renameDocument(document, revision, title)
     override suspend fun load(id: DocumentId) = open().store.catalog.load(id)
     override suspend fun loadIssued(id: DocumentId, issuedAt: LibraryActivation) =
-        scoped?.loadDefaultAlbum(issuedAt, id) ?: load(id)
+        scoped?.loadLibraryAlbum(issuedAt, id) ?: load(id)
     override suspend fun openPageHit(hit: HomePageSearchHit, issuedAt: LibraryActivation?): DocumentOverview? {
         val services = scoped ?: return super.openPageHit(hit, issuedAt)
         if (issuedAt == null || hit.issuedAt != issuedAt) return null
