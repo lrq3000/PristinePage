@@ -12,6 +12,7 @@ import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.test.TestScope
 import kotlinx.coroutines.test.advanceUntilIdle
+import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.*
 import org.junit.Test
@@ -108,6 +109,39 @@ class ImportLibrarySessionTest {
             assertNull(session.state.value.document)
             assertNull(session.state.value.error)
         } finally { lateOld.complete(Unit) }
+    }
+
+    @Test fun aCompletedCreateFromTheOldLibraryCannotSelectAnAlbumInItsSuccessor() = runTest {
+        val old = LibraryActivation("aaaaaaaa-aaaa-4aaa-8aaa-000000000001", 1)
+        val next = LibraryActivation("aaaaaaaa-aaaa-4aaa-8aaa-000000000002", 2)
+        val fixture = Fixture()
+        val finish = CompletableDeferred<Unit>()
+        var active = old
+        val actions = object : LibraryActions by fixture {
+            override suspend fun openLibrary() = LibraryStartup(fixture.startup(), active)
+            override suspend fun create(title: String): DocumentId {
+                finish.await()
+                return fixture.first
+            }
+            override suspend fun createIssued(title: String, issuedAt: LibraryActivation?): DocumentId {
+                assertEquals(old, issuedAt)
+                return create(title)
+            }
+        }
+        val session = ImportLibrarySession(actions, LibraryIdentity(), this)
+        advanceUntilIdle()
+        session.accept(LibraryEvent.NewDocument("Old write"))
+        runCurrent()
+
+        active = next
+        session.reloadAfterLibraryChange(old)
+        advanceUntilIdle()
+        finish.complete(Unit)
+        advanceUntilIdle()
+
+        assertEquals(next, session.state.value.activation)
+        assertNull(session.state.value.selectedId)
+        assertNull(session.state.value.document)
     }
 
     @Test fun aRefusedRestoredCallbackDoesNotRetryFailedStartupOrTrapTheAlbum() = runTest {
@@ -324,7 +358,7 @@ class ImportLibrarySessionTest {
     @Test fun navigationCannotAdmitASecondPreparationWhileTheFirstReservationIsSuspended() = runTest {
         val f = Fixture(); val gate = CompletableDeferred<Unit>(); val begun = mutableListOf<DocumentId>()
         val actions = object : LibraryActions by f {
-            override suspend fun begin(document: DocumentSummary): PhotoImportRequest {
+            override suspend fun beginIssued(document: DocumentSummary, issuedAt: LibraryActivation?): PhotoImportRequest {
                 begun += document.documentId
                 if (document.documentId == f.first) gate.await()
                 return PhotoImportRequest(if (document.documentId == f.first) f.batch.value else f.otherBatch.value)

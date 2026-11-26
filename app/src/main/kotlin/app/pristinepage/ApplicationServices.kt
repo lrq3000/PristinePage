@@ -521,6 +521,12 @@ class ApplicationServices(context: Context, internal val budget: ImageAllocation
     internal suspend fun loadDefaultAlbum(issuedAt: LibraryActivation, album: DocumentId): DocumentOverview =
         readDefaultHome(issuedAt) { it.store.catalog.load(album) }
 
+    internal suspend fun createDefaultAlbum(issuedAt: LibraryActivation?, title: String): DocumentId =
+        withDefaultLibrary(issuedAt ?: activationChanged()) { it.store.documents.createDocument(title) } ?: activationChanged()
+
+    internal suspend fun renameDefaultAlbum(issuedAt: LibraryActivation?, album: DocumentId, revision: Long, title: String): DocumentMutationResult =
+        withDefaultLibrary(issuedAt ?: activationChanged()) { it.store.documents.renameDocument(album, revision, title) } ?: activationChanged()
+
     internal suspend fun loadDefaultAlbumExport(issuedAt: LibraryActivation, review: AlbumExportReview): List<ExportPagePlan> =
         readDefaultHome(issuedAt) { graph ->
             review.pages.map {

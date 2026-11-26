@@ -156,15 +156,20 @@ class ImportLibrarySession(private val actions: LibraryActions, restored: Librar
             }
             is LibraryEvent.RenameAlbum -> rename(event)
             LibraryEvent.ClearRenameResult -> if (!current.value.renaming) current.value = current.value.copy(renameResult = null)
-            is LibraryEvent.NewDocument -> if (!current.value.loading && (!event.importAfterCreate || (!current.value.preparingImport && current.value.request == null))) {
-                current.value = current.value.copy(loading = true, error = null, preparingImport = current.value.preparingImport || event.importAfterCreate)
-                run(onFailure = { error -> if (event.importAfterCreate) current.value = current.value.copy(preparingImport = false); failed(error) }) {
+            is LibraryEvent.NewDocument -> if (!current.value.selectedFolder && !current.value.loading &&
+                (!event.importAfterCreate || (!current.value.preparingImport && current.value.request == null))) {
+                val issuing = current.value
+                fun stillIssued() = current.value.activation == issuing.activation
+                current.value = issuing.copy(loading = true, error = null, preparingImport = issuing.preparingImport || event.importAfterCreate)
+                run(onFailure = { error -> if (stillIssued()) failed(error) }) {
                     try {
-                        val id = actions.create(event.title); ++navigation
+                        val id = actions.createIssued(event.title, issuing.activation)
+                        if (!stillIssued()) return@run
+                        ++navigation
                         current.value = current.value.copy(selectedId = id, selectedPage = null, document = null)
                         refresh(true).join()
-                        if (event.importAfterCreate) reserveFor(id, event.kind)
-                    } finally { if (event.importAfterCreate) current.value = current.value.copy(preparingImport = false) }
+                        if (event.importAfterCreate && stillIssued()) reserveFor(id, event.kind, issuing.activation)
+                    } finally { if (event.importAfterCreate && stillIssued()) current.value = current.value.copy(preparingImport = false) }
                 }
             }
             LibraryEvent.Refresh -> {
@@ -225,7 +230,8 @@ class ImportLibrarySession(private val actions: LibraryActions, restored: Librar
     private fun rename(event: LibraryEvent.RenameAlbum) {
         val value = current.value
         val document = value.document?.document ?: return
-        if (value.renaming || value.request != null || value.preparingImport || value.selectedId != event.documentId || document.documentId != event.documentId) return
+        if (value.selectedFolder || value.renaming || value.request != null || value.preparingImport ||
+            value.selectedId != event.documentId || document.documentId != event.documentId) return
         val title = event.title.trim()
         if (event.expectedDocumentRevision != document.documentRevision) {
             current.value = value.copy(renameResult = DocumentMutationResult.Conflict(document.documentRevision))
@@ -237,8 +243,12 @@ class ImportLibrarySession(private val actions: LibraryActions, restored: Librar
             return
         }
         current.value = value.copy(renaming = true, renameResult = null)
-        run(onFailure = { error -> current.value = current.value.copy(renaming = false, renameResult = DocumentMutationResult.Rejected(error)) }) {
-            val result = actions.rename(document.documentId, event.expectedDocumentRevision, title)
+        fun stillIssued() = current.value.activation == value.activation
+        run(onFailure = { error ->
+            if (stillIssued()) current.value = current.value.copy(renaming = false, renameResult = DocumentMutationResult.Rejected(error))
+        }) {
+            val result = actions.renameIssued(document.documentId, event.expectedDocumentRevision, title, value.activation)
+            if (!stillIssued()) return@run
             current.value = current.value.copy(renaming = false, renameResult = result)
             if (result !is DocumentMutationResult.Rejected) refresh(true, includeList = false).join()
         }
@@ -247,18 +257,21 @@ class ImportLibrarySession(private val actions: LibraryActions, restored: Librar
     private fun prepare(kind: PhotoImportKind) {
         val value = current.value
         val target = value.selectedId ?: return
-        if (value.loading || value.request != null || value.preparingImport) return
+        if (value.selectedFolder || value.loading || value.request != null || value.preparingImport) return
         current.value = value.copy(loading = true, error = null, preparingImport = true)
-        run(onFailure = { error -> current.value = current.value.copy(preparingImport = false); failed(error) }) {
-            try { reserveFor(target, kind) }
-            finally { current.value = current.value.copy(preparingImport = false) }
+        run(onFailure = { error -> if (current.value.activation == value.activation) failed(error) }) {
+            try { reserveFor(target, kind, value.activation) }
+            finally { if (current.value.activation == value.activation) current.value = current.value.copy(preparingImport = false) }
         }
     }
 
-    private suspend fun reserveFor(target: DocumentId, kind: PhotoImportKind) {
+    private suspend fun reserveFor(target: DocumentId, kind: PhotoImportKind, issuedAt: LibraryActivation?) {
         // Preparation admission is independent of navigation/loading and spans create through durable reservation. Never reread the visible destination after suspension or drop an existing durable request.
         check(current.value.preparingImport && current.value.request == null)
-        val reserved = actions.begin(actions.load(target).document)
+        val album = if (issuedAt == null) actions.load(target) else actions.loadIssued(target, issuedAt)
+        if (current.value.activation != issuedAt) return
+        val reserved = actions.beginIssued(album.document, issuedAt)
+        if (current.value.activation != issuedAt) return
         val request = reserved.routedAs(kind)
         current.value = current.value.copy(request = request, launchPending = kind != PhotoImportKind.CAMERA, phase = ImportPhase.WAITING_PICKER, results = emptyList(), resultBatch = null, loading = false)
     }

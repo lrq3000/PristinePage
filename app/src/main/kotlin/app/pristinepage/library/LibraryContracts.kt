@@ -34,11 +34,15 @@ interface LibraryActions {
     suspend fun activeImportRequest(id: DocumentId): PhotoImportRequest? = activeImport(id)?.let { PhotoImportRequest.abandonmentOnly(it) }
     suspend fun activeIssuedImport(id: DocumentId, issuedAt: LibraryActivation): PhotoImportRequest? = activeImportRequest(id)
     suspend fun create(title: String): DocumentId
+    suspend fun createIssued(title: String, issuedAt: LibraryActivation?): DocumentId = create(title)
     suspend fun begin(document: DocumentSummary): PhotoImportRequest
+    suspend fun beginIssued(document: DocumentSummary, issuedAt: LibraryActivation?): PhotoImportRequest = begin(document)
     suspend fun deliver(request: PhotoImportRequest, selection: LibraryPhotoResult): List<IngestResult>
     suspend fun cancel(request: PhotoImportRequest)
     suspend fun rename(document: DocumentId, revision: Long, title: String): DocumentMutationResult =
         DocumentMutationResult.Rejected(OperationError(OperationErrorCode.PROVIDER_UNAVAILABLE, false, "rename_unavailable", document.value))
+    suspend fun renameIssued(document: DocumentId, revision: Long, title: String, issuedAt: LibraryActivation?): DocumentMutationResult =
+        rename(document, revision, title)
 }
 
 /** Opt-in so older/synthetic consumers of the plain ID-ordered catalog keep their own cursor contract. */
