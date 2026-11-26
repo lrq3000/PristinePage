@@ -300,7 +300,9 @@ class LibraryFolderFilesJourneyTest {
         compose.waitUntil(10_000) { enabled(folderButton) }
         compose.onNodeWithTag(folderButton).performScrollTo().performClick()
         compose.waitUntil(12_000) { instrumentation.uiAutomation.rootInActiveWindow?.packageName?.toString() == picker }
-        selectSettingsDestination(instrumentation, picker, folder, touchNavigation = true)
+        val restoreHidden = InstrumentationRegistry.getArguments().getString("librarySettingsRestoreHidden") == "true"
+        check(!restoreHidden || applyEdit)
+        selectSettingsDestination(instrumentation, picker, folder, touchNavigation = true, restorePreviouslyHidden = restoreHidden)
         val storage = compose.runOnUiThread { ViewModelProvider(compose.activity)[LibraryStorageViewModel::class.java] }
         compose.waitUntil(20_000) { storage.state.value.review != null }
         val review = checkNotNull(storage.state.value.review)
@@ -612,7 +614,7 @@ class LibraryFolderFilesJourneyTest {
     private fun selectSettingsDestination(instrumentation: Instrumentation, picker: String, folder: String,
         selectFolder: Boolean = true, navigateFromRoot: Boolean = true,
         expectedChildren: Set<String> = setOf("catalogs", "generations", "objects"), allowExactWindowTitle: Boolean = false,
-        touchNavigation: Boolean = false,
+        touchNavigation: Boolean = false, restorePreviouslyHidden: Boolean = false,
     ) {
         val affirmative = setOf("SELECT", "Select", "SÉLECTIONNER", "Sélectionner", "Use this folder", "USE THIS FOLDER", "Choose this folder")
         fun containsUnder(root: AccessibilityNodeInfo, text: String, within: String) =
@@ -708,13 +710,14 @@ class LibraryFolderFilesJourneyTest {
             select("Files options for $step", options)
             return await(instrumentation, picker, step, ::hasVisibilityChoice)
         }
-        fun awaitFilesToolbar(step: String) {
-            if (touchNavigation) await(instrumentation, picker, step) {
-                !hasVisibilityChoice(it) && unique(it, options) != null && unique(it, drawer) != null
-            }
-        }
+        fun isFilesToolbar(root: AccessibilityNodeInfo) =
+            !hasVisibilityChoice(root) && unique(root, options) != null && unique(root, drawer) != null
         fun dismissPreferenceMenu() {
             if (touchNavigation) {
+                val live = await(instrumentation, picker, "current Files overflow or toolbar") {
+                    hasVisibilityChoice(it) || isFilesToolbar(it)
+                }
+                if (isFilesToolbar(live)) return
                 val down = SystemClock.uptimeMillis()
                 for (action in listOf(KeyEvent.ACTION_DOWN, KeyEvent.ACTION_UP)) {
                     val key = KeyEvent(down, SystemClock.uptimeMillis(), action, KeyEvent.KEYCODE_BACK, 0)
@@ -722,7 +725,15 @@ class LibraryFolderFilesJourneyTest {
                     check(automation.injectInputEvent(key, true))
                 }
             } else check(automation.performGlobalAction(AccessibilityService.GLOBAL_ACTION_BACK))
-            awaitFilesToolbar("Files toolbar after menu dismissal")
+            if (touchNavigation) await(instrumentation, picker, "Files toolbar after menu dismissal", ::isFilesToolbar)
+        }
+        fun reconcilePreferenceToggle(shown: Set<String>) {
+            if (!touchNavigation) return
+            val settled = await(instrumentation, picker, "Files toolbar or updated overflow menu") {
+                isFilesToolbar(it) || unique(it, shown) != null
+            }
+            // A changed menu item proves the toggle took effect. Close that positively observed popup, never issue a second toggle.
+            if (!isFilesToolbar(settled)) dismissPreferenceMenu()
         }
         // Inspect the real platform menu once; the primary-storage root is hidden by default on the fresh API 28 guest.
         val menu = preferenceMenu("initial internal storage preference")
@@ -733,7 +744,7 @@ class LibraryFolderFilesJourneyTest {
             if (wasHidden) {
                 changed = true // Reconcile even if the touch is accepted but its effect is not delivered cleanly.
                 select("show internal storage", showStorage)
-                awaitFilesToolbar("Files toolbar after showing internal storage")
+                reconcilePreferenceToggle(hideStorage)
             } else dismissPreferenceMenu()
             select("root drawer", drawer)
             select("primary storage", setOf(Build.MODEL, "Internal storage", "Stockage interne", "Stockage interne partagé"), "roots_list")
@@ -747,10 +758,13 @@ class LibraryFolderFilesJourneyTest {
             navigationFailure = failure
             throw failure
         } finally {
-            if (changed) {
+            if (changed || restorePreviouslyHidden) {
                 try {
                     val visible = preferenceMenu("restore internal storage preference")
-                    if (unique(visible, hideStorage) != null) select("restore hidden internal storage", hideStorage)
+                    if (unique(visible, hideStorage) != null) {
+                        select("restore hidden internal storage", hideStorage)
+                        reconcilePreferenceToggle(showStorage)
+                    }
                     await(instrumentation, picker, "settled Files restoration menu or toolbar") {
                         unique(it, showStorage) != null || (!hasVisibilityChoice(it) && unique(it, options) != null)
                     }

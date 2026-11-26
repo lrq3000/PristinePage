@@ -67,12 +67,15 @@ class LibraryFolderPickerRunnerTest(unittest.TestCase):
                 require_initial_settings_pointer(pointer, leaves)
 
     def test_main_settings_apply_can_only_continue_the_exact_read_only_witness(self):
-        from run_library_folder_picker_ldplayer import MAIN_SETTINGS_APPLY_CASE, SETTINGS_OPEN_CANCELED_GUEST, SETTINGS_OPEN_PASS_MANIFEST, select_main_settings_open
+        from run_library_folder_picker_ldplayer import (MAIN_SETTINGS_APPLY_CASE, SETTINGS_APPLY_NAVIGATION_MANIFEST,
+            SETTINGS_OPEN_CANCELED_GUEST, SETTINGS_OPEN_PASS_MANIFEST, select_main_settings_open)
         exact = Namespace(settings_open=False, fresh=False, settings_apply=SETTINGS_OPEN_PASS_MANIFEST,
                           guest=SETTINGS_OPEN_CANCELED_GUEST, previous=["app.apk", "test.apk"])
         self.assertEqual(MAIN_SETTINGS_APPLY_CASE, select_main_settings_open(exact))
+        self.assertEqual(MAIN_SETTINGS_APPLY_CASE, select_main_settings_open(
+            Namespace(**(vars(exact) | {"settings_apply_retry": SETTINGS_APPLY_NAVIGATION_MANIFEST}))))
         for changed in ({"settings_apply": "f" * 64}, {"guest": "other"}, {"previous": None},
-                        {"settings_open": True}, {"fresh": True}, {"probe_write": True}):
+                        {"settings_apply_retry": "f" * 64}, {"settings_open": True}, {"fresh": True}, {"probe_write": True}):
             with self.assertRaisesRegex(RuntimeError, "standalone selected Apply"):
                 select_main_settings_open(Namespace(**(vars(exact) | changed)))
 
@@ -99,6 +102,35 @@ class LibraryFolderPickerRunnerTest(unittest.TestCase):
                          (("content://com.android.externalstorage.documents/tree/home%3Aother", *exact[0][1:]),)):
             with self.assertRaisesRegex(RuntimeError, "exact retained grant"):
                 require_settings_apply_grants(observed, exact, folder)
+
+    def test_settings_apply_refuses_unsettled_private_writes_even_with_an_unchanged_pointer(self):
+        from run_library_folder_picker_ldplayer import require_settings_apply_private_absence
+        folder = "PristinePage-tree-ef264581e55a"
+        stable = ["active-library", "default-origin"]
+        require_settings_apply_private_absence(["library-settings"], stable, folder)
+        for files, settings in (
+            (["library-settings", "catalog-recipe-attempts-v1"], stable),
+            (["library-settings", "catalog-revision-spends"], stable),
+            (["library-settings", f"library-settings-apply-pointer-{folder}"], stable),
+            (["library-settings"], stable + [".active-library-test.pending"]),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "earlier selected recipe attempt"):
+                require_settings_apply_private_absence(files, settings, folder)
+
+    def test_settings_apply_failure_readback_does_not_hide_other_boundaries(self):
+        from run_library_folder_picker_ldplayer import collect_settings_apply_boundary
+        def refusal():
+            raise RuntimeError("predecessor hash refused")
+        boundary = collect_settings_apply_boundary(False, {
+            "predecessorFilesUnchanged": refusal,
+            "pointerActivation": lambda: "3",
+            "generationMarkers": lambda: ["only-predecessor.complete"],
+            "persistedGrantCount": lambda: 1,
+        })
+        self.assertEqual(boundary, {
+            "instrumentationTerminated": False, "observationErrors": {"predecessorFilesUnchanged": "RuntimeError"},
+            "pointerActivation": "3", "generationMarkers": ["only-predecessor.complete"], "persistedGrantCount": 1,
+        })
 
     def test_cutover_continuation_accepts_only_an_unlaunched_observer_on_the_exact_installed_pair(self):
         from run_selected_folder_open_ldplayer import CONTROLS_CASE, CUTOVER_CASE, PREVIEW_PASS_SHA, verify_unlaunched_cutover
