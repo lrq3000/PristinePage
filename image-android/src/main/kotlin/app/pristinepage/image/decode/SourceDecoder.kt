@@ -36,6 +36,9 @@ class SourceDecoder(private val sources: ScopedCommittedOriginals, private val d
 
     suspend fun decode(sourceId: String, output: OutputSpec): DecodedSource = decode(sourceId, output, null)
 
+    /** A source preview derives its display size from the authenticated full decode, not from a separately borrowed file. */
+    internal suspend fun decodeForOriginalPreview(sourceId: String): DecodedSource = decode(sourceId, null, null)
+
     internal suspend fun decodeForProducer(sourceId: String, output: OutputSpec, expected: ExportSourceBinding): DecodedSource =
         decode(sourceId, output, expected)
 
@@ -45,7 +48,7 @@ class SourceDecoder(private val sources: ScopedCommittedOriginals, private val d
     ): DecodedSource = decode(sourceId, output, null, checkCapacity)
 
     private suspend fun decode(
-        sourceId: String, output: OutputSpec, expected: ExportSourceBinding?,
+        sourceId: String, output: OutputSpec?, expected: ExportSourceBinding?,
         checkCapacity: ((SourceInspection, Long) -> Unit)? = null,
     ): DecodedSource {
         val context = currentCoroutineContext()
@@ -53,7 +56,9 @@ class SourceDecoder(private val sources: ScopedCommittedOriginals, private val d
         val id = try { SourceId(sourceId) }
         catch (_: IllegalArgumentException) { throw RepositoryFailure(OperationError(OperationErrorCode.INVALID_INPUT, false, "invalid_source_id", null)) }
         if (expected != null && expected.source.sourceId != id.value) refuse(OperationErrorCode.INTEGRITY_FAILED, "committed_source_binding_mismatch", id)
-        if (output.size.width > 12000 || output.size.height > 12000 || output.size.pixelCount > 48_000_000) refuse(OperationErrorCode.RESOURCE_LIMIT, "render_destination_limit", id)
+        if (output != null && (output.size.width > 12000 || output.size.height > 12000 || output.size.pixelCount > 48_000_000)) {
+            refuse(OperationErrorCode.RESOURCE_LIMIT, "render_destination_limit", id)
+        }
         var provisional: DecodedSource? = null
         var accepted = false
         try {
