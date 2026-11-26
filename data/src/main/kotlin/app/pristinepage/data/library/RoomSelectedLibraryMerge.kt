@@ -27,6 +27,7 @@ internal class RoomSelectedLibraryMerge(context: Context, private val scratchDir
 
     suspend fun append(operationId: String, destination: AndroidLibraryTreeRead.PairInput, incoming: AndroidLibraryTreeRead.PairInput,
         requireAuthority: () -> Unit,
+        beforeDelivery: (suspend (LibraryGeneration) -> Nothing)? = null,
     ): LibraryGeneration = withContext(Dispatchers.IO) {
         requireOpaqueId(operationId)
         if (destination.expected == null || incoming.expected == null) throw IOException("The selected write needs both exact input generations")
@@ -34,20 +35,25 @@ internal class RoomSelectedLibraryMerge(context: Context, private val scratchDir
         val files = app.filesDir.toPath().toRealPath()
         checkpoint()
         requireAuthority()
-        withWriteLane(files) { appendOwned(operationId, destination, incoming, files, checkpoint, requireAuthority) }
+        val published = withWriteLane(files) { appendOwned(operationId, destination, incoming, files, checkpoint, requireAuthority) }
+        // A per-invocation instrumentation observation only. Never arm this from a chooser, disk state, or a recovered intent.
+        beforeDelivery?.invoke(published)
+        published
     }
 
     private suspend fun appendOwned(operationId: String, destination: AndroidLibraryTreeRead.PairInput, incoming: AndroidLibraryTreeRead.PairInput,
         files: Path, checkpoint: () -> Unit, requireAuthority: () -> Unit,
     ): LibraryGeneration {
+        val storage = files.resolve(STORAGE)
+        val attempts = LocalSelectedMergeAttempts(storage) { journal(it, files) }
+        attempts.requireUnused(operationId)
         val reader = AndroidLibraryTreeRead(app, scratchDirectory)
         val plan = reader.planMerge(operationId, destination, incoming, requireAuthority)
-        val storage = files.resolve(STORAGE)
         if (files.toFile().usableSpace < 3 * maximum) throw IOException("Not enough private space to stage the merged library")
         requireAuthority()
         checkpoint()
         // A repeat is a fresh confirmed operation, not replay. Retained unresolved evidence still blocks admission.
-        val (journal, attempt) = LocalSelectedMergeAttempts(storage) { journal(it, files) }.allocate(operationId, checkpoint, requireAuthority)
+        val (journal, attempt) = attempts.allocate(operationId, checkpoint, requireAuthority)
         val root = journal.rootPath
         val key = localLibraryRootKey(root)
         val attemptKey = localLibraryRootKey(attempt)

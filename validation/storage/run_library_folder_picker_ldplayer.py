@@ -34,6 +34,8 @@ INDEPENDENT_GRANT_CASE = "app.pristinepage.LibraryFolderFilesJourneyTest#persist
 INDEPENDENT_DERIVED_CASE = "app.pristinepage.LibraryFolderFilesJourneyTest#separatesIndependentlySelectedRootsWithoutAParentGrant"
 SELECTED_APPEND_CASE = "app.pristinepage.LibraryFolderFilesJourneyTest#selectedFilesMergeAppendsOnlyTheMissingOriginalAndKeepsItsPredecessor"
 SELECTED_REPEAT_CASE = "app.pristinepage.LibraryFolderFilesJourneyTest#selectedFilesMergeCanAppendTwiceWithoutReusingAnOlderStage"
+SELECTED_DEATH_CASE = "app.pristinepage.LibraryFolderFilesJourneyTest#endsProcessAfterSelectedAppendCompletionBeforeDelivery"
+SELECTED_DEATH_RECOVERY_CASE = "app.pristinepage.LibrarySelectedAppendDeathRecoveryTest#coldProcessInspectsCompletedSelectedAppendWithoutReplay"
 INDEPENDENT_COLD_CASE = "app.pristinepage.LibraryProviderAncestryColdTest#twoIndependentFilesRootsRequireDisjointPhysicalAncestry"
 INDEPENDENT_CHILDREN = ("Library-Left", "Library-Right")
 WORKING_CASE = "app.pristinepage.LibraryFolderFilesJourneyTest#populatingAWorkingRoomCatalogDoesNotMaterializeTheOriginal"
@@ -105,6 +107,7 @@ INDEPENDENT_SHARED_READER_PASSED = "8fbc16be139aa19e4e81d73e2c48ebf0e41199ba4250
 INDEPENDENT_CLOSED_DRY_RUN_PASSED = "8730d1669c0f61f82d07eb2ee8d4bcd3d3bd762fed8e73317660e0e640a478db"
 SELECTED_APPEND_HOST_REFUSAL = "ea076b07261c53b5d5f3aea812717dc5f974dec05675c5ff8065c0802fd986f4"
 SELECTED_APPEND_PASSED = "3498e3282d00a523ed7257524afbe2d357c10bec999e617244bead1a2f1e16a7"
+SELECTED_REPEAT_PASSED = "0857432a8308f790866e60559db02729f92bfdacca4a20fc144278c1e1a86200"
 UUID_TEXT = r"[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}"
 URI_PERMISSIONS_HEADER = "ACTIVITY MANAGER URI PERMISSIONS (dumpsys activity permissions)"
 BACKUP_ORIGINAL = "ebd602840377a3b3cf763cb6828fee67861ff77c444e8fe5894457ef6d99a24d"
@@ -138,9 +141,33 @@ def recheck_target(run, ns):
 
 def read_backup_delivery_death(output, operation, *, before_marker=False):
     """Reject an ordinary assertion failure, an early crash or anything other than the one armed boundary."""
-    target, method = (BACKUP_PRE_MARKER_CASE if before_marker else BACKUP_DEATH_CASE).split("#")
-    lines = output.rstrip(" \r\n").splitlines()
     error = "Missing exact backup checkpoint and ensuing Android process crash"
+    checkpoint = read_deliberate_process_death(output, BACKUP_PRE_MARKER_CASE if before_marker else BACKUP_DEATH_CASE,
+                                              "72" if before_marker else "71", error)
+    keys = {"backupDeathOperation", "backupDeathPid", "backupDeathReceipt", "backupDeathBindings"}
+    if before_marker:
+        keys.add("backupDeathGrantInventory")
+    need(set(checkpoint) == keys and
+         checkpoint["backupDeathOperation"] == operation and re.fullmatch(r"[1-9][0-9]{0,8}", checkpoint["backupDeathPid"]) and
+         re.fullmatch(rf"{UUID_TEXT}:{UUID_TEXT}", checkpoint["backupDeathReceipt"]) and
+         re.fullmatch(rf"{UUID_TEXT}:{UUID_TEXT}:{UUID_TEXT}(?::[a-f0-9]{{64}}){{3}}", checkpoint["backupDeathBindings"]) and
+         (not before_marker or re.fullmatch(r"[a-f0-9]{64}", checkpoint["backupDeathGrantInventory"])), error)
+    identity = checkpoint["backupDeathPid"], checkpoint["backupDeathReceipt"].split(":"), checkpoint["backupDeathBindings"].split(":")
+    return (*identity, checkpoint["backupDeathGrantInventory"]) if before_marker else identity
+
+
+def read_selected_delivery_death(output, operation):
+    error = "Missing exact selected append checkpoint and ensuing Android process crash"
+    checkpoint = read_deliberate_process_death(output, SELECTED_DEATH_CASE, "72", error)
+    need(set(checkpoint) == {"selectedAppendDeathOperation", "selectedAppendDeathPid", "selectedAppendDeathGrantInventory"} and
+         checkpoint["selectedAppendDeathOperation"] == operation and re.fullmatch(r"[1-9][0-9]{0,8}", checkpoint["selectedAppendDeathPid"]) and
+         re.fullmatch(r"[a-f0-9]{64}", checkpoint["selectedAppendDeathGrantInventory"]), error)
+    return checkpoint["selectedAppendDeathPid"], checkpoint["selectedAppendDeathGrantInventory"]
+
+
+def read_deliberate_process_death(output, case, status, error):
+    target, method = case.split("#")
+    lines = output.rstrip(" \r\n").splitlines()
     need(lines[-2:] == ["INSTRUMENTATION_RESULT: shortMsg=Process crashed.", "INSTRUMENTATION_CODE: 0"], error)
     blocks, fields = [], {}
     for line in lines[:-2]:
@@ -153,20 +180,11 @@ def read_backup_delivery_death(output, operation, *, before_marker=False):
             fields = {}
         else:
             need(not line.strip() or ("stream" in fields and not line.startswith("INSTRUMENTATION_")), error)
-    need(not fields and [code for code, _ in blocks] == ["1", "72" if before_marker else "71"], error)
+    need(not fields and [code for code, _ in blocks] == ["1", status], error)
     start, checkpoint = blocks[0][1], blocks[1][1]
-    keys = {"backupDeathOperation", "backupDeathPid", "backupDeathReceipt", "backupDeathBindings"}
-    if before_marker:
-        keys.add("backupDeathGrantInventory")
     need(start.get("class") == target and start.get("test") == method and
-         set(start) <= {"class", "test", "current", "id", "numtests", "stream"} and
-         set(checkpoint) == keys and
-         checkpoint["backupDeathOperation"] == operation and re.fullmatch(r"[1-9][0-9]{0,8}", checkpoint["backupDeathPid"]) and
-         re.fullmatch(rf"{UUID_TEXT}:{UUID_TEXT}", checkpoint["backupDeathReceipt"]) and
-         re.fullmatch(rf"{UUID_TEXT}:{UUID_TEXT}:{UUID_TEXT}(?::[a-f0-9]{{64}}){{3}}", checkpoint["backupDeathBindings"]) and
-         (not before_marker or re.fullmatch(r"[a-f0-9]{64}", checkpoint["backupDeathGrantInventory"])), error)
-    identity = checkpoint["backupDeathPid"], checkpoint["backupDeathReceipt"].split(":"), checkpoint["backupDeathBindings"].split(":")
-    return (*identity, checkpoint["backupDeathGrantInventory"]) if before_marker else identity
+         set(start) <= {"class", "test", "current", "id", "numtests", "stream"}, error)
+    return checkpoint
 
 
 def check_fixture_root(namespaces, after, probe_write, probe_passed, backup_export, backup_passed):
@@ -691,62 +709,13 @@ def exercise_selected_repeat(run, adb, ns, raw, guest_root, folder, files, recei
         run.path("independent-roots-append-instrumentation.txt").write_text(output, encoding="utf-8")
         passed, failed = read_results(output, (SELECTED_REPEAT_CASE,))
         if not failed:
-            baseline, = (name for name in files if name.startswith("generations/"))
-            incoming, = (name for name in received if name.startswith("generations/"))
-            baseline_text = adb("shell", "cat", f"{left}/{baseline}")
-            source_text = adb("shell", "cat", f"{right}/{incoming}")
-            inventory = files | {f"objects/{missing}": missing}
-            stages = []
-            root_keys = None
-            journal = f"files/{scope}/library-selected-merge-v1/merge-stages"
-            need(set(adb("shell", "run-as", APP, "ls", "-A", "-1", journal).splitlines()) == {operation, repeat},
-                 "The selected repeat did not retain exactly the two admitted attempts")
-            for candidate, label in ((operation, "selected-append"), (repeat, "selected-repeat")):
-                repeated = candidate == repeat
-                predecessor = baseline_text.splitlines()
-                marker_path, catalog_path = f"generations/{candidate}.complete", f"catalogs/{candidate}.sqlite"
-                marker_text = adb("shell", "cat", f"{left}/{marker_path}")
-                marker = marker_text.splitlines()
-                need(len(predecessor) == 7 and len(marker) == 7 and
-                     marker[:5] == [predecessor[0], predecessor[1], candidate, predecessor[2], predecessor[4]] and
-                     marker[5].isdigit() and 0 < int(marker[5]) <= 2 * 1024 * 1024 and re.fullmatch(r"[a-f0-9]{64}", marker[6]),
-                     "The selected append did not publish one exact successor")
-                inventory.update({marker_path: sha256(marker_text.encode("ascii")).hexdigest(), catalog_path: marker[6]})
-                stage_name = f"merge-staging-{candidate}"
-                stages.append(stage_name)
-                need(not adb("shell", "ls", "-A", "-1", f"{left}/{stage_name}").strip(),
-                     "The selected append retained a staged provider file")
-                catalog = raw / f"{label}-catalog.sqlite"
-                need(adb("shell", "stat", "-c", "%s", f"{left}/{catalog_path}").strip() == marker[5],
-                     "The selected append catalog extent differs from its marker")
-                adb("pull", f"{left}/{catalog_path}", catalog, timeout=20)
-                need(catalog.stat().st_size == int(marker[5]) and sha(catalog) == marker[6], "The pulled selected append catalog changed")
-                verify_selected_append_catalog(catalog, synthetic_scan()[0], missing, repeated=repeated)
-                stage = f"{journal}/{candidate}"
-                intent = adb("shell", "run-as", APP, "cat", f"{stage}/merge.intent")
-                completion = adb("shell", "run-as", APP, "cat", f"{stage}/selected-merge.complete")
-                keys = verify_selected_append_records(intent, completion, baseline_text, source_text, marker_text)
-                need(root_keys is None or keys == root_keys, "The repeat receipt refers to different selected roots")
-                root_keys = keys
-                need(adb("shell", "run-as", APP, "sha256sum", f"{stage}/catalog.sqlite").split() ==
-                     [marker[6], f"{stage}/catalog.sqlite"], "The private selected append stage differs from the external catalog")
-                known = {"catalog.sqlite", "merge.intent", "selected-merge.complete"}
-                leaves = set(adb("shell", "run-as", APP, "ls", "-A", "-1", stage).splitlines())
-                need(known <= leaves, "The selected append did not retain all records")
-                payloads = {catalog_path: (int(marker[5]), marker[6]),
-                            marker_path: (len(marker_text.encode("ascii")), inventory[marker_path])}
-                if not repeated:
-                    payloads[f"objects/{missing}"] = (missing_bytes, missing)
-                verify_library_move_spends(adb, stage, leaves - known, payloads)
-                run.save(run.path(f"{label}-readback.json"), {
-                    "generation": candidate, "predecessor": predecessor[2], "catalogSha256": marker[6],
-                    "catalogBytes": int(marker[5]), "missingBytes": 0 if repeated else missing_bytes,
-                    "copiedObjectSha256": None if repeated else missing,
-                    "privateIntentSha256": sha256(intent.encode("ascii")).hexdigest(),
-                    "privateCompletionSha256": sha256(completion.encode("ascii")).hexdigest(),
-                }, durable=True)
-                baseline_text = marker_text
-            verify_unchanged_settings_destination(adb, left, inventory, extra_names=stages)
+            labels = ("selected-append", "selected-repeat")
+            readings, _ = observe_selected_history(adb, folder, files, received, scope, [operation, repeat],
+                                                   catalogs=[raw / f"{label}-catalog.sqlite" for label in labels])
+            need(readings[0]["copiedObjectSha256"] == missing and readings[0]["missingBytes"] == missing_bytes,
+                 "The selected repeat copied different synthetic bytes")
+            for label, record in zip(labels, readings):
+                run.save(run.path(f"{label}-readback.json"), record, durable=True)
             run.save(status, {"fixture": folder, "state": "prior-inventory-restored"}, durable=True)
         return {"passed": passed, "failed": failed, "installedSha256": hashes}
     finally:
@@ -760,9 +729,56 @@ def exercise_selected_repeat(run, adb, ns, raw, guest_root, folder, files, recei
                  "The repeat selected append changed predecessor or unreferenced fixture bytes")
 
 
+def exercise_selected_delivery_death(run, adb, ns, raw, guest_root, folder, files, incoming, hashes, operation, grants):
+    left, right = (f"{guest_root}/{name}" for name in independent_fixture_children(folder))
+    scope = f"library-selected-death-{operation}"
+    require_cold_backup_app(adb)
+    verify_unchanged_settings_destination(adb, left, files)
+    verify_unchanged_settings_destination(adb, right, incoming)
+    require_same_repeat_grants(grants, read_app_persisted_grants(adb))
+    need(scope not in adb("shell", "run-as", APP, "ls", "-A", "-1", "files").splitlines(),
+         "A retained selected death attempt must never be repeated")
+    recheck_target(run, ns)
+    # Persist the one-use admission before the writer, including when the command or transport loses its result.
+    spend_settings_retry(raw.parent, SELECTED_REPEAT_PASSED, dict(operation=operation, destination=folder, kind="selected-delivery-death"))
+    run.save(run.path("selected-death-attempt.json"), {"operation": operation, "fixture": folder, "state": "armed"}, durable=True)
+    output = adb("shell", "am", "instrument", "-w", "-r", "-e", "class", SELECTED_DEATH_CASE,
+                 "-e", "libraryFixtureFolder", folder, "-e", "librarySelectedAppendOperation", operation, RUNNER, timeout=180, allowed=(0, 1))
+    run.path("selected-death-instrumentation.txt").write_text(output, encoding="utf-8")
+    old_pid, fingerprint = read_selected_delivery_death(output, operation)
+    recheck_target(run, ns)
+    require_selected_cold_process(adb, old_pid)
+    require_same_repeat_grants(grants, read_app_persisted_grants(adb))
+    before = observe_selected_history(adb, folder, files, incoming, scope, [operation], catalogs=[raw / "selected-death-catalog.sqlite"])
+    run.save(run.path("selected-death-before-cold.json"), before, durable=True)
+    recheck_target(run, ns)
+    require_selected_cold_process(adb, old_pid)
+    try:
+        output = adb("shell", "am", "instrument", "-w", "-r", "-e", "class", SELECTED_DEATH_RECOVERY_CASE,
+                     "-e", "libraryFixtureFolder", folder, "-e", "librarySelectedAppendOperation", operation,
+                     "-e", "librarySelectedAppendPreviousPid", old_pid,
+                     "-e", "librarySelectedAppendGrantInventory", fingerprint, RUNNER, timeout=75, allowed=(0, 1))
+        run.path("selected-death-cold-instrumentation.txt").write_text(output, encoding="utf-8")
+        passed, failed = read_results(output, (SELECTED_DEATH_RECOVERY_CASE,))
+    finally:
+        recheck_target(run, ns)
+        require_selected_cold_process(adb, old_pid)
+        require_same_repeat_grants(grants, read_app_persisted_grants(adb))
+        after = observe_selected_history(adb, folder, files, incoming, scope, [operation])
+        run.save(run.path("selected-death-after-cold.json"), after, durable=True)
+        need(before == after, "Cold selected append recovery changed retained evidence")
+    return {"passed": passed, "failed": failed, "installedSha256": hashes}
+
+
 def select_selected_repeat(enabled, *, selected_append, reassigned, failed_host):
     need(not enabled or (selected_append and reassigned is None and not failed_host),
          "Repeated selected append requires the standalone lane and the exact successful predecessor")
+    return enabled
+
+
+def select_selected_death(enabled, *, selected_append, repeat, reassigned, failed_host):
+    need(not enabled or (selected_append and not repeat and reassigned is None and not failed_host),
+         "Selected append death requires the exact repeat predecessor and a standalone synthetic scope")
     return enabled
 
 
@@ -817,6 +833,7 @@ def verify_library_move_spend(text, key, size, digest):
 def verify_library_move_spends(adb, stage, actual_names, payloads):
     expected = {sha256(leaf.encode("ascii")).hexdigest(): proof for leaf, proof in payloads.items()}
     need(actual_names == {f"{key}.spent" for key in expected}, "The selected append move spend inventory differs")
+    fingerprints = {}
     for key, (size, digest) in expected.items():
         path = f"{stage}/{key}.spent"
         extent = adb("shell", "run-as", APP, "stat", "-c", "%s", path).strip()
@@ -824,6 +841,159 @@ def verify_library_move_spends(adb, stage, actual_names, payloads):
         text = adb("shell", "run-as", APP, "cat", path)
         need(len(text.encode("ascii")) == int(extent), "The library move spend extent changed")
         verify_library_move_spend(text, key, size, digest)
+        fingerprints[key] = sha256(text.encode("ascii")).hexdigest()
+    return fingerprints
+
+
+def read_selected_history_record(command, path, maximum):
+    size = command("stat", "-c", "%s", path).strip()
+    error = "Invalid selected history record extent"
+    need(re.fullmatch(r"[1-9][0-9]{0,3}", size) and int(size) <= maximum, error)
+    text = command("head", "-c", str(maximum + 1), path)
+    need(len(text.encode("ascii")) == int(size), error)
+    return text
+
+
+def observe_selected_history(adb, folder, files, incoming, scope, operations, *, catalogs=None):
+    """Authenticate the exact provider chain and private evidence, without granting access or writing on the guest."""
+    root = f"/sdcard/Documents/{folder}"
+    children = independent_fixture_children(folder)
+    need(adb("shell", "ls", "-A", "-1", root).splitlines() == sorted(children), "The selected history parent changed")
+    need(len(operations) in (1, 2) and len(set(operations)) == len(operations) and
+         all(re.fullmatch(UUID_TEXT, value) for value in operations) and
+         scope in {f"library-selected-death-{operations[0]}", f"library-selected-repeat-{operations[0]}"},
+         "The selected history scope and generation IDs must be exact")
+    left, right = (f"{root}/{name}" for name in children)
+    baseline, = (leaf for leaf in files if leaf.startswith("generations/"))
+    source, = (leaf for leaf in incoming if leaf.startswith("generations/"))
+    def guest(*args):
+        return adb("shell", *args)
+    baseline_text = read_selected_history_record(guest, f"{left}/{baseline}", 256)
+    source_text = read_selected_history_record(guest, f"{right}/{source}", 256)
+    need(sha256(baseline_text.encode("ascii")).hexdigest() == files[baseline] and
+         sha256(source_text.encode("ascii")).hexdigest() == incoming[source], "Selected history inputs diverged from their evidence")
+    missing, payload, _ = synthetic_scan(alternate=True)
+    inventory = files | {f"objects/{missing}": missing}
+    stages, results, fingerprints = [], [], {}
+    storage = f"files/{scope}/library-selected-merge-v1"
+    journal = f"{storage}/merge-stages"
+
+    def private(*args):
+        return adb("shell", "run-as", APP, *args)
+
+    def identity(command, path):
+        value = command("stat", "-c", "%d:%i", path).strip()
+        need(re.fullmatch(r"[0-9]+:[1-9][0-9]*", value), "The selected history node cannot be identified")
+        return value
+
+    need(set(private("ls", "-A", "-1", f"files/{scope}").splitlines()) ==
+         {"library-selected-merge-v1", "library-selected-merge-v1.lock", "read-scratch"} and
+         not private("ls", "-A", "-1", f"files/{scope}/read-scratch").strip() and
+         private("ls", "-A", "-1", storage).splitlines() == ["merge-stages"] and
+         set(private("ls", "-A", "-1", journal).splitlines()) == set(operations), "The selected history private scope changed")
+    keys = None
+    for index, operation in enumerate(operations):
+        repeated = index > 0
+        prior = baseline_text.splitlines()
+        marker, catalog = f"generations/{operation}.complete", f"catalogs/{operation}.sqlite"
+        text = read_selected_history_record(guest, f"{left}/{marker}", 256)
+        elements = text.splitlines()
+        need(len(prior) == len(elements) == 7 and elements[:5] == [prior[0], prior[1], operation, prior[2], prior[4]] and
+             re.fullmatch(r"[1-9][0-9]{0,6}", elements[5]) and int(elements[5]) <= 2 * 1024 * 1024 and
+             re.fullmatch(r"[a-f0-9]{64}", elements[6]), "The selected history marker is not the exact successor")
+        extent, digest = int(elements[5]), elements[6]
+        need(adb("shell", "stat", "-c", "%s", f"{left}/{catalog}").strip() == str(extent), "The selected catalog extent changed")
+        stage_name = f"merge-staging-{operation}"
+        need(not adb("shell", "ls", "-A", "-1", f"{left}/{stage_name}").strip(), "The selected history provider stage is not empty")
+        stages.append(stage_name)
+        fingerprints[stage_name] = identity(guest, f"{left}/{stage_name}")
+        if catalogs is not None:
+            local = catalogs[index]
+            adb("pull", f"{left}/{catalog}", local, timeout=20)
+            need(local.stat().st_size == extent and sha(local) == digest, "The pulled selected history catalog changed")
+            verify_selected_append_catalog(local, synthetic_scan()[0], missing, repeated=repeated)
+        attempt = f"{journal}/{operation}"
+        intent = read_selected_history_record(private, f"{attempt}/merge.intent", 1024)
+        receipt = read_selected_history_record(private, f"{attempt}/selected-merge.complete", 1024)
+        bound = verify_selected_append_records(intent, receipt, baseline_text, source_text, text)
+        need(keys is None or keys == bound, "The selected history receipts refer to different roots")
+        keys = bound
+        need(private("sha256sum", f"{attempt}/catalog.sqlite").split() == [digest, f"{attempt}/catalog.sqlite"],
+             "The selected history private catalog differs from the external catalog")
+        marker_digest = sha256(text.encode("ascii")).hexdigest()
+        payloads = {catalog: (extent, digest), marker: (len(text.encode("ascii")), marker_digest)}
+        if not repeated:
+            payloads[f"objects/{missing}"] = (len(payload), missing)
+        known = {"catalog.sqlite", "merge.intent", "selected-merge.complete"}
+        names = set(private("ls", "-A", "-1", attempt).splitlines())
+        need(known <= names, "The selected history lost private records")
+        fingerprints[operation] = {
+            "spends": verify_library_move_spends(adb, attempt, names - known, payloads),
+            "nodes": {leaf: identity(private, f"{attempt}/{leaf}") for leaf in sorted(names)},
+        }
+        inventory.update({marker: marker_digest, catalog: digest})
+        results.append(dict(generation=operation, predecessor=prior[2], catalogSha256=digest, catalogBytes=extent,
+                            missingBytes=0 if repeated else len(payload), copiedObjectSha256=None if repeated else missing,
+                            privateIntentSha256=sha256(intent.encode("ascii")).hexdigest(),
+                            privateCompletionSha256=sha256(receipt.encode("ascii")).hexdigest()))
+        baseline_text = text
+    verify_unchanged_settings_destination(adb, right, incoming)
+    verify_unchanged_settings_destination(adb, left, inventory, extra_names=stages)
+    return results, fingerprints
+
+
+def pinned_selected_death_predecessor(raw, guest, installed):
+    anchor = settings_run_anchors(raw, SELECTED_REPEAT_PASSED)
+    artifact = json.loads(anchor("artifacts.json"))
+    claim = json.loads(anchor("claim.json"))
+    grants = json.loads(anchor("independent-roots-grants.json"))
+    readings = [json.loads(anchor(f"{label}-readback.json")) for label in ("selected-append", "selected-repeat")]
+    operations = [row["generation"] for row in readings]
+    need(raw.name == "picker-adapter-library-tree-23f912ee54cb" and artifact["guest"] == guest == claim["name"] and
+         operations == [artifact["selectedRootAppend"], artifact["selectedRepeat"]] and readings[1]["predecessor"] == operations[0] and
+         grants["state"] == "prior-inventory-restored" and
+         json.loads(anchor("outcomes.json")) == {"passed": [SELECTED_REPEAT_CASE], "failed": [], "installedSha256": installed} and
+         read_results(anchor("independent-roots-append-instrumentation.txt"), (SELECTED_REPEAT_CASE,)) == ([SELECTED_REPEAT_CASE], []),
+         "The exact successful repeat predecessor was not verified")
+    independent_fixture_children(grants["fixture"])
+    missing, payload, _ = synthetic_scan(alternate=True)
+    for index, (label, row) in enumerate(zip(("selected-append", "selected-repeat"), readings)):
+        catalog = raw / f"{label}-catalog.sqlite"
+        need(catalog.stat().st_size == row["catalogBytes"] and sha(catalog) == row["catalogSha256"] and
+             row["missingBytes"] == (0 if index else len(payload)) and row["copiedObjectSha256"] == (None if index else missing),
+             "A retained repeat catalog or original-copy record changed")
+        verify_selected_append_catalog(catalog, synthetic_scan()[0], missing, repeated=index == 1)
+    legacy = json.loads(anchor("legacy-selected-append-private.json"))
+    grant_record = json.loads(anchor("repeat-prior-grants.json"))
+    spends = pinned_selected_repeat_spends(anchor("commands.jsonl"), operations)
+    expected = dict(legacy=legacy, grants=grant_record, spends=spends)
+    return claim, (grants["fixture"], artifact["fixture"], artifact["incomingFixture"], readings, expected), artifact["previous"]
+
+
+def pinned_selected_repeat_spends(transcript, operations):
+    journal = f"files/library-selected-repeat-{operations[0]}/library-selected-merge-v1/merge-stages"
+    expected = {operation: {} for operation in operations}
+    for line in transcript.splitlines():
+        record = json.loads(line)
+        args = record["argv"]
+        if args[-5:-1] != ["shell", "run-as", APP, "cat"]:
+            continue
+        match = re.fullmatch(rf"{journal}/({UUID_TEXT})/([a-f0-9]{{64}})\.spent", args[-1])
+        if match:
+            operation, key = match.groups()
+            need(operation in expected and key not in expected[operation] and record.get("exit") == 0 and not record.get("stderr") and
+                 0 < len(record["stdout"]) <= 512, "The pinned selected repeat spend evidence is ambiguous")
+            expected[operation][key] = sha256(record["stdout"].encode("ascii")).hexdigest()
+    need([len(expected[op]) for op in operations] == [3, 2], "The pinned selected repeat spend evidence is incomplete")
+    return expected
+
+
+def require_selected_death_prior_evidence(expected, grants, legacy, observed):
+    records, fingerprints = observed
+    spends = {op: fingerprints.get(op, {}).get("spends") for op in expected["spends"]}
+    need(len(records) == 2 and grants == expected["grants"] and legacy == expected["legacy"] and spends == expected["spends"],
+         "The pinned selected repeat evidence changed before installation")
+
 
 def pinned_selected_repeat_predecessor(raw, guest, installed):
     anchor = settings_run_anchors(raw, SELECTED_APPEND_PASSED)
@@ -1147,6 +1317,23 @@ def require_cold_backup_app(adb):
     need(not adb("shell", "pidof", APP, TEST, allowed=(0, 1)).strip(), "The app and test process must be absent")
 
 
+def require_selected_cold_process(adb, writer_pid):
+    need(re.fullmatch(r"[1-9][0-9]{0,8}", writer_pid), "Invalid selected writer process identity")
+    # Prove a successful guest process inventory that includes its own shell, and return only the package-scoped result.
+    script = (
+        'rows=$(ps -A -o PID,NAME 2>&1) || exit 71; '
+        'printf "%s\\n" "$rows" | (read -r first second && [ "$first $second" = "PID NAME" ] || exit 71; '
+        'observer=0; while read -r pid name; do '
+        'case "$pid" in ""|*[!0-9]*) exit 71 ;; esac; '
+        f'case "$name" in ""|{APP}|{APP}:*|{TEST}|{TEST}:*) exit 71 ;; esac; '
+        f'[ "$pid" != "{writer_pid}" ] || exit 71; '
+        '[ "$pid" != "$$" ] || observer=1; done; '
+        f'[ "$observer" = 1 ] || exit 71; printf "selected-processes-absent:{writer_pid}\\n")'
+    )
+    need(adb("shell", script, allowed=(0, 71)) == f"selected-processes-absent:{writer_pid}\n",
+         "Could not establish exact selected app and writer process absence")
+
+
 def finish_pre_marker_outcome(outcome, preservation_checks, record, *, label="Pre-marker backup"):
     failures = []
     for check in preservation_checks:
@@ -1432,7 +1619,9 @@ def run(args):
     append_release = args.selected_append_released_generation
     append_host_recovery = args.selected_append_host_recovery
     selected_repeat = select_selected_repeat(args.selected_append_repeat, selected_append=selected_append,
-                                           reassigned=append_release, failed_host=append_host_recovery)
+                                            reassigned=append_release, failed_host=append_host_recovery)
+    selected_death = select_selected_death(args.selected_append_death, selected_append=selected_append,
+                                          repeat=selected_repeat, reassigned=append_release, failed_host=append_host_recovery)
     need(append_release is None or (selected_append and re.fullmatch(UUID_TEXT, append_release)),
          "Reassignment is valid only for a standalone selected append and one exact released generation")
     need(not append_host_recovery or (selected_append and append_release is None),
@@ -1492,11 +1681,14 @@ def run(args):
     prior_derived = []
     failed_append_fixture = None
     prior_successful_append = None
+    prior_successful_repeat = None
     protect_interrupted = None
     death_authority = CAPACITY_PASSED if before_marker else args.backup_death_retry or SETTINGS_COLD_MANIFEST
     death_operation = str(uuid.uuid4()) if args.backup_delivery_death or before_marker else None
     append_operation = str(uuid.uuid4()) if selected_append else None
     repeat_operation = str(uuid.uuid4()) if selected_repeat else None
+    need(not selected_death or not (raw.parent / f"settings-retry-spent-{SELECTED_REPEAT_PASSED}.json").exists(),
+         "The selected delivery-death authorization was already spent; do not launch another writer")
     need(args.backup_death_retry is None or (death_operation and args.backup_death_retry == BACKUP_DIRECT_CONTROL_PASS),
          "Retry requires the exact new no-write batch receipt")
     if args.previous:
@@ -1519,11 +1711,17 @@ def run(args):
             if args.independent_roots_retry or independent_handoff or independent_derived:
                 if independent_derived:
                     dry_pair = previous
-                    if selected_repeat:
-                        independent_claim, prior_successful_append, recovered_pair = pinned_selected_repeat_predecessor(root, args.guest, previous)
+                    legacy_pair = previous
+                    if selected_death:
+                        independent_claim, prior_successful_repeat, legacy_pair = pinned_selected_death_predecessor(root, args.guest, previous)
+                        root = raw.parent / "picker-adapter-library-tree-6a2d8a67bc65"
+                    if selected_repeat or selected_death:
+                        legacy_claim, prior_successful_append, recovered_pair = pinned_selected_repeat_predecessor(root, args.guest, legacy_pair)
+                        if selected_repeat:
+                            independent_claim = legacy_claim
                         root = raw.parent / "picker-adapter-library-tree-f417bf74e32d"
-                    if append_host_recovery or selected_repeat:
-                        recovered_pair = recovered_pair if selected_repeat else previous
+                    if append_host_recovery or selected_repeat or selected_death:
+                        recovered_pair = recovered_pair if prior_successful_append else previous
                         failed = settings_run_anchors(root, SELECTED_APPEND_HOST_REFUSAL)
                         verify_selected_append_host_refusal(failed("independent-roots-append-instrumentation.txt"))
                         artifact = json.loads(failed("artifacts.json"))
@@ -1531,12 +1729,12 @@ def run(args):
                         need(artifact["guest"] == args.guest and artifact["selectedRootAppend"] and artifact["incomingFixture"]
                              and artifact["appendInterveningRelease"] and status["state"] == "cleanup-unconfirmed"
                              and json.loads(failed("outcomes.json")) == {"passed": [], "failed": [SELECTED_APPEND_CASE], "installedSha256": recovered_pair}
-                             and (previous[APP] == recovered_pair[APP] if selected_repeat else
+                             and (legacy_pair[APP] == recovered_pair[APP] if prior_successful_append else
                                   previous[APP] == hashes[APP] and previous[TEST] != hashes[TEST]),
                              "The failed host attempt and corrected successor do not match the pinned history")
                         dry_pair = json.loads(failed("installed-before.json"))
                         need(dry_pair == artifact["previous"], "The failed append did not start from the exact dry-run pair")
-                        if not selected_repeat:
+                        if not prior_successful_append:
                             independent_claim = json.loads(failed("claim.json"))
                         failed_append_fixture = status["fixture"], artifact["fixture"], artifact["incomingFixture"]
                         root = raw.parent / "picker-adapter-library-tree-d0bcd64ff487"
@@ -1783,7 +1981,8 @@ def run(args):
                         treeAncestryHandoff=ancestry_resume, backupPreMarker=before_marker,
                         backupPreMarkerHandoff=pre_marker_handoff, independentRoots=bool(independent_cases),
                         independentRootsRetry=args.independent_roots_retry, independentRootsHandoff=independent_handoff,
-                          independentRootsDerived=independent_derived, selectedRootAppend=append_operation, selectedRepeat=repeat_operation,
+                         independentRootsDerived=independent_derived, selectedRootAppend=append_operation, selectedRepeat=repeat_operation,
+                         selectedDeath=selected_death,
                          appendInterveningRelease=append_release, appendHostRecovery=append_host_recovery, incomingFixture=received)),
         encoding="utf-8",
     )
@@ -1792,7 +1991,7 @@ def run(args):
     def admit_independent(record):
         if append_release:
             verify_released_append_guest(independent_claim, record, append_release)
-        elif selected_repeat:
+        elif selected_repeat or selected_death:
             verify_released_selected_repeat_guest(independent_claim, record)
         else:
             verify_released_independent_guest(independent_claim, record)
@@ -1860,7 +2059,8 @@ def run(args):
             require_cold_backup_app(adb)
         def require_fresh_append_scope():
             private = adb("shell", "run-as", APP, "ls", "-A", "-1", "files").splitlines()
-            name = f"library-selected-repeat-{append_operation}" if selected_repeat else "library-selected-merge-v1"
+            name = (f"library-selected-death-{append_operation}" if selected_death else
+                    f"library-selected-repeat-{append_operation}" if selected_repeat else "library-selected-merge-v1")
             need(name not in private, "A retained selected append must never be repeated")
 
         if selected_append:
@@ -1905,10 +2105,11 @@ def run(args):
                 independent_preservation = (*checks, check_interrupted)
                 if prior_successful_append:
                     grants_before = read_app_persisted_grants(adb)
-                    run.save(run.path("repeat-prior-grants.json"), {
+                    grant_record = {
                         "quantity": len(grants_before),
                         "sha256": sha256(json.dumps(grants_before).encode("utf8")).hexdigest(),
-                    }, durable=True)
+                    }
+                    run.save(run.path("repeat-prior-grants.json"), grant_record, durable=True)
                     def check_prior_grants():
                         recheck_target(run, ns)
                         require_same_repeat_grants(grants_before, read_app_persisted_grants(adb))
@@ -1920,6 +2121,20 @@ def run(args):
                         need(observe_legacy_selected_append(adb, prior_successful_append) == protected_append,
                              "The earlier successful selected append changed")
                     independent_preservation = (*independent_preservation, check_prior_successful_append)
+                if prior_successful_repeat:
+                    prior_folder, prior_files, prior_incoming, expected, anchors = prior_successful_repeat
+                    operations = [row["generation"] for row in expected]
+                    def observe_prior_repeat():
+                        recheck_target(run, ns)
+                        return observe_selected_history(adb, prior_folder, prior_files, prior_incoming,
+                                                        f"library-selected-repeat-{operations[0]}", operations)
+                    protected_repeat = observe_prior_repeat()
+                    need(protected_repeat[0] == expected, "The two earlier successful selected receipts changed")
+                    require_selected_death_prior_evidence(anchors, grant_record, protected_append, protected_repeat)
+                    run.save(run.path("protected-selected-repeat.json"), protected_repeat, durable=True)
+                    def check_prior_repeat():
+                        need(observe_prior_repeat() == protected_repeat, "The earlier successful selected history changed")
+                    independent_preservation = (*independent_preservation, check_prior_repeat)
                 if independent_prior:
                     def check_prior_picker():
                         recheck_target(run, ns)
@@ -2052,7 +2267,10 @@ def run(args):
                         recheck_target(run, ns)
                 stage_independent_fixture_pair(adb, guest_root, folder,
                     ((fixture, files), (alternate_fixture, received) if selected_append else (fixture, files)), admit_fixtures)
-            if selected_repeat:
+            if selected_death:
+                independent_outcome = exercise_selected_delivery_death(run, adb, ns, raw, guest_root, folder, files, received,
+                                                                       hashes, append_operation, grants_before)
+            elif selected_repeat:
                 independent_outcome = exercise_selected_repeat(run, adb, ns, raw, guest_root, folder, files, received,
                                                                 hashes, append_operation, repeat_operation, missing, missing_bytes)
             elif selected_append:
@@ -2280,6 +2498,8 @@ if __name__ == "__main__":
                         help="Reconcile one exact intervening released claim; still require the installed dry-run pair and preserved fixtures")
     parser.add_argument("--selected-append-repeat", action="store_true",
                         help="Run two new selected appends in one isolated synthetic scope after the exact successful release")
+    parser.add_argument("--selected-append-death", action="store_true",
+                        help="Run one selected append, end its process after the private receipt, then inspect without replay")
     parser.add_argument("--selected-append-host-recovery", action="store_true",
                         help="Use the pinned failure before Files launch; verify both previous fixture trees before a new test-only attempt")
     parser.add_argument("--provider-capacity", action="store_true",

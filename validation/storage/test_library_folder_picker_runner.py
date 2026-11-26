@@ -68,6 +68,103 @@ class LibraryFolderPickerRunnerTest(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "exact successful predecessor"):
                 select_selected_repeat(True, selected_append=selected_append, reassigned=reassigned, failed_host=failed)
 
+    def test_selected_delivery_death_requires_its_own_case_id_and_exact_crash(self):
+        from run_library_folder_picker_ldplayer import read_selected_delivery_death
+        operation = self._uuid(7)
+        start = ("INSTRUMENTATION_STATUS: class=app.pristinepage.LibraryFolderFilesJourneyTest\n"
+                 "INSTRUMENTATION_STATUS: test=endsProcessAfterSelectedAppendCompletionBeforeDelivery\n"
+                 "INSTRUMENTATION_STATUS_CODE: 1\n")
+        boundary = (f"INSTRUMENTATION_STATUS: selectedAppendDeathOperation={operation}\n"
+                    "INSTRUMENTATION_STATUS: selectedAppendDeathPid=2345\n"
+                    f"INSTRUMENTATION_STATUS: selectedAppendDeathGrantInventory={'a' * 64}\n"
+                    "INSTRUMENTATION_STATUS_CODE: 72\n")
+        crash = "INSTRUMENTATION_RESULT: shortMsg=Process crashed.\nINSTRUMENTATION_CODE: 0\n"
+        self.assertEqual(("2345", "a" * 64), read_selected_delivery_death(start + boundary + crash, operation))
+        for output in (start + crash, start + boundary * 2 + crash, start + boundary,
+                       start + boundary.replace("2345", "0") + crash,
+                       start + boundary.replace(operation, self._uuid(8)) + crash,
+                       start.replace("BeforeDelivery", "WrongBoundary") + boundary + crash):
+            with self.assertRaisesRegex(RuntimeError, "exact selected append checkpoint"):
+                read_selected_delivery_death(output, operation)
+
+    def test_selected_death_is_not_a_repeat_or_reassignment_mode(self):
+        from run_library_folder_picker_ldplayer import select_selected_death
+        self.assertTrue(select_selected_death(True, selected_append=True, repeat=False, reassigned=None, failed_host=False))
+        for append, repeat, reassigned, failed in ((False, False, None, False), (True, True, None, False),
+                                                   (True, False, self._uuid(9), False), (True, False, None, True)):
+            with self.assertRaisesRegex(RuntimeError, "exact repeat predecessor"):
+                select_selected_death(True, selected_append=append, repeat=repeat, reassigned=reassigned, failed_host=failed)
+
+    def test_unexplained_successor_process_never_starts_cold_or_replays_writer(self):
+        from run_library_folder_picker_ldplayer import exercise_selected_delivery_death, SELECTED_DEATH_CASE
+        folder, operation = "PristinePage-tree-0123456789ab", self._uuid(7)
+        commands = []
+
+        def adb(*args, **kwargs):
+            commands.append(args)
+            if args[:2] == ("shell", "pidof"):
+                return "3456\n" if any("instrument" in call for call in commands) else ""
+            if args[0] == "shell" and "ps -A" in args[1]:
+                return ""
+            if args[1:3] == ("am", "instrument"):
+                return "captured"
+            if "run-as" in args and "ls" in args:
+                return ""
+            self.fail(f"Unadmitted command: {args}")
+
+        with (TemporaryDirectory(prefix="pristinepage-selected-death-test-") as temporary,
+              patch("run_library_folder_picker_ldplayer.verify_unchanged_settings_destination"),
+              patch("run_library_folder_picker_ldplayer.read_app_persisted_grants", return_value=()),
+              patch("run_library_folder_picker_ldplayer.recheck_target"),
+              patch("run_library_folder_picker_ldplayer.read_selected_delivery_death", return_value=("2345", "a" * 64)),
+              patch("run_library_folder_picker_ldplayer.observe_selected_history", side_effect=AssertionError("Must not inspect before cold admission"))):
+            class Run:
+                def path(self, name):
+                    return Path(temporary) / name
+
+                def save(self, path, record, *, durable):
+                    path.write_text(json.dumps(record), encoding="utf8")
+
+            (Path(temporary) / "evidence").mkdir()
+            with self.assertRaisesRegex(RuntimeError, "process absence"):
+                exercise_selected_delivery_death(Run(), adb, None, Path(temporary) / "evidence",
+                                                  f"/sdcard/Documents/{folder}", folder, {}, {}, {}, operation, ())
+            self.assertTrue((Path(temporary) / "selected-death-attempt.json").is_file())
+        instruments = [call for call in commands if "instrument" in call]
+        self.assertEqual(1, len(instruments))
+        self.assertIn(SELECTED_DEATH_CASE, instruments[0])
+        self.assertFalse(any("force-stop" in call for call in commands))
+
+    def test_selected_cold_admission_requires_positive_absence_not_empty_or_failed_output(self):
+        from run_library_folder_picker_ldplayer import require_selected_cold_process
+        def result(reply):
+            def command(mode, script, **kwargs):
+                self.assertEqual("shell", mode)
+                self.assertIn("ps -A -o PID,NAME 2>&1", script)
+                self.assertIn("2345", script)
+                self.assertIn("app.pristinepage.debug.test", script)
+                return reply
+            return command
+        require_selected_cold_process(result("selected-processes-absent:2345\n"), "2345")
+        for reply in ("", "ps: invalid option\n", "selected-processes-absent:3456\n", "selected-processes-absent:2345\nerror\n"):
+            with self.assertRaisesRegex(RuntimeError, "process absence"):
+                require_selected_cold_process(result(reply), "2345")
+
+    def test_selected_death_prior_evidence_refuses_already_changed_spend_bytes_and_grants(self):
+        from run_library_folder_picker_ldplayer import require_selected_death_prior_evidence
+        records = [{"operation": "one"}, {"operation": "two"}]
+        expected = {"grants": {"quantity": 0, "sha256": "a" * 64}, "legacy": {"older": "b" * 64},
+                    "spends": {"one": {"leaf": "c" * 64}, "two": {"leaf": "d" * 64}}}
+        observed = (records, {op: {"spends": leaves} for op, leaves in expected["spends"].items()})
+        require_selected_death_prior_evidence(expected, expected["grants"], expected["legacy"], observed)
+        for grants, legacy, snapshot in (
+            (expected["grants"] | {"quantity": 1}, expected["legacy"], observed),
+            (expected["grants"], {"older": "e" * 64}, observed),
+            (expected["grants"], expected["legacy"], (records, observed[1] | {"one": {"spends": {"leaf": "f" * 64}}})),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "pinned selected repeat evidence"):
+                require_selected_death_prior_evidence(expected, grants, legacy, snapshot)
+
     def test_repeat_receipt_requires_the_exact_intent_and_all_three_markers(self):
         def marker(suffix, predecessor):
             return (f"pristinepage-library-v1\n{self._uuid(99)}\n{self._uuid(suffix)}\n{predecessor}\n"
@@ -85,6 +182,20 @@ class LibraryFolderPickerRunnerTest(unittest.TestCase):
         ):
             with self.assertRaisesRegex(RuntimeError, "selected append"):
                 verify_selected_append_records(wrong_intent, wrong_receipt, baseline, incoming, wrong_child)
+
+    def test_selected_history_reads_no_unbounded_record(self):
+        from run_library_folder_picker_ldplayer import read_selected_history_record
+        path = "generations/synthetic.complete"
+        for claimed in ("0", "257", "12 unexpected", "1"):
+            calls = []
+            def command(*args):
+                calls.append(args)
+                if args[0] == "stat":
+                    return claimed
+                return "too many bytes\n"
+            with self.assertRaisesRegex(RuntimeError, "selected history record"):
+                read_selected_history_record(command, path, 256)
+            self.assertEqual(2 if claimed == "1" else 1, len(calls))
 
     @staticmethod
     def _uuid(suffix):

@@ -57,6 +57,23 @@ object LibraryDescriptorAncestryWitness {
         requireAuthority: () -> Unit,
     ): String = RoomSelectedLibraryMerge(context, scratch).append(operation, destination.input, incoming.input, requireAuthority).id
 
+    suspend fun publishMergeBeforeDelivery(context: Context, scratch: File, operation: String, destination: Catalog, incoming: Catalog,
+        requireAuthority: () -> Unit, beforeDelivery: suspend (String) -> Nothing,
+    ): Nothing {
+        RoomSelectedLibraryMerge(context, scratch).append(operation, destination.input, incoming.input, requireAuthority,
+            beforeDelivery = { beforeDelivery(it.id) })
+        error("The armed selected append returned normally")
+    }
+
+    suspend fun attemptRetainedMerge(context: Context, scratch: File, operation: String, destination: Uri, incoming: Uri) {
+        val state = requireNotNull(RoomSelectedLibraryMerge.inspect(context, operation))
+        check(state.completed && state.intent.candidate.id == operation)
+        val intent = state.intent
+        // Deliberately supply the original exact generations to the real write entry; a test context traps any provider access.
+        RoomSelectedLibraryMerge(context, scratch).append(operation, AndroidLibraryTreeRead.PairInput(destination, intent.destination),
+            AndroidLibraryTreeRead.PairInput(incoming, intent.incoming), requireAuthority = {})
+    }
+
     suspend fun completedMerge(context: Context, operation: String): String? =
         RoomSelectedLibraryMerge.inspect(context, operation)?.takeIf { it.completed }?.intent?.candidate?.id
 

@@ -13,8 +13,19 @@ import java.nio.file.attribute.BasicFileAttributes
 internal class LocalSelectedMergeAttempts(private val root: Path, private val openJournal: (Path) -> LocalLibraryMergeJournal) {
     data class Fresh(val journal: LocalLibraryMergeJournal, val stage: Path)
 
-    fun allocate(operation: String, checkpoint: () -> Unit = {}, requireAuthority: () -> Unit = {}): Fresh {
+    /** Exact-ID refusal only. Absence neither admits a new write nor clears the rest of the namespace. */
+    fun requireUnused(operation: String) {
         requireOpaqueId(operation)
+        if (!directoryPresent(root)) return
+        requireKnownNamespace()
+        val stages = root.resolve("merge-stages")
+        if (directoryPresent(stages) && directoryPresent(stages.resolve(operation))) {
+            throw IOException("The selected merge operation cannot be repeated")
+        }
+    }
+
+    fun allocate(operation: String, checkpoint: () -> Unit = {}, requireAuthority: () -> Unit = {}): Fresh {
+        requireUnused(operation)
         val parent = checkNotNull(root.parent)
         if (!directoryPresent(parent)) throw IOException("Private library files are unavailable")
         fun createFresh(path: Path): Path {

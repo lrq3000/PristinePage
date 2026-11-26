@@ -116,7 +116,7 @@ class LibraryFolderFilesJourneyTest {
     private val chooseHost = TestRule { next, description ->
         val rule = if (description.methodName in setOf("endsProcessAfterPayloadBeforeTheCompletionMarker", "persistsIndependentFilesRootsAndAnchor",
                  "separatesIndependentlySelectedRootsWithoutAParentGrant", "selectedFilesMergeAppendsOnlyTheMissingOriginalAndKeepsItsPredecessor",
-                 "selectedFilesMergeCanAppendTwiceWithoutReusingAnOlderStage"))
+                 "selectedFilesMergeCanAppendTwiceWithoutReusingAnOlderStage", "endsProcessAfterSelectedAppendCompletionBeforeDelivery"))
             interruptionCompose else compose
         rule.apply(next, description)
     }
@@ -728,6 +728,46 @@ class LibraryFolderFilesJourneyTest {
         runBlocking {
             assertEquals(first, witness.completedMerge(isolated, first))
             assertEquals(second, witness.completedMerge(isolated, second))
+        }
+    }
+
+    @Test fun endsProcessAfterSelectedAppendCompletionBeforeDelivery() {
+        val instrumentation = InstrumentationRegistry.getInstrumentation()
+        val operation = UUID.fromString(requireNotNull(InstrumentationRegistry.getArguments()
+            .getString("librarySelectedAppendOperation"))).toString()
+        val witness = LibraryDescriptorAncestryWitness
+        withIndependentFilesSelections(chooseAnchor = false, writableDestination = true) { app, folder, selected, before ->
+            val grants = LibraryIndependentRootGrants
+            fun requireAuthority() {
+                assertEquals(before + mapOf(selected[0].toString() to (true to true), selected[1].toString() to (true to false)),
+                    grants.inventory(app))
+                grants.refuseParentAccess(app, folder)
+            }
+            val files = File(app.filesDir.canonicalFile, "library-selected-death-$operation").apply { check(mkdir()) }
+            val scope = object : ContextWrapper(app) {
+                override fun getApplicationContext(): Context = this
+                override fun getFilesDir(): File = files
+            }
+            val scratch = File(files, "read-scratch").apply { check(mkdir()) }
+            runBlocking {
+                val inputs = witness.verifyPairWithSharedOwner(scope, scratch, selected[0], selected[1], ::requireAuthority)
+                witness.publishMergeBeforeDelivery(scope, scratch, operation, inputs[0], inputs[1], ::requireAuthority) { generation ->
+                    assertEquals(operation, generation)
+                    requireAuthority()
+                    // These two modes were issued only to this synthetic case. Restore them before deliberately ending the app process.
+                    app.contentResolver.releasePersistableUriPermission(selected[0], Intent.FLAG_GRANT_WRITE_URI_PERMISSION)
+                    grants.releaseReadDelta(app, selected) { assertEquals(before, grants.inventory(app)) }
+                    suspendCancellableCoroutine<Nothing> {
+                        instrumentation.sendStatus(72, Bundle().apply {
+                            putString("selectedAppendDeathOperation", operation)
+                            putInt("selectedAppendDeathPid", Process.myPid())
+                            putString("selectedAppendDeathGrantInventory", LibraryAncestryGrantWitness.fingerprint(before))
+                        })
+                        Process.killProcess(Process.myPid())
+                    }
+                }
+            }
+            error("The selected append must lose its process before delivering success")
         }
     }
 
