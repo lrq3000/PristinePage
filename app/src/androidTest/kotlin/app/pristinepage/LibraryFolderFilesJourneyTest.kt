@@ -23,6 +23,11 @@ import android.view.MotionEvent
 import android.view.accessibility.AccessibilityNodeInfo
 import androidx.activity.result.ActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.activity.compose.setContent
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.runtime.getValue
+import androidx.compose.ui.test.assertIsEnabled
+import androidx.compose.ui.test.assertIsNotEnabled
 import androidx.compose.ui.test.hasTestTag
 import androidx.compose.ui.test.isEnabled
 import androidx.compose.ui.test.assertIsDisplayed
@@ -32,6 +37,7 @@ import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performScrollTo
 import androidx.compose.ui.test.performClick
 import androidx.lifecycle.ViewModelProvider
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import app.pristinepage.core.pipeline.OutputSpec
@@ -53,12 +59,18 @@ import app.pristinepage.data.model.SaveRecipeResult
 import app.pristinepage.data.model.SourceBlobId
 import app.pristinepage.data.repository.ScopedCommittedOriginals
 import app.pristinepage.data.repository.SavedOcrWork
+import app.pristinepage.editor.EditorIdentity
+import app.pristinepage.design.AtelierPreferences
 import app.pristinepage.image.decode.AndroidSourceInspector
 import app.pristinepage.image.decode.SourceDecoder
 import app.pristinepage.library.LibraryBackupConfirmation
 import app.pristinepage.library.LibraryBackupViewModel
 import app.pristinepage.library.LibraryFolderGrantHandoff
 import app.pristinepage.library.LibraryFolderPickerContract
+import app.pristinepage.library.ApplicationLibraryActions
+import app.pristinepage.library.AtelierLibraryScreen
+import app.pristinepage.library.ImportLibrarySession
+import app.pristinepage.library.LibraryIdentity
 import app.pristinepage.testing.LibraryInterruptionPickerActivity
 import java.io.ByteArrayOutputStream
 import java.io.File
@@ -71,7 +83,10 @@ import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicReference
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.awaitCancellation
 import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.currentCoroutineContext
@@ -948,6 +963,58 @@ class LibraryFolderFilesJourneyTest {
                     current.list(null, 10)
                 }
                 assertEquals(1, catalog.single().pageCount)
+                val services = ApplicationServices(isolated)
+                val document = catalog.single().documentId
+                val page = services.loadLibraryAlbum(selected, document).pages.single()
+                val editor = EditorIdentity(document, page.pageId, selected)
+                val owner = SupervisorJob()
+                val clicked = AtomicReference<EditorIdentity?>()
+                try {
+                    interruptionCompose.runOnUiThread {
+                        val session = ImportLibrarySession(ApplicationLibraryActions(isolated, null, services), LibraryIdentity(),
+                            CoroutineScope(owner + Dispatchers.Main.immediate))
+                        val preferences = AtelierPreferences(isolated)
+                        interruptionCompose.activity.setContent {
+                            val state by session.state.collectAsStateWithLifecycle()
+                            MaterialTheme {
+                                AtelierLibraryScreen(session, state, preferences,
+                                    { services.loadLibraryAlbum(selected, it) },
+                                    { album, tile -> services.renderLibraryThumbnail(selected, album, tile) },
+                                    onSettings = {},
+                                    onEdit = { documentId, pageId -> clicked.set(EditorIdentity(documentId, pageId, selected)) },
+                                )
+                            }
+                        }
+                    }
+                    fun awaitTag(tag: String) = interruptionCompose.waitUntil(25_000) {
+                        interruptionCompose.onAllNodes(hasTestTag(tag) and isEnabled()).fetchSemanticsNodes().isNotEmpty()
+                    }
+                    val albumTag = "atelier-album-${document.value}"
+                    awaitTag(albumTag)
+                    interruptionCompose.onNodeWithTag(albumTag).performClick()
+                    val pageTag = "original-page-${page.pageId.value}"
+                    interruptionCompose.waitUntil(25_000) {
+                        interruptionCompose.onAllNodes(hasTestTag(pageTag)).fetchSemanticsNodes().isNotEmpty()
+                    }
+                    interruptionCompose.onNodeWithTag("atelier-add-pages").assertIsNotEnabled()
+                    interruptionCompose.onNodeWithTag(pageTag).assertIsEnabled().performClick()
+                    assertEquals(editor, clicked.get())
+                } finally {
+                    interruptionCompose.runOnUiThread { interruptionCompose.activity.setContent {} }
+                    owner.cancelAndJoin()
+                    interruptionCompose.waitUntil(15_000) { services.budget.usedBytes == 0L }
+                }
+                val accepted = services.loadLibraryEditorPage(editor)
+                services.originalLibraryEditor(editor, page.sourceId.value).use { original ->
+                    assertEquals(page.sourceId.value, original.sourceId)
+                    assertEquals(accepted.recipe.geometry.source.sourceSize, original.inspection.normalizedSize)
+                    assertEquals(0xff132b47.toInt(), original.bitmap.getPixel(0, 0))
+                    assertEquals(0xff637b89.toInt(), original.bitmap.getPixel(2, 1))
+                    assertTrue(services.budget.usedBytes > 0)
+                }
+                assertEquals(0L, services.budget.usedBytes)
+                val foreign = runCatching { services.originalLibraryEditor(editor, UUID.randomUUID().toString()).close() }.exceptionOrNull()
+                assertEquals("editor_page_unavailable", (foreign as RepositoryFailure).error.safeMessageKey)
                 val repeated = runCatching { start.openVerifiedExistingFolder(scratch, preview) }.exceptionOrNull() as RepositoryFailure
                 assertEquals("library_activation_changed", repeated.error.safeMessageKey)
                 app.contentResolver.releasePersistableUriPermission(tree, Intent.FLAG_GRANT_WRITE_URI_PERMISSION)
@@ -956,6 +1023,9 @@ class LibraryFolderFilesJourneyTest {
                     AndroidLibraryStartup(isolated).useSelectedCatalog(scratch) { _, _ -> error("A removed grant cannot open the catalog") }
                 }.exceptionOrNull() as RepositoryFailure
                 assertEquals("library_reconnect_required", unavailable.error.safeMessageKey)
+                val deniedOriginal = runCatching { services.originalLibraryEditor(editor, page.sourceId.value).close() }.exceptionOrNull()
+                assertEquals("library_reconnect_required", (deniedOriginal as RepositoryFailure).error.safeMessageKey)
+                assertEquals(0L, services.budget.usedBytes)
                 assertEquals(null, start.recordedDefaultActivation())
             }
         }

@@ -13,7 +13,7 @@ WRITER_SHA256 = "b07ea7c1fe50c8d3a81a813e02deb716db192780560d34a2bedf7ff2b8e98e1
 DETACHED = "picker-adapter-library-tree-5e7909463a3e"
 
 
-def readback(run, adb, ns, files, attempt, catalog_identity):
+def readback(run, adb, ns, files, attempt, catalog_identity, *, advanced=False):
     operation, folder = attempt["operation"], attempt["folder"]
     left, right = (f"/sdcard/Documents/{folder}/{name}" for name in checks.independent_fixture_children(folder))
     marker_leaf, catalog_leaf = f"generations/{operation}.complete", f"catalogs/{operation}.sqlite"
@@ -45,7 +45,7 @@ def readback(run, adb, ns, files, attempt, catalog_identity):
         checks.need((actual if "/" in leaf else actual.rsplit(":", 1)[0]) == identity, "A retained bound fixture node changed")
     scope = f"files/library-selected-editor-{operation}"
     stage = f"{scope}/catalog-recipe-attempts-v1/{operation}"
-    receipt = checks.read_bound_recipe_evidence(adb, scope, stage, left, predecessor, successor, digest)
+    receipt = checks.read_bound_recipe_evidence(adb, scope, stage, left, predecessor, successor, digest, advanced=advanced)
     spend = read(private, f"{scope}/catalog-revision-spends/{operation}.spent", 1024)
     checks.need(spend == "pristinepage-catalog-revision-spent-v1\n" + predecessor + successor, "The exact bound revision spend changed")
     names = set(private("ls", "-A", "-1", stage).splitlines())

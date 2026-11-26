@@ -253,8 +253,8 @@ class AndroidLibraryStartup(context: Context) {
     /** Original loans and accepted editor metadata are scoped to the same activation. */
     suspend fun <T : Any> useIssuedSelectedPageSources(
         scratchDirectory: File, issuedAt: LibraryActivation,
-        block: suspend CoroutineScope.(EditablePages, ScopedCommittedOriginals) -> T,
-    ): T = useRecordedWorkingLibrary(scratchDirectory, issuedAt) { _, _, originals, editable -> block(editable, originals) }
+        block: suspend CoroutineScope.(DocumentCatalog, EditablePages, ScopedCommittedOriginals) -> T,
+    ): T = useRecordedWorkingLibrary(scratchDirectory, issuedAt) { _, catalog, originals, editable -> block(catalog, editable, originals) }
 
     /** Admit the catalog and original loans under the same activation; finish using and close any owned results before returning. */
     suspend fun useSelectedLibrary(

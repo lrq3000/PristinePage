@@ -45,7 +45,9 @@ import app.pristinepage.data.repository.AtelierAcquisition
 import app.pristinepage.data.repository.AlbumSearchQuery
 import app.pristinepage.data.repository.AtelierDraftView
 import app.pristinepage.data.repository.AtelierSavedPages
+import app.pristinepage.data.repository.DocumentCatalog
 import app.pristinepage.data.repository.DocumentRepository
+import app.pristinepage.data.repository.EditablePages
 import app.pristinepage.data.repository.SourceInput
 import app.pristinepage.data.repository.SavedOcrWork
 import app.pristinepage.data.repository.SavedOcrWork.TextSaveOutcome
@@ -207,8 +209,8 @@ class ApplicationServices(context: Context, internal val budget: ImageAllocation
         val active = storageLocation()
         if (active.activation != issuedAt) activationChanged()
         if (active.folderLabel == null) return renderDefaultLibraryThumbnail(issuedAt, album, tile)
-        return selectedLibraryPixels(issuedAt) { pages, renderer ->
-            AtelierThumbnailLoader(pages::load, renderer, RenderedPreviewBitmapLoader(budget)).load(album, tile)
+        return selectedLibraryPixels(issuedAt) { _, pages, decoder ->
+            AtelierThumbnailLoader(pages::load, selectedRenderer(decoder), RenderedPreviewBitmapLoader(budget)).load(album, tile)
         }
     }
 
@@ -223,23 +225,36 @@ class ApplicationServices(context: Context, internal val budget: ImageAllocation
         val active = storageLocation()
         if (active.activation != identity.issuedAt) activationChanged()
         if (active.folderLabel == null) return renderDefaultEditor(identity, request)
-        return selectedLibraryPixels(identity.issuedAt) { pages, renderer ->
+        return selectedLibraryPixels(identity.issuedAt) { _, pages, decoder ->
             val page = pages.load(identity.documentId, identity.pageId)
             if (request.pageId != page.pageId.value || request.sourceId != page.sourceId.value ||
                 request.recipeRevision != page.recipeRevision) activationChanged()
-            renderer.render(request)
+            selectedRenderer(decoder).render(request)
         }
     }
 
+    internal suspend fun originalLibraryEditor(identity: EditorIdentity, sourceId: String): OriginalPreviewBitmap {
+        val active = storageLocation()
+        if (active.activation != identity.issuedAt) activationChanged()
+        if (active.folderLabel == null) return originalDefaultEditor(identity, sourceId)
+        return selectedLibraryPixels(identity.issuedAt) { catalog, _, decoder ->
+            // An unsupported saved recipe can still show its original; admission checks the saved slot, not recipe executability.
+            if (editorPage(catalog, identity).sourceId.value != sourceId) editorPageUnavailable(identity)
+            selectedDecodeQueue.withLock { OriginalPreviewBitmapLoader(OriginalPreviewLoader(decoder, budget), budget).load(sourceId) }
+        }
+    }
+
+    private fun selectedRenderer(decoder: SourceDecoder) =
+        DefaultRenderCoordinator(decoder, GeometryEngine(budget), AppearanceEngine(budget), queue = selectedDecodeQueue)
+
     private suspend fun <T : AutoCloseable> selectedLibraryPixels(issuedAt: LibraryActivation,
-        produce: suspend (app.pristinepage.data.repository.EditablePages, RenderCoordinator) -> T,
+        produce: suspend (DocumentCatalog, EditablePages, SourceDecoder) -> T,
     ): T {
         var provisional: T? = null
         try {
-            libraryStartup.useIssuedSelectedPageSources(selectedLibraryScratch(), issuedAt) { pages, originals ->
+            libraryStartup.useIssuedSelectedPageSources(selectedLibraryScratch(), issuedAt) { catalog, pages, originals ->
                 val decoder = SourceDecoder(originals, AndroidSourceInspector(budget))
-                val renderer = DefaultRenderCoordinator(decoder, GeometryEngine(budget), AppearanceEngine(budget), queue = selectedDecodeQueue)
-                provisional = produce(pages, renderer)
+                provisional = produce(catalog, pages, decoder)
             }
             currentCoroutineContext().ensureActive()
             return checkNotNull(provisional).also { provisional = null }
@@ -680,7 +695,7 @@ class ApplicationServices(context: Context, internal val budget: ImageAllocation
 
     internal suspend fun saveDefaultEditorPage(identity: EditorIdentity, revision: Long, recipe: Recipe) =
         defaultEditorOperation(identity) { graph ->
-            editorPage(graph, identity)
+            editorPage(graph.store.catalog, identity)
             graph.store.documents.saveRecipe(identity.pageId, revision, recipe)
         }
 
@@ -768,8 +783,8 @@ class ApplicationServices(context: Context, internal val budget: ImageAllocation
     internal suspend fun originalDefaultEditor(identity: EditorIdentity, sourceId: String): OriginalPreviewBitmap =
         editorPixels(identity, sourceId) { it.originalPreview(sourceId) }
 
-    private suspend fun editorPage(graph: ApplicationImports, identity: EditorIdentity): DocumentPage =
-        graph.store.catalog.load(identity.documentId).pages.singleOrNull { it.pageId == identity.pageId }
+    private suspend fun editorPage(catalog: DocumentCatalog, identity: EditorIdentity): DocumentPage =
+        catalog.load(identity.documentId).pages.singleOrNull { it.pageId == identity.pageId }
             ?: editorPageUnavailable(identity)
 
     private fun editorPageUnavailable(identity: EditorIdentity): Nothing =
@@ -778,7 +793,7 @@ class ApplicationServices(context: Context, internal val budget: ImageAllocation
     /** Capture the owned, detached pixels before leaving the lease so cancellation/late refusal cannot strand their allocation. */
     private suspend fun <T : AutoCloseable> editorPixels(identity: EditorIdentity, sourceId: String, produce: suspend (ApplicationImports) -> T): T {
         return activationPixels(identity.issuedAt) { graph ->
-            if (editorPage(graph, identity).sourceId.value != sourceId) editorPageUnavailable(identity)
+            if (editorPage(graph.store.catalog, identity).sourceId.value != sourceId) editorPageUnavailable(identity)
             produce(graph)
         }
     }

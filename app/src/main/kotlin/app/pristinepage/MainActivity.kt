@@ -318,7 +318,7 @@ class MainActivity : ComponentActivity() {
                  val identity = host.identity
                  val album = library.document?.takeIf { identity != null && it.document.documentId == identity.documentId && library.activation == identity.issuedAt }
                  val loadEditorOriginal: suspend (String) -> OriginalPreviewBitmap = { source ->
-                     services.originalDefaultEditor(checkNotNull(identity), source)
+                      services.originalLibraryEditor(checkNotNull(identity), source)
                  }
                 val orderedPages = album?.pages.orEmpty()
                 val index = orderedPages.indexOfFirst { it.pageId == identity?.pageId }

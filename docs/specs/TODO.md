@@ -606,6 +606,8 @@ The [exact native advancement witness](../../validation/storage/library-folder-a
 
 Original display now also accepts the verified scoped decoder without requiring a raw, separately opened source locator. Two focused JVM cases failed on the missing scoped entry, then the image JVM suite passed with one loan, exact half-pixel values, and no surviving pixels or allowance when the reader refuses after decode. The original private lookup path retains its independent binding check. Application/Files wiring and visible Frame/reopen evidence are separate.
 
+The selected album now enables ordinary page taps without enabling selected acquisition, batch or rendered export. The Frame and original-on-load-failure routes use the exact selected activation and catalogued page/source binding. A native fixture with the same original bytes and the guest's actual normalization policy checks grid navigation, exact asymmetric Original pixels, foreign source refusal and post-revocation denial. The application and data JVM checks passed, Android instrumentation compiled and both APKs assembled under strict offline verification; 301 host storage cases passed. The standalone native run must still prove the named route and restore the exact prior grant inventory. It does not expose the Default Settings cutover or qualify foreground Save.
+
 ### Current coordination: transition to `main`
 
 - [x] Operator approved the local fast-forward and `main`-based PR/handoff cadence; see [operational authority](OPERATIONAL_PLAN.md) and [queue rules](PARALLEL_EXECUTION_PLAN.md#coordination). Earlier branch/base references below describe their historical claims.

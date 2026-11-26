@@ -9,6 +9,7 @@ from subprocess import TimeoutExpired, run
 from tempfile import TemporaryDirectory
 import unittest
 from unittest.mock import patch
+from make_library_folder_picker_fixture import synthetic_scan
 
 from run_library_folder_picker_ldplayer import (
     check_fixture_root, read_backup_delivery_death, recheck_target, require_independent_manifests, select_backup_case, select_backup_death_picker_case, select_independent_roots, select_provider_capacity, select_settings_picker_case, select_settings_recovery_case, select_tree_ancestry, settings_completed_destination, spend_settings_retry, verify_released_independent_guest,
@@ -21,6 +22,18 @@ from run_local_ocr_guest import read_boot_serial
 
 
 class LibraryFolderPickerRunnerTest(unittest.TestCase):
+    def test_native_preview_fixture_changes_only_the_recorded_pixel_binding(self):
+        fingerprint = "android-imagedecoder-v2/api28/0123456789abcdef/srgb-straight-white-exif-v1"
+        old_digest, old_payload, old_rows = synthetic_scan()
+        digest, payload, rows = synthetic_scan(conversion=fingerprint)
+        self.assertEqual((old_digest, old_payload), (digest, payload))
+        self.assertEqual(old_rows[0], rows[0])
+        self.assertIn(f"'{fingerprint}'", rows[1])
+        self.assertIn("2981671c3ce9d742ecd1d6fc560562bffcd8d79a7522c91b859dadf108fa4cf2", rows[1])
+        self.assertNotEqual(old_rows[-2], rows[-2])
+        with self.assertRaises(ValueError):
+            synthetic_scan(conversion="not a native policy")
+
     def test_bound_recipe_receipt_does_not_accept_mismatched_activation_or_catalog(self):
         from run_library_folder_picker_ldplayer import verify_bound_recipe_receipt
         library, prior, child, grant_id = map(self._uuid, (1, 2, 3, 4))

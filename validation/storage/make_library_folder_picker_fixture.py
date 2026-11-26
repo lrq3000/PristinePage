@@ -4,6 +4,7 @@ from argparse import ArgumentParser
 from hashlib import sha256
 import json
 from pathlib import Path
+import re
 import shutil
 from struct import pack
 import subprocess
@@ -18,8 +19,10 @@ LIBRARY = "9e940d7b-76c7-45ea-b5e4-0ad86f26ea13"
 GENERATION = "25c49d9b-02d8-418f-b982-154980d89cfb"
 
 
-def synthetic_scan(alternate=False):
-    """One 3×2 RGB image and two canonical revisions. The synthetic binding is not a mobile codec witness."""
+def synthetic_scan(alternate=False, *, conversion=None):
+    """One 3×2 RGB image and two canonical revisions. Default fixtures keep their historical non-codec binding."""
+    if conversion is not None and not re.fullmatch(r"android-imagedecoder-v2/api28/[a-f0-9]{16}/srgb-straight-white-exif-v1", conversion):
+        raise ValueError("The native synthetic preview requires the exact API 28 unprofiled decode identity")
     width, height = 3, 2
     rgb = bytes((19, 43, 71, 255, 250, 240, 211, 233, 191, 17, 90, 126, 50, 8, 200, 99, 123, 137))
     blob, source, page, transaction, filename = BLOB, SOURCE, PAGE, DRAFT, "Synthetic.png"
@@ -37,12 +40,13 @@ def synthetic_scan(alternate=False):
     payload += chunk(b"tEXt", b"Comment\0" + b"R" * 70_000)
     payload += chunk(b"IDAT", compress(b"\0" + rgb[:9] + b"\0" + rgb[9:])) + chunk(b"IEND", b"")
     digest = sha256(payload).hexdigest()
-    fingerprint = b"srgb-v1"
+    conversion = conversion or "srgb-v1"
+    fingerprint = conversion.encode("ascii")
     pixel = sha256(b"pristinepage-source-pixels-v1\0" + pack(">I", len(fingerprint)) + fingerprint +
                    pack(">IIQ", width, height, len(rgb)) + rgb).hexdigest()
     rows = [
         f"INSERT INTO SourceBlob VALUES ('{blob}','{digest}',{len(payload)},'image/png',3,2,'sources/{blob}/original.bin','READY',1,'{transaction}',0)",
-        f"INSERT INTO Source VALUES ('{source}','{blob}','{pixel}',3,2,1,'srgb-v1',NULL,3,'READY',0)",
+        f"INSERT INTO Source VALUES ('{source}','{blob}','{pixel}',3,2,1,'{conversion}',NULL,3,'READY',0)",
         f"INSERT INTO Page VALUES ('{page}','{DOC}','{source}',2,'ACTIVE',0,NULL,0)",
         f"INSERT INTO LibraryScanName VALUES ('{page}','{DOC}','{filename}','{filename.lower()}')",
         f"INSERT INTO SourceReference VALUES ('PAGE','{page}','{source}',0)",
@@ -64,14 +68,14 @@ def synthetic_scan(alternate=False):
     return digest, payload, rows
 
 
-def make_fixture(destination: Path, *, with_scan=False, alternate_scan=False):
-    if alternate_scan and not with_scan:
-        raise ValueError("The alternate fixture must contain a scan")
+def make_fixture(destination: Path, *, with_scan=False, alternate_scan=False, conversion=None):
+    if (alternate_scan or conversion is not None) and not with_scan:
+        raise ValueError("The requested fixture must contain a scan")
     cli = shutil.which("sqlite3")
     if not cli:
         raise RuntimeError("The existing FTS4-capable SQLite CLI is required")
     schema = json.loads(SCHEMA.read_text(encoding="utf-8"))["database"]
-    scan = synthetic_scan(alternate_scan) if with_scan else None
+    scan = synthetic_scan(alternate_scan, conversion=conversion) if with_scan else None
     commands = [*create_tables(schema["version"]), *sync_triggers(), *schema["setupQueries"],
                 "PRAGMA user_version=8", "PRAGMA foreign_keys=ON", "BEGIN",
                 f"INSERT INTO Document VALUES ('{DOC}','Synthetic folder test',{2 if scan else 1},'ACTIVE',0,0,NULL)",

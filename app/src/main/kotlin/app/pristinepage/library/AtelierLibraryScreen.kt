@@ -100,7 +100,8 @@ import kotlinx.coroutines.launch
     fun nextTitle() = defaultAlbumTitle(template = preferencesState.albumTitleTemplate)
     val home = state.selectedId == null
     val overview = state.document
-    val canAcquire = !state.selectedFolder && !state.loading && !state.preparingImport && state.request == null && !state.renaming
+    val canOpenPage = !state.reconnect && !state.loading && !state.preparingImport && state.request == null && !state.renaming
+    val canAcquire = !state.selectedFolder && canOpenPage
     val canClose = state.request == null && !state.preparingImport && !state.renaming
     fun acquire(kind: PhotoImportKind) {
         sheet = null
@@ -228,7 +229,7 @@ import kotlinx.coroutines.launch
             }
         } else {
             val selectedId = state.selectedId
-            val batchActivation = state.activation
+            val batchActivation = state.activation.takeUnless { state.selectedFolder }
             key(selectedId) {
                 LazyVerticalGrid(GridCells.Adaptive(148.dp), Modifier.weight(1f).fillMaxWidth().testTag("document-overview"),
                     contentPadding = PaddingValues(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp),
@@ -257,9 +258,11 @@ import kotlinx.coroutines.launch
                         Surface(
                             modifier = Modifier.fillMaxWidth().testTag("original-page-${page.pageId.value}")
                                 .semantics { selected = state.selectedPage == page.pageId }
-                                .combinedClickable(enabled = canAcquire && overview != null, role = Role.Button,
-                                    onLongClickLabel = stringResource(R.string.carnet_select_page),
-                                    onLongClick = { if (batchActivation != null && overview != null) onSelectPages(batchActivation, overview, page.pageId) }) {
+                                 .combinedClickable(enabled = canOpenPage && overview != null, role = Role.Button,
+                                     onLongClickLabel = if (batchActivation != null) stringResource(R.string.carnet_select_page) else null,
+                                     onLongClick = if (batchActivation != null && overview != null) {
+                                         { onSelectPages(batchActivation, overview, page.pageId) }
+                                     } else null) {
                                     overview?.let { onEdit(it.document.documentId, page.pageId) }
                                 },
                             shape = RoundedCornerShape(AtelierStyle.surfaceRadius), color = MaterialTheme.colorScheme.surface,
