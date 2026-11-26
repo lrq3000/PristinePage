@@ -1409,9 +1409,11 @@ def verify_selected_append_catalog(catalog, destination_digest, incoming_digest,
               "The actual selected append catalog lost the album order, originals or full recipe history")
 
 
-def verify_selected_recipe_catalog(catalog, predecessor, original_digest):
+def verify_selected_recipe_catalog(catalog, predecessor, original_digest, *, issuing_revision=2):
     """Read-only oracle for the exact one-scan fixture and its single recipe edit; verify prior history and Undo independently."""
     error = "The selected recipe catalog changed more than the bound recipe edit"
+    need(issuing_revision in (2, 3), "Only the first and second fixture edits are admissible")
+    saved_revision = issuing_revision + 1
     paths = [candidate.resolve() for candidate in (predecessor, catalog)]
     need(all(0 < item.stat().st_size <= 2 * 1024 * 1024 and
              not any(Path(str(item) + suffix).exists() for suffix in ("-wal", "-shm", "-journal")) for item in paths), error)
@@ -1425,11 +1427,12 @@ def verify_selected_recipe_catalog(catalog, predecessor, original_digest):
         need(len(old_docs) == len(new_docs) == 1, error)
         old, new = old_docs[0], new_docs[0]
         changed_at = new[5]
-        need(isinstance(changed_at, int) and changed_at > 0 and new == (*old[:2], 3, *old[3:5], changed_at, old[6]) and old[2] == 2, error)
+        need(isinstance(changed_at, int) and changed_at > 0 and
+             new == (*old[:2], saved_revision, *old[3:5], changed_at, old[6]) and old[2] == issuing_revision, error)
         pages = "SELECT pageId,documentId,sourceId,currentRecipeRevision,state,ordinal,removedAt,createdAt FROM Page"
         old_pages, new_pages = rows(before, pages), rows(after, pages)
-        need(len(old_pages) == len(new_pages) == 1 and old_pages[0][3] == 2 and
-             new_pages[0] == (*old_pages[0][:3], 3, *old_pages[0][4:]), error)
+        need(len(old_pages) == len(new_pages) == 1 and old_pages[0][3] == issuing_revision and
+             new_pages[0] == (*old_pages[0][:3], saved_revision, *old_pages[0][4:]), error)
         page, document, source = old_pages[0][:3]
         need(document == old[0], error)
         for table in ("LibraryScanName", "SourceBlob", "SourceCaptureDay"):
@@ -1437,26 +1440,28 @@ def verify_selected_recipe_catalog(catalog, predecessor, original_digest):
         need(rows(after, "SELECT byteSha256 FROM SourceBlob") == [(original_digest,)], error)
         sources = "SELECT sourceId,sourceBlobId,pixelSha256,width,height,exifOrientation,conversionFingerprint,profileSha256,state,createdAt,refCount FROM Source"
         old_sources = rows(before, sources)
-        need(len(old_sources) == 1 and old_sources[0][0] == source and old_sources[0][-1] == 3 and
-             rows(after, sources) == [(*old_sources[0][:-1], 5)], error)
+        refs_before = 3 if issuing_revision == 2 else 5
+        need(len(old_sources) == 1 and old_sources[0][0] == source and old_sources[0][-1] == refs_before and
+             rows(after, sources) == [(*old_sources[0][:-1], refs_before + 2)], error)
         revisions = "SELECT pageId,recipeRevision,sourceId,recipeSchemaVersion,canonicalRecipe,recipeSha256,parentRevision,createdAt FROM RecipeRevision ORDER BY recipeRevision"
         past, current = rows(before, revisions), rows(after, revisions)
-        need(len(past) == 2 and len(current) == 3 and current[:2] == past and
-             [row[1] for row in past] == [1, 2] and past[1][:4] == (page, 2, source, 1), error)
-        recipe = json.loads(past[1][4])
-        need(recipe["geometry"]["outputQuarterTurns"] == 1, error)
-        recipe["geometry"]["outputQuarterTurns"] = 2
+        need(len(past) == issuing_revision and len(current) == saved_revision and current[:-1] == past and
+             [row[1] for row in past] == list(range(1, saved_revision)) and past[-1][:4] == (page, issuing_revision, source, 1), error)
+        recipe = json.loads(past[-1][4])
+        need(recipe["geometry"]["outputQuarterTurns"] == issuing_revision - 1, error)
+        recipe["geometry"]["outputQuarterTurns"] = issuing_revision
         encoded = json.dumps(recipe, sort_keys=True, separators=(",", ":")).encode("ascii")
         fingerprint = sha256(b"pristinepage-recipe-json-v1\0" + len(encoded).to_bytes(4, "big") + encoded).hexdigest()
-        need(current[-1] == (page, 3, source, 1, encoded, fingerprint, 2, changed_at), error)
-        undo = rows(after, "SELECT undoId,documentId,action,appliedDocumentRevision,state,expiresAt,beforeState,afterState FROM UndoEntry")
-        need(len(undo) == 1 and not rows(before, "SELECT undoId FROM UndoEntry") and
-             undo[0][1:6] == (document, "RECIPE_EDIT", 3, "AVAILABLE", changed_at + 86_400_000), error)
-        for index, revision in enumerate((2, 3), 6):
+        need(current[-1] == (page, saved_revision, source, 1, encoded, fingerprint, issuing_revision, changed_at), error)
+        undo = "SELECT undoId,documentId,action,appliedDocumentRevision,state,expiresAt,beforeState,afterState FROM UndoEntry ORDER BY appliedDocumentRevision"
+        earlier, revised = rows(before, undo), rows(after, undo)
+        need(len(earlier) == issuing_revision - 2 and len(revised) == issuing_revision - 1 and revised[:-1] == earlier and
+             revised[-1][1:6] == (document, "RECIPE_EDIT", saved_revision, "AVAILABLE", changed_at + 86_400_000), error)
+        for index, revision in enumerate((issuing_revision, saved_revision), 6):
             binding = {"version": 1, "pages": [{"pageId": page, "sourceId": source, "recipeRevision": revision}]}
-            need(json.loads(undo[0][index]) == binding, error)
+            need(json.loads(revised[-1][index]) == binding, error)
         references = "SELECT ownerType,ownerId,sourceId FROM SourceReference"
-        expected_refs = set(rows(before, references)) | {("RECIPE_HISTORY", f"recipe-v1/{page}/3", source), ("UNDO", undo[0][0], source)}
+        expected_refs = set(rows(before, references)) | {("RECIPE_HISTORY", f"recipe-v1/{page}/{saved_revision}", source), ("UNDO", revised[-1][0], source)}
         found_refs = rows(after, references)
         need(len(found_refs) == len(expected_refs) and set(found_refs) == expected_refs, error)
         for table in ("OcrResult", "OcrPageWork", "Job"):

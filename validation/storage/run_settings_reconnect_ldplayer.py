@@ -1,4 +1,4 @@
-"""Qualify actual Settings Reconnect once, on a new synthetic folder after foreground Apply."""
+"""Qualify Settings Reconnect or its isolated two-edit successor, each on new synthetic data."""
 
 from argparse import ArgumentParser
 from hashlib import sha256
@@ -17,6 +17,9 @@ from run_settings_direct_files_ldplayer import (
 APPLY_RELEASE = "6fff22d7ed9aa23df6925142b438deba2002d53b3e0e39d0e648a83de0678ff4"
 DOCUMENTS_PROBE_REFUSAL = "e0b0cccd9d949cd1da2016bde97107299949c89155b8261b314eed358550446c"
 CASE = "app.pristinepage.LibraryFolderFilesJourneyTest#mainSettingsReconnectsAnInterruptedEditWithoutRepublishingIt"
+RECONNECT_RELEASE = "bc559ad1e7d301f68706e9efc242a0dfd279064022a48b5b07fca9eb32bcd21e"
+SETTLED_CASE = "app.pristinepage.LibraryFolderFilesJourneyTest#selectedRecipeSettlesTwoEditsWithoutRetainingCatalogStages"
+BRIDGE_SOURCE = "data/src/debug/kotlin/app/pristinepage/data/library/LibraryDescriptorAncestryWitness.kt"
 
 
 def retained_inputs(args, history):
@@ -91,6 +94,95 @@ def require_guest_documents(adb):
     return reply
 
 
+def admit_reconnect_release(manifest, history, guest):
+    c = checks
+    manifest = manifest.resolve(strict=True)
+    raw = manifest.parent
+    c.need(raw.parent == history.resolve() and manifest.name == f"{raw.name}-final-manifest.json",
+           "Unexpected Reconnect release location")
+    anchor = c.settings_run_anchors(raw, RECONNECT_RELEASE)
+    claim, artifacts, observed, readback, outcomes = (json.loads(anchor(name)) for name in
+        ("claim.json", "artifacts.json", "reconnect-boundary.json", "settings-apply-readback.json", "outcomes.json"))
+    pair = {p: artifacts["proof"][p]["sha256"] for p in (c.APP, c.TEST)}
+    trace = [json.loads(line) for line in anchor("commands.jsonl").splitlines()]
+    launches = [row for row in trace if "instrument" in row["argv"]]
+    c.need(claim["name"] == artifacts["guest"] == guest and len(launches) == 1
+           and outcomes == dict(passed=[CASE], failed=[], installedSha256=pair)
+           and c.read_results(anchor("instrumentation.txt"), (CASE,)) == ([CASE], [])
+           and observed["instrumentationTerminated"] and not observed["observationErrors"]
+           and observed["pointer"] == "9" and observed["grantUnchanged"] and observed["priorUnchanged"]
+           and readback["selectedActivation"] == 8 and readback["returnedActivation"] == 9,
+           "Exact completed foreground Reconnect evidence is required")
+    command = launches[0]["argv"]
+    c.need(command[1:4] == ["-s", claim["serial"], "shell"] and CASE in command and launches[0]["exit"] == 0,
+           "Missing exact predecessor instrumentation")
+    folder = command[command.index("libraryFixtureFolder") + 1]
+    c.need(re.fullmatch(r"PristinePage-tree-[a-f0-9]{12}", folder), "Invalid retained Reconnect fixture")
+    return manifest, json.loads(manifest.read_bytes())["recordSnapshot"], claim, pair, folder, readback
+
+
+def verify_settled_pair(runner, adb, private, folder, operations, synthetic, inventory):
+    c = checks
+    left, right = [f"/sdcard/Documents/{folder}/{name}" for name in c.independent_fixture_children(folder)]
+    scope = f"files/library-selected-editor-{operations[0]}"
+    settings = f"{scope}/library-settings"
+    read = c.read_selected_history_record
+    final = read(private, f"{settings}/active-library", 320)
+    grant_id = final.splitlines()[3]
+    grant = read(private, f"{settings}/folder-grants/{grant_id}", 4352)
+    c.require_bound_recipe_grant_destination(grant.splitlines()[3], left)
+    baseline, = (name for name in inventory if name.startswith("generations/"))
+    previous = (synthetic / baseline).read_text(encoding="ascii")
+    previous_db = synthetic / f"catalogs/{previous.splitlines()[2]}.sqlite"
+    expected = dict(inventory)
+    stages, receipts = [], []
+    active_inventory = private("ls", "-A", "-1", f"{scope}/catalog-recipe-attempts-v1").splitlines()
+    history = f"{scope}/catalog-recipe-acknowledged-v1"
+    c.need(not active_inventory and set(private("ls", "-A", "-1", history).splitlines()) == set(operations),
+           "Both attempts must have left the active inventory exactly once")
+    for index, operation in enumerate(operations):
+        marker_leaf, catalog_leaf = f"generations/{operation}.complete", f"catalogs/{operation}.sqlite"
+        child = read(lambda *a: adb("shell", *a), f"{left}/{marker_leaf}", 256)
+        fields, prior = child.splitlines(), previous.splitlines()
+        c.need(len(fields) == 7 and fields[:5] == [prior[0], prior[1], operation, prior[2], prior[4]]
+               and re.fullmatch(r"[1-9][0-9]{0,6}", fields[5]) and int(fields[5]) <= 2 * 1024 * 1024
+               and re.fullmatch(r"[a-f0-9]{64}", fields[6]), "Wrong settled edit ancestry")
+        marker_sha = sha256(child.encode("ascii")).hexdigest()
+        expected.update({marker_leaf: marker_sha, catalog_leaf: fields[6]})
+        db = runner.path(f"settled-catalog-{index + 1}.sqlite")
+        adb("pull", f"{left}/{catalog_leaf}", db, timeout=20)
+        c.need(db.stat().st_size == int(fields[5]) and c.sha(db) == fields[6], "Wrong closed catalog bytes")
+        recipe = c.verify_selected_recipe_catalog(db, previous_db, c.synthetic_scan()[0], issuing_revision=2 + index)
+        archive = f"{history}/{operation}"
+        intent = read(private, f"{archive}/recipe-edit.intent", 1024)
+        completed = read(private, f"{archive}/recipe-edit.complete", 256)
+        adopted = read(private, f"{archive}/recipe-edit.adopted", 256)
+        bound_sha = sha256((grant + child).encode("ascii")).hexdigest()
+        issuing = 2 + index
+        body = f"pristinepage-active-library-v2\n{fields[1]}\n{issuing + 1}\n{grant_id}\n{operation}\n{bound_sha}\n"
+        pointer = body + sha256(body.encode("ascii")).hexdigest() + "\n"
+        if index == len(operations) - 1:
+            c.need(final == pointer, "The final pointer is not the verified second child")
+        _, receipt = c.verify_bound_recipe_receipt(intent, completed, previous, child, pointer, grant, advanced=True, issuing=issuing)
+        c.need(adopted == f"pristinepage-recipe-edit-adopted-v1\n{receipt}\n{issuing + 1}\n{bound_sha}\n"
+               and read(private, f"{settings}/folder-verifications/{grant_id}-{operation}", 256) == child
+               and read(private, f"{scope}/catalog-revision-spends/{operation}.spent", 1024) ==
+                   "pristinepage-catalog-revision-spent-v1\n" + previous + child, "Missing exact archive or revision spend evidence")
+        leaves = set(private("ls", "-A", "-1", archive).splitlines())
+        spends = c.verify_library_move_spends(adb, archive, leaves - {"recipe-edit.intent", "recipe-edit.complete", "recipe-edit.adopted"},
+            {marker_leaf: (len(child.encode("ascii")), marker_sha), catalog_leaf: (int(fields[5]), fields[6])})
+        stage = f"merge-staging-{operation}"
+        c.need(not adb("shell", "ls", "-A", "-1", f"{left}/{stage}").strip(), "A provider stage still retains bytes")
+        stages.append(stage)
+        receipts.append(dict(operation=operation, activation=issuing + 1, catalogSha256=fields[6], recipeSha256=recipe,
+                             receiptSha256=receipt, moveSpends=spends))
+        previous, previous_db = child, db
+    c.verify_unchanged_settings_destination(adb, left, expected, extra_names=stages)
+    c.verify_unchanged_settings_destination(adb, right, inventory)
+    runner.save(runner.path("settled-readback.json"), dict(edits=receipts, privateCatalogLinksAbsent=True,
+        originalInventoryUnchanged=True), durable=True)
+
+
 def run(args):
     c = checks
     root = c.ROOT
@@ -106,6 +198,16 @@ def run(args):
     previous = {p: artifacts["proof"][p]["sha256"] for p in paths}
     authority = sha256(f"settings-reconnect-edit-v1:{guest}".encode("ascii")).hexdigest()
     release = APPLY_RELEASE
+    two_edits = args.settled_after is not None
+    prior_reconnect = None
+    c.need(not (two_edits and args.probe_refusal is not None), "Choose exactly one predecessor admission")
+    if two_edits:
+        manifest, snapshot, claim, previous, prior_folder, prior_reconnect = admit_reconnect_release(args.settled_after, history, guest)
+        c.need(args.bridge_sha and c.sha(root / BRIDGE_SOURCE) == args.bridge_sha, "The built witness bridge changed")
+        release = RECONNECT_RELEASE
+        authority = sha256(f"selected-two-settled-edits-v1:{guest}".encode("ascii")).hexdigest()
+    else:
+        c.need(args.bridge_sha is None, "Bridge identity applies only to the two-edit test")
     if args.probe_refusal is not None:
         manifest, snapshot, claim = admit_documents_probe_refusal(
             args.probe_refusal, history, claim, guest, previous, pair, args.source_sha)
@@ -116,7 +218,7 @@ def run(args):
     stage = root / "validation/raw/providers/ocr-app-standard-full"
     proof = {p: c.exact_apk(paths[p], pair[p], stage, p == c.TEST) for p in paths}
     c.require_independent_manifests(proof.values())
-    prefix = "picker-adapter-settings-reconnect-" + uuid.uuid4().hex[:12]
+    prefix = ("picker-adapter-settled-edits-" if two_edits else "picker-adapter-settings-reconnect-") + uuid.uuid4().hex[:12]
     raw = history / prefix
     raw.mkdir()
     saved = {p: raw / f"{p}.apk" for p in paths}
@@ -124,9 +226,9 @@ def run(args):
         shutil.copyfile(path, saved[package])
         c.need(c.sha(saved[package]) == pair[package], "The retained APK changed")
     (raw / f"{prefix}-artifacts.json").write_text(json.dumps(dict(guest=guest, previous=previous, proof=proof, source=args.source_sha,
-        immediateRelease=release, protected=protected, applyReadback=prior), indent=2), encoding="utf-8")
+        immediateRelease=release, protected=protected, applyReadback=prior, bridgeSource=args.bridge_sha), indent=2), encoding="utf-8")
     ns = c.load_allocator(root, guest, raw, "pristinepage-tree-" + os.environ["OPENCODE_SESSION_ID"])
-    base = c.run_type(ns, purpose="pristinepage-library-app-tree", operation="Settings Reconnect interrupted recipe",
+    base = c.run_type(ns, purpose="pristinepage-library-app-tree", operation="Two settled edits" if two_edits else "Settings Reconnect interrupted recipe",
                       admit_released=lambda record: c.verify_bound_recipe_release(claim, record, manifest, snapshot))
 
     class ReconnectRun(base):
@@ -147,42 +249,54 @@ def run(args):
             return adb("shell", "run-as", c.APP, *a)
 
         original_files = fixture["inventory"]
-        old_destination = f"/sdcard/Documents/{fixture['folder']}"
-        operation = prior["generation"]
-        marker = f"generations/{operation}.complete"
-        catalog = f"catalogs/{operation}.sqlite"
         initial_leaf, = (leaf for leaf in original_files if leaf.startswith("generations/"))
         old_marker = (synthetic / initial_leaf).read_text(encoding="ascii")
         settings = "files/library-settings"
         pointer_path = f"{settings}/active-library"
 
+        def preserve_recipe(folder, readback, issuing):
+            destination = f"/sdcard/Documents/{folder}"
+            operation = readback["generation"]
+            marker = f"generations/{operation}.complete"
+            catalog = f"catalogs/{operation}.sqlite"
+            child = c.read_selected_history_record(lambda *a: adb("shell", *a), f"{destination}/{marker}", 256)
+            c.verify_unchanged_settings_destination(adb, destination, original_files | {
+                marker: sha256(child.encode("ascii")).hexdigest(), catalog: readback["catalogSha256"]},
+                backup_name=f"merge-staging-{operation}")
+            captured = c.read_selected_history_record(private, f"files/library-settings-apply-pointer-{folder}", 320)
+            attempt = f"files/catalog-recipe-attempts-v1/{operation}"
+            receipt = c.read_bound_recipe_evidence(adb, "files", attempt, destination, old_marker, child, readback["catalogSha256"],
+                advanced=True, issuing=issuing, captured_pointer=captured)
+            spend = c.read_selected_history_record(private, f"files/catalog-revision-spends/{operation}.spent", 1024)
+            leaves = set(private("ls", "-A", "-1", attempt).splitlines())
+            extras = {"catalog.sqlite", "recipe-edit.intent", "recipe-edit.complete", "recipe-edit.catalog-owner"}
+            c.need(receipt == readback["receiptSha256"] and sha256(spend.encode("ascii")).hexdigest() == readback["revisionSpendSha256"]
+                   and not adb("shell", "ls", "-A", "-1", f"{destination}/merge-staging-{operation}").strip()
+                   and c.verify_library_move_spends(adb, attempt, leaves - extras, {
+                       catalog: (int(child.splitlines()[5]), readback["catalogSha256"]),
+                       marker: (len(child.encode("ascii")), sha256(child.encode("ascii")).hexdigest()),
+                   }) == readback["moveSpends"], "Prior foreground edit evidence changed")
+
         def preserve():
             c.recheck_target(runner, ns)
             c.verify_unchanged_settings_destination(adb, f"/sdcard/Documents/{protected['folder']}", protected["inventory"])
-            child = c.read_selected_history_record(lambda *a: adb("shell", *a), f"{old_destination}/{marker}", 256)
-            c.verify_unchanged_settings_destination(adb, old_destination, original_files | {
-                marker: sha256(child.encode("ascii")).hexdigest(), catalog: prior["catalogSha256"]},
-                backup_name=f"merge-staging-{operation}")
-            captured = c.read_selected_history_record(private, f"files/library-settings-apply-pointer-{fixture['folder']}", 320)
-            receipt = c.read_bound_recipe_evidence(adb, "files", f"files/catalog-recipe-attempts-v1/{operation}", old_destination,
-                old_marker, child, prior["catalogSha256"], advanced=True, issuing=4, captured_pointer=captured)
-            spend = c.read_selected_history_record(private, f"files/catalog-revision-spends/{operation}.spent", 1024)
-            attempt = f"files/catalog-recipe-attempts-v1/{operation}"
-            leaves = set(private("ls", "-A", "-1", attempt).splitlines())
-            extras = {"catalog.sqlite", "recipe-edit.intent", "recipe-edit.complete", "recipe-edit.catalog-owner"}
-            c.need(receipt == prior["receiptSha256"] and sha256(spend.encode("ascii")).hexdigest() == prior["revisionSpendSha256"]
-                   and not adb("shell", "ls", "-A", "-1", f"{old_destination}/merge-staging-{operation}").strip()
-                   and c.verify_library_move_spends(adb, attempt, leaves - extras, {
-                       catalog: (int(child.splitlines()[5]), prior["catalogSha256"]),
-                       marker: (len(child.encode("ascii")), sha256(child.encode("ascii")).hexdigest()),
-                   }) == prior["moveSpends"], "Prior Apply evidence changed")
+            preserve_recipe(fixture["folder"], prior, 4)
+            if prior_reconnect is not None:
+                preserve_recipe(prior_folder, prior_reconnect, 7)
             return verify_prior_settings_recovery(adb, original_files, synthetic, recovery_attempt, recovery_readback)
 
         def starting_pointer():
             pointer = c.read_selected_history_record(private, pointer_path, 320)
             origin = c.read_selected_history_record(private, f"{settings}/default-origin", 320)
-            c.need(sha256(pointer.encode("ascii")).hexdigest() == prior_boundary["pointer"]["sha256"], "The returned Default pointer changed")
-            return c.require_returned_settings_pointer(pointer, origin, 6)
+            if not two_edits:
+                c.need(sha256(pointer.encode("ascii")).hexdigest() == prior_boundary["pointer"]["sha256"], "The returned Default pointer changed")
+            default_id = c.require_returned_settings_pointer(pointer, origin, 9 if two_edits else 6)
+            # Return uses the same original Default identity at either activation; authenticate it against the older exact pointer as well.
+            if two_edits:
+                body = f"pristinepage-active-library-v1\n{default_id}\n6\n-\n-\n"
+                exact = body + sha256(body.encode("ascii")).hexdigest() + "\n"
+                c.need(sha256(exact.encode("ascii")).hexdigest() == prior_boundary["pointer"]["sha256"], "Default origin changed")
+            return default_id
 
         c.require_cold_backup_app(adb)
         c.need(set(adb("shell", "pm", "list", "packages", c.APP).splitlines()) == {f"package:{p}" for p in paths}
@@ -193,9 +307,11 @@ def run(args):
         default = starting_pointer()
         preserve()
         before = c.read_app_persisted_grants(adb)
-        c.need(before in (baseline, tuple(sorted((*baseline, former)))), "The cold grant inventory is not the exact Apply baseline")
+        c.need(before == baseline if two_edits else before in (baseline, tuple(sorted((*baseline, former)))),
+               "The cold grant inventory is not the exact admitted baseline")
         folder = "PristinePage-tree-" + uuid.uuid4().hex[:12]
         new_operation = str(uuid.uuid4())
+        operations = (new_operation, str(uuid.uuid4())) if two_edits else (new_operation,)
         new_destination = f"/sdcard/Documents/{folder}"
         parent = require_guest_documents(adb)
         settings_names = private("ls", "-A", "-1", settings).splitlines()
@@ -203,9 +319,13 @@ def run(args):
                and new_operation not in private("ls", "-A", "-1", "files/catalog-recipe-attempts-v1").splitlines()
                and f"{new_operation}.spent" not in private("ls", "-A", "-1", "files/catalog-revision-spends").splitlines(),
                "A pointer stage or the new operation ID is already occupied")
+        if two_edits:
+            scope = f"library-selected-editor-{new_operation}"
+            c.need(scope not in private("ls", "-A", "-1", "files").splitlines(), "The isolated two-edit scope already exists")
         c.recheck_target(runner, ns)
-        c.spend_settings_retry(history, authority, dict(folder=folder, operation=new_operation, kind="settings-reconnect-edit",
-            previous=previous, candidate=pair))
+        c.spend_settings_retry(history, authority, dict(folder=folder, operation=new_operation,
+            kind="selected-two-settled-edits" if two_edits else "settings-reconnect-edit",
+            operations=operations, previous=previous, candidate=pair))
         former_args = ("-e", "librarySettingsSecondPriorFolder", fixture["folder"]) if former in before else ()
         terminated = False
         try:
@@ -221,13 +341,21 @@ def run(args):
             c.require_cold_backup_app(adb)
             c.need(starting_pointer() == default and c.read_app_persisted_grants(adb) == before, "Installation changed the baseline")
             c.need(require_guest_documents(adb) == parent, "The guest-local Documents parent changed")
-            c.stage_synthetic_files(adb, synthetic, new_destination, original_files)
-            output = adb("shell", "am", "instrument", "-w", "-r", "-e", "class", CASE,
-                         "-e", "libraryFixtureFolder", folder, "-e", "librarySettingsOpenFixture", "reconnect-edit",
-                         "-e", "librarySettingsPriorFolder", protected["folder"], *former_args, "-e", "librarySettingsExactHint", "true",
+            if two_edits:
+                c.stage_independent_fixture_pair(adb, new_destination, folder, ((synthetic, original_files),) * 2,
+                    lambda: c.recheck_target(runner, ns))
+                case = SETTLED_CASE
+                options = ("-e", "librarySelectedSecondOperation", operations[1])
+            else:
+                c.stage_synthetic_files(adb, synthetic, new_destination, original_files)
+                case = CASE
+                options = ("-e", "librarySettingsOpenFixture", "reconnect-edit", "-e", "librarySettingsPriorFolder", protected["folder"],
+                           *former_args, "-e", "librarySettingsExactHint", "true")
+            output = adb("shell", "am", "instrument", "-w", "-r", "-e", "class", case,
+                         "-e", "libraryFixtureFolder", folder, *options,
                          "-e", "librarySelectedAppendOperation", new_operation, c.RUNNER, timeout=260)
             runner.path("instrumentation.txt").write_text(output, encoding="utf-8")
-            passed, failed = c.read_results(output, (CASE,))
+            passed, failed = c.read_results(output, (case,))
             terminated = True
         finally:
             def checked(observe):
@@ -238,7 +366,8 @@ def run(args):
                 appSha256=lambda: runner.installed_hash(c.APP),
                 testSha256=lambda: runner.installed_hash(c.TEST),
                 pointer=lambda: c.read_selected_history_record(private, pointer_path, 320).splitlines()[2],
-                generationMarkers=lambda: adb("shell", "ls", "-A", "-1", f"{new_destination}/generations").splitlines(),
+                generationMarkers=lambda: adb("shell", "ls", "-A", "-1", f"{new_destination}/{c.independent_fixture_children(folder)[0]}/generations"
+                    if two_edits else f"{new_destination}/generations").splitlines(),
                 priorUnchanged=preserve,
                 grantUnchanged=lambda: c.read_app_persisted_grants(adb) == before)
             observed = c.collect_settings_apply_boundary(terminated, {
@@ -250,10 +379,14 @@ def run(args):
                    and observed["appSha256"] == pair[c.APP] and observed["testSha256"] == pair[c.TEST],
                    "The Reconnect case did not preserve the exact starting grant and fixtures")
             c.recheck_target(runner, ns)
-            c.verify_settings_apply_destination(runner, adb, new_destination, synthetic, original_files, default,
-                                                issuing=7, expected_operation=new_operation)
+            if two_edits:
+                c.need(starting_pointer() == default, "The isolated witness changed the ordinary selection")
+                verify_settled_pair(runner, adb, private, folder, operations, synthetic, original_files)
+            else:
+                c.verify_settings_apply_destination(runner, adb, new_destination, synthetic, original_files, default,
+                                                    issuing=7, expected_operation=new_operation)
         runner.save(runner.path("outcomes.json"), dict(passed=passed, failed=failed, installedSha256=pair), durable=True)
-        print(f"Settings Reconnect: {len(passed)} passed, {len(failed)} failed.", flush=True)
+        print(f"{'Two settled edits' if two_edits else 'Settings Reconnect'}: {len(passed)} passed, {len(failed)} failed.", flush=True)
         return bool(failed)
     finally:
         if runner.claimed:
@@ -267,4 +400,6 @@ if __name__ == "__main__":
     for arg in ("apply", "original", "recovery"):
         parser.add_argument(arg, type=Path)
     parser.add_argument("--probe-refusal", type=Path, help="Exact pre-install Documents probe refusal; never retry after a mutation")
+    parser.add_argument("--settled-after", type=Path, help="Exact released Reconnect witness; uses a distinct isolated two-edit case")
+    parser.add_argument("--bridge-sha", help="Exact built debug bridge source identity for the two-edit case")
     raise SystemExit(run(parser.parse_args()))

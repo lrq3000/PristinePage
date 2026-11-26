@@ -155,7 +155,8 @@ class LibraryFolderFilesJourneyTest {
                  "separatesIndependentlySelectedRootsWithoutAParentGrant", "selectedFilesMergeAppendsOnlyTheMissingOriginalAndKeepsItsPredecessor",
                  "selectedFilesMergeCanAppendTwiceWithoutReusingAnOlderStage", "endsProcessAfterSelectedAppendCompletionBeforeDelivery",
                  "oneFilesSelectionPublishesOnlyAClosedEditedCatalog", "selectedRecipeReceiptBindsTheExactIssuingActivation",
-                 "selectedRecipeAdvancesOnlyTheVerifiedDirectSuccessor", "opensSelectedAlbumGridAndVerifiedOriginalWhileBrowsing",
+                  "selectedRecipeAdvancesOnlyTheVerifiedDirectSuccessor", "selectedRecipeSettlesTwoEditsWithoutRetainingCatalogStages",
+                  "opensSelectedAlbumGridAndVerifiedOriginalWhileBrowsing",
                  "startEmptyRefusesANestedStageOfTheCurrentFilesLibrary", "unconfirmedDefaultGraphCloseFencesBothSuccessorAndReturn",
                  "selectedEditorDisplaysActualOriginalAndFrameWithoutWrite"))
             interruptionCompose else compose
@@ -1376,6 +1377,53 @@ class LibraryFolderFilesJourneyTest {
                 assertEquals(2, exact.recipe.geometry.outputQuarterTurns)
                 val obsolete = runCatching { reopened.loadSelectedEditablePage(scratch, old, album, page.pageId) }.exceptionOrNull()
                 assertEquals("library_activation_changed", (obsolete as RepositoryFailure).error.safeMessageKey)
+                assertEquals(before + (tree.toString() to (true to true)), LibraryIndependentRootGrants.inventory(app))
+                LibraryIndependentRootGrants.refuseParentAccess(app, folder)
+            }
+        }
+    }
+
+    @Test fun selectedRecipeSettlesTwoEditsWithoutRetainingCatalogStages() {
+        val args = InstrumentationRegistry.getArguments()
+        val ids = listOf("librarySelectedAppendOperation", "librarySelectedSecondOperation").map { key ->
+            requireNotNull(args.getString(key)).also { check(UUID.fromString(it).toString() == it) }
+        }
+        check(ids.distinct().size == 2)
+        withIndependentFilesSelections(chooseAnchor = false, writableDestination = true, singleDestination = true) { app, folder, selections, before ->
+            val tree = selections.single()
+            val files = File(app.filesDir.canonicalFile, "library-selected-editor-${ids.first()}").apply { check(mkdir()) }
+            val isolated = object : ContextWrapper(app) {
+                override fun getApplicationContext(): Context = this
+                override fun getFilesDir(): File = files
+            }
+            val scratch = File(files, "scratch").apply { check(mkdir()) }
+            val witness = LibraryDescriptorAncestryWitness
+            val album = DocumentId("aaaaaaaa-aaaa-4aaa-8aaa-000000000001")
+            runBlocking {
+                var active = witness.seedRecipeEditBinding(isolated, scratch, tree)
+                val startup = AndroidLibraryStartup(isolated)
+                val page = startup.useSelectedCatalog(scratch) { _, catalog -> catalog.load(album).pages.single() }
+                var revision = 2L
+                val firstPublication = ids.mapIndexed { index, operation ->
+                    val turns = index + 2
+                    val (adopted, saved) = witness.saveAndAdvanceSelectedRecipe(
+                        isolated, scratch, active, operation, album, page.pageId, revision, turns, requireSettled = true)
+                    assertEquals(active.copy(number = active.number + 1), adopted)
+                    assertEquals(page.pageId, saved.pageId)
+                    val reopened = startup.loadSelectedEditablePage(scratch, adopted, album, page.pageId)
+                    assertEquals(revision + 1, reopened.recipeRevision)
+                    assertEquals(saved.recipeHash, reopened.recipeHash)
+                    assertEquals(turns, reopened.recipe.geometry.outputQuarterTurns)
+                    assertFalse(File(files, "catalog-recipe-attempts-v1/$operation").exists())
+                    val archived = File(files, "catalog-recipe-acknowledged-v1/$operation").list().orEmpty().toSet()
+                    assertEquals(5, archived.size)
+                    assertTrue(archived.containsAll(setOf("recipe-edit.intent", "recipe-edit.complete", "recipe-edit.adopted")))
+                    assertTrue(archived.count { it.matches(Regex("[a-f0-9]{64}\\.spent")) } == 2)
+                    active = adopted
+                    revision = reopened.recipeRevision
+                    reconnectPublication(app.contentResolver, tree, operation)
+                }.first()
+                assertEquals(firstPublication, reconnectPublication(app.contentResolver, tree, ids.first()))
                 assertEquals(before + (tree.toString() to (true to true)), LibraryIndependentRootGrants.inventory(app))
                 LibraryIndependentRootGrants.refuseParentAccess(app, folder)
             }

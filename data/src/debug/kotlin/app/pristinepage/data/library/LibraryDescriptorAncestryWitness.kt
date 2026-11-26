@@ -131,12 +131,13 @@ object LibraryDescriptorAncestryWitness {
 
     suspend fun saveAndAdvanceSelectedRecipe(
         context: Context, scratch: File, issuedAt: LibraryActivation, operation: String, document: DocumentId, page: PageId,
-        expectedRevision: Long, turns: Int,
+        expectedRevision: Long, turns: Int, requireSettled: Boolean = false,
     ): Pair<LibraryActivation, SaveRecipeResult.Saved> {
         val result = AndroidLibraryStartup(context).advanceSelectedRecipeEdit(scratch, issuedAt, operation, document, page, expectedRevision,
             RecipeAdmission { _, _ -> null }) { previous ->
             previous.copy(geometry = previous.geometry.withOutputQuarterTurns(turns))
         } as AndroidLibraryStartup.SelectedRecipeSave.Activated
+        if (requireSettled) check(!result.cleanupPending) { "Adoption left unresolved private cleanup" }
         return result.activation to result.saved
     }
 

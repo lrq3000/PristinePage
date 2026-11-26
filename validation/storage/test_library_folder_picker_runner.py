@@ -562,7 +562,7 @@ class LibraryFolderPickerRunnerTest(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "standalone"):
                 select_independent_roots(enabled, mixed, derived=derived, append=True)
 
-    def test_selected_recipe_oracle_refuses_truncated_titles_or_unbound_undo(self):
+    def test_selected_recipe_oracle_checks_both_transitions_and_preserves_prior_undo(self):
         from run_library_folder_picker_ldplayer import verify_selected_recipe_catalog
         from make_library_folder_picker_fixture import make_fixture, synthetic_scan
         with TemporaryDirectory(prefix="pristinepage-recipe-oracle-") as temporary:
@@ -570,41 +570,49 @@ class LibraryFolderPickerRunnerTest(unittest.TestCase):
             before = root / "baseline"
             make_fixture(before, with_scan=True)
             baseline, = (before / "catalogs").glob("*.sqlite")
-            candidate = root / "edited.sqlite"
-            shutil.copyfile(baseline, candidate)
-            with closing(sqlite3.connect(candidate)) as db:
-                document, = db.execute("SELECT documentId FROM Document").fetchone()
-                page, source = db.execute("SELECT pageId,sourceId FROM Page").fetchone()
-                prior, = db.execute("SELECT canonicalRecipe FROM RecipeRevision WHERE recipeRevision=2").fetchone()
-                recipe = json.loads(prior)
-                recipe["geometry"]["outputQuarterTurns"] = 2
-                encoded = json.dumps(recipe, sort_keys=True, separators=(",", ":")).encode()
-                digest = sha256(b"pristinepage-recipe-json-v1\0" + len(encoded).to_bytes(4, "big") + encoded).hexdigest()
-                db.execute("INSERT INTO RecipeRevision VALUES (?,3,?,1,?,?,2,20)", (page, source, encoded, digest))
-                db.execute("UPDATE Document SET documentRevision=3,updatedAt=20")
-                db.execute("UPDATE Page SET currentRecipeRevision=3")
-                def state(revision):
-                    return json.dumps(dict(version=1, pages=[dict(pageId=page, sourceId=source, recipeRevision=revision)]),
-                                      separators=(",", ":")).encode()
-                undo = self._uuid(8)
-                db.execute("INSERT INTO UndoEntry VALUES (?,?,?,?, 'RECIPE_EDIT',3,86400020,'AVAILABLE')",
-                           (undo, document, state(2), state(3)))
-                db.execute("INSERT INTO SourceReference VALUES ('RECIPE_HISTORY',?,?,20)", (f"recipe-v1/{page}/3", source))
-                db.execute("INSERT INTO SourceReference VALUES ('UNDO',?,?,20)", (undo, source))
-                db.execute("UPDATE Source SET refCount=5")
-                db.commit()
-            good = candidate.read_bytes()
-            verify_selected_recipe_catalog(candidate, baseline, synthetic_scan()[0])
-            self.assertEqual(good, candidate.read_bytes())
-            for sql in ("UPDATE Document SET title='Synthetic'",
-                        "UPDATE UndoEntry SET afterState=beforeState",
-                        "UPDATE RecipeRevision SET parentRevision=1 WHERE recipeRevision=3"):
-                candidate.write_bytes(good)
+            predecessor = baseline
+            for issuing, turns, saved, timestamp, refs in ((2, 2, 3, 20, 5), (3, 3, 4, 30, 7)):
+                candidate = root / f"edited-{saved}.sqlite"
+                shutil.copyfile(predecessor, candidate)
                 with closing(sqlite3.connect(candidate)) as db:
-                    db.execute(sql)
+                    document, = db.execute("SELECT documentId FROM Document").fetchone()
+                    page, source = db.execute("SELECT pageId,sourceId FROM Page").fetchone()
+                    prior, = db.execute("SELECT canonicalRecipe FROM RecipeRevision WHERE recipeRevision=?", (issuing,)).fetchone()
+                    recipe = json.loads(prior)
+                    recipe["geometry"]["outputQuarterTurns"] = turns
+                    encoded = json.dumps(recipe, sort_keys=True, separators=(",", ":")).encode()
+                    digest = sha256(b"pristinepage-recipe-json-v1\0" + len(encoded).to_bytes(4, "big") + encoded).hexdigest()
+                    db.execute("INSERT INTO RecipeRevision VALUES (?,?,?,1,?,?,?,?)",
+                               (page, saved, source, encoded, digest, issuing, timestamp))
+                    db.execute("UPDATE Document SET documentRevision=?,updatedAt=?", (saved, timestamp))
+                    db.execute("UPDATE Page SET currentRecipeRevision=?", (saved,))
+                    def state(revision):
+                        return json.dumps(dict(version=1, pages=[dict(pageId=page, sourceId=source, recipeRevision=revision)]),
+                                          separators=(",", ":")).encode()
+                    undo = self._uuid(saved + 5)
+                    db.execute("INSERT INTO UndoEntry VALUES (?,?,?,?, 'RECIPE_EDIT',?,?,'AVAILABLE')",
+                               (undo, document, state(issuing), state(saved), saved, 86_400_000 + timestamp))
+                    db.execute("INSERT INTO SourceReference VALUES ('RECIPE_HISTORY',?,?,?)", (f"recipe-v1/{page}/{saved}", source, timestamp))
+                    db.execute("INSERT INTO SourceReference VALUES ('UNDO',?,?,?)", (undo, source, timestamp))
+                    db.execute("UPDATE Source SET refCount=?", (refs,))
                     db.commit()
-                with self.assertRaisesRegex(RuntimeError, "selected recipe catalog"):
-                    verify_selected_recipe_catalog(candidate, baseline, synthetic_scan()[0])
+                good = candidate.read_bytes()
+                before_bytes = predecessor.read_bytes()
+                verify_selected_recipe_catalog(candidate, predecessor, synthetic_scan()[0], issuing_revision=issuing)
+                self.assertEqual(good, candidate.read_bytes())
+                self.assertEqual(before_bytes, predecessor.read_bytes())
+                for sql in ("UPDATE Document SET title='Synthetic'",
+                            "UPDATE UndoEntry SET afterState=beforeState WHERE appliedDocumentRevision=3",
+                            "UPDATE RecipeRevision SET parentRevision=1 WHERE recipeRevision=3",
+                            "UPDATE Source SET refCount=3"):
+                    candidate.write_bytes(good)
+                    with closing(sqlite3.connect(candidate)) as db:
+                        db.execute(sql)
+                        db.commit()
+                    with self.subTest(issuing=issuing, mutation=sql), self.assertRaisesRegex(RuntimeError, "selected recipe catalog"):
+                        verify_selected_recipe_catalog(candidate, predecessor, synthetic_scan()[0], issuing_revision=issuing)
+                candidate.write_bytes(good)
+                predecessor = candidate
 
     def test_selected_append_host_oracle_rejects_missing_recipe_history(self):
         with TemporaryDirectory(prefix="pristinepage-append-catalog-test-") as temporary:
