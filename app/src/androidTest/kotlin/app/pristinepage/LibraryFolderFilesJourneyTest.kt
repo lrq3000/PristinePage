@@ -279,7 +279,14 @@ class LibraryFolderFilesJourneyTest {
         assertTrue(runBlocking { graph.store.catalog.list(null, 2) }.isEmpty())
         val witness = LibraryIndependentRootGrants
         val before = witness.inventory(app)
-        assertTrue(before.isEmpty())
+        if (applyEdit) {
+            val priorFolder = InstrumentationRegistry.getArguments().getString("librarySettingsPriorFolder")
+                ?.takeIf { it != folder && it.matches(Regex("PristinePage-tree-[0-9a-f]{12}")) }
+                ?: error("No distinct retained Files grant baseline")
+            val previous = Uri.parse(before.keys.single())
+            assertTrue(previous in witness.spellings(priorFolder))
+            assertEquals(true to true, before.getValue(previous.toString()))
+        } else assertTrue(before.isEmpty())
         val album = DocumentId("aaaaaaaa-aaaa-4aaa-8aaa-000000000001")
         val editor = compose.runOnUiThread { ViewModelProvider(compose.activity)[EditorViewModel::class.java] }
         val picker = checkNotNull(LibraryFolderPickerContract(writable = true).createIntent(app, Unit).component).packageName
@@ -310,10 +317,9 @@ class LibraryFolderFilesJourneyTest {
         var selected = checkNotNull(storage.state.value.location).activation
         assertEquals(initial.number + 1, selected.number)
         val retained = witness.inventory(app)
-        assertEquals(1, retained.size)
-        val exact = Uri.parse(retained.keys.single())
+        val exact = Uri.parse((retained.keys - before.keys).single())
         assertTrue(exact in witness.spellings(folder))
-        assertEquals(true to true, retained.getValue(exact.toString()))
+        assertEquals(before + (exact.toString() to (true to true)), retained)
         compose.onNodeWithTag("settings-back").performClick()
         compose.onNodeWithTag("settings-back").performClick()
         val albumTag = "atelier-album-${album.value}"

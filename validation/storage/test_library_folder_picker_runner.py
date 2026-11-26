@@ -89,6 +89,17 @@ class LibraryFolderPickerRunnerTest(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "exact returned Default"):
                 require_returned_settings_pointer(pointer, origin, 3)
 
+    def test_main_settings_apply_refuses_an_unrelated_or_changed_cold_grant(self):
+        from run_library_folder_picker_ldplayer import require_settings_apply_grants
+        folder = "PristinePage-tree-6795e2ab4479"
+        exact = (("content://com.android.externalstorage.documents/tree/home%3A" + folder, True,
+                  "com.android.externalstorage", 3),)
+        require_settings_apply_grants(exact, exact, folder)
+        for observed in ((), (exact[0][:3] + (1,),), (exact[0][:1] + (False,) + exact[0][2:],),
+                         (("content://com.android.externalstorage.documents/tree/home%3Aother", *exact[0][1:]),)):
+            with self.assertRaisesRegex(RuntimeError, "exact retained grant"):
+                require_settings_apply_grants(observed, exact, folder)
+
     def test_cutover_continuation_accepts_only_an_unlaunched_observer_on_the_exact_installed_pair(self):
         from run_selected_folder_open_ldplayer import CONTROLS_CASE, CUTOVER_CASE, PREVIEW_PASS_SHA, verify_unlaunched_cutover
         pair = {"app.pristinepage.debug": "a" * 64, "app.pristinepage.debug.test": "b" * 64}

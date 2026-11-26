@@ -92,6 +92,8 @@ SETTINGS_OPEN_NAVIGATION_MANIFEST = "77783b3e16115c3441f36071f91d1e377ae6dc615a1
 SETTINGS_OPEN_MENU_MANIFEST = "a0aa2831e567babf6319c43825e1b17cfa01b5159adc7d38a9eaa16ac80d74ff"
 SETTINGS_OPEN_PASS_RUN = "picker-adapter-library-tree-ac053d11fb43"
 SETTINGS_OPEN_PASS_MANIFEST = "332fd154cb07ef0a27352d32bf0a6a0d888178e32e5ba3c05a58cfd05798e44c"
+SETTINGS_APPLY_COLD_RUN = "picker-adapter-library-tree-4db9216db4be"
+SETTINGS_APPLY_COLD_MANIFEST = "fa877750cf04d08c37fefed8dbda943883742372d163065b046fdeb4437973a2"
 SETTINGS_OPEN_REFUSALS = {
     SETTINGS_OPEN_NAVIGATION_MANIFEST: (SETTINGS_OPEN_NAVIGATION_RUN, "synthetic folder", "Documents / android:id/title", None),
     SETTINGS_OPEN_MENU_MANIFEST: ("picker-adapter-library-tree-0d2c964e72ee", "root drawer",
@@ -603,6 +605,33 @@ def verify_settings_open_success(raw, guest, previous):
          re.fullmatch(r"PristinePage-tree-[a-f0-9]{12}", fixture["folder"]),
          "No exact completed read-only Settings Open and Return")
     return claim, fixture
+
+
+def require_settings_apply_grants(observed, expected, prior_folder):
+    prefix = "content://com.android.externalstorage.documents/tree/"
+    allowed = {prefix + quote(document_id, safe="") for document_id in
+               (f"home:{prior_folder}", f"primary:Documents/{prior_folder}")}
+    need(observed == expected and len(expected) == 1 and expected[0][0] in allowed and
+         expected[0][1:] == (True, "com.android.externalstorage", 3),
+         "The Apply baseline is not the exact retained grant of the read-only fixture")
+
+
+def verify_settings_apply_cold_refusal(raw, guest, previous, prior_claim, prior_folder):
+    anchor = settings_run_anchors(raw, SETTINGS_APPLY_COLD_MANIFEST)
+    artifacts, claim, shutdown = (json.loads(anchor(leaf)) for leaf in ("artifacts.json", "claim.json", "shutdown.json"))
+    history = claim["ownership_history"]
+    trace = [json.loads(line) for line in anchor("commands.jsonl").splitlines()]
+    observations = [parse_app_persisted_grants(row["stdout"]) for row in trace if row.get("exit") == 0 and
+                    any("dumpsys -t 10 activity" in arg for arg in row["argv"])]
+    need(guest == claim["name"] == artifacts["guest"] and artifacts["mainSettingsApply"] == SETTINGS_OPEN_PASS_MANIFEST and
+         artifacts["previous"] == previous and history and history[-1]["generation"] == prior_claim["generation"] and
+         claim["generation"] == shutdown["generation"] and claim["runtime_processes"] == shutdown["originalProcesses"] and
+         shutdown["ownedShutdownVerified"] is True and shutdown["storageDeleted"] is False and len(observations) == 1 and
+         all(not {"install", "instrument", "push"}.intersection(row["argv"]) for row in trace),
+         "The cold Apply refusal did not establish a read-only, pre-install continuation")
+    grants = observations[0]
+    require_settings_apply_grants(grants, grants, prior_folder)
+    return claim, grants
 
 
 def verify_settings_retry_evidence(raw, expected_sha, guest, previous):
@@ -2291,6 +2320,7 @@ def run(args):
         require_independent_manifests(proof.values())
     previous = {}
     open_retry = None
+    expected_apply_grants = None
     prior_destinations = []
     prior_navigation_only = False
     completed = None
@@ -2352,6 +2382,10 @@ def run(args):
                  not (raw.parent / f"settings-retry-spent-{apply_open}.json").exists(),
                  "Only the unspent checked Apply successor pair is admitted")
             open_retry = verify_settings_open_success(prior, args.guest, previous)
+            prior_claim, prior_fixture = open_retry
+            cold_claim, expected_apply_grants = verify_settings_apply_cold_refusal(
+                raw.parent / SETTINGS_APPLY_COLD_RUN, args.guest, previous, prior_claim, prior_fixture["folder"])
+            open_retry = cold_claim, prior_fixture
         if advanced_recipe:
             from run_bound_recipe_readback_ldplayer import WRITER, WRITER_SHA256, readback
             writer = raw.parent / WRITER
@@ -2715,7 +2749,8 @@ def run(args):
         json.dumps(dict(proof=proof, source=args.commit, fixture=files, previous=previous, guest=args.guest,
                         settingsCancel=args.settings_retry, settingsPriorFailure=args.settings_prior_failure,
                          settingsCompleted=args.settings_recover, mainSettingsOpen=bool(settings_open),
-                         mainSettingsOpenRetry=retry_open, mainSettingsApply=apply_open, backupDeliveryDeath=death_operation,
+                         mainSettingsOpenRetry=retry_open, mainSettingsApply=apply_open,
+                         mainSettingsApplyCold=SETTINGS_APPLY_COLD_MANIFEST if apply_open else None, backupDeliveryDeath=death_operation,
                         backupDeathRetry=args.backup_death_retry, backupDeathReceiptOnly=death_receipt,
                         treeAncestryHandoff=ancestry_resume, backupPreMarker=before_marker,
                         backupPreMarkerHandoff=pre_marker_handoff, independentRoots=bool(independent_cases),
@@ -2732,7 +2767,7 @@ def run(args):
     def admit_independent(record):
         if open_retry:
             claim, _ = open_retry
-            run_name = SETTINGS_OPEN_PASS_RUN if apply_open else SETTINGS_OPEN_REFUSALS[retry_open][0]
+            run_name = SETTINGS_APPLY_COLD_RUN if apply_open else SETTINGS_OPEN_REFUSALS[retry_open][0]
             manifest = raw.parent / run_name / f"{run_name}-final-manifest.json"
             need(record["generation"] == claim["generation"] and record["shutdown_processes"] == claim["runtime_processes"] and
                  Path(record["runtime_evidence"]).resolve() == manifest.resolve(),
@@ -2823,7 +2858,14 @@ def run(args):
         elif open_retry:
             need(installed == previous, "The exact Settings Open predecessor APK pair was not installed")
             require_cold_backup_app(adb)
-            need(not read_app_persisted_grants(adb), "The navigation refusal left a retained grant")
+            _, old_fixture = open_retry
+            def require_starting_grants():
+                observed = read_app_persisted_grants(adb)
+                if apply_open:
+                    require_settings_apply_grants(observed, expected_apply_grants, old_fixture["folder"])
+                else:
+                    need(not observed, "The navigation refusal left a retained grant")
+            require_starting_grants()
             def read_default_pointer():
                 path = "files/library-settings"
                 def private(*argv):
@@ -2835,7 +2877,6 @@ def run(args):
                 require_initial_settings_pointer(pointer, private("ls", "-A", "-1", path).splitlines())
                 return pointer
             initial_pointer = read_default_pointer()
-            _, old_fixture = open_retry
             def verify_prior_settings_fixture():
                 recheck_target(run, ns)
                 verify_unchanged_settings_destination(adb, f"/sdcard/Documents/{old_fixture['folder']}", old_fixture["inventory"])
@@ -3034,7 +3075,10 @@ def run(args):
              [f"instrumentation:{RUNNER} (target={APP})"], "The instrumentation registry differs")
         if settings_open:
             require_cold_backup_app(adb)
-            need(not read_app_persisted_grants(adb), "The MainActivity graph must not have a persisted grant")
+            if open_retry:
+                require_starting_grants()
+            else:
+                need(not read_app_persisted_grants(adb), "The MainActivity graph must not have a persisted grant")
             fingerprint = adb("shell", "getprop", "ro.build.fingerprint").strip()
             need(re.fullmatch(r"[A-Za-z0-9_.+:/,-]{12,256}", fingerprint), "Missing exact Android build fingerprint")
             policy = f"android-imagedecoder-v2/api28/{sha256(fingerprint.encode()).hexdigest()[:16]}/srgb-straight-white-exif-v1"
@@ -3057,10 +3101,11 @@ def run(args):
             recheck_target(run, ns)
             if retry_open or apply_open:
                 spend_settings_retry(raw.parent, retry_open or apply_open, dict(guest=args.guest, candidate=prefix, destination=folder))
+            prior_folder_arg = ("-e", "librarySettingsPriorFolder", old_fixture["folder"]) if apply_open else ()
             try:
                 output = adb("shell", "am", "instrument", "-w", "-r", "-e", "class", settings_open,
                              "-e", "libraryFixtureFolder", folder, "-e", "librarySettingsOpenFixture", "apply" if apply_open else "fresh",
-                             RUNNER, timeout=260)
+                             *prior_folder_arg, RUNNER, timeout=260)
                 run.path("instrumentation.txt").write_text(output, encoding="utf-8")
                 passed, failed = read_results(output, (settings_open,))
                 run.save(run.path("junit-outcomes.json" if apply_open else "outcomes.json"),
@@ -3079,10 +3124,13 @@ def run(args):
                              pointerActivation=pointer.splitlines()[2], generationMarkers=markers), durable=True)
                 else:
                     verify_unchanged_settings_destination(adb, destination, inventory)
-                grant_count = len(read_app_persisted_grants(adb))
+                grants = read_app_persisted_grants(adb)
+                grant_count = len(grants)
                 run.save(run.path("preservation.json"), dict(externalFixtureUnchanged=True, persistedGrantCount=grant_count)
-                         if not apply_open else dict(predecessorFilesUnchanged=True, persistedGrantCount=grant_count), durable=True)
-            need(failed or grant_count == 0, "The successful journey did not restore the starting grant inventory")
+                         if not apply_open else dict(predecessorFilesUnchanged=True, persistedGrantCount=grant_count,
+                                                     priorGrantsUnchanged=grants == expected_apply_grants), durable=True)
+            need(failed or grants == (expected_apply_grants if apply_open else ()),
+                 "The successful journey did not restore the starting grant inventory")
             if apply_open and not failed:
                 verify_settings_apply_destination(run, adb, destination, fixture, inventory, initial_pointer)
                 check_prior_apply_fixture()
