@@ -53,6 +53,18 @@ class LibraryFolderPickerRunnerTest(unittest.TestCase):
             with self.subTest(wrong=wrong), self.assertRaisesRegex(RuntimeError, "exact Files-selected"):
                 require_bound_recipe_grant_destination(prefix + wrong, left)
 
+    def test_bound_edit_recovery_requires_sole_successful_instrumentation_for_the_spent_attempt(self):
+        from run_library_folder_picker_ldplayer import BOUND_RECIPE_CASE, RUNNER, require_bound_recovery_writer
+        operation = self._uuid(3)
+        folder = "PristinePage-tree-1234567890ab"
+        call = {"argv": ["adb.exe", "-s", "emulator-5554", "shell", "am", "instrument", "-w", "-r",
+                         "-e", "class", BOUND_RECIPE_CASE, "-e", "libraryFixtureFolder", folder,
+                         "-e", "librarySelectedAppendOperation", operation, RUNNER], "exit": 0}
+        require_bound_recovery_writer([call], "emulator-5554", folder, operation)
+        for unexpected in ([], [call, call], [call | {"exit": 1}], [call | {"argv": call["argv"][:-2] + [self._uuid(5), RUNNER]}]):
+            with self.subTest(unexpected=unexpected), self.assertRaisesRegex(RuntimeError, "sole spent bound writer"):
+                require_bound_recovery_writer(unexpected, "emulator-5554", folder, operation)
+
     def test_fresh_recipe_witness_requires_only_its_own_new_private_scope(self):
         from run_library_folder_picker_ldplayer import verify_fresh_recipe_scope
         scope = "library-selected-editor-7bde9de8-6e8e-4a84-9ec3-25a58670daeb"

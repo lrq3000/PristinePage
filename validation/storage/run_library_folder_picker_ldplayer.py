@@ -1319,6 +1319,38 @@ def require_bound_recipe_grant_destination(uri, destination):
     need(destination.startswith(base) and uri in expected, "The receipt did not bind the exact Files-selected synthetic folder")
 
 
+def require_bound_recovery_writer(trace, serial, folder, operation):
+    launches = [call for call in trace if "instrument" in call["argv"]]
+    expected = ["-s", serial, "shell", "am", "instrument", "-w", "-r", "-e", "class", BOUND_RECIPE_CASE,
+                "-e", "libraryFixtureFolder", folder, "-e", "librarySelectedAppendOperation", operation, RUNNER]
+    need(len(launches) == 1 and launches[0].get("exit") == 0 and launches[0]["argv"][1:] == expected,
+         "The trace did not record the sole spent bound writer")
+
+
+def read_bound_recipe_evidence(adb, private, attempt, left, predecessor, successor, catalog_digest):
+    def app_files(*args):
+        return adb("shell", "run-as", APP, *args)
+    settings = f"{private}/library-settings"
+    pointer = read_selected_history_record(app_files, f"{settings}/active-library", 320)
+    fields = pointer.splitlines()
+    need(len(fields) == 7 and re.fullmatch(UUID_TEXT, fields[3]), "The bound recipe receipt has no exact grant identifier")
+    grant_id = fields[3]
+    grant = read_selected_history_record(app_files, f"{settings}/folder-grants/{grant_id}", 4352)
+    intent = read_selected_history_record(app_files, f"{attempt}/recipe-edit.intent", 1024)
+    completion = read_selected_history_record(app_files, f"{attempt}/recipe-edit.complete", 256)
+    _, receipt_digest = verify_bound_recipe_receipt(intent, completion, predecessor, successor, pointer, grant)
+    require_bound_recipe_grant_destination(grant.splitlines()[3], left)
+    previous_id = predecessor.splitlines()[2]
+    catalog = f"{attempt}/catalog.sqlite"
+    node = app_files("stat", "-c", "%d:%i", catalog).strip()
+    need(read_selected_history_record(app_files, f"{settings}/folder-verifications/{grant_id}-{previous_id}", 256) == predecessor and
+         re.fullmatch("[0-9]+:[1-9][0-9]*", node) and
+         node == app_files("stat", "-c", "%d:%i", f"{attempt}/recipe-edit.catalog-owner").strip() and
+         app_files("sha256sum", catalog).split() == [catalog_digest, catalog],
+         "The bound recipe receipt lost the original binding or staged catalog owner")
+    return receipt_digest
+
+
 def preserve_detached_recipe(adb, files, attempt, readback):
     folder, operation = attempt["folder"], attempt["operation"]
     children = independent_fixture_children(folder)
@@ -1425,21 +1457,7 @@ def exercise_selected_recipe_edit(run, adb, ns, raw, fixture, files, hashes, *, 
             extras = {"catalog.sqlite"}
             receipt_digest = None
             if bound:
-                settings = f"{private}/library-settings"
-                pointer = read_selected_history_record(app_files, f"{settings}/active-library", 320)
-                fields_active = pointer.splitlines()
-                need(len(fields_active) == 7 and re.fullmatch(UUID_TEXT, fields_active[3]),
-                     "The bound recipe receipt has no exact grant identifier")
-                grant_id = fields_active[3]
-                grant = read_selected_history_record(app_files, f"{settings}/folder-grants/{grant_id}", 4352)
-                intent = read_selected_history_record(app_files, f"{attempt}/recipe-edit.intent", 1024)
-                completion = read_selected_history_record(app_files, f"{attempt}/recipe-edit.complete", 256)
-                _, receipt_digest = verify_bound_recipe_receipt(intent, completion, initial, marker, pointer, grant)
-                require_bound_recipe_grant_destination(grant.splitlines()[3], left)
-                need(read_selected_history_record(app_files, f"{settings}/folder-verifications/{grant_id}-{prior[2]}", 256) == initial and
-                     app_files("stat", "-c", "%d:%i", staged_catalog).strip() ==
-                     app_files("stat", "-c", "%d:%i", f"{attempt}/recipe-edit.catalog-owner").strip(),
-                     "The bound recipe receipt lost the original binding or staged catalog owner")
+                receipt_digest = read_bound_recipe_evidence(adb, private, attempt, left, initial, marker, fields[6])
                 extras.update(("recipe-edit.intent", "recipe-edit.complete", "recipe-edit.catalog-owner"))
             move_spends = verify_library_move_spends(adb, attempt, leaves - extras,
                 {catalog_leaf: (int(fields[5]), fields[6]), marker_leaf: (len(marker.encode("ascii")), marker_hash)})
