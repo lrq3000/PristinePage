@@ -2,6 +2,7 @@ package app.pristinepage.data.library
 
 import app.pristinepage.data.files.DirectorySync
 import app.pristinepage.data.files.PlatformDirectorySync
+import app.pristinepage.data.library.ActiveLibraryFence.Identity
 import app.pristinepage.data.library.ActiveLibraryFence.Location
 import app.pristinepage.data.library.ActiveLibraryFence.Selection
 import java.io.File
@@ -97,6 +98,33 @@ internal class LocalSelectedLibraryAuthority(root: File, sync: DirectorySync = P
         val next = advancedFolderSelection(expected, successor) ?: return null
         val bound = boundSelection(next, expected.grant, successor)
         return (read() as? Selected.Folder)?.takeIf { it == Selected.Folder(bound, expected.grant, successor) }
+    }
+
+    /** Reconstruct the candidate issuing binding; only the exact private intent can prove it issued the current child. */
+    fun readVerifiedRecipePredecessor(adopted: Selected.Folder): Selected.Folder? {
+        if (read() != adopted) throw IOException("The adopted folder binding changed")
+        val identity = adopted.selection.identity
+        if (identity.activation <= 1 || adopted.grant.returnedModes != 3) return null
+        val predecessorId = adopted.expectedGeneration.predecessorId ?: return null
+        val location = Location.Folder(adopted.grant.grantId, predecessorId)
+        val predecessor = readVerifiedGeneration(location) ?: return null
+        if (predecessor.libraryId != identity.libraryId) return null
+        val issuing = Selection(location, identity.copy(activation = identity.activation - 1))
+        val binding = Selected.Folder(boundSelection(issuing, adopted.grant, predecessor), adopted.grant, predecessor)
+        val successor = advancedFolderSelection(binding, adopted.expectedGeneration) ?: return null
+        if (boundSelection(successor, adopted.grant, adopted.expectedGeneration) != adopted.selection || read() != adopted) {
+            throw IOException("The adopted folder binding changed during predecessor readback")
+        }
+        return binding
+    }
+
+    /** Resolve one archive locator against immutable private records. This is never authority for a current operation. */
+    fun readArchivedRecipePredecessor(activation: Long, grantId: String, candidate: LibraryGeneration): Selected.Folder? {
+        val location = Location.Folder(grantId, candidate.id)
+        val grant = grants.readVerified(grantId)?.takeIf { it.returnedModes == 3 } ?: return null
+        val predecessor = readVerifiedGeneration(location)?.takeIf { it == candidate } ?: return null
+        val selection = Selection(location, Identity(predecessor.libraryId, activation))
+        return Selected.Folder(boundSelection(selection, grant, predecessor), grant, predecessor)
     }
 
     fun advanceOrReadVerifiedFolderGeneration(

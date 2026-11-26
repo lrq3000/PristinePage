@@ -120,15 +120,6 @@ class AndroidLibraryTreeRead(context: Context, private val scratchDirectory: Fil
         }
     }
 
-    /** Fail before Files on a repeated bound request; the writer rechecks under its exclusive lane before creating any stage. */
-    private fun requireUnusedRecipeOperation(files: Path, operation: String) {
-        requireOpaqueId(operation)
-        LocalLibraryDirectory(files.toFile()).requireUnspentCatalogRevision(operation)
-        if (!Files.notExists(files.resolve("catalog-recipe-attempts-v1").resolve(operation), NOFOLLOW_LINKS)) {
-            throw IOException("The selected catalog edit attempt was already retained")
-        }
-    }
-
     /** A durable private selection supplies the full expected marker; reject a different tip before projecting rows or opening originals. */
     private suspend fun verifyExact(tree: Uri, expected: LibraryGeneration?, scratch: File = scratchDirectory,
         bindEditRoot: Boolean = false, requireOwner: () -> Unit = {},
@@ -244,7 +235,8 @@ class AndroidLibraryTreeRead(context: Context, private val scratchDirectory: Fil
     }
 
     internal suspend fun <T : Any> appendBoundRecipeEdit(
-        binding: LocalSelectedLibraryAuthority.Selected.Folder, operation: String, document: DocumentId, page: PageId,
+        binding: LocalSelectedLibraryAuthority.Selected.Folder, authority: LocalSelectedLibraryAuthority,
+        operation: String, document: DocumentId, page: PageId,
         expectedRevision: Long, admission: RecipeAdmission, requireAuthority: () -> Unit, edit: (Recipe) -> Recipe,
         onPublicationStarted: (LibraryGeneration) -> Unit,
         consume: suspend (SelectedRecipeEdit, SelectedLibraryWriteLease) -> T,
@@ -260,8 +252,23 @@ class AndroidLibraryTreeRead(context: Context, private val scratchDirectory: Fil
                 checkpoint()
             }
             requireSelection()
-            requireUnusedRecipeOperation(files, operation)
-            val verified = verifyRecipeEditTarget(Uri.parse(binding.grant.exactUri), binding.expectedGeneration, ::requireSelection)
+            suspend fun verifyChild(): Verified =
+                verifyRecipeEditTarget(Uri.parse(binding.grant.exactUri), binding.expectedGeneration, ::requireSelection)
+            var verifiedChild: Verified? = null
+            androidRecipeAttempts(files, checkpoint).prepareFollowingEdit(binding, operation,
+                readPredecessor = { authority.readVerifiedRecipePredecessor(binding) },
+                verifySpend = { intent ->
+                    LocalLibraryDirectory(files.toFile()).requireAndroidRevisionSpend(
+                        intent.binding.expectedGeneration, intent.successor, ::requireSelection, checkpoint)
+                },
+                readCurrent = authority::read, readArchivedPredecessor = authority::readArchivedRecipePredecessor,
+                verifyCurrentChild = { intent ->
+                    val verified = requireVerifiedTree(verifyChild())
+                    val root = verified.editRoot ?: throw UnsettledSelectedRecipeEdit()
+                    if (recipeRootKey(verified.tree, root) != intent.rootSha256) throw UnsettledSelectedRecipeEdit()
+                    verifiedChild = verified
+                }, requireOwner = ::requireSelection)
+            val verified = verifiedChild ?: verifyChild()
             val result = appendRecipeUnderLease(files, lease, verified, operation, document, page, expectedRevision, admission,
                 ::requireSelection, checkpoint, binding, onPublicationStarted, edit)
             consume(result, lease)
@@ -464,9 +471,9 @@ class AndroidLibraryTreeRead(context: Context, private val scratchDirectory: Fil
             checkpoint()
         }
         requirePrivateOwner()
-        requireUnusedRecipeOperation(files, operation)
-        val namespace = files.resolve("catalog-recipe-attempts-v1")
-        val attempt = namespace.resolve(operation)
+        val attempts = androidRecipeAttempts(files, checkpoint)
+        val attempt = attempts.requireNew(operation)
+        val namespace = checkNotNull(attempt.parent)
         var pending: PendingRecipeCompletion? = null
         val published = LibraryProviderAttempt.runOwned { owner ->
             val providerCheckpoint = owner::requireCurrent

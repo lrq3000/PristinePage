@@ -6,6 +6,7 @@ import app.pristinepage.data.files.PlatformDirectorySync
 import app.pristinepage.data.library.ActiveLibraryFence.Location
 import app.pristinepage.data.library.LocalLibraryDirectory.RecipeEditRecord
 import app.pristinepage.data.library.RoomLibraryCatalogReader.Companion.MAX_PORTABLE_BYTES
+import app.pristinepage.data.model.requireOpaqueId
 import java.io.File
 import java.io.IOException
 import java.io.InputStream
@@ -191,8 +192,16 @@ internal class LocalLibraryRecipeEditJournal(
     /** Reconstruct a private observation for the exact issuing selection. This does not return a live receipt or prove current provider bytes. */
     fun observeForRecovery(binding: LocalSelectedLibraryAuthority.Selected.Folder): Observation {
         requireAttemptDirectory()
-        val intent = directory.openRecipeEditRecord(RecipeEditRecord.INTENT)?.use { readIntent(it, binding) } ?: invalid()
+        val intent = directory.openRecipeEditRecord(RecipeEditRecord.INTENT)?.use { readIntent(it) { _, _, _ -> binding } } ?: invalid()
         return Observation(intent, inspect(intent) ?: invalid())
+    }
+
+    /** The locator resolves historical evidence for readback only; this does not create an issuing writer. */
+    fun readArchivedIntent(
+        resolve: (Long, String, LibraryGeneration) -> LocalSelectedLibraryAuthority.Selected.Folder?,
+    ): Intent {
+        requireAttemptDirectory()
+        return directory.openRecipeEditRecord(RecipeEditRecord.INTENT)?.use { readIntent(it, resolve) } ?: invalid()
     }
 
     data class Observation(val intent: Intent, val phase: Phase)
@@ -314,7 +323,9 @@ internal class LocalLibraryRecipeEditJournal(
         if (!Files.isDirectory(root, NOFOLLOW_LINKS) || root.toRealPath() != root) invalid()
     }
 
-    private fun readIntent(input: InputStream, binding: LocalSelectedLibraryAuthority.Selected.Folder): Intent {
+    private fun readIntent(input: InputStream,
+        resolve: (Long, String, LibraryGeneration) -> LocalSelectedLibraryAuthority.Selected.Folder?,
+    ): Intent {
         val bytes = ByteArray(MAX_INTENT_BYTES)
         var count = 0
         while (true) {
@@ -327,10 +338,15 @@ internal class LocalLibraryRecipeEditJournal(
         val raw = String(bytes, 0, count, Charsets.US_ASCII)
         if (!raw.endsWith('\n')) invalid()
         val fields = raw.dropLast(1).split('\n', limit = 20)
-        // Five envelope fields precede the two seven-field markers. The predecessor comes from the caller's durable binding, not from this record.
+        // The embedded predecessor is a locator only. The exact issuing binding comes from the caller's durable evidence.
         if (fields.size != 19) invalid()
+        val activation = fields[1].toLongOrNull()?.takeIf { it > 0 } ?: invalid()
+        try { requireOpaqueId(fields[2]) } catch (_: IllegalArgumentException) { invalid() }
+        val predecessor = fields.subList(5, 12).joinToString("\n", postfix = "\n")
+            .byteInputStream(Charsets.US_ASCII).use(LibraryGeneration::read)
         val successor = fields.subList(12, 19).joinToString("\n", postfix = "\n")
             .byteInputStream(Charsets.US_ASCII).use(LibraryGeneration::read)
+        val binding = resolve(activation, fields[2], predecessor) ?: invalid()
         val intent = try { Intent(binding, fields[4], successor) }
         catch (_: IllegalArgumentException) { invalid() }
         if (intent.encode().toString(Charsets.US_ASCII) != raw) invalid()

@@ -332,7 +332,7 @@ class AndroidLibraryStartup(context: Context) {
         }
         val reader = AndroidLibraryTreeRead(app, scratchDirectory)
         return try {
-            reader.appendBoundRecipeEdit(selected, operation, document, page, expectedRevision, admission, ::requireSelected, edit, onPublicationStarted) { result, lease ->
+            reader.appendBoundRecipeEdit(selected, authority, operation, document, page, expectedRevision, admission, ::requireSelected, edit, onPublicationStarted) { result, lease ->
                 consume(reader, authority, result, lease, ::requireSelected)
             }
         } catch (_: LibraryTreeUnavailable) { reconnect() }

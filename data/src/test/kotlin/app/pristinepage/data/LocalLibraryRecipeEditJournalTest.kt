@@ -18,6 +18,7 @@ import java.nio.file.StandardCopyOption.REPLACE_EXISTING
 import java.nio.file.attribute.FileTime
 import java.security.MessageDigest
 import java.util.UUID
+import kotlinx.coroutines.runBlocking
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
@@ -525,6 +526,114 @@ class LocalLibraryRecipeEditJournalTest {
         assertEquals(true, Files.isSameFile(active.resolve("catalog.sqlite"), active.resolve("recipe-edit.catalog-owner")))
         assertEquals(LocalLibraryRecipeEditJournal.Phase.ACKNOWLEDGED, journal.inspect(intent))
         assertEquals(active, attempts(files).find(next.id))
+    }
+
+    @Test fun aFollowingWriteSettlesOnlyTheExactCurrentAttemptBeforeTakingItsSlot() = runBlocking {
+        val (files, active, intent) = reclaimedAttempt()
+        val selected = binding(4, predecessor = next)
+        repeat(3) { Files.createDirectory(active.parent.resolve(UUID.randomUUID().toString())) }
+        val nextId = UUID.randomUUID().toString()
+        val attempts = attempts(files)
+        var proved = false
+        assertFailsWith<IOException> {
+            attempts.prepareFollowingEdit(selected, nextId, { binding(2) }, { error("Wrong predecessor reached spend proof") },
+                { selected }, verifyCurrentChild = { error("Wrong predecessor reached Files") }) {}
+        }
+        assertFailsWith<IOException> {
+            attempts.prepareFollowingEdit(selected, nextId, { intent.binding }, { throw IOException("The revision spend is missing") },
+                { selected }, verifyCurrentChild = { error("Missing spend reached Files") }) {}
+        }
+        assertEquals(active, attempts.find(next.id))
+        val candidate = attempts.prepareFollowingEdit(selected, nextId, { intent.binding }, {
+            assertEquals(intent, it)
+            proved = true
+        }, { selected }, verifyCurrentChild = {}) {}
+        assertEquals(true, proved)
+        assertEquals(active.parent.resolve(nextId), candidate)
+        assertFalse(Files.exists(candidate))
+        assertFalse(Files.exists(active))
+        assertFailsWith<IOException> {
+            attempts.prepareFollowingEdit(selected, next.id, { error("A replay cannot nominate cleanup") },
+                { error("A replay cannot reach spend proof") }, { selected }, verifyCurrentChild = { error("A replay reached Files") }) {}
+        }
+        Unit
+    }
+
+    @Test fun aFollowingWriteRefusesKnownCollisionsAndASpendWithNoAttempt() = runBlocking {
+        val files = roots.newFolder().canonicalFile
+        val selected = binding(4, predecessor = next)
+        val attempts = attempts(files)
+        for (id in listOf(next.id, prior.id)) {
+            assertFailsWith<IOException> {
+                attempts.prepareFollowingEdit(selected, id, { error("No predecessor lookup") }, { error("No spend lookup") },
+                    { selected }, verifyCurrentChild = { error("Collision reached Files") }) {}
+            }
+        }
+        LocalLibraryDirectory(files, sync).spendCatalogRevision(prior, next) {}
+        assertFailsWith<IOException> {
+            attempts.prepareFollowingEdit(selected, UUID.randomUUID().toString(), { error("No predecessor lookup") },
+                { error("An absent attempt has no proof") }, { selected }, verifyCurrentChild = { error("Missing attempt reached Files") }) {}
+        }
+        Unit
+    }
+
+    @Test fun aFollowingWriteCannotUseAnArchiveWithInvalidCurrentEvidence() = runBlocking {
+        val (files, _, intent) = reclaimedAttempt()
+        val adopted = binding(4, predecessor = next)
+        val attempts = attempts(files)
+        val archive = attempts.archiveReclaimed(intent, adopted) {}
+        archive.resolve("recipe-edit.adopted").toFile().appendText("changed")
+        assertFailsWith<IOException> {
+            attempts.prepareFollowingEdit(adopted, UUID.randomUUID().toString(), { intent.binding }, {}, { adopted },
+                verifyCurrentChild = { error("An invalid archive reached Files") },
+                readArchivedPredecessor = { _, _, _ -> intent.binding }) {}
+        }
+        Unit
+    }
+
+    @Test fun aReopenedFolderCanVerifyHistoricalArchiveWithoutAuthorizingHistoricalCleanup() = runBlocking {
+        val (files, _, intent) = reclaimedAttempt()
+        val former = binding(4, predecessor = next)
+        val current = binding(6, owner = grant.copy(grantId = UUID.randomUUID().toString()), predecessor = next)
+        val attempts = attempts(files)
+        val archive = attempts.archiveReclaimed(intent, former) {}
+        val operation = UUID.randomUUID().toString()
+        val before = archive.toFile().listFiles()!!.associate { it.name to it.readBytes().toList() }
+        val candidate = attempts.prepareFollowingEdit(current, operation, { error("Historical archive is not an active attempt") },
+            { assertEquals(intent, it) }, { current }, verifyCurrentChild = { error("Archive verification must not open a provider") },
+            readArchivedPredecessor = { activation, grantId, predecessor ->
+                assertEquals(3L, activation)
+                assertEquals(grant.grantId, grantId)
+                assertEquals(prior, predecessor)
+                intent.binding
+            }) {}
+        assertEquals(operation, candidate.fileName.toString())
+        assertEquals(before, archive.toFile().listFiles()!!.associate { it.name to it.readBytes().toList() })
+    }
+
+    @Test fun aFollowingWriteKeepsTheOnlyPrivateCatalogUntilTheAdoptedChildIsVerified() = runBlocking {
+        val files = roots.newFolder().canonicalFile
+        val active = attempts(files).requireNew(next.id)
+        Files.createDirectory(active.parent)
+        Files.createDirectory(active)
+        active.resolve("catalog.sqlite").toFile().writeBytes(staged)
+        val intent = LocalLibraryRecipeEditJournal.Intent(binding(3), "c".repeat(64), next)
+        val adopted = binding(4, predecessor = next)
+        val journal = journal(active.toFile())
+        journal.start(intent) {}.recordAfterProviderClosure(next)
+        assertFailsWith<IOException> {
+            attempts(files).prepareFollowingEdit(adopted, UUID.randomUUID().toString(), { intent.binding }, {}, { adopted },
+                verifyCurrentChild = { throw IOException("Files has lost the edited catalog") }) {}
+        }
+        assertEquals(LocalLibraryRecipeEditJournal.Phase.COMPLETED, journal.inspect(intent))
+        assertEquals(true, Files.isSameFile(active.resolve("catalog.sqlite"), active.resolve("recipe-edit.catalog-owner")))
+    }
+
+    @Test fun aSpentIdTakesPrecedenceOverRetainedAttemptInventory() {
+        val (files, _, _) = reclaimedAttempt()
+        LocalLibraryDirectory(files, sync).spendCatalogRevision(prior, next) {}
+        val refusal = assertFailsWith<IOException> { attempts(files).requireNew(next.id) }
+        assertEquals("The catalog revision attempt is already spent", refusal.message)
     }
 
     private fun reclaimedAttempt(withSpend: Boolean = false): Triple<File, java.nio.file.Path, LocalLibraryRecipeEditJournal.Intent> {

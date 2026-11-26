@@ -47,6 +47,24 @@ class LocalSelectedLibraryAuthorityTest {
         assertEquals(reopened, writer.read())
     }
 
+    @Test fun reconstructsAnIssuingBindingOnlyFromTheCurrentChildAndRetainedSameGrantProof() {
+        val root = roots.newFolder().canonicalFile
+        val writer = LocalSelectedLibraryAuthority(root, sync)
+        val issuing = select(writer, writable = true)
+        val adopted = writer.advanceVerifiedFolderGeneration(issuing, successor) {}
+        val cold = LocalSelectedLibraryAuthority(root, sync)
+        assertEquals(issuing, cold.readVerifiedRecipePredecessor(adopted))
+        assertEquals(issuing, cold.readArchivedRecipePredecessor(2, grant.grantId, generation))
+        assertEquals(null, cold.readArchivedRecipePredecessor(2, grant.grantId, generation.copy(catalog = ObjectId("9".repeat(64), 512))))
+        val predecessor = root.resolve("folder-verifications").resolve("${grant.grantId}-${generation.id}")
+        java.nio.file.Files.delete(predecessor.toPath())
+        assertEquals(null, cold.readVerifiedRecipePredecessor(adopted))
+        assertEquals(null, cold.readArchivedRecipePredecessor(2, grant.grantId, generation))
+        assertEquals(adopted, cold.read())
+        writer.returnToDefault(adopted.selection) {}
+        assertFailsWith<IOException> { cold.readVerifiedRecipePredecessor(adopted) }
+    }
+
     @Test fun sameFolderAdvanceRefusesReadOnlyBindingsAndUnrelatedGenerationsBeforeStaging() {
         val readOnly = LocalSelectedLibraryAuthority(roots.newFolder().canonicalFile, sync)
         val readSelection = select(readOnly, writable = false)

@@ -33,8 +33,7 @@ internal class LocalSelectedRecipeAttempts(
     }
 
     fun requireNew(id: String): Path {
-        if (find(id) != null) throw IOException("The selected recipe operation cannot be repeated")
-        LocalLibraryDirectory(files.toFile(), sync).requireUnspentCatalogRevision(id)
+        requireUnused(id)
         val parents = parentKeys()
         // A rename can become visible before fsync. Never spend a different operation's newly visible slot until it is durable.
         forceParents(parents)
@@ -43,6 +42,66 @@ internal class LocalSelectedRecipeAttempts(
         requireCapacity(history, 128)
         requireParents(parents)
         return active.resolve(id)
+    }
+
+    private fun requireUnused(id: String) {
+        requireOpaqueId(id)
+        LocalLibraryDirectory(files.toFile(), sync).requireUnspentCatalogRevision(id)
+        if (find(id) != null) throw IOException("The selected recipe operation cannot be repeated")
+    }
+
+    /** Resolve outstanding cleanup for exactly the current, adopted edit before another operation can enter Files. */
+    suspend fun prepareFollowingEdit(
+        selected: LocalSelectedLibraryAuthority.Selected.Folder, operation: String,
+        readPredecessor: () -> LocalSelectedLibraryAuthority.Selected.Folder?,
+        verifySpend: (LocalLibraryRecipeEditJournal.Intent) -> Unit,
+        readCurrent: () -> LocalSelectedLibraryAuthority.Selected?,
+        verifyCurrentChild: suspend (LocalLibraryRecipeEditJournal.Intent) -> Unit,
+        readArchivedPredecessor: (Long, String, LibraryGeneration) -> LocalSelectedLibraryAuthority.Selected.Folder? = { _, _, _ -> null },
+        requireOwner: () -> Unit,
+    ): Path {
+        fun requireSelected() {
+            requireOwner()
+            if (readCurrent() != selected) unavailable()
+            requireOwner()
+        }
+        requireSelected()
+        requireUnused(operation)
+        val generation = selected.expectedGeneration
+        if (operation == generation.id || operation == generation.predecessorId) unavailable()
+        val currentAttempt = find(generation.id)
+        if (currentAttempt == null) {
+            // A matching private spend with neither attempt present is not an empty history.
+            LocalLibraryDirectory(files.toFile(), sync).requireUnspentCatalogRevision(generation.id)
+        } else if (currentAttempt.parent == active) {
+            val prior = readPredecessor() ?: unavailable()
+            val proof = open(currentAttempt).observeForRecovery(prior)
+            val intent = proof.intent
+            if (proof.phase == LocalLibraryRecipeEditJournal.Phase.INTENT_ONLY || intent.adoptedSelection() != selected) unavailable()
+            verifySpend(intent)
+            requireSelected()
+            verifyCurrentChild(intent)
+            if (!settleRecordedAdoption(intent, selected, readCurrent, requireOwner)) unavailable()
+        } else {
+            val intent = open(currentAttempt).readArchivedIntent(readArchivedPredecessor)
+            if (intent.successor != generation || intent.adoptedSelection().selection.identity.activation > selected.selection.identity.activation) unavailable()
+            verifySpend(intent)
+            requireArchiveEvidence(intent, ::requireSelected)
+        }
+        val attempt = requireNew(operation)
+        requireSelected()
+        return attempt
+    }
+
+    private fun requireArchiveEvidence(intent: LocalLibraryRecipeEditJournal.Intent, requireSelected: () -> Unit) {
+        val target = history.resolve(intent.successor.id)
+        val parents = parentKeys()
+        if (parents[history] == null || parents[active] == null || find(intent.successor.id) != target) unavailable()
+        val before = open(target).reclaimedEvidence(intent)
+        forceParents(parents)
+        if (find(intent.successor.id) != target || open(target).reclaimedEvidence(intent) != before) unavailable()
+        requireParents(parents)
+        requireSelected()
     }
 
     /** False is unresolved private cleanup, not a judgment about the already-adopted pointer or the provider write. */
