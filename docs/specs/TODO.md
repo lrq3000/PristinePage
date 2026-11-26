@@ -812,6 +812,8 @@ The one Settings Import instrumentation and independent readback passed on API 2
 
 Scratch closeout: the JVM fixture scratch root is empty. After matching all 26 invocation-owned Gradle daemon records and confirming no live consumer or reparse point, the disposable build-only Gradle home was removed. A separate check confirmed its absence, retained pinned dependency inputs and Import evidence, and about 31.38 GiB of free host space. Preserve the historical JVM/build logs and all APK/runtime receipts. No shared SDK, other cache, guest disk or user storage was removed.
 
+The read-only lifecycle diagnosis also found that the slot's current configuration contains only seven device-property fields, no recorded name or local-ADB mode, and none of those seven values matches the retained configuration snapshot bearing the original guest name. Both old VM disk files are present at the slot path, but a path and stopped flag do not authenticate their ownership or show why the configuration changed. Preserve them. The safe reentry condition is operator/coordinator verification of the retained disk and configuration lineage, followed by a separately scoped allocator cleanup or isolated approved replacement. Do not restore a configuration snapshot or release the shared reservation based on this comparison alone.
+
 ### Current coordination: transition to `main`
 
 - [x] Operator approved the local fast-forward and `main`-based PR/handoff cadence; see [operational authority](OPERATIONAL_PLAN.md) and [queue rules](PARALLEL_EXECUTION_PLAN.md#coordination). Earlier branch/base references below describe their historical claims.
