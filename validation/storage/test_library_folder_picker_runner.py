@@ -42,10 +42,12 @@ class LibraryFolderPickerRunnerTest(unittest.TestCase):
                 select_main_settings_open(Namespace(**(vars(exact) | changed)))
 
     def test_main_settings_open_retry_requires_its_exact_preselection_failure_and_pair(self):
-        from run_library_folder_picker_ldplayer import MAIN_SETTINGS_OPEN_CASE, SETTINGS_OPEN_CANCELED_GUEST, SETTINGS_OPEN_NAVIGATION_MANIFEST, select_main_settings_open
+        from run_library_folder_picker_ldplayer import MAIN_SETTINGS_OPEN_CASE, SETTINGS_OPEN_CANCELED_GUEST, SETTINGS_OPEN_NAVIGATION_MANIFEST, SETTINGS_OPEN_MENU_MANIFEST, select_main_settings_open
         exact = Namespace(settings_open=True, fresh=False, settings_open_retry=SETTINGS_OPEN_NAVIGATION_MANIFEST,
                           guest=SETTINGS_OPEN_CANCELED_GUEST, previous=["app.apk", "test.apk"])
         self.assertEqual(MAIN_SETTINGS_OPEN_CASE, select_main_settings_open(exact))
+        self.assertEqual(MAIN_SETTINGS_OPEN_CASE, select_main_settings_open(
+            Namespace(**(vars(exact) | {"settings_open_retry": SETTINGS_OPEN_MENU_MANIFEST}))))
         for changed in ({"settings_open_retry": "f" * 64}, {"guest": "other"}, {"previous": None},
                         {"settings_open_reuse": True}, {"fresh": True}, {"backup_export": True}):
             with self.assertRaisesRegex(RuntimeError, "standalone fresh"):

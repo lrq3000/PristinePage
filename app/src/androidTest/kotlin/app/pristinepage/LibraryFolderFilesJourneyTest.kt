@@ -19,6 +19,7 @@ import android.os.Process
 import android.os.SystemClock
 import android.provider.DocumentsContract
 import android.view.InputDevice
+import android.view.KeyEvent
 import android.view.MotionEvent
 import android.view.accessibility.AccessibilityNodeInfo
 import androidx.activity.result.ActivityResult
@@ -284,7 +285,7 @@ class LibraryFolderFilesJourneyTest {
         compose.waitUntil(10_000) { enabled(folderButton) }
         compose.onNodeWithTag(folderButton).performScrollTo().performClick()
         compose.waitUntil(12_000) { instrumentation.uiAutomation.rootInActiveWindow?.packageName?.toString() == picker }
-        selectSettingsDestination(instrumentation, picker, folder, touchDirectoryRows = true)
+        selectSettingsDestination(instrumentation, picker, folder, touchNavigation = true)
         val storage = compose.runOnUiThread { ViewModelProvider(compose.activity)[LibraryStorageViewModel::class.java] }
         compose.waitUntil(20_000) { storage.state.value.review != null }
         val review = checkNotNull(storage.state.value.review)
@@ -545,7 +546,7 @@ class LibraryFolderFilesJourneyTest {
     private fun selectSettingsDestination(instrumentation: Instrumentation, picker: String, folder: String,
         selectFolder: Boolean = true, navigateFromRoot: Boolean = true,
         expectedChildren: Set<String> = setOf("catalogs", "generations", "objects"), allowExactWindowTitle: Boolean = false,
-        touchDirectoryRows: Boolean = false,
+        touchNavigation: Boolean = false,
     ) {
         val affirmative = setOf("SELECT", "Select", "SÉLECTIONNER", "Sélectionner", "Use this folder", "USE THIS FOLDER", "Choose this folder")
         fun containsUnder(root: AccessibilityNodeInfo, text: String, within: String) =
@@ -600,8 +601,8 @@ class LibraryFolderFilesJourneyTest {
                 true
             }
             val control = checkNotNull(confirmed)
-            // This API 28 picker acknowledged the accessibility click on Documents without navigating. Use the real row touch for this witness, keeping the same identity and geometry checks.
-            if (touchDirectoryRows && parent == "dir_list") tap(instrumentation, control)
+            // A semantic acknowledgment did not establish navigation on this picker. Exercise real user touches while keeping the same live identity and geometry checks.
+            if (touchNavigation) tap(instrumentation, control)
             else if (control.isClickable) check(control.performAction(AccessibilityNodeInfo.ACTION_CLICK)) { "Files did not acknowledge $step" }
             else {
                 check(parent == "dir_list")
@@ -641,6 +642,22 @@ class LibraryFolderFilesJourneyTest {
             select("Files options for $step", options)
             return await(instrumentation, picker, step, ::hasVisibilityChoice)
         }
+        fun awaitFilesToolbar(step: String) {
+            if (touchNavigation) await(instrumentation, picker, step) {
+                !hasVisibilityChoice(it) && unique(it, options) != null && unique(it, drawer) != null
+            }
+        }
+        fun dismissPreferenceMenu() {
+            if (touchNavigation) {
+                val down = SystemClock.uptimeMillis()
+                for (action in listOf(KeyEvent.ACTION_DOWN, KeyEvent.ACTION_UP)) {
+                    val key = KeyEvent(down, SystemClock.uptimeMillis(), action, KeyEvent.KEYCODE_BACK, 0)
+                    key.source = InputDevice.SOURCE_KEYBOARD
+                    check(automation.injectInputEvent(key, true))
+                }
+            } else check(automation.performGlobalAction(AccessibilityService.GLOBAL_ACTION_BACK))
+            awaitFilesToolbar("Files toolbar after menu dismissal")
+        }
         // Inspect the real platform menu once; the primary-storage root is hidden by default on the fresh API 28 guest.
         val menu = preferenceMenu("initial internal storage preference")
         val wasHidden = unique(menu, showStorage) != null
@@ -648,13 +665,14 @@ class LibraryFolderFilesJourneyTest {
         var navigationFailure: Throwable? = null
         try {
             if (wasHidden) {
+                changed = true // Reconcile even if the touch is accepted but its effect is not delivered cleanly.
                 select("show internal storage", showStorage)
-                changed = true
-            } else check(automation.performGlobalAction(AccessibilityService.GLOBAL_ACTION_BACK))
+                awaitFilesToolbar("Files toolbar after showing internal storage")
+            } else dismissPreferenceMenu()
             select("root drawer", drawer)
             select("primary storage", setOf(Build.MODEL, "Internal storage", "Stockage interne", "Stockage interne partagé"), "roots_list")
             select("Documents", setOf("Documents"), "dir_list")
-            if (touchDirectoryRows) await(instrumentation, picker, "Documents breadcrumb") {
+            if (touchNavigation) await(instrumentation, picker, "Documents breadcrumb") {
                 containsUnder(it, "Documents", "dropdown_breadcrumb")
             }
             select("synthetic folder", setOf(folder), "dir_list") { containsUnder(it, "Documents", "dropdown_breadcrumb") }
@@ -672,7 +690,7 @@ class LibraryFolderFilesJourneyTest {
                     }
                     val restored = preferenceMenu("verify restored internal storage preference")
                     check(unique(restored, showStorage) != null) { "Files did not restore the hidden internal storage preference" }
-                    check(automation.performGlobalAction(AccessibilityService.GLOBAL_ACTION_BACK))
+                    dismissPreferenceMenu()
                 } catch (restorationFailure: Throwable) {
                     val original = navigationFailure
                     if (original == null) throw restorationFailure

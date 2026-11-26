@@ -88,6 +88,12 @@ SETTINGS_OPEN_CANCELED_GUEST = "agent-pristinepage-tree-d5eac64d59bd"
 SETTINGS_OPEN_CANCELED_RUN = "picker-adapter-library-tree-14e34a5f3966"
 SETTINGS_OPEN_NAVIGATION_RUN = "picker-adapter-library-tree-244aa1a50b23"
 SETTINGS_OPEN_NAVIGATION_MANIFEST = "77783b3e16115c3441f36071f91d1e377ae6dc615a1038a6b8083c9fcbe8b9fc"
+SETTINGS_OPEN_MENU_MANIFEST = "a0aa2831e567babf6319c43825e1b17cfa01b5159adc7d38a9eaa16ac80d74ff"
+SETTINGS_OPEN_REFUSALS = {
+    SETTINGS_OPEN_NAVIGATION_MANIFEST: (SETTINGS_OPEN_NAVIGATION_RUN, "synthetic folder", "Documents / android:id/title", None),
+    SETTINGS_OPEN_MENU_MANIFEST: ("picker-adapter-library-tree-0d2c964e72ee", "root drawer",
+                                  "Masquer mém. stock. int. / android:id/title", SETTINGS_OPEN_NAVIGATION_MANIFEST),
+}
 SETTINGS_RECOVERY_CASE = "app.pristinepage.LibraryFolderFilesJourneyTest#coldSettingsRecoversTheExactCompletedBackupWithoutWriting"
 BACKUP_DEATH_CASE = "app.pristinepage.LibraryFolderFilesJourneyTest#endsProcessAfterBackupCommitBeforeDelivery"
 BACKUP_DEATH_RECOVERY_CASE = "app.pristinepage.LibraryBackupDeathRecoveryTest#coldProcessInspectsInterruptedDeliveryWithoutReplay"
@@ -250,7 +256,7 @@ def select_main_settings_open(args):
         identity.add("previous")
     need(sum((args.fresh, reuse, retry is not None)) == 1 and
          (not (reuse or retry is not None) or args.guest == SETTINGS_OPEN_CANCELED_GUEST) and
-         (retry is None or retry == SETTINGS_OPEN_NAVIGATION_MANIFEST and len(args.previous or ()) == 2) and
+         (retry is None or retry in SETTINGS_OPEN_REFUSALS and len(args.previous or ()) == 2) and
          not any(value for name, value in vars(args).items() if name not in identity), error)
     return MAIN_SETTINGS_OPEN_CASE
 
@@ -521,9 +527,11 @@ def settings_run_anchors(raw, expected_sha):
     return anchored
 
 
-def verify_settings_open_navigation_failure(raw, guest, previous):
+def verify_settings_open_navigation_failure(raw, guest, previous, digest):
     """Borrow only the exact pre-selection failure; the live pointer, grants and fixture require separate readback."""
-    anchor = settings_run_anchors(raw, SETTINGS_OPEN_NAVIGATION_MANIFEST)
+    run_name, failed_step, observation, predecessor = SETTINGS_OPEN_REFUSALS[digest]
+    need(raw.name == run_name, "Wrong Settings Open artifact directory")
+    anchor = settings_run_anchors(raw, digest)
     artifacts = json.loads(anchor("artifacts.json"))
     claim = json.loads(anchor("claim.json"))
     shutdown = json.loads(anchor("shutdown.json"))
@@ -531,15 +539,16 @@ def verify_settings_open_navigation_failure(raw, guest, previous):
     folder = fixture["folder"]
     transcript = anchor("instrumentation.txt")
     launches = [call for line in anchor("commands.jsonl").splitlines() if "instrument" in (call := json.loads(line))["argv"]]
-    need(guest == claim["name"] == artifacts["guest"] and artifacts["mainSettingsOpen"] is True and not artifacts["previous"] and
+    need(guest == claim["name"] == artifacts["guest"] and artifacts["mainSettingsOpen"] is True and
+         artifacts.get("mainSettingsOpenRetry") == predecessor and bool(artifacts["previous"]) == (predecessor is not None) and
          claim["generation"] == shutdown["generation"] and claim["runtime_processes"] == shutdown["originalProcesses"] and
          shutdown["ownedShutdownVerified"] is True and shutdown["storageDeleted"] is False and
          {p: proof["sha256"] for p, proof in artifacts["proof"].items()} == previous and
          json.loads(anchor("outcomes.json")) == {"passed": [], "failed": [MAIN_SETTINGS_OPEN_CASE], "installedSha256": previous} and
          json.loads(anchor("preservation.json")) == {"externalFixtureUnchanged": True, "persistedGrantCount": 0} and
          read_results(transcript, (MAIN_SETTINGS_OPEN_CASE,)) == ([], [MAIN_SETTINGS_OPEN_CASE]) and
-         "Files did not reach synthetic folder; foreground=com.android.documentsui;" in transcript and
-         "Documents / android:id/title" in transcript and "Suppressed:" not in transcript and
+         f"Files did not reach {failed_step}; foreground=com.android.documentsui;" in transcript and
+         observation in transcript and "Suppressed:" not in transcript and
          re.fullmatch(r"PristinePage-tree-[a-f0-9]{12}", folder) and len(launches) == 1 and launches[0].get("exit") == 0 and
          launches[0]["argv"][-8:] == [MAIN_SETTINGS_OPEN_CASE, "-e", "libraryFixtureFolder", folder,
                                      "-e", "librarySettingsOpenFixture", "fresh", RUNNER],
@@ -2239,12 +2248,12 @@ def run(args):
             previous[package] = sha(path)
             exact_apk(path, previous[package], stage, package == TEST)
         if retry_open:
-            prior = raw.parent / SETTINGS_OPEN_NAVIGATION_RUN
+            prior = raw.parent / SETTINGS_OPEN_REFUSALS[retry_open][0]
             need(all(Path(path).resolve().parent == prior.resolve() for path in args.previous) and
                  hashes[APP] == previous[APP] and hashes[TEST] != previous[TEST] and
                  not (raw.parent / f"settings-retry-spent-{retry_open}.json").exists(),
                  "Only an unspent, test-only Settings Open continuation is admitted")
-            open_retry = verify_settings_open_navigation_failure(prior, args.guest, previous)
+            open_retry = verify_settings_open_navigation_failure(prior, args.guest, previous, retry_open)
         if advanced_recipe:
             from run_bound_recipe_readback_ldplayer import WRITER, WRITER_SHA256, readback
             writer = raw.parent / WRITER
@@ -2625,7 +2634,8 @@ def run(args):
     def admit_independent(record):
         if open_retry:
             claim, _ = open_retry
-            manifest = raw.parent / SETTINGS_OPEN_NAVIGATION_RUN / f"{SETTINGS_OPEN_NAVIGATION_RUN}-final-manifest.json"
+            run_name = SETTINGS_OPEN_REFUSALS[retry_open][0]
+            manifest = raw.parent / run_name / f"{run_name}-final-manifest.json"
             need(record["generation"] == claim["generation"] and record["shutdown_processes"] == claim["runtime_processes"] and
                  Path(record["runtime_evidence"]).resolve() == manifest.resolve(),
                  "The Settings Open retry is not the immediately released navigation attempt")
