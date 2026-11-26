@@ -40,6 +40,19 @@ class LibraryFolderPickerRunnerTest(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "bound recipe receipt"):
                 verify_bound_recipe_receipt(bad, forged, old_marker, new_marker, pointer, grant)
 
+    def test_bound_recipe_grant_names_the_exact_child_in_either_files_root(self):
+        from run_library_folder_picker_ldplayer import require_bound_recipe_grant_destination
+        left = "/sdcard/Documents/PristinePage-tree-1234567890ab/Library-Left-1234567890ab"
+        prefix = "content://com.android.externalstorage.documents/tree/"
+        child = "PristinePage-tree-1234567890ab%2FLibrary-Left-1234567890ab"
+        for exact in ("home%3A" + child, "primary%3ADocuments%2F" + child):
+            require_bound_recipe_grant_destination(prefix + exact, left)
+        for wrong in ("home%3A" + child.replace("Left", "Right"), "home%3ADocuments%2F" + child,
+                      "home%3A" + child + "?copy=1", "home%3A" + child.replace("%2F", "/"),
+                      "primary%3A" + child):
+            with self.subTest(wrong=wrong), self.assertRaisesRegex(RuntimeError, "exact Files-selected"):
+                require_bound_recipe_grant_destination(prefix + wrong, left)
+
     def test_fresh_recipe_witness_requires_only_its_own_new_private_scope(self):
         from run_library_folder_picker_ldplayer import verify_fresh_recipe_scope
         scope = "library-selected-editor-7bde9de8-6e8e-4a84-9ec3-25a58670daeb"

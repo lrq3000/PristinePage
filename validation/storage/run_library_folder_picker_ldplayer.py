@@ -1311,6 +1311,14 @@ def verify_bound_recipe_receipt(intent, completion, old_marker, new_marker, poin
     return active[3], sha256(completion.encode("ascii")).hexdigest()
 
 
+def require_bound_recipe_grant_destination(uri, destination):
+    prefix = "content://com.android.externalstorage.documents/tree/"
+    base = "/sdcard/Documents/"
+    path = destination.removeprefix(base)
+    expected = {prefix + quote(document_id, safe="") for document_id in (f"home:{path}", f"primary:Documents/{path}")}
+    need(destination.startswith(base) and uri in expected, "The receipt did not bind the exact Files-selected synthetic folder")
+
+
 def preserve_detached_recipe(adb, files, attempt, readback):
     folder, operation = attempt["folder"], attempt["operation"]
     children = independent_fixture_children(folder)
@@ -1427,8 +1435,7 @@ def exercise_selected_recipe_edit(run, adb, ns, raw, fixture, files, hashes, *, 
                 intent = read_selected_history_record(app_files, f"{attempt}/recipe-edit.intent", 1024)
                 completion = read_selected_history_record(app_files, f"{attempt}/recipe-edit.complete", 256)
                 _, receipt_digest = verify_bound_recipe_receipt(intent, completion, initial, marker, pointer, grant)
-                need(unquote(grant.splitlines()[3].split("/tree/", 1)[1]) == "primary:" + left.removeprefix("/sdcard/"),
-                     "The receipt did not bind the exact Files-selected synthetic folder")
+                require_bound_recipe_grant_destination(grant.splitlines()[3], left)
                 need(read_selected_history_record(app_files, f"{settings}/folder-verifications/{grant_id}-{prior[2]}", 256) == initial and
                      app_files("stat", "-c", "%d:%i", staged_catalog).strip() ==
                      app_files("stat", "-c", "%d:%i", f"{attempt}/recipe-edit.catalog-owner").strip(),
