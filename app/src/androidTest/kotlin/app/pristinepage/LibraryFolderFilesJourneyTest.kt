@@ -28,7 +28,9 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.test.assertIsEnabled
 import androidx.compose.ui.test.assertIsNotEnabled
+import androidx.compose.ui.test.hasClickAction
 import androidx.compose.ui.test.hasTestTag
+import androidx.compose.ui.test.hasText
 import androidx.compose.ui.test.isEnabled
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
@@ -64,6 +66,7 @@ import app.pristinepage.editor.EditorIdentity
 import app.pristinepage.editor.EditorViewModel
 import app.pristinepage.editor.EditorView
 import app.pristinepage.editor.PageEditorScreen
+import app.pristinepage.library.LibraryStorageViewModel
 import app.pristinepage.design.AtelierPreferences
 import app.pristinepage.image.decode.AndroidSourceInspector
 import app.pristinepage.image.decode.SourceDecoder
@@ -252,6 +255,96 @@ class LibraryFolderFilesJourneyTest {
         assertEquals(grants, app.contentResolver.persistedUriPermissions.map { Triple(it.uri, it.isReadPermission, it.isWritePermission) }.toSet())
         assertArrayEquals(originalPointer, pointer.readBytes())
         assertEquals(ocrBefore, settingsFixtureOcr(app, page.pageId.value))
+    }
+
+    @Test fun mainSettingsOpensAnExistingLibraryAndReturnsToTheUnchangedDefault() {
+        check(InstrumentationRegistry.getArguments().getString("librarySettingsOpenFixture") == "fresh") {
+            "This journey requires an independently admitted synthetic app graph"
+        }
+        val instrumentation = InstrumentationRegistry.getInstrumentation()
+        val app = instrumentation.targetContext.applicationContext as PristinePageApplication
+        val folder = settingsFixtureFolder()
+        val graph = runBlocking { app.services.imports() }
+        val initial = graph.activation
+        assertEquals(1L, initial.number)
+        assertTrue(runBlocking { graph.store.catalog.list(null, 2) }.isEmpty())
+        val witness = LibraryIndependentRootGrants
+        val before = witness.inventory(app)
+        assertTrue(before.isEmpty())
+        val album = DocumentId("aaaaaaaa-aaaa-4aaa-8aaa-000000000001")
+        val editor = compose.runOnUiThread { ViewModelProvider(compose.activity)[EditorViewModel::class.java] }
+        val picker = checkNotNull(LibraryFolderPickerContract(writable = true).createIntent(app, Unit).component).packageName
+        val folderButton = "library-storage-folder"
+        fun openStorage() {
+            compose.onNodeWithTag("atelier-settings").performClick()
+            compose.onNodeWithTag("settings-open-library_storage").performClick()
+        }
+        fun enabled(tag: String) = compose.onAllNodes(hasTestTag(tag) and isEnabled()).fetchSemanticsNodes().size == 1
+        openStorage()
+        compose.waitUntil(10_000) { enabled(folderButton) }
+        compose.onNodeWithTag(folderButton).performScrollTo().performClick()
+        compose.waitUntil(12_000) { instrumentation.uiAutomation.rootInActiveWindow?.packageName?.toString() == picker }
+        selectSettingsDestination(instrumentation, picker, folder)
+        val storage = compose.runOnUiThread { ViewModelProvider(compose.activity)[LibraryStorageViewModel::class.java] }
+        compose.waitUntil(20_000) { storage.state.value.review != null }
+        val review = checkNotNull(storage.state.value.review)
+        check(review.picked == folder || review.picked == "Documents/$folder")
+        assertEquals(initial, runBlocking { app.services.storageLocation().activation })
+        compose.onNodeWithText(app.getString(R.string.library_open_folder_confirm,
+            app.getString(R.string.library_default_location), review.picked)).assertIsDisplayed()
+        compose.onNodeWithTag("library-storage-open").performClick()
+        compose.waitUntil(20_000) {
+            val location = storage.state.value.location
+            location?.activation?.libraryId == "9e940d7b-76c7-45ea-b5e4-0ad86f26ea13" &&
+                location.activation.number > initial.number && !storage.state.value.busy
+        }
+        val selected = checkNotNull(storage.state.value.location).activation
+        val retained = witness.inventory(app)
+        assertEquals(1, retained.size)
+        val exact = Uri.parse(retained.keys.single())
+        assertTrue(exact in witness.spellings(folder))
+        assertEquals(true to true, retained.getValue(exact.toString()))
+        compose.onNodeWithTag("settings-back").performClick()
+        compose.onNodeWithTag("settings-back").performClick()
+        val albumTag = "atelier-album-${album.value}"
+        compose.waitUntil(20_000) { enabled(albumTag) }
+        compose.onNodeWithTag(albumTag).performClick()
+        val page = runBlocking { app.services.loadLibraryAlbum(selected, album).pages.single() }
+        val pageTag = "original-page-${page.pageId.value}"
+        compose.waitUntil(20_000) { enabled(pageTag) }
+        compose.onNodeWithTag(pageTag).performClick()
+        compose.waitUntil(20_000) { editor.session.value?.preview?.value?.display != null }
+        assertEquals(EditorIdentity(album, page.pageId, selected), editor.state.value.identity)
+        compose.onNodeWithTag("editor-tool-original").performClick()
+        compose.waitUntil(20_000) {
+            editor.session.value?.preview?.value?.let { it.view == EditorView.ORIGINAL && !it.previous && it.display != null } == true
+        }
+        compose.runOnUiThread {
+            val original = checkNotNull(editor.session.value?.preview?.value?.display).bitmap
+            assertEquals(0xff637b89.toInt(), original.getPixel(2, 1))
+        }
+        compose.onNodeWithTag("editor-back").performClick()
+        compose.waitUntil(15_000) { editor.state.value.identity == null && enabled(pageTag) }
+        assertTrue(instrumentation.uiAutomation.performGlobalAction(AccessibilityService.GLOBAL_ACTION_BACK))
+        compose.waitUntil(15_000) { enabled("atelier-settings") }
+        openStorage()
+        compose.waitUntil(15_000) { enabled("library-storage-use-default") }
+        compose.onNodeWithTag("library-storage-use-default").performScrollTo().performClick()
+        compose.onNodeWithText(app.getString(R.string.library_open_folder_confirm, review.picked,
+            app.getString(R.string.library_default_location))).assertIsDisplayed()
+        compose.onNode(hasTestTag("library-storage-use-default").not() and
+            hasText(app.getString(R.string.library_use_default)) and hasClickAction()).performClick()
+        compose.waitUntil(20_000) {
+            val location = storage.state.value.location
+            location?.folderLabel == null && location?.activation?.libraryId == initial.libraryId &&
+                location.activation.number > selected.number && !storage.state.value.busy
+        }
+        val reopened = runBlocking { app.services.imports() }
+        assertTrue(runBlocking { reopened.store.catalog.list(null, 2) }.isEmpty())
+        assertEquals(retained, witness.inventory(app))
+        app.contentResolver.releasePersistableUriPermission(exact,
+            Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION)
+        assertEquals(before, witness.inventory(app))
     }
 
     private fun cancelExactFiles(instrumentation: Instrumentation, picker: String, appPackage: String,

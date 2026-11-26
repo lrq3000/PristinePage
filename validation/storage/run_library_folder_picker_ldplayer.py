@@ -83,6 +83,7 @@ WRITE_PROBE_CASE = "app.pristinepage.LibraryFolderFilesJourneyTest#grantedTreeCa
 BACKUP_CASE = "app.pristinepage.LibraryFolderFilesJourneyTest#defaultLibraryExportsItsOriginalAndAcceptedEditIntoANewFilesBackup"
 SETTINGS_BACKUP_CASE = "app.pristinepage.LibraryFolderFilesJourneyTest#settingsPublishesOneBackupOfTheSyntheticDefaultLibrary"
 SETTINGS_PICKER_CASE = "app.pristinepage.LibraryFolderFilesJourneyTest#settingsOpensAndCancelsFilesWithoutStartingABackup"
+MAIN_SETTINGS_OPEN_CASE = "app.pristinepage.LibraryFolderFilesJourneyTest#mainSettingsOpensAnExistingLibraryAndReturnsToTheUnchangedDefault"
 SETTINGS_RECOVERY_CASE = "app.pristinepage.LibraryFolderFilesJourneyTest#coldSettingsRecoversTheExactCompletedBackupWithoutWriting"
 BACKUP_DEATH_CASE = "app.pristinepage.LibraryFolderFilesJourneyTest#endsProcessAfterBackupCommitBeforeDelivery"
 BACKUP_DEATH_RECOVERY_CASE = "app.pristinepage.LibraryBackupDeathRecoveryTest#coldProcessInspectsInterruptedDeliveryWithoutReplay"
@@ -231,6 +232,15 @@ def select_settings_picker_case(args):
                   args.activation_compatibility, args.expect_home, args.settings_retry)),
          "Settings picker cancellation requires the retained synthetic guest and a standalone invocation")
     return SETTINGS_PICKER_CASE
+
+
+def select_main_settings_open(args):
+    if not args.settings_open:
+        return None
+    identity = {"settings_open", "fresh", "commit", "app_sha", "test_sha", "guest"}
+    need(args.fresh and not any(value for name, value in vars(args).items() if name not in identity),
+         "MainActivity Settings Open requires a standalone fresh synthetic app graph")
+    return MAIN_SETTINGS_OPEN_CASE
 
 
 def select_settings_recovery_case(args):
@@ -2004,6 +2014,7 @@ def run(args):
          "The checked-out production/test build inputs do not match the admitted source")
     need(re.fullmatch(r"agent-pristinepage-tree-[a-f0-9]{12}", args.guest), "Require a dedicated library app-test guest name")
     need(args.fresh != bool(args.previous), "Choose first admission or an exact retained predecessor pair")
+    settings_open = select_main_settings_open(args)
     picker_case = select_settings_picker_case(args)
     recovery_case = select_settings_recovery_case(args)
     backup_case = select_backup_case(args)
@@ -2098,7 +2109,6 @@ def run(args):
              "The OCR regression batch requires the retained app guest and does not operate on Files fixtures")
     prefix = "picker-adapter-library-tree-" + uuid.uuid4().hex[:12]
     raw = ROOT / "validation/raw/storage" / prefix
-    raw.mkdir()
     stage = ROOT / "validation/raw/providers/ocr-app-standard-full"
     built = {
         APP: ROOT / "app/build/outputs/apk/debug/app-debug.apk",
@@ -2107,9 +2117,10 @@ def run(args):
     disk_floor = 16 if args.fresh else 12
     need(shutil.disk_usage(ROOT).free >= disk_floor * 1024**3 + sum(path.stat().st_size for path in built.values()),
          "Not enough disk for the exact retained APK pair and the guest floor")
+    raw.mkdir()
     hashes = dict(zip(built, [args.app_sha, args.test_sha]))
     proof = {package: exact_apk(path, hashes[package], stage, package == TEST) for package, path in built.items()}
-    if independent_cases or selected_recipe:
+    if independent_cases or selected_recipe or settings_open:
         require_independent_manifests(proof.values())
     previous = {}
     prior_destinations = []
@@ -2504,9 +2515,10 @@ def run(args):
         need(sha(saved) == hashes[package], "Retained candidate APK changed")
         retained[package] = saved
     fixture = raw / "synthetic-library"
-    files = (selected_death_retained[2] if selected_death_retained else independent_retained[1] if independent_retained else retained_pre_marker[1] if pre_marker_handoff else retained_ancestry[1] if ancestry_resume else {} if args.ocr_activation or recovery_case or death_receipt
-             else make_fixture(fixture, with_scan=True))
-    original = None if args.ocr_activation or recovery_case or death_receipt else synthetic_scan()[0]
+    without_generic_fixture = args.ocr_activation or recovery_case or death_receipt or settings_open
+    files = (selected_death_retained[2] if selected_death_retained else independent_retained[1] if independent_retained else retained_pre_marker[1] if pre_marker_handoff else retained_ancestry[1] if ancestry_resume else {} if without_generic_fixture
+              else make_fixture(fixture, with_scan=True))
+    original = None if without_generic_fixture else synthetic_scan()[0]
     if original:
         need(files.get(f"objects/{original}") == original, "The populated Files fixture lacks its exact original")
     alternate_fixture = raw / "synthetic-incoming"
@@ -2520,7 +2532,7 @@ def run(args):
     (raw / f"{prefix}-artifacts.json").write_text(
         json.dumps(dict(proof=proof, source=args.commit, fixture=files, previous=previous, guest=args.guest,
                         settingsCancel=args.settings_retry, settingsPriorFailure=args.settings_prior_failure,
-                        settingsCompleted=args.settings_recover, backupDeliveryDeath=death_operation,
+                         settingsCompleted=args.settings_recover, mainSettingsOpen=bool(settings_open), backupDeliveryDeath=death_operation,
                         backupDeathRetry=args.backup_death_retry, backupDeathReceiptOnly=death_receipt,
                         treeAncestryHandoff=ancestry_resume, backupPreMarker=before_marker,
                         backupPreMarkerHandoff=pre_marker_handoff, independentRoots=bool(independent_cases),
@@ -2566,8 +2578,8 @@ def run(args):
     try:
         wait_for_allocator(run, lambda: run.prepare(args.fresh, None, args.fresh), before_claim=True)
         recheck_target(run, ns)
-        if selected_recipe:
-            need(run.owned()["api"] == 28, "The selected Files witness requires API 28")
+        if selected_recipe or settings_open:
+            need(run.owned()["api"] == 28, "This selected Files witness requires API 28")
         if recipe_baseline:
             current = run.owned()
             verify_completed_guest(recipe_baseline, current)
@@ -2805,6 +2817,35 @@ def run(args):
             need(run.installed_hash(p) == hashes[p], "Installed APK differs from the admitted candidate")
         need(adb("shell", "pm", "list", "instrumentation", APP).splitlines() ==
              [f"instrumentation:{RUNNER} (target={APP})"], "The instrumentation registry differs")
+        if settings_open:
+            require_cold_backup_app(adb)
+            need(not read_app_persisted_grants(adb) and "library-settings" not in recipe_private_scopes(adb),
+                 "The fresh MainActivity graph must not have an active pointer or persisted grant")
+            fingerprint = adb("shell", "getprop", "ro.build.fingerprint").strip()
+            need(re.fullmatch(r"[A-Za-z0-9_.+:/,-]{12,256}", fingerprint), "Missing exact Android build fingerprint")
+            policy = f"android-imagedecoder-v2/api28/{sha256(fingerprint.encode()).hexdigest()[:16]}/srgb-straight-white-exif-v1"
+            inventory = make_fixture(fixture, with_scan=True, conversion=policy)
+            folder = "PristinePage-tree-" + uuid.uuid4().hex[:12]
+            destination = f"/sdcard/Documents/{folder}"
+            run.save(run.path("settings-open-fixture.json"), dict(folder=folder, inventory=inventory, conversion=policy), durable=True)
+            adb("shell", "mkdir", "-p", "/sdcard/Documents")
+            stage_synthetic_files(adb, fixture, destination, inventory)
+            verify_unchanged_settings_destination(adb, destination, inventory)
+            recheck_target(run, ns)
+            try:
+                output = adb("shell", "am", "instrument", "-w", "-r", "-e", "class", settings_open,
+                             "-e", "libraryFixtureFolder", folder, "-e", "librarySettingsOpenFixture", "fresh", RUNNER, timeout=220)
+                run.path("instrumentation.txt").write_text(output, encoding="utf-8")
+                passed, failed = read_results(output, (settings_open,))
+                run.save(run.path("outcomes.json"), dict(passed=passed, failed=failed, installedSha256=hashes), durable=True)
+            finally:
+                recheck_target(run, ns)
+                verify_unchanged_settings_destination(adb, destination, inventory)
+                grant_count = len(read_app_persisted_grants(adb))
+                run.save(run.path("preservation.json"), dict(externalFixtureUnchanged=True, persistedGrantCount=grant_count), durable=True)
+            need(failed or grant_count == 0, "The successful journey did not restore the starting grant inventory")
+            print(f"MainActivity Settings Open: {len(passed)} passed, {len(failed)} failed.", flush=True)
+            return bool(failed)
         if selected_recipe:
             if args.fresh:
                 def check_fresh_recipe_grants():
@@ -3092,6 +3133,7 @@ if __name__ == "__main__":
     parser.add_argument("--backup-export", action="store_true", help="Export an isolated default library into a separately named backup child")
     parser.add_argument("--settings-backup", action="store_true", help="Exercise real Settings publication on an admitted synthetic guest")
     parser.add_argument("--settings-picker-only", action="store_true", help="Open and cancel Files from Settings on the retained synthetic guest; never select a destination")
+    parser.add_argument("--settings-open", action="store_true", help="Open a complete synthetic library from the real MainActivity Settings and return to Default on a fresh app guest")
     parser.add_argument("--settings-recover", metavar="COMPLETED_MANIFEST_SHA", help="Read the existing Settings receipt after a cold launch; never open a picker")
     parser.add_argument("--backup-delivery-death", action="store_true", help="One isolated native process death after commit but before delivery; never replay")
     parser.add_argument("--backup-pre-marker", action="store_true",

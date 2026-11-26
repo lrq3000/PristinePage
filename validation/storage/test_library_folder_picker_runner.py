@@ -22,6 +22,15 @@ from run_local_ocr_guest import read_boot_serial
 
 
 class LibraryFolderPickerRunnerTest(unittest.TestCase):
+    def test_main_settings_open_admits_only_a_standalone_fresh_graph(self):
+        from run_library_folder_picker_ldplayer import MAIN_SETTINGS_OPEN_CASE, select_main_settings_open
+        exact = Namespace(settings_open=True, fresh=True, previous=None, settings_backup=False, probe_write=False)
+        self.assertEqual(MAIN_SETTINGS_OPEN_CASE, select_main_settings_open(exact))
+        self.assertIsNone(select_main_settings_open(Namespace(settings_open=False)))
+        for changed in ({"fresh": False}, {"previous": ["retained"]}, {"settings_backup": True}, {"probe_write": True}):
+            with self.assertRaisesRegex(RuntimeError, "standalone fresh"):
+                select_main_settings_open(Namespace(**(vars(exact) | changed)))
+
     def test_cutover_continuation_accepts_only_an_unlaunched_observer_on_the_exact_installed_pair(self):
         from run_selected_folder_open_ldplayer import CONTROLS_CASE, CUTOVER_CASE, PREVIEW_PASS_SHA, verify_unlaunched_cutover
         pair = {"app.pristinepage.debug": "a" * 64, "app.pristinepage.debug.test": "b" * 64}
