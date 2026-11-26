@@ -21,6 +21,23 @@ from run_local_ocr_guest import read_boot_serial
 
 
 class LibraryFolderPickerRunnerTest(unittest.TestCase):
+    def test_recipe_boot_retry_requires_no_android_command_and_no_usable_serial(self):
+        from run_library_folder_picker_ldplayer import verify_selected_recipe_boot_only_trace
+        trace = [
+            {"argv": ["adb.exe", "version"], "exit": 0},
+            {"argv": ["ldconsole.exe", "launch", "--index", "4"], "exit": 0},
+            {"argv": ["ldconsole.exe", "adb", "--index", "4", "--command", "get-serialno"],
+             "exit": 0, "stderr": "error: device offline"},
+            {"argv": ["ldconsole.exe", "quit", "--index", "4"], "exit": 0},
+        ]
+        verify_selected_recipe_boot_only_trace(trace, 4)
+        changed = trace[2] | {"stdout": "emulator-5554", "stderr": ""}
+        guest_read = {"argv": ["adb.exe", "-s", "emulator-5554", "shell", "pm", "path", "android"], "exit": 0}
+        guest_install = {"argv": ["adb.exe", "-s", "emulator-5554", "install", "candidate.apk"], "exit": 0}
+        for unexpected in (changed, guest_read, guest_install):
+            with self.subTest(unexpected=unexpected), self.assertRaisesRegex(RuntimeError, "boot-only"):
+                verify_selected_recipe_boot_only_trace([*trace[:2], unexpected, *trace[2:]], 4)
+
     def test_selected_recipe_admission_refuses_a_candidate_pair_or_drifted_retained_state(self):
         from run_library_folder_picker_ldplayer import require_selected_recipe_predecessor
         pair = {"app": "prior", "test": "prior-test"}

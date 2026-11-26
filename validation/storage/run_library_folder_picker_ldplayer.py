@@ -38,6 +38,7 @@ SELECTED_DEATH_CASE = "app.pristinepage.LibraryFolderFilesJourneyTest#endsProces
 SELECTED_DEATH_RECOVERY_CASE = "app.pristinepage.LibrarySelectedAppendDeathRecoveryTest#coldProcessInspectsCompletedSelectedAppendWithoutReplay"
 SELECTED_RECIPE_CASE = "app.pristinepage.LibraryFolderFilesJourneyTest#oneFilesSelectionPublishesOnlyAClosedEditedCatalog"
 SELECTED_RECIPE_BASELINE = "6e8a2b6c8dfdc36c323c548667045688a0f7a5024386e610c5616892708ff794"
+SELECTED_RECIPE_BOOT_REFUSAL = "3eebda9fc80c090ec377221082f6e715af1c232066bf425daf1cb4108474e7e9"
 INDEPENDENT_COLD_CASE = "app.pristinepage.LibraryProviderAncestryColdTest#twoIndependentFilesRootsRequireDisjointPhysicalAncestry"
 INDEPENDENT_CHILDREN = ("Library-Left", "Library-Right")
 WORKING_CASE = "app.pristinepage.LibraryFolderFilesJourneyTest#populatingAWorkingRoomCatalogDoesNotMaterializeTheOriginal"
@@ -1202,6 +1203,59 @@ def require_selected_recipe_predecessor(installed, expected_pair, ordinary, expe
          "The selected edit predecessor APKs, private state or persisted grants changed")
 
 
+def verify_selected_recipe_boot_only_trace(trace, index):
+    """Whitelist the failed launch and read-only transport probes; no Android command can qualify for a retry."""
+    suffix = ("--index", str(index))
+    permitted_hosts = {
+        ("pwsh", ("-NoProfile", "-Command", "(Get-CimInstance Win32_OperatingSystem).FreePhysicalMemory")),
+        ("adb.exe", ("version",)),
+        ("ldconsole.exe", ("list2",)),
+        ("ldconsole.exe", ("isrunning", *suffix)),
+    }
+    phase, probes = "before", 0
+    error = "The selected edit is not a boot-only refusal"
+    for row in trace:
+        exe, *tail = row["argv"]
+        call = Path(exe).name.lower(), tuple(tail)
+        need(row.get("exit") == 0, error)
+        if call in permitted_hosts:
+            continue
+        if call == ("ldconsole.exe", ("launch", *suffix)):
+            need(phase == "before", error)
+            phase = "launched"
+        elif call == ("ldconsole.exe", ("adb", *suffix, "--command", "get-serialno")):
+            reply = (row.get("stdout", "") + "\n" + row.get("stderr", "")).strip()
+            need(phase == "launched" and re.fullmatch(r"error: device (?:offline|'emulator-[0-9]+' not found)", reply), error)
+            probes += 1
+        else:
+            need(call == ("ldconsole.exe", ("quit", *suffix)) and phase == "launched" and probes > 0, error)
+            phase = "stopped"
+    need(phase == "stopped", error)
+
+
+def selected_recipe_boot_retry_owner(root, original, previous, candidate):
+    raw = root / "picker-adapter-library-tree-00860c6898ca"
+    anchor = settings_run_anchors(raw, SELECTED_RECIPE_BOOT_REFUSAL)
+    artifacts = json.loads(anchor("artifacts.json"))
+    shutdown = json.loads(anchor("shutdown.json"))
+    manifest = json.loads((raw / f"{raw.name}-final-manifest.json").read_bytes())
+    snapshot = manifest["recordSnapshot"]
+    stable = ("name", "installation", "index", "created", "worktree", "purpose", "api", "created_by_agent")
+    history = snapshot.get("ownership_history", [])
+    need(all(snapshot.get(key) == original[key] for key in stable) and history and
+         history[-1]["generation"] == original["generation"] and history[-1]["shutdown_processes"] == original["runtime_processes"] and
+         artifacts["guest"] == original["name"] and artifacts["selectedRecipe"] is True and artifacts["previous"] == previous and
+         {package: row["sha256"] for package, row in artifacts["proof"].items()} == candidate and
+         snapshot["serial"] is None and manifest["generation"] == shutdown["generation"] == snapshot["generation"] and
+         shutdown["stage"] == "verified-before-release" and shutdown["ownedShutdownVerified"] is True and
+         shutdown["storageDeleted"] is False and
+         snapshot["runtime_processes"] == shutdown["originalProcesses"] == [[node["pid"], node["start"]] for node in shutdown["after"]] and
+         len(shutdown["after"]) == 2 and all(node["running"] is False for node in shutdown["after"]),
+         "The exact prior selected edit boot-only evidence changed")
+    verify_selected_recipe_boot_only_trace([json.loads(line) for line in anchor("commands.jsonl").splitlines()], original["index"])
+    return snapshot
+
+
 def exercise_selected_recipe_edit(run, adb, ns, raw, fixture, files, hashes):
     """One picker and one new operation; preserve an ambiguous result rather than rerunning it."""
     folder = "PristinePage-tree-" + uuid.uuid4().hex[:12]
@@ -1803,6 +1857,7 @@ def run(args):
     independent_derived = args.independent_roots_derived
     selected_append = args.selected_root_append
     selected_recipe = args.selected_recipe_edit
+    need(not args.selected_recipe_boot_retry or selected_recipe, "Boot-only retry requires selected recipe mode")
     append_release = args.selected_append_released_generation
     append_host_recovery = args.selected_append_host_recovery
     selected_repeat = select_selected_repeat(args.selected_append_repeat, selected_append=selected_append,
@@ -1878,6 +1933,7 @@ def run(args):
     prior_successful_repeat = None
     selected_death_retained = None
     recipe_baseline = None
+    recipe_boot_retry = None
     recipe_interrupted = None
     recipe_interrupted_expected = None
     recipe_retained = None
@@ -1916,6 +1972,8 @@ def run(args):
                                                               args.guest, legacy_pair)
             recipe_retained = repeat, legacy, {name: json.loads(pinned(name + ".json")) for name in
                 ("repeat-prior-grants", "recovery-before", "legacy-selected-append-private", "protected-selected-repeat")}
+            if args.selected_recipe_boot_retry:
+                recipe_boot_retry = selected_recipe_boot_retry_owner(raw.parent, recipe_baseline, previous, hashes)
         if recovery_case:
             parents = {Path(file).resolve().parent for file in args.previous}
             need(len(parents) == 1 and previous[APP] == hashes[APP] and args.settings_recover == SETTINGS_COMPLETED_MANIFEST,
@@ -2209,6 +2267,7 @@ def run(args):
                         independentRootsRetry=args.independent_roots_retry, independentRootsHandoff=independent_handoff,
                          independentRootsDerived=independent_derived, selectedRootAppend=append_operation, selectedRepeat=repeat_operation,
                           selectedDeath=selected_death, selectedDeathReadOnly=bool(selected_death_retained), selectedRecipe=selected_recipe,
+                          selectedRecipeBootRetry=bool(recipe_boot_retry),
                          appendInterveningRelease=append_release, appendHostRecovery=append_host_recovery, incomingFixture=received)),
         encoding="utf-8",
     )
@@ -2216,7 +2275,7 @@ def run(args):
 
     def admit_independent(record):
         if recipe_baseline:
-            verify_released_selected_repeat_guest(recipe_baseline, record)
+            verify_released_selected_repeat_guest(recipe_boot_retry or recipe_baseline, record)
         elif append_release:
             verify_released_append_guest(independent_claim, record, append_release)
         elif selected_repeat or selected_death:
@@ -2244,7 +2303,7 @@ def run(args):
         if recipe_baseline:
             current = run.owned()
             verify_completed_guest(recipe_baseline, current)
-            need(current["ownership_history"][-1]["generation"] == recipe_baseline["generation"],
+            need(current["ownership_history"][-1]["generation"] == (recipe_boot_retry or recipe_baseline)["generation"],
                  "The selected edit does not follow its exact verified release")
         if capacity_claim:
             verify_completed_guest(capacity_claim, run.owned())
@@ -2782,6 +2841,8 @@ if __name__ == "__main__":
                         help="Use the pinned failure before Files launch; verify both previous fixture trees before a new test-only attempt")
     parser.add_argument("--selected-recipe-edit", action="store_true",
                         help="Publish one closed catalog-only edit through a single Files grant on the pinned released app guest")
+    parser.add_argument("--selected-recipe-boot-retry", action="store_true",
+                        help="Permit one retry on the exact released guest after its pinned boot-only refusal")
     parser.add_argument("--provider-capacity", action="store_true",
                         help="Verify the real Files capacity gate with an unattainable synthetic requirement and no publication")
     parser.add_argument("--settings-retry", metavar="CANCEL_MANIFEST_SHA", help="Permit one new confirmation on the exact retained, independently canceled fixture")
