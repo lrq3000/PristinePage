@@ -19,6 +19,7 @@ internal class AndroidNewLibraryBackup private constructor(
     private val catalogs: HeldLibraryDirectory,
     private val generations: HeldLibraryDirectory,
     journal: LocalLibraryMoveAuthorization,
+    private val requireOwner: () -> Unit,
 ) : LibraryObjectTransfer.Store, LibraryCatalogPublication.Store {
     private data class Leaf(val parent: String, val name: String)
     private val acknowledged = mutableMapOf<Leaf, Pair<Long, Long>>()
@@ -92,7 +93,8 @@ internal class AndroidNewLibraryBackup private constructor(
     private fun publish(parent: HeldLibraryDirectory, name: String, wanted: ObjectId, write: (OutputStream) -> Unit) {
         val leaf = Leaf(parent.id, name)
         if (acknowledged.containsKey(leaf)) throw IOException("The new library file would replace an existing name")
-        acknowledged[leaf] = leafWriter.publish(parent, name, wanted, write = write)
+        acknowledged[leaf] = leafWriter.publish(parent, name, wanted, requireStage = requireOwner,
+            requireVisibility = requireOwner, write = write)
     }
 
     private fun find(parent: HeldLibraryDirectory, name: String): String? {
@@ -125,6 +127,7 @@ internal class AndroidNewLibraryBackup private constructor(
             provider: WritableTree, name: String?, required: Long, privateIdentities: Set<Pair<Long, Long>>,
             journal: LocalLibraryMoveAuthorization, recordIntent: (Pair<Long, Long>) -> Unit,
             requireEmptyRoot: (HeldLibraryDirectory) -> Unit = {},
+            requireOwner: () -> Unit = {},
             block: (AndroidNewLibraryBackup, Long) -> T,
         ): T {
             val seenIdentities = privateIdentities.toMutableSet()
@@ -140,6 +143,7 @@ internal class AndroidNewLibraryBackup private constructor(
             fun child(parent: HeldLibraryDirectory, leaf: String, limit: Int): String {
                 provider.requireDirectory(parent.id, parent.descriptor)
                 if (exactChild(provider, parent.id, leaf, true, limit) != null) throw IOException("The backup folder name already exists")
+                requireOwner()
                 val created = provider.create(parent.id, Document.MIME_TYPE_DIR, leaf)
                 if (exactChild(provider, parent.id, leaf, true, limit) != created) throw IOException("The new backup directory could not be verified")
                 Os.fsync(parent.descriptor.fileDescriptor)
@@ -163,7 +167,7 @@ internal class AndroidNewLibraryBackup private constructor(
                                     if (name == null) for (directory in listOf(objects, catalogs, markers, stage)) {
                                         AndroidLibraryDescriptorAncestry.requireDirectChild(directory.descriptor, root.descriptor)
                                     }
-                                    val backup = AndroidNewLibraryBackup(provider, selected, root, stage, objects, catalogs, markers, journal)
+                                    val backup = AndroidNewLibraryBackup(provider, selected, root, stage, objects, catalogs, markers, journal, requireOwner)
                                     block(backup, available)
                                 }
                             }

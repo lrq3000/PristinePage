@@ -76,6 +76,24 @@ class AndroidLibraryWritableFolder(context: Context) {
             if (directoryIdentity(anchor) != directoryIdentity(current)) throw IOException("The writable library directory changed")
         }
 
+        /** Keep both exact Files bindings held under this provider attempt. Neither document ID grants access to their common ancestor. */
+        fun <T> withSeparatePreviousRoot(previous: Uri, destination: ParcelFileDescriptor, block: (() -> Unit) -> T): T {
+            val priorId = AndroidLibraryTreeRead.localTreeDocumentId(previous) ?: throw IOException("The previous folder is unavailable")
+            val hints = LibraryTreeAncestryHint.parentHops(priorId, root)
+            val prior = WritableTree(app, previous, priorId, signal, checkpoint, Access.PERSISTED)
+            return prior.openDirectory(priorId).use { held ->
+                AndroidLibraryDescriptorAncestry.withDerivedAnchor(held, destination, hints, checkpoint) { ancestry ->
+                    fun requireCurrent() {
+                        prior.requireDirectory(priorId, held)
+                        requireDirectory(root, destination)
+                        ancestry()
+                    }
+                    requireCurrent()
+                    block(::requireCurrent).also { requireCurrent() }
+                }
+            }
+        }
+
         fun children(parent: String, limit: Int): List<LibraryTreeReadSource.Entry> =
             query(DocumentsContract.buildChildDocumentsUriUsingTree(tree, parent), limit)
 

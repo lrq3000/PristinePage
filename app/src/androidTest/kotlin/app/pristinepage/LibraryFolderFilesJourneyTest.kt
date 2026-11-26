@@ -118,7 +118,8 @@ class LibraryFolderFilesJourneyTest {
                  "separatesIndependentlySelectedRootsWithoutAParentGrant", "selectedFilesMergeAppendsOnlyTheMissingOriginalAndKeepsItsPredecessor",
                  "selectedFilesMergeCanAppendTwiceWithoutReusingAnOlderStage", "endsProcessAfterSelectedAppendCompletionBeforeDelivery",
                  "oneFilesSelectionPublishesOnlyAClosedEditedCatalog", "selectedRecipeReceiptBindsTheExactIssuingActivation",
-                 "selectedRecipeAdvancesOnlyTheVerifiedDirectSuccessor", "confirmedOpenSwitchesToTheSelectedFilesCatalogAndRevocationDoesNotFallBack"))
+                 "selectedRecipeAdvancesOnlyTheVerifiedDirectSuccessor", "confirmedOpenSwitchesToTheSelectedFilesCatalogAndRevocationDoesNotFallBack",
+                 "startEmptyRefusesANestedStageOfTheCurrentFilesLibrary"))
             interruptionCompose else compose
         rule.apply(next, description)
     }
@@ -960,17 +961,54 @@ class LibraryFolderFilesJourneyTest {
         }
     }
 
+    @Test fun startEmptyRefusesANestedStageOfTheCurrentFilesLibrary() {
+        val leaf = requireNotNull(InstrumentationRegistry.getArguments().getString("libraryNestedEmptyStage"))
+        require(leaf.startsWith("merge-staging-") && UUID.fromString(leaf.removePrefix("merge-staging-")).toString() ==
+            leaf.removePrefix("merge-staging-"))
+        withIndependentFilesSelections(chooseAnchor = false, writableDestination = true, nestedEmptyLeaf = leaf) { app, _, selections, _ ->
+            val (current, nested) = selections
+            val files = File(app.filesDir.canonicalFile, "library-nested-start-${UUID.randomUUID()}").apply { check(mkdir()) }
+            val isolated = object : ContextWrapper(app) {
+                override fun getApplicationContext(): Context = this
+                override fun getFilesDir(): File = files
+            }
+            val scratch = File(files, "scratch").apply { check(mkdir()) }
+            val startup = AndroidLibraryStartup(isolated)
+            fun contents(): Int {
+                val children = DocumentsContract.buildChildDocumentsUriUsingTree(nested, DocumentsContract.getTreeDocumentId(nested))
+                return checkNotNull(app.contentResolver.query(children, arrayOf(DocumentsContract.Document.COLUMN_DOCUMENT_ID), null, null, null))
+                    .use { it.count }
+            }
+            runBlocking {
+                val before = LibraryDescriptorAncestryWitness.seedRecipeEditBinding(isolated, scratch, current)
+                val pointer = File(files, "library-settings/active-library")
+                val retained = pointer.readBytes().toList()
+                assertEquals(0, contents())
+                val preview = startup.prepareFolder(scratch, before, nested) as AndroidLibraryStartup.FolderPreview.Empty
+                val refusal = runCatching { startup.startVerifiedEmptyFolder(scratch, preview) }.exceptionOrNull()
+                assertTrue(refusal is IOException)
+                assertEquals("The selected library folders have no usable common-ancestry hint", refusal?.message)
+                assertEquals(retained, pointer.readBytes().toList())
+                assertEquals(0, contents())
+                assertEquals(before, startup.useSelectedCatalog(scratch) { activation, _ -> activation })
+            }
+        }
+    }
+
     private fun withIndependentFilesSelections(chooseAnchor: Boolean, writableDestination: Boolean = false, singleDestination: Boolean = false,
+        nestedEmptyLeaf: String? = null,
         use: (Context, String, List<Uri>, Map<String, Pair<Boolean, Boolean>>) -> Unit,
     ) {
         check(!writableDestination || !chooseAnchor)
         check(!singleDestination || writableDestination)
+        check(nestedEmptyLeaf == null || (!chooseAnchor && writableDestination && !singleDestination))
         val instrumentation = InstrumentationRegistry.getInstrumentation()
         val app = instrumentation.targetContext.applicationContext
         val folder = requireNotNull(InstrumentationRegistry.getArguments().getString("libraryFixtureFolder"))
         val witness = LibraryIndependentRootGrants
         val paths = witness.paths(folder)
-        val all = paths.flatMap(witness::spellings)
+        val nested = nestedEmptyLeaf?.let { "${paths.first()}/$it" }
+        val all = (paths + listOfNotNull(nested)).flatMap(witness::spellings)
         val before = witness.inventory(app)
         if (!chooseAnchor) {
             // This witness is pinned to the API 28 guest. Admit only a sparse starting inventory; never ask Android to prune someone else's grant to make room.
@@ -988,12 +1026,14 @@ class LibraryFolderFilesJourneyTest {
         witness.requireNewRecord(app, folder)
         witness.refuseEffectiveWrite(app, all)
         val selected = ArrayList<Uri>(paths.size)
-        fun expectedModes() = selected.mapIndexed { index, uri -> uri.toString() to (true to (writableDestination && index == 0)) }.toMap()
+        fun isWritable(index: Int) = writableDestination && (index == 0 || nested != null)
+        fun expectedModes() = selected.mapIndexed { index, uri -> uri.toString() to (true to isWritable(index)) }.toMap()
         var handedOff = false
         try {
-            for ((index, path) in (if (chooseAnchor) paths else paths.take(if (singleDestination) 1 else 2)).withIndex()) {
+            val targets = if (nested != null) listOf(paths.first(), nested) else if (chooseAnchor) paths else paths.take(if (singleDestination) 1 else 2)
+            for ((index, path) in targets.withIndex()) {
                 val result = AtomicReference<ActivityResult>()
-                val platform = LibraryFolderPickerContract(writable = writableDestination && index == 0)
+                val platform = LibraryFolderPickerContract(writable = isWritable(index))
                 val (picker, launcher) = interruptionCompose.runOnUiThread {
                     val host = interruptionCompose.activity
                     val intent = platform.createIntent(host, Unit).putExtra(DocumentsContract.EXTRA_INITIAL_URI,
@@ -1009,8 +1049,9 @@ class LibraryFolderFilesJourneyTest {
                         selectSettingsDestination(instrumentation, picker, folder, navigateFromRoot = false,
                             expectedChildren = paths.take(2).map { it.substringAfterLast('/') }.toSet(), allowExactWindowTitle = true)
                     } else {
-                        selectSettingsDestination(instrumentation, picker, path.substringAfterLast('/'),
-                            navigateFromRoot = false, allowExactWindowTitle = true)
+                         selectSettingsDestination(instrumentation, picker, path.substringAfterLast('/'),
+                             navigateFromRoot = false, expectedChildren = if (path == nested) emptySet() else setOf("catalogs", "generations", "objects"),
+                             allowExactWindowTitle = true)
                     }
                     interruptionCompose.waitUntil(10_000) { result.get() != null }
                     val raw = requireNotNull(result.get())
@@ -1021,7 +1062,7 @@ class LibraryFolderFilesJourneyTest {
                     // Remember the exact previously absent URI before the platform persistence call; reconcile on failure.
                     selected += picked.uri
                     val handoff = LibraryFolderGrantHandoff(app)
-                    val exact = if (writableDestination && index == 0) handoff.persistWrite(picked) else handoff.persistRead(picked)
+                    val exact = if (isWritable(index)) handoff.persistWrite(picked) else handoff.persistRead(picked)
                     assertEquals(picked.uri, exact)
                     check(witness.inventory(app) == before + expectedModes())
                 } catch (failure: Throwable) {
@@ -1046,10 +1087,11 @@ class LibraryFolderFilesJourneyTest {
         } finally {
             if (!handedOff) {
                 try {
-                    val destination = selected.firstOrNull()
-                    if (writableDestination && destination != null && witness.inventory(app)[destination.toString()]?.second == true) {
-                        // This URI was absent from the entire prior inventory and only this exact synthetic picker asked for its write mode.
-                        app.contentResolver.releasePersistableUriPermission(destination, Intent.FLAG_GRANT_WRITE_URI_PERMISSION)
+                    for ((index, destination) in selected.withIndex()) {
+                        if (isWritable(index) && witness.inventory(app)[destination.toString()]?.second == true) {
+                            // This URI was absent from the entire prior inventory and only this exact synthetic picker asked for its write mode.
+                            app.contentResolver.releasePersistableUriPermission(destination, Intent.FLAG_GRANT_WRITE_URI_PERMISSION)
+                        }
                     }
                 } finally {
                     witness.releaseReadDelta(app, selected) { assertEquals(before, witness.inventory(app)) }

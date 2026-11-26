@@ -35,8 +35,12 @@ internal class AndroidEmptyLibraryFolder(context: Context, private val scratchDi
         }
     }
 
-    suspend fun start(tree: Uri, expectedRoot: Observation, requireCurrent: () -> Unit): LibraryGeneration = withContext(Dispatchers.IO) {
+    suspend fun start(tree: Uri, expectedRoot: Observation, previous: Uri?, requireCurrent: () -> Unit): LibraryGeneration = withContext(Dispatchers.IO) {
         val checkpoint = { coroutineContext.ensureActive(); requireCurrent() }
+        // Reject known nested/identical locators before consuming private staging space. A positive hint must still be proven with real descriptors.
+        if (previous != null) LibraryTreeAncestryHint.parentHops(
+            checkNotNull(AndroidLibraryTreeRead.localTreeDocumentId(previous)), checkNotNull(AndroidLibraryTreeRead.localTreeDocumentId(tree)),
+        )
         val files = app.filesDir.toPath().toRealPath()
         val scratch = canonicalLibraryDirectory(scratchDirectory, files)
         if (scratch.toFile().usableSpace < 3 * MAX_PORTABLE_BYTES) throw IOException("Not enough space for a closed empty library")
@@ -64,18 +68,30 @@ internal class AndroidEmptyLibraryFolder(context: Context, private val scratchDi
             if (localLibraryRootKey(stage) != stageKey) throw IOException("The empty library's private attempt changed")
         }
         folder.useTree(tree, AndroidLibraryWritableFolder.Access.PERSISTED) { provider ->
-            AndroidNewLibraryBackup.create(provider, null, required, emptySet(), spend, recordIntent = {
-                requireStage()
-                forceIntent(stage, attempts, scratch, tree, generation, expectedRoot)
-            }, requireEmptyRoot = {
-                requireStage()
-                requireRoot(it.descriptor, expectedRoot)
-            }) { target, _ ->
-                LibraryCatalogPublication(target, stage, ::requireStage).publish(generation, MAX_PORTABLE_BYTES,
-                    { Files.newInputStream(catalog, READ, NOFOLLOW_LINKS) }, createOnly = true) { candidate ->
-                    reader.verifyStagedProjection(candidate, empty, ::requireStage)
+            fun publish(checkSeparation: () -> Unit) {
+                fun requirePublication() {
+                    requireStage()
+                    checkSeparation()
                 }
-                target.requireCompleteLayout()
+                AndroidNewLibraryBackup.create(provider, null, required, emptySet(), spend, recordIntent = {
+                    requirePublication()
+                    forceIntent(stage, attempts, scratch, tree, generation, expectedRoot)
+                }, requireEmptyRoot = {
+                    requirePublication()
+                    requireRoot(it.descriptor, expectedRoot)
+                }, requireOwner = ::requirePublication) { target, _ ->
+                    LibraryCatalogPublication(target, stage, ::requirePublication).publish(generation, MAX_PORTABLE_BYTES,
+                        { Files.newInputStream(catalog, READ, NOFOLLOW_LINKS) }, createOnly = true) { candidate ->
+                        reader.verifyStagedProjection(candidate, empty, ::requirePublication)
+                    }
+                    target.requireCompleteLayout()
+                }
+            }
+            if (previous == null) publish {}
+            else provider.openDirectory(provider.root).use { held ->
+                requireStage()
+                requireRoot(held, expectedRoot)
+                provider.withSeparatePreviousRoot(previous, held, ::publish)
             }
         }
         checkpoint()
