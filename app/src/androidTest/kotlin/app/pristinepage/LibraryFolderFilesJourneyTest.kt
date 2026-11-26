@@ -87,6 +87,7 @@ import java.io.File
 import java.io.IOException
 import java.io.OutputStream
 import java.nio.file.Files
+import java.nio.file.StandardCopyOption.ATOMIC_MOVE
 import java.nio.file.StandardOpenOption.CREATE_NEW
 import java.security.MessageDigest
 import java.util.UUID
@@ -1096,12 +1097,34 @@ class LibraryFolderFilesJourneyTest {
                 }.exceptionOrNull() as RepositoryFailure).error.safeMessageKey)
                 assertFalse(unused.exists())
                 assertFalse(File(files, "catalog-recipe-attempts-v1").exists())
+                assertEquals(null, witness.observeInterruptedRecipeSuccessor(isolated, scratch, activation))
                 val child = witness.publishBoundRecipeEdit(isolated, scratch, activation, operation, album, page.pageId, 2, 2)
                 assertEquals(operation, child.generationId)
                 assertEquals(activation, child.issuedAt)
                 assertEquals(page.pageId, child.page)
                 assertEquals(3L, child.revision)
                 assertTrue(child.reopenWithoutProvider(forbidProvider))
+                assertEquals(operation, witness.observeInterruptedRecipeSuccessor(isolated, scratch, activation))
+                val staged = File(files, "catalog-recipe-attempts-v1/$operation")
+                // This operation is created by this test, not retained predecessor evidence. Temporarily withhold one leaf without modifying its bytes.
+                for (leaf in listOf(File(staged, "recipe-edit.complete"), File(files, "catalog-revision-spends/$operation.spent"))) {
+                    val parked = File(files, "withheld-${leaf.name}-$operation").toPath()
+                    val path = leaf.toPath()
+                    val exactBytes = leaf.readBytes()
+                    check(Files.notExists(parked) && Files.isRegularFile(path))
+                    Files.move(path, parked, ATOMIC_MOVE)
+                    try {
+                        val failure = runCatching { witness.observeInterruptedRecipeSuccessor(isolated, scratch, activation) }.exceptionOrNull()
+                        assertTrue(failure is IOException)
+                        assertFalse(leaf.exists())
+                        assertEquals(expectedPointer, activePointer.readBytes().toList())
+                        assertEquals(before + (tree.toString() to (true to true)), LibraryIndependentRootGrants.inventory(app))
+                    } finally {
+                        check(Files.notExists(path))
+                        Files.move(parked, path, ATOMIC_MOVE)
+                    }
+                    assertArrayEquals(exactBytes, leaf.readBytes())
+                }
                 val spent = runCatching {
                     witness.publishBoundRecipeEdit(forbidProvider, unused, activation, operation, album, page.pageId, 2, 2)
                 }.exceptionOrNull()
@@ -1109,7 +1132,6 @@ class LibraryFolderFilesJourneyTest {
                 assertEquals("The catalog revision attempt is already spent", spent?.message)
                 assertEquals(expectedPointer, activePointer.readBytes().toList())
                 assertEquals(operation, AndroidLibraryTreeRead(isolated, scratch).verify(tree).generationId)
-                val staged = File(files, "catalog-recipe-attempts-v1/$operation")
                 assertTrue(File(staged, "recipe-edit.intent").isFile)
                 assertTrue(File(staged, "recipe-edit.complete").isFile)
                 assertEquals(before + (tree.toString() to (true to true)), LibraryIndependentRootGrants.inventory(app))

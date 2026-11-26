@@ -11,8 +11,8 @@ import java.nio.file.Path
 
 /** Android readback of one already-recorded private spend. The caller owns the selected storage lane. */
 internal fun LocalLibraryDirectory.requireAndroidRevisionSpend(predecessor: LibraryGeneration, successor: LibraryGeneration,
-    requireOwner: () -> Unit,
-) = requireRecordedCatalogRevision(predecessor, successor, checkpoint = requireOwner) { leaf, check ->
+    requireOwner: () -> Unit, checkpoint: () -> Unit,
+) = requireRecordedCatalogRevision(predecessor, successor, checkpoint) { leaf, check ->
     val parent = checkNotNull(leaf.parent)
     try {
         withPrivateNode(rootPath, directory = true) { files, requireFiles ->

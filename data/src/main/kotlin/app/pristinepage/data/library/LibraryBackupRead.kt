@@ -28,11 +28,27 @@ internal class LibraryBackupRead(
     data class Projection<T>(val value: T, val objects: Collection<ObjectId>)
     data class Verified<T>(val generation: LibraryGeneration, val value: T)
 
-    /** Recheck identity of an already admitted tip and catalog without reopening every original. */
-    fun requireCurrent(generation: LibraryGeneration, retainedPredecessor: LibraryGeneration? = null) {
+    /** The current tip can nominate an operation to examine; it is never a completion or activation proof. */
+    fun observeTip(retained: LibraryGeneration): LibraryGeneration {
         verifyScratch()
+        val inventory = store.generationInventory(checkpoint)
+        inventory.requireExact(retained)
+        checkpoint()
+        return inventory.tip
+    }
+
+    /** Recheck identity of an already admitted tip and catalog without reopening every original. */
+    fun requireCurrent(generation: LibraryGeneration, retainedPredecessor: LibraryGeneration? = null, verifyRetainedCatalog: Boolean = false) {
+        verifyScratch()
+        if (generation.catalog.byteCount > maximumCatalogBytes ||
+            (verifyRetainedCatalog && (retainedPredecessor == null || retainedPredecessor.catalog.byteCount > maximumCatalogBytes))
+        ) throw IOException("The library catalog exceeds the verification budget")
         checkTip(generation, retainedPredecessor)
         openCatalog(generation).use { generation.verifyCatalog(it, checkpoint) }
+        if (verifyRetainedCatalog) {
+            val previous = checkNotNull(retainedPredecessor)
+            openCatalog(previous).use { previous.verifyCatalog(it, checkpoint) }
+        }
         checkTip(generation, retainedPredecessor)
         checkpoint()
     }

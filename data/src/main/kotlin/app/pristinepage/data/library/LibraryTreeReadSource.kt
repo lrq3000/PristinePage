@@ -7,7 +7,9 @@ import java.io.InputStream
 import java.nio.file.Path
 
 /** One read attempt over an already authorized document tree. The backend keeps document IDs opaque and proves their tree membership and availability; this class does not obtain a grant or write to it. */
-internal class LibraryTreeReadSource(private val rootId: String, private val backend: Backend) : LibraryBackupRead.Source {
+internal class LibraryTreeReadSource(private val rootId: String, private val backend: Backend,
+    private val bindAcrossChecks: Boolean = false,
+) : LibraryBackupRead.Source {
     data class Entry(val id: String, val name: String, val directory: Boolean)
 
     interface Backend {
@@ -33,6 +35,8 @@ internal class LibraryTreeReadSource(private val rootId: String, private val bac
 
     override fun requireIndependentScratch(scratch: Path) {
         backend.requireIndependentScratch(scratch)
+        // A recovery observation retains the same document bindings from nomination through its final readback.
+        if (bindAcrossChecks) return
         layout = null
         boundMarkers = null
         bindings.clear()

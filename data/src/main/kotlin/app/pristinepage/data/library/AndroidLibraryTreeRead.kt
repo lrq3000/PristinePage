@@ -268,6 +268,67 @@ class AndroidLibraryTreeRead(context: Context, private val scratchDirectory: Fil
         }
     }
 
+    /** Scope a cold read to the exact selected folder and one completed direct successor. Does not advance the pointer or replay anything. */
+    internal suspend fun observeInterruptedRecipeSuccessor(issuedAt: LibraryActivation): LibraryGeneration? = withContext(Dispatchers.IO) {
+        val files = app.filesDir.toPath().toRealPath()
+        withSelectedLibraryWriteLane(files) { lane ->
+            val authority = LocalLibrarySettingsBootstrap(files.toFile()).openExisting() ?: throw UnsettledSelectedRecipeEdit()
+            val binding = authority.read() as? LocalSelectedLibraryAuthority.Selected.Folder ?: throw UnsettledSelectedRecipeEdit()
+            val tree = Uri.parse(binding.grant.exactUri)
+            val predecessor = binding.expectedGeneration
+            fun requireSelection() {
+                coroutineContext.ensureActive()
+                lane.requireCurrent(files)
+                val identity = binding.selection.identity
+                if (LibraryActivation(identity.libraryId, identity.activation) != issuedAt ||
+                    binding.grant.returnedModes != 3 || authority.read() != binding
+                ) throw UnsettledSelectedRecipeEdit()
+            }
+            withReadBackend(tree, scratchDirectory, ::requireSelection, bindAcrossChecks = true) { backend, read, checkpoint ->
+                backend.requireWritableAccess()
+                backend.openRootDirectory().use { held ->
+                    val root = AndroidLibraryDescriptorAncestry.observe(held)
+                    fun requireRoot() {
+                        requireSelection()
+                        backend.requireWritableAccess()
+                        backend.rebindRoot(root)
+                    }
+                    val observed = read.observeTip(predecessor)
+                    if (observed == predecessor) {
+                        read.requireCurrent(predecessor)
+                        requireRoot()
+                        return@use null
+                    }
+                    if (observed.libraryId != predecessor.libraryId || observed.predecessorId != predecessor.id ||
+                        observed.catalogSchema != predecessor.catalogSchema
+                    ) throw UnsettledSelectedRecipeEdit()
+                    val attempt = files.resolve("catalog-recipe-attempts-v1").resolve(observed.id)
+                    val private = LocalLibraryDirectory(files.toFile())
+                    fun requireRecordedEdit() {
+                        requireRoot()
+                        try {
+                            val ownedAttempt = canonicalLibraryDirectory(attempt.toFile(), files)
+                            val proof = androidRecipeEditJournal(ownedAttempt.toFile(), checkpoint).observeForRecovery(binding)
+                            if (proof.phase != LocalLibraryRecipeEditJournal.Phase.COMPLETED || proof.intent.successor != observed ||
+                                proof.intent.rootSha256 != recipeRootKey(tree.toString(), root)
+                            ) throw IOException("The interrupted edit has no exact private completion")
+                            private.requireAndroidRevisionSpend(predecessor, observed, ::requireSelection, checkpoint)
+                        } catch (failure: IOException) { throw UnsettledSelectedRecipeEdit(failure) }
+                    }
+                    requireRecordedEdit()
+                    readCatalog(read, observed, checkpoint) { _, _ -> Unit }
+                    requireRecordedEdit()
+                    read.requireCurrent(observed, predecessor, verifyRetainedCatalog = true)
+                    requireRoot()
+                    observed
+                }.also {
+                    requireSelection()
+                    backend.requireWritableAccess()
+                }
+            }
+        }
+    }
+
     /** Only the still-owned writer may offer its live receipt. Reopen the full successor, then keep the exact grant, stage and tip checked at the private pointer swap. */
     internal suspend fun <T : Any> withBoundRecipeAdoption(
         edit: SelectedRecipeEdit.Completed, lease: SelectedLibraryWriteLease, requirePredecessor: () -> Unit,
@@ -811,7 +872,8 @@ class AndroidLibraryTreeRead(context: Context, private val scratchDirectory: Fil
     }
 
     private suspend fun <T> withReadBackend(
-        tree: Uri, scratchLocation: File, requireOwner: () -> Unit = {}, block: (Backend, LibraryBackupRead, () -> Unit) -> T,
+        tree: Uri, scratchLocation: File, requireOwner: () -> Unit = {}, bindAcrossChecks: Boolean = false,
+        block: (Backend, LibraryBackupRead, () -> Unit) -> T,
     ): T = withContext(Dispatchers.IO) {
         val checkpoint = { coroutineContext.ensureActive() }
         LibraryProviderAttempt.run {
@@ -820,7 +882,7 @@ class AndroidLibraryTreeRead(context: Context, private val scratchDirectory: Fil
                 requireOwner()
                 val scratch = canonicalLibraryDirectory(scratchLocation, app.filesDir.toPath().toRealPath())
                 val backend = Backend(app, tree, root, scratch, signal, checkpoint)
-                block(backend, backupRead(LibraryTreeReadSource(root, backend), scratch, checkpoint), checkpoint)
+                block(backend, backupRead(LibraryTreeReadSource(root, backend, bindAcrossChecks), scratch, checkpoint), checkpoint)
             }
         }
     }
@@ -979,6 +1041,9 @@ class AndroidLibraryTreeRead(context: Context, private val scratchDirectory: Fil
 
 /** Known loss of provider identity or access; private scratch and callback exceptions are not this state. */
 internal class LibraryTreeUnavailable(message: String) : IOException(message)
+
+/** An unverified interruption is not proof of lost platform access or permission to replay. */
+internal class UnsettledSelectedRecipeEdit(cause: Throwable? = null) : IOException("The selected edit could not be settled", cause)
 
 internal fun androidRecipeEditJournal(attempt: File, checkpoint: () -> Unit = {}): LocalLibraryRecipeEditJournal =
     LocalLibraryRecipeEditJournal(attempt, checkpoint = checkpoint, nodeIdentity = { path, _ ->

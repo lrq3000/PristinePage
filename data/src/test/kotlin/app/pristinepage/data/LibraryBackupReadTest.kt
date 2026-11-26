@@ -264,6 +264,22 @@ class LibraryBackupReadTest {
         assertThrows(IOException::class.java) { fixture.reader.requireCurrent(successor, predecessor) }
     }
 
+    @Test fun anUnchangedTipOnlyNominatesAndRecoveryReadbackRequiresThePredecessorCatalogBytes() {
+        val fixture = fixture()
+        val predecessor = fixture.generation
+        assertEquals(predecessor, fixture.reader.observeTip(predecessor))
+        val successor = predecessor.copy(id = "1bbb6a89-836f-4858-811d-e73237b95422", predecessorId = predecessor.id)
+        fixture.store.createCatalog(successor) { it.write(fixture.catalog) }
+        fixture.store.createMarker(successor, successor.encode())
+        assertEquals(successor, fixture.reader.observeTip(predecessor))
+        fixture.reader.requireCurrent(successor, predecessor, verifyRetainedCatalog = true)
+
+        val changed = fixture.catalog.copyOf().also { it[0] = (it[0].toInt() xor 1).toByte() }
+        File(fixture.backup, predecessor.catalogPath).writeBytes(changed)
+        assertEquals(successor, fixture.reader.observeTip(predecessor))
+        assertThrows(IOException::class.java) { fixture.reader.requireCurrent(successor, predecessor, verifyRetainedCatalog = true) }
+    }
+
     @Test fun changingTheRetainedMarkerDuringProjectionCannotBeAcknowledgedEvenWhenTheTipStaysExact() {
         val fixture = fixture()
         val original = fixture.generation

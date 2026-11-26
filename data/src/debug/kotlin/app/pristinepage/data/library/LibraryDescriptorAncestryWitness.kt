@@ -122,6 +122,10 @@ object LibraryDescriptorAncestryWitness {
             result.projection.pageId, result.projection.recipeRevision, intent)
     }
 
+    /** The witness comes back through the durable issuing binding, not the live writer's returned object. */
+    suspend fun observeInterruptedRecipeSuccessor(context: Context, scratch: File, issuedAt: LibraryActivation): String? =
+        AndroidLibraryTreeRead(context, scratch).observeInterruptedRecipeSuccessor(issuedAt)?.id
+
     suspend fun saveAndAdvanceSelectedRecipe(
         context: Context, scratch: File, issuedAt: LibraryActivation, operation: String, document: DocumentId, page: PageId,
         expectedRevision: Long, turns: Int,
