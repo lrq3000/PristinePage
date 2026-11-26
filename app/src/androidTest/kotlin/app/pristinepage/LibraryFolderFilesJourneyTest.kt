@@ -114,7 +114,7 @@ class LibraryFolderFilesJourneyTest {
     }
     private val chooseHost = TestRule { next, description ->
         val rule = if (description.methodName in setOf("endsProcessAfterPayloadBeforeTheCompletionMarker", "persistsIndependentFilesRootsAndAnchor",
-                "separatesIndependentlySelectedRootsWithoutAParentGrant"))
+                "separatesIndependentlySelectedRootsWithoutAParentGrant", "selectedFilesMergeAppendsOnlyTheMissingOriginalAndKeepsItsPredecessor"))
             interruptionCompose else compose
         rule.apply(next, description)
     }

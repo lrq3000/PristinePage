@@ -102,6 +102,7 @@ INDEPENDENT_COLD_PASSED = "10354effa50ebdf210c7d4d8b5d1fd2709a9388b779414518c267
 INDEPENDENT_DERIVED_PASSED = "550461e2206a8f887853ded659da4a494215144c64ba53f14f22a5212d3ccdd9"
 INDEPENDENT_SHARED_READER_PASSED = "8fbc16be139aa19e4e81d73e2c48ebf0e41199ba42500cfcbcf0df5a47b15081"
 INDEPENDENT_CLOSED_DRY_RUN_PASSED = "8730d1669c0f61f82d07eb2ee8d4bcd3d3bd762fed8e73317660e0e640a478db"
+SELECTED_APPEND_HOST_REFUSAL = "ea076b07261c53b5d5f3aea812717dc5f974dec05675c5ff8065c0802fd986f4"
 UUID_TEXT = r"[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}"
 BACKUP_ORIGINAL = "ebd602840377a3b3cf763cb6828fee67861ff77c444e8fe5894457ef6d99a24d"
 OCR_ACTIVATION_CASES = tuple(f"app.pristinepage.ocr.OcrWorkManagerIntegrationTest#{method}" for method in (
@@ -364,6 +365,15 @@ def verify_derived_receipt(anchor, guest, pair):
          json.loads(anchor("outcomes.json")) == {"passed": [INDEPENDENT_DERIVED_CASE], "failed": [], "installedSha256": pair},
          "The derived predecessor did not restore the exact grant inventory on the admitted pair")
     return folder, artifacts["fixture"], artifacts["previous"]
+
+
+def verify_selected_append_host_refusal(transcript):
+    need(read_results(transcript, (SELECTED_APPEND_CASE,)) == ([], [SELECTED_APPEND_CASE])
+         and "INSTRUMENTATION_STATUS: stack=java.lang.NullPointerException" in transcript
+         and "ActivityScenarioRule.getScenario(ActivityScenarioRule.java:127)" in transcript
+         and re.search(r"LibraryFolderFilesJourneyTest\.withIndependentFilesSelections[^\n]*LibraryFolderFilesJourneyTest\.kt:703\)",
+                       transcript),
+         "The exact selected append did not fail before opening Files")
 
 
 def settings_run_anchors(raw, expected_sha):
@@ -1146,8 +1156,11 @@ def run(args):
     independent_derived = args.independent_roots_derived
     selected_append = args.selected_root_append
     append_release = args.selected_append_released_generation
+    append_host_recovery = args.selected_append_host_recovery
     need(append_release is None or (selected_append and re.fullmatch(UUID_TEXT, append_release)),
          "Reassignment is valid only for a standalone selected append and one exact released generation")
+    need(not append_host_recovery or (selected_append and append_release is None),
+         "The exact pre-picker host recovery requires a standalone selected append")
     independent_cases = select_independent_roots(args.independent_roots,
         any((args.fresh, args.backup_delivery_death, args.backup_death_retry, death_receipt, death_picker_case,
              ancestry_cases, before_marker, capacity_case, picker_case, recovery_case, backup_case, args.probe_write,
@@ -1201,6 +1214,7 @@ def run(args):
     independent_retained = None
     independent_protected = None
     prior_derived = []
+    failed_append_fixture = None
     protect_interrupted = None
     death_authority = CAPACITY_PASSED if before_marker else args.backup_death_retry or SETTINGS_COLD_MANIFEST
     death_operation = str(uuid.uuid4()) if args.backup_delivery_death or before_marker else None
@@ -1226,12 +1240,29 @@ def run(args):
             recovery_pair = previous
             if args.independent_roots_retry or independent_handoff or independent_derived:
                 if independent_derived:
+                    dry_pair = previous
+                    if append_host_recovery:
+                        failed = settings_run_anchors(root, SELECTED_APPEND_HOST_REFUSAL)
+                        verify_selected_append_host_refusal(failed("independent-roots-append-instrumentation.txt"))
+                        artifact = json.loads(failed("artifacts.json"))
+                        status = json.loads(failed("independent-roots-grants.json"))
+                        need(artifact["guest"] == args.guest and artifact["selectedRootAppend"] and artifact["incomingFixture"]
+                             and artifact["appendInterveningRelease"] and status["state"] == "cleanup-unconfirmed"
+                             and json.loads(failed("outcomes.json")) == {"passed": [], "failed": [SELECTED_APPEND_CASE], "installedSha256": previous}
+                             and previous[APP] == hashes[APP] and previous[TEST] != hashes[TEST],
+                             "Recovery requires the exact failed host attempt and a test-only successor")
+                        dry_pair = json.loads(failed("installed-before.json"))
+                        need(dry_pair == artifact["previous"], "The failed append did not start from the exact dry-run pair")
+                        independent_claim = json.loads(failed("claim.json"))
+                        failed_append_fixture = status["fixture"], artifact["fixture"], artifact["incomingFixture"]
+                        root = raw.parent / "picker-adapter-library-tree-d0bcd64ff487"
                     latest = settings_run_anchors(root, INDEPENDENT_CLOSED_DRY_RUN_PASSED if selected_append else INDEPENDENT_SHARED_READER_PASSED)
-                    folder, contents, prior_pair = verify_derived_receipt(latest, args.guest, previous)
+                    folder, contents, prior_pair = verify_derived_receipt(latest, args.guest, dry_pair)
                     need(read_results(latest("independent-roots-derived-instrumentation.txt"), (INDEPENDENT_DERIVED_CASE,)) ==
                          ([INDEPENDENT_DERIVED_CASE], []), "The exact derived predecessor did not pass its instrumented case")
                     prior_derived.append((folder, contents))
-                    independent_claim = json.loads(latest("claim.json"))
+                    if independent_claim is None:
+                        independent_claim = json.loads(latest("claim.json"))
                     if selected_append:
                         shared = settings_run_anchors(raw.parent / "picker-adapter-library-tree-620643f16b20", INDEPENDENT_SHARED_READER_PASSED)
                         folder, contents, prior_pair = verify_derived_receipt(shared, args.guest, prior_pair)
@@ -1469,7 +1500,7 @@ def run(args):
                         backupPreMarkerHandoff=pre_marker_handoff, independentRoots=bool(independent_cases),
                         independentRootsRetry=args.independent_roots_retry, independentRootsHandoff=independent_handoff,
                          independentRootsDerived=independent_derived, selectedRootAppend=append_operation,
-                         appendInterveningRelease=append_release, incomingFixture=received)),
+                         appendInterveningRelease=append_release, appendHostRecovery=append_host_recovery, incomingFixture=received)),
         encoding="utf-8",
     )
     ns = load_allocator(ROOT, args.guest, raw, "pristinepage-tree-" + os.environ["OPENCODE_SESSION_ID"])
@@ -1625,6 +1656,18 @@ def run(args):
                                  "A previous derived roots fixture unexpectedly retained a grant handoff")
                     check_prior_derived()
                     independent_preservation = (*independent_preservation, check_prior_derived)
+                if failed_append_fixture:
+                    def check_failed_append():
+                        recheck_target(run, ns)
+                        prior_folder, left, right = failed_append_fixture
+                        parent = f"/sdcard/Documents/{prior_folder}"
+                        children = independent_fixture_children(prior_folder)
+                        need(adb("shell", "ls", "-A", "-1", parent).splitlines() == sorted(children),
+                             "The refused selected append parent changed")
+                        for name, inventory in zip(children, (left, right)):
+                            verify_unchanged_settings_destination(adb, f"{parent}/{name}", inventory)
+                    check_failed_append()
+                    independent_preservation = (*independent_preservation, check_failed_append)
             else:
                 pre_marker_preservation = checks
         for p, path in retained.items():
@@ -1926,6 +1969,8 @@ if __name__ == "__main__":
                         help="With standalone derived roots, append one missing original to the fresh synthetic destination")
     parser.add_argument("--selected-append-released-generation", metavar="GENERATION",
                         help="Reconcile one exact intervening released claim; still require the installed dry-run pair and preserved fixtures")
+    parser.add_argument("--selected-append-host-recovery", action="store_true",
+                        help="Use the pinned failure before Files launch; verify both previous fixture trees before a new test-only attempt")
     parser.add_argument("--provider-capacity", action="store_true",
                         help="Verify the real Files capacity gate with an unattainable synthetic requirement and no publication")
     parser.add_argument("--settings-retry", metavar="CANCEL_MANIFEST_SHA", help="Permit one new confirmation on the exact retained, independently canceled fixture")

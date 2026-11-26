@@ -14,7 +14,7 @@ from run_library_folder_picker_ldplayer import (
     check_fixture_root, read_backup_delivery_death, recheck_target, require_independent_manifests, select_backup_case, select_backup_death_picker_case, select_independent_roots, select_provider_capacity, select_settings_picker_case, select_settings_recovery_case, select_tree_ancestry, settings_completed_destination, spend_settings_retry, verify_released_independent_guest,
     finish_pre_marker_outcome, independent_fixture_children, read_independent_grant_record, retry_pre_marker_checksum, verify_ancestry_cold_handoff, verify_ancestry_grant_refusal, verify_backup_death_control, verify_backup_death_intent, verify_backup_receipt_only, verify_pre_marker_handoff, verify_pre_marker_read_refusal, verify_settings_catalog, verify_settings_ocr, verify_settings_retry_evidence,
     verify_independent_derived_installed, verify_derived_receipt, verify_selected_append_catalog, verify_released_append_guest,
-    stage_independent_fixture_pair,
+    stage_independent_fixture_pair, verify_selected_append_host_refusal,
 )
 from run_local_ocr_guest import read_boot_serial
 
@@ -143,6 +143,21 @@ class LibraryFolderPickerRunnerTest(unittest.TestCase):
         folder = "PristinePage-tree-0123456789ab"
         with self.assertRaisesRegex(RuntimeError, "after installation"):
             stage_independent_fixture_pair(adb, f"/sdcard/Documents/{folder}", folder, (("local", {}), ("source", {})), refuse)
+
+    def test_only_the_before_picker_host_failure_allows_another_append_attempt(self):
+        from run_library_folder_picker_ldplayer import SELECTED_APPEND_CASE
+        cls, test = SELECTED_APPEND_CASE.split("#")
+        status = f"INSTRUMENTATION_STATUS: class={cls}\nINSTRUMENTATION_STATUS: test={test}\n"
+        transcript = status + "INSTRUMENTATION_STATUS_CODE: 1\n" + status + (
+            "INSTRUMENTATION_STATUS: stack=java.lang.NullPointerException\n"
+            "\tat androidx.test.ext.junit.rules.ActivityScenarioRule.getScenario(ActivityScenarioRule.java:127)\n"
+            "\tat app.pristinepage.LibraryFolderFilesJourneyTest.withIndependentFilesSelections$lambda$4(LibraryFolderFilesJourneyTest.kt:703)\n"
+            "INSTRUMENTATION_STATUS_CODE: -2\nINSTRUMENTATION_RESULT: stream=\n"
+            "FAILURES!!!\nTests run: 1,  Failures: 1\nINSTRUMENTATION_CODE: -1\n"
+        )
+        verify_selected_append_host_refusal(transcript)
+        with self.assertRaisesRegex(RuntimeError, "before opening Files"):
+            verify_selected_append_host_refusal(transcript.replace("ActivityScenarioRule.getScenario", "ActivityScenarioRule.getActivity"))
 
     def test_interruption_checksum_retries_only_timeout_on_the_same_read(self):
         calls = []
