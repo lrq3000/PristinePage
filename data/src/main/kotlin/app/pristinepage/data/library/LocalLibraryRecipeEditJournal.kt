@@ -46,9 +46,23 @@ internal class LocalLibraryRecipeEditJournal(
 
         fun completion(): ByteArray =
             "pristinepage-recipe-edit-complete-v1\n${backupSha256(encode())}\n".toByteArray(Charsets.US_ASCII)
+
+        fun adoptedSelection(): LocalSelectedLibraryAuthority.Selected.Folder {
+            val identity = binding.selection.identity.copy(activation = binding.selection.identity.activation + 1)
+            val unbound = ActiveLibraryFence.Selection(Location.Folder(binding.grant.grantId, successor.id), identity)
+            return LocalSelectedLibraryAuthority.Selected.Folder(
+                LocalSelectedLibraryAuthority.boundSelection(unbound, binding.grant, successor), binding.grant, successor)
+        }
+
+        fun acknowledgment(): ByteArray {
+            val adopted = adoptedSelection().selection
+            val proof = (adopted.location as Location.Folder).verificationSha256
+            return "pristinepage-recipe-edit-adopted-v1\n${backupSha256(completion())}\n${adopted.identity.activation}\n$proof\n"
+                .toByteArray(Charsets.US_ASCII)
+        }
     }
 
-    enum class Phase { INTENT_ONLY, COMPLETED }
+    enum class Phase { INTENT_ONLY, COMPLETED, ACKNOWLEDGED }
 
     sealed interface Receipt {
         val intent: Intent
@@ -90,6 +104,23 @@ internal class LocalLibraryRecipeEditJournal(
 
     /** A known exact attempt may be inspected without creating a receipt, touching the provider, or reviving its writer. */
     fun inspect(intent: Intent): Phase? = inspectOwned(intent, null)?.phase
+
+    /** Private terminal evidence only. The caller holds the selected-write lane and reopens the exact adopted binding. */
+    fun acknowledgeAdopted(intent: Intent, adopted: LocalSelectedLibraryAuthority.Selected.Folder, requireCurrent: () -> Unit) {
+        if (adopted != intent.adoptedSelection()) invalid()
+        requireCurrent()
+        val before = inspectOwned(intent, null) ?: invalid()
+        requireCurrent()
+        if (before.phase == Phase.ACKNOWLEDGED) return
+        if (before.phase != Phase.COMPLETED) invalid()
+        val published = directory.createRecipeEditRecord(RecipeEditRecord.ADOPTED, intent.acknowledgment(), ::identity) { ownedStage ->
+            if (inspectOwned(intent, ownedStage) != before) invalid()
+            requireCurrent()
+        }
+        val after = inspectOwned(intent, null)?.takeIf { it.phase == Phase.ACKNOWLEDGED } ?: invalid()
+        if (after.nodes[RecipeEditRecord.ADOPTED.leaf] != published || after.nodes - RecipeEditRecord.ADOPTED.leaf != before.nodes) invalid()
+        requireCurrent()
+    }
 
     /** Reconstruct a private observation for the exact issuing selection. This does not return a live receipt or prove current provider bytes. */
     fun observeForRecovery(binding: LocalSelectedLibraryAuthority.Selected.Folder): Observation {
@@ -137,7 +168,8 @@ internal class LocalLibraryRecipeEditJournal(
     private fun evidence(intent: Intent, phase: Phase, includeIntent: Boolean, ownedStage: Path?): Evidence {
         val records = buildList {
             if (includeIntent) add(RecipeEditRecord.INTENT.leaf)
-            if (phase == Phase.COMPLETED) add(RecipeEditRecord.COMPLETED.leaf)
+            if (phase != Phase.INTENT_ONLY) add(RecipeEditRecord.COMPLETED.leaf)
+            if (phase == Phase.ACKNOWLEDGED) add(RecipeEditRecord.ADOPTED.leaf)
         }
         val known = (setOf("catalog.sqlite", CATALOG_OWNER) + records).toMutableSet()
         val allowedSpends = if (includeIntent) listOf(intent.successor.catalogPath, "generations/${intent.successor.id}.complete")
@@ -169,13 +201,21 @@ internal class LocalLibraryRecipeEditJournal(
     private fun readPhase(intent: Intent): Phase? {
         val known = directory.openRecipeEditRecord(RecipeEditRecord.INTENT)?.use { requireExact(it, intent.encode()) }
         val complete = directory.openRecipeEditRecord(RecipeEditRecord.COMPLETED)?.use { requireExact(it, intent.completion()) }
+        val adopted = directory.openRecipeEditRecord(RecipeEditRecord.ADOPTED)?.use {
+            if (known == null || complete == null) invalid()
+            requireExact(it, intent.acknowledgment())
+        }
         if (known == null) {
             Files.newDirectoryStream(root).use {
                 if (complete != null || it.asSequence().take(2).any { node -> node.fileName.toString() != "catalog.sqlite" }) invalid()
             }
             return null
         }
-        return if (complete == null) Phase.INTENT_ONLY else Phase.COMPLETED
+        return when {
+            adopted != null -> Phase.ACKNOWLEDGED
+            complete != null -> Phase.COMPLETED
+            else -> Phase.INTENT_ONLY
+        }
     }
 
     private fun requireStage(intent: Intent) {

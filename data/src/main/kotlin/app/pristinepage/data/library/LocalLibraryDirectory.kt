@@ -286,14 +286,21 @@ internal class LocalLibraryDirectory(root: File, private val directorySync: Dire
         forceDirectory(checkNotNull(paths.root.parentFile))
     }
 
-    enum class RecipeEditRecord(val leaf: String) { INTENT("recipe-edit.intent"), COMPLETED("recipe-edit.complete") }
+    enum class RecipeEditRecord(val leaf: String) {
+        INTENT("recipe-edit.intent"), COMPLETED("recipe-edit.complete"), ADOPTED("recipe-edit.adopted"),
+    }
 
     fun openRecipeEditRecord(record: RecipeEditRecord) = open(record.leaf)
 
     fun createRecipeEditRecord(record: RecipeEditRecord, bytes: ByteArray,
         recordIdentity: (Path) -> Any, requireOwner: (Path?) -> Unit,
-    ) = create(record.leaf, privateSupport = true, beforeStage = { requireOwner(null) },
-        recordIdentity = recordIdentity, verifyRecordLink = requireOwner) { it.write(bytes) }
+    ): Any {
+        var published: Any? = null
+        create(record.leaf, privateSupport = true, beforeStage = { requireOwner(null) },
+            recordIdentity = recordIdentity, verifyRecordLink = requireOwner, onVerifiedLink = { published = it },
+            discardDefiniteRefusal = record == RecipeEditRecord.ADOPTED) { it.write(bytes) }
+        return checkNotNull(published)
+    }
 
     /** Private grant records never cross a library export or accept a destination path from a provider. */
     fun createDefaultOrigin(bytes: ByteArray) =
@@ -457,7 +464,8 @@ internal class LocalLibraryDirectory(root: File, private val directorySync: Dire
 
     private fun create(relativePath: String, privateSupport: Boolean = false, beforeLink: () -> Unit = {},
         beforeStage: () -> Unit = {}, recordIdentity: ((Path) -> Any)? = null,
-        verifyRecordLink: ((Path) -> Unit)? = null, write: (OutputStream) -> Unit,
+        verifyRecordLink: ((Path) -> Unit)? = null, onVerifiedLink: (Any) -> Unit = {},
+        discardDefiniteRefusal: Boolean = false, write: (OutputStream) -> Unit,
     ) {
         val file = paths.beneath(relativePath)
         val destination = file.toPath()
@@ -466,6 +474,7 @@ internal class LocalLibraryDirectory(root: File, private val directorySync: Dire
         paths.createDirectories(parent, ::forceDirectory)
         if (privateSupport) admitPrivateSupportStage(parent.toPath())
         forceDirectory(parent)
+        val prelinkOwner = if (discardDefiniteRefusal) recordIdentity?.invoke(parent.toPath()) else null
         beforeStage()
         val stage = Files.createTempFile(parent.toPath(), ".pristinepage-", ".part")
         FileChannel.open(stage, WRITE, NOFOLLOW_LINKS).use { channel ->
@@ -474,8 +483,23 @@ internal class LocalLibraryDirectory(root: File, private val directorySync: Dire
         }
         // The exclusive link makes the closed stage visible without replacing any existing leaf. A backend without this primitive refuses rather than copying into the final name.
         val forced = recordIdentity?.invoke(stage)
-        beforeLink()
-        verifyRecordLink?.invoke(stage)
+        try {
+            beforeLink()
+            verifyRecordLink?.invoke(stage)
+        } catch (refused: Exception) {
+            if (prelinkOwner != null && forced != null && recordIdentity != null) {
+                try {
+                    // The publisher has not called createLink. Only discard the exact temporary record inside its original private directory.
+                    if (recordIdentity(parent.toPath()) == prelinkOwner && Files.notExists(destination, NOFOLLOW_LINKS) &&
+                        recordIdentity(stage) == forced) {
+                        Files.delete(stage)
+                        forceDirectory(parent)
+                        if (!Files.notExists(stage, NOFOLLOW_LINKS)) throw IOException("The refused private stage remains")
+                    }
+                } catch (cleanup: Exception) { if (cleanup !== refused) refused.addSuppressed(cleanup) }
+            }
+            throw refused
+        }
         if (recordIdentity != null && recordIdentity(stage) != forced) {
             throw IOException("The closed private record changed before publication")
         }
@@ -484,6 +508,7 @@ internal class LocalLibraryDirectory(root: File, private val directorySync: Dire
         if (recordIdentity != null &&
             (recordIdentity(stage) != forced || recordIdentity(destination) != forced || !Files.isSameFile(stage, destination))
         ) throw IOException("The durable private record no longer names its forced inode")
+        forced?.let(onVerifiedLink)
         // A failed write, close or sync keeps its exact stage as recovery evidence. Once durable, unlink only this attempt's temporary name; never remove the final name.
         try { Files.deleteIfExists(stage) } catch (_: IOException) { /* The verified object remains usable. */ }
     }

@@ -23,7 +23,7 @@ import org.junit.Rule
 import org.junit.rules.TemporaryFolder
 
 class LocalLibraryRecipeEditJournalTest {
-    @get:Rule val roots = TemporaryFolder()
+    @get:Rule val roots = TemporaryFolder.builder().assureDeletion().build()
     private val sync = DirectorySync { true }
     private val library = "1c45277c-3f1d-42a2-9ad2-c3996a22ba7a"
     private val prior = LibraryGeneration(library, "25c49d9b-02d8-418f-b982-154980d89cfb", null, 8, ObjectId("a".repeat(64), 512))
@@ -180,6 +180,73 @@ class LocalLibraryRecipeEditJournalTest {
         assertFailsWith<IOException> { live.recordAfterProviderClosure(next) }
         assertEquals(intent.completion().toList(), spill.readBytes().toList())
         assertFalse(attempt.resolve("recipe-edit.complete").exists())
+    }
+
+    @Test fun onlyExactCompletedAdoptionSettlesWithoutRemovingItsCatalogOrReceipt() {
+        val (attempt, intent) = fixture()
+        val writer = journal(attempt)
+        val live = writer.start(intent) {}
+        val adopted = binding(4, predecessor = next)
+        assertFailsWith<IOException> { writer.acknowledgeAdopted(intent, adopted) {} }
+        live.recordAfterProviderClosure(next)
+        for (wrong in listOf(binding(3), binding(5, predecessor = next),
+            binding(4, owner = grant.copy(exactUri = grant.exactUri.replace("Scans", "Other")), predecessor = next))) {
+            assertFailsWith<IOException> { writer.acknowledgeAdopted(intent, wrong) {} }
+        }
+        val before = attempt.listFiles()!!.associate { it.name to it.readBytes().toList() }
+        writer.acknowledgeAdopted(intent, adopted) {}
+        assertEquals(LocalLibraryRecipeEditJournal.Phase.ACKNOWLEDGED, journal(attempt).inspect(intent))
+        journal(attempt).acknowledgeAdopted(intent, adopted) {}
+        val after = attempt.listFiles()!!.associate { it.name to it.readBytes().toList() }
+        assertEquals(before, after - "recipe-edit.adopted")
+        assertEquals(before.keys + "recipe-edit.adopted", after.keys)
+    }
+
+    @Test fun settlementRefusesLostBindingAndUnacknowledgedBarrier() {
+        val (attempt, intent) = fixture()
+        journal(attempt).start(intent) {}.recordAfterProviderClosure(next)
+        val adopted = binding(4, predecessor = next)
+        assertFailsWith<IOException> {
+            journal(attempt).acknowledgeAdopted(intent, adopted) { throw IOException("The advanced pointer changed") }
+        }
+        val leaf = attempt.resolve("recipe-edit.adopted")
+        assertFalse(leaf.exists())
+        val failed = journal(attempt, DirectorySync { !leaf.exists() })
+        assertFailsWith<IOException> { failed.acknowledgeAdopted(intent, adopted) {} }
+        assertFailsWith<IOException> { failed.inspect(intent) }
+        assertEquals(staged.toList(), attempt.resolve("catalog.sqlite").readBytes().toList())
+    }
+
+    @Test fun definiteAdoptionRefusalAfterStagingDoesNotObscureTheCompletedEdit() {
+        val (attempt, intent) = fixture()
+        val writer = journal(attempt)
+        writer.start(intent) {}.recordAfterProviderClosure(next)
+        val names = attempt.list()!!.toSet()
+        assertFailsWith<IOException> {
+            writer.acknowledgeAdopted(intent, binding(4, predecessor = next)) {
+                if (attempt.list()!!.toSet() != names) throw IOException("Selection changed before linking")
+            }
+        }
+        assertEquals(names, attempt.list()!!.toSet())
+        assertEquals(LocalLibraryRecipeEditJournal.Phase.COMPLETED, writer.inspect(intent))
+    }
+
+    @Test fun aByteIdenticalSubstituteAfterLinkCannotSatisfyTheLiveAcknowledgment() {
+        val (attempt, intent) = fixture()
+        val leaf = attempt.resolve("recipe-edit.adopted").toPath()
+        var replaced = false
+        val writer = LocalLibraryRecipeEditJournal(attempt, sync, checkpoint = {
+            if (!replaced && Files.exists(leaf) && attempt.list().orEmpty().none { it.endsWith(".part") }) {
+                val substitute = Files.createTempFile(checkNotNull(attempt.parentFile).toPath(), "adopted-", ".record")
+                Files.write(substitute, Files.readAllBytes(leaf))
+                Files.setLastModifiedTime(substitute, FileTime.fromMillis(1_600_000_000_000))
+                Files.move(substitute, leaf, REPLACE_EXISTING)
+                replaced = true
+            }
+        }, nodeIdentity = { _, attrs -> attrs.fileKey() ?: (attrs.creationTime() to attrs.lastModifiedTime().takeIf { attrs.isRegularFile }) })
+        writer.start(intent) {}.recordAfterProviderClosure(next)
+        assertFailsWith<IOException> { writer.acknowledgeAdopted(intent, binding(4, predecessor = next)) {} }
+        assertEquals(true, replaced)
     }
 
     private fun binding(number: Long, owner: LibraryFolderGrantRecord = grant,
