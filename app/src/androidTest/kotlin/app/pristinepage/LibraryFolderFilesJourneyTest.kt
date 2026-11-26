@@ -63,6 +63,7 @@ import app.pristinepage.data.model.DocumentId
 import app.pristinepage.data.model.IngestResult
 import app.pristinepage.data.model.OperationErrorCode
 import app.pristinepage.data.model.RepositoryFailure
+import app.pristinepage.data.repository.RecipeAdmission
 import app.pristinepage.data.model.SaveRecipeResult
 import app.pristinepage.data.model.SourceBlobId
 import app.pristinepage.data.repository.ScopedCommittedOriginals
@@ -155,8 +156,9 @@ class LibraryFolderFilesJourneyTest {
                  "separatesIndependentlySelectedRootsWithoutAParentGrant", "selectedFilesMergeAppendsOnlyTheMissingOriginalAndKeepsItsPredecessor",
                  "selectedFilesMergeCanAppendTwiceWithoutReusingAnOlderStage", "endsProcessAfterSelectedAppendCompletionBeforeDelivery",
                  "oneFilesSelectionPublishesOnlyAClosedEditedCatalog", "selectedRecipeReceiptBindsTheExactIssuingActivation",
-                  "selectedRecipeAdvancesOnlyTheVerifiedDirectSuccessor", "selectedRecipeSettlesTwoEditsWithoutRetainingCatalogStages",
-                  "opensSelectedAlbumGridAndVerifiedOriginalWhileBrowsing",
+                   "selectedRecipeAdvancesOnlyTheVerifiedDirectSuccessor", "selectedRecipeSettlesTwoEditsWithoutRetainingCatalogStages",
+                   "selectedRecipeDoesNotReclaimOrWriteAgainAfterLosingWriteAuthority",
+                   "opensSelectedAlbumGridAndVerifiedOriginalWhileBrowsing",
                  "startEmptyRefusesANestedStageOfTheCurrentFilesLibrary", "unconfirmedDefaultGraphCloseFencesBothSuccessorAndReturn",
                  "selectedEditorDisplaysActualOriginalAndFrameWithoutWrite"))
             interruptionCompose else compose
@@ -1426,6 +1428,74 @@ class LibraryFolderFilesJourneyTest {
                 assertEquals(firstPublication, reconnectPublication(app.contentResolver, tree, ids.first()))
                 assertEquals(before + (tree.toString() to (true to true)), LibraryIndependentRootGrants.inventory(app))
                 LibraryIndependentRootGrants.refuseParentAccess(app, folder)
+            }
+        }
+    }
+
+    @Test fun selectedRecipeDoesNotReclaimOrWriteAgainAfterLosingWriteAuthority() {
+        val args = InstrumentationRegistry.getArguments()
+        val (first, refusedOperation) = listOf("librarySelectedAppendOperation", "librarySelectedSecondOperation").map { key ->
+            requireNotNull(args.getString(key)).also { check(UUID.fromString(it).toString() == it) }
+        }
+        check(first != refusedOperation)
+        withIndependentFilesSelections(chooseAnchor = false, writableDestination = true, singleDestination = true) { app, folder, selections, before ->
+            val tree = selections.single()
+            val files = File(app.filesDir.canonicalFile, "library-selected-editor-$first").apply { check(mkdir()) }
+            val isolated = object : ContextWrapper(app) {
+                override fun getApplicationContext(): Context = this
+                override fun getFilesDir(): File = files
+            }
+            val scratch = File(files, "scratch").apply { check(mkdir()) }
+            val pointer = File(files, "library-settings/active-library")
+            val attempt = File(files, "catalog-recipe-attempts-v1/$first")
+            val catalog = File(attempt, "catalog.sqlite")
+            val owner = File(attempt, "recipe-edit.catalog-owner")
+            val witness = LibraryIndependentRootGrants
+            val album = DocumentId("aaaaaaaa-aaaa-4aaa-8aaa-000000000001")
+            runBlocking {
+                val issuing = LibraryDescriptorAncestryWitness.seedRecipeEditBinding(isolated, scratch, tree)
+                val adopted = issuing.copy(number = issuing.number + 1)
+                val startup = AndroidLibraryStartup(isolated)
+                val page = startup.useSelectedCatalog(scratch) { _, loaded -> loaded.load(album).pages.single() }
+                var capturedPointer: ByteArray? = null
+                val firstResult = runCatching {
+                    startup.advanceSelectedRecipeEdit(scratch, issuing, first, album, page.pageId, 2,
+                        RecipeAdmission { _, _ -> null },
+                        onPointerVerified = { observed ->
+                            assertEquals(adopted, observed)
+                            assertEquals(null, capturedPointer)
+                            capturedPointer = pointer.readBytes()
+                            app.contentResolver.releasePersistableUriPermission(tree, Intent.FLAG_GRANT_WRITE_URI_PERMISSION)
+                            assertEquals(before + (tree.toString() to (true to false)), witness.inventory(app))
+                        }) { it.copy(geometry = it.geometry.withOutputQuarterTurns(2)) }
+                }
+                assertEquals("library_reconnect_required", (firstResult.exceptionOrNull() as RepositoryFailure).error.safeMessageKey)
+                val exactPointer = checkNotNull(capturedPointer)
+                assertEquals(first, pointer.readLines()[4])
+                assertArrayEquals(exactPointer, pointer.readBytes())
+                val publication = reconnectPublication(app.contentResolver, tree, first)
+                val reader = AndroidLibraryTreeRead(isolated, scratch)
+                assertEquals(first, reader.verify(tree).generationId)
+                val privateBefore = attempt.listFiles()!!.associate { it.name to sha256(it.readBytes()) }
+                assertTrue(privateBefore.keys.containsAll(setOf("recipe-edit.intent", "recipe-edit.complete", catalog.name, owner.name)))
+                assertFalse("recipe-edit.adopted" in privateBefore)
+                assertTrue(Files.isSameFile(catalog.toPath(), owner.toPath()))
+                val refused = runCatching {
+                    startup.advanceSelectedRecipeEdit(scratch, adopted, refusedOperation, album, page.pageId, 3,
+                        RecipeAdmission { _, _ -> null },
+                        onPublicationStarted = { error("Revoked authority reached publication") }) {
+                        error("Revoked authority reached the recipe mutation")
+                    }
+                }
+                assertEquals("library_reconnect_required", (refused.exceptionOrNull() as RepositoryFailure).error.safeMessageKey)
+                assertArrayEquals(exactPointer, pointer.readBytes())
+                assertEquals(privateBefore, attempt.listFiles()!!.associate { it.name to sha256(it.readBytes()) })
+                assertTrue(Files.isSameFile(catalog.toPath(), owner.toPath()))
+                assertFalse(File(files, "catalog-recipe-attempts-v1/$refusedOperation").exists())
+                assertFalse(File(files, "catalog-revision-spends/$refusedOperation.spent").exists())
+                assertEquals(publication, reconnectPublication(app.contentResolver, tree, first))
+                assertEquals(before + (tree.toString() to (true to false)), witness.inventory(app))
+                witness.refuseParentAccess(app, folder)
             }
         }
     }
