@@ -1,17 +1,21 @@
 """Qualify Settings Reconnect and isolated selected-editor scenarios, each on new synthetic data."""
 
 from argparse import ArgumentParser
+from contextlib import closing
 from hashlib import sha256
 import json
 import os
 from pathlib import Path
 import re
 import shutil
+import sqlite3
+from tempfile import TemporaryDirectory
 import uuid
 
 from run_settings_direct_files_ldplayer import (
     checks, prior_recovery_release, verify_prior_settings_recovery, PREDECESSOR_MANIFEST, RECOVERY_PASSED_MANIFEST, TEST_SOURCE,
 )
+from make_library_folder_picker_fixture import make_fixture
 
 
 APPLY_RELEASE = "6fff22d7ed9aa23df6925142b438deba2002d53b3e0e39d0e648a83de0678ff4"
@@ -24,6 +28,8 @@ GRANT_LOSS_CASE = "app.pristinepage.LibraryFolderFilesJourneyTest#selectedRecipe
 GRANT_LOSS_RELEASE = "4d5afc4d0917a339749eca9754c754a3b19bc8ae81db78b1158eb3751f23197c"
 ORDINARY_APPLY_CASE = "app.pristinepage.LibraryFolderFilesJourneyTest#mainSettingsAppliesAndSettlesASelectedEditWithoutTestEnablement"
 ORDINARY_APPLY_READBACK_TIMEOUT = "80858bc5c3e0ad1c254363b1cee40967b73676d276b852b9bafbfd4de0bf2b2c"
+ORDINARY_APPLY_RELEASE = "e072b0dbae9122a6100a94ec9277fa801883e147a144e3e43117d0c28f366bdc"
+IMPORT_CASE = "app.pristinepage.LibraryFolderFilesJourneyTest#settingsCopiesAndMergesAReadOnlyFilesLibrary"
 BRIDGE_SOURCE = "data/src/debug/kotlin/app/pristinepage/data/library/LibraryDescriptorAncestryWitness.kt"
 
 
@@ -174,6 +180,96 @@ def admit_ordinary_readback(manifest, history, guest, pair, previous):
     return manifest, json.loads(manifest.read_bytes())["recordSnapshot"], claim, folder, observed, inventory
 
 
+def admit_import_release(manifest, history, guest):
+    c = checks
+    manifest = manifest.resolve(strict=True)
+    raw = manifest.parent
+    c.need(raw.parent == history.resolve() and manifest.name == f"{raw.name}-final-manifest.json", "Unexpected ordinary Apply release")
+    anchor = c.settings_run_anchors(raw, ORDINARY_APPLY_RELEASE)
+    artifacts, result, proof, claim = (json.loads(anchor(name)) for name in
+                                      ("artifacts.json", "outcomes.json", "settled-readback.json", "claim.json"))
+    pair = {p: artifacts["proof"][p]["sha256"] for p in (c.APP, c.TEST)}
+    c.need(guest == artifacts["guest"] == claim["name"] and result == dict(readbackOnly=True,
+           retainedOutcomeSha256=ORDINARY_APPLY_READBACK_TIMEOUT, passed=[ORDINARY_APPLY_CASE], failed=[], installedSha256=pair)
+           and len(proof["edits"]) == 1 and proof["edits"][0]["activation"] == 11 and proof["privateCatalogLinksAbsent"]
+           and proof["originalInventoryUnchanged"], "The released foreground archive has not been qualified")
+    return manifest, json.loads(manifest.read_bytes())["recordSnapshot"], claim, pair, proof
+
+
+def import_recipe_history(catalog):
+    path = catalog.resolve()
+    c = checks
+    c.need(0 < path.stat().st_size <= 2 * 1024 * 1024 and
+           not any(Path(str(path) + suffix).exists() for suffix in ("-wal", "-shm", "-journal")),
+           "Import readback needs a bounded closed catalog")
+    with closing(sqlite3.connect(path.as_uri() + "?mode=ro&immutable=1", uri=True)) as db:
+        c.need(db.execute("PRAGMA quick_check").fetchall() == [("ok",)] and
+               not db.execute("PRAGMA foreign_key_check").fetchmany(1), "Import catalog integrity check failed")
+        return db.execute("""SELECT n.filename,r.recipeRevision,r.recipeSchemaVersion,r.canonicalRecipe,r.recipeSha256,r.parentRevision
+            FROM RecipeRevision r JOIN LibraryScanName n USING(pageId) JOIN Page p USING(pageId)
+            ORDER BY p.ordinal,r.recipeRevision LIMIT 5""").fetchall()
+
+
+def verify_settings_import(runner, adb, private, folder, synthetic, inventory, source, source_history, received, default):
+    c = checks
+    root = f"/sdcard/Documents/{folder}"
+    names = c.independent_fixture_children(folder)
+    c.need(adb("shell", "ls", "-A", "-1", root).splitlines() == sorted(names), "The Import fixture parent changed")
+    left, right = (f"{root}/{name}" for name in names)
+    c.verify_unchanged_settings_destination(adb, right, received)
+    base, = (n for n in inventory if n.startswith("generations/"))
+    original = (synthetic / base).read_text(encoding="ascii")
+    settings = "files/library-settings"
+    pointer = c.read_selected_history_record(private, f"files/library-settings-import-pointer-{folder}", 320)
+    fields = pointer.splitlines()
+    c.need(len(fields) == 7 and re.fullmatch(c.UUID_TEXT, fields[3]) and re.fullmatch(c.UUID_TEXT, fields[4]),
+           "Import did not return an exact selected binding")
+    grant_id, operation = fields[3:5]
+    leaf, catalog = f"generations/{operation}.complete", f"catalogs/{operation}.sqlite"
+    child = c.read_selected_history_record(lambda *a: adb("shell", *a), f"{left}/{leaf}", 256)
+    before, tip = original.splitlines(), child.splitlines()
+    c.need(len(tip) == 7 and tip[:5] == [before[0], before[1], operation, before[2], before[4]]
+           and re.fullmatch("[1-9][0-9]{0,6}", tip[5]) and int(tip[5]) <= 2 * 1024 * 1024
+           and re.fullmatch("[0-9a-f]{64}", tip[6]), "Import did not append the exact child")
+    marker_sha = sha256(child.encode("ascii")).hexdigest()
+    grant = c.read_selected_history_record(private, f"{settings}/folder-grants/{grant_id}", 4352)
+    access = grant.splitlines()
+    c.need(len(access) == 5 and access[:3] == ["pristinepage-library-grant-v1", grant_id, "3"] and
+           grant == "\n".join(access[:-1]) + "\n" + sha256(("\n".join(access[:-1])+"\n").encode("ascii")).hexdigest() + "\n",
+           "The exact destination grant receipt changed")
+    c.require_bound_recipe_grant_destination(access[3], left)
+    digest = sha256((grant + child).encode("ascii")).hexdigest()
+    body = f"pristinepage-active-library-v2\n{tip[1]}\n14\n{grant_id}\n{operation}\n{digest}\n"
+    c.need(pointer == body + sha256(body.encode("ascii")).hexdigest() + "\n"
+           and all(c.read_selected_history_record(private, f"{settings}/folder-verifications/{grant_id}-{g}", 256) == text
+                   for g, text in ((before[2], original), (operation, child))), "Import selection failed exact verification")
+    missing, payload, _ = c.synthetic_scan(True)
+    new_object = f"objects/{missing}"
+    stage = f"merge-staging-{operation}"
+    c.verify_unchanged_settings_destination(adb, left, inventory | {leaf: marker_sha, catalog: tip[6], new_object: missing}, backup_name=stage)
+    c.need(not adb("shell", "ls", "-A", "-1", f"{left}/{stage}").strip(), "Import left a provider temp file")
+    closed = runner.path("settings-import-catalog.sqlite")
+    adb("pull", f"{left}/{catalog}", closed, timeout=25)
+    c.need(closed.stat().st_size == int(tip[5]) and c.sha(closed) == tip[6], "Wrong closed Import catalog")
+    c.verify_selected_append_catalog(closed, c.synthetic_scan()[0], missing)
+    c.need(import_recipe_history(closed) == import_recipe_history(synthetic / f"catalogs/{before[2]}.sqlite") + source_history,
+           "Import changed canonical recipe bytes or hashes")
+    attempt = f"files/library-selected-merge-v1/merge-stages/{operation}"
+    intent = c.read_selected_history_record(private, f"{attempt}/merge.intent", 1024)
+    receipt = c.read_selected_history_record(private, f"{attempt}/selected-merge.complete", 1024)
+    c.verify_selected_append_records(intent, receipt, original, source, child)
+    c.need(private("sha256sum", f"{attempt}/catalog.sqlite").split() == [tip[6], f"{attempt}/catalog.sqlite"],
+           "The private Import catalog changed")
+    extras = {"catalog.sqlite", "merge.intent", "selected-merge.complete"}
+    spends = c.verify_library_move_spends(adb, attempt, set(private("ls", "-A", "-1", attempt).splitlines()) - extras,
+        {leaf: (len(child.encode("ascii")), marker_sha), catalog: (int(tip[5]), tip[6]), new_object: (len(payload), missing)})
+    c.need(c.require_returned_settings_pointer(c.read_selected_history_record(private, f"{settings}/active-library", 320),
+                c.read_selected_history_record(private, f"{settings}/default-origin", 320), 15) == default,
+           "Import changed the original Default identity")
+    runner.save(runner.path("settings-import-readback.json"), dict(operation=operation, activation=14, returnedActivation=15,
+        copiedObjectSha256=missing, catalogSha256=tip[6], moveSpends=spends, sourceUnchanged=True), durable=True)
+
+
 def verify_selected_edits(runner, adb, private, folder, operations, synthetic, inventory, *, refused=None, retained=None,
                           foreground_inventory=None):
     c = checks
@@ -292,6 +388,7 @@ def run(args):
     release = APPLY_RELEASE
     foreground = args.foreground_after is not None
     readback_only = args.readback_after is not None
+    importing = args.import_after is not None
     grant_loss = args.grant_loss_after is not None
     two_edits = args.settled_after is not None
     isolated_editor = two_edits or grant_loss
@@ -301,7 +398,9 @@ def run(args):
            "Choose exactly one predecessor admission")
     c.need((args.reconnect_evidence is not None) == (grant_loss or foreground) and
            (args.settled_evidence is not None) == foreground, "The successor requires its exact retained editor evidence")
-    c.need(not readback_only or foreground, "Readback must bind the exact foreground predecessor chain")
+    c.need(not (readback_only or importing) or foreground and not (readback_only and importing),
+           "Choose an exact read-only or Import successor to the foreground chain")
+    c.need((args.ordinary_apply_evidence is not None) == importing, "Import requires the exact prior write and independent readback")
     if advanced:
         reconnect_manifest, reconnect_snapshot, reconnect_claim, reconnect_pair, prior_folder, prior_reconnect = admit_editor_release(
             args.settled_after if two_edits else args.reconnect_evidence, history, guest)
@@ -330,20 +429,32 @@ def run(args):
         release = DOCUMENTS_PROBE_REFUSAL
     spent_path = history / f"settings-retry-spent-{authority}.json"
     c.need(pair[c.TEST] != previous[c.TEST] and (pair[c.APP] == previous[c.APP]) == grant_loss and
-           spent_path.is_file() == readback_only and
+           spent_path.is_file() == (readback_only or importing) and
            shutil.disk_usage(root).free >= 12 * 1024**3 + sum(p.stat().st_size for p in paths.values()),
            "Need the exact APK successor, unspent authority and retained-artifact headroom")
-    if readback_only:
+    if readback_only or importing:
         loss_manifest = manifest
+        apply_pair = pair
+        apply_timeout = args.readback_after
+        if importing:
+            import_release = admit_import_release(args.import_after, history, guest)
+            apply_pair = import_release[3]
+            apply_timeout = args.ordinary_apply_evidence
         manifest, snapshot, claim, readback_folder, old_observation, foreground_inventory = admit_ordinary_readback(
-            args.readback_after, history, guest, pair, previous)
+            apply_timeout, history, guest, apply_pair, previous)
         c.need(json.loads(spent_path.read_bytes()) == dict(folder=readback_folder, operation=None, kind="ordinary-selected-apply",
-               operations=[], previous=previous, candidate=pair), "The spent foreground intent does not match")
+               operations=[], previous=previous, candidate=apply_pair), "The spent foreground intent does not match")
         release = ORDINARY_APPLY_READBACK_TIMEOUT
+        if importing:
+            manifest, snapshot, claim, previous, foreground_proof = import_release
+            release = ORDINARY_APPLY_RELEASE
+            authority = sha256(f"settings-import-first-v1:{guest}".encode("ascii")).hexdigest()
+            c.need(not (history / f"settings-retry-spent-{authority}.json").exists() and all(pair[p] != previous[p] for p in pair),
+                   "The selected Import requires an unspent admission and an exact successor pair")
     stage = root / "validation/raw/providers/ocr-app-standard-full"
     proof = {p: c.exact_apk(paths[p], pair[p], stage, p == c.TEST) for p in paths}
     c.require_independent_manifests(proof.values())
-    purpose = ("ordinary-apply-readback" if readback_only else "ordinary-selected-apply" if foreground else
+    purpose = ("settings-import" if importing else "ordinary-apply-readback" if readback_only else "ordinary-selected-apply" if foreground else
                "selected-grant-loss" if grant_loss else "settled-edits" if two_edits else "settings-reconnect")
     prefix = f"picker-adapter-{purpose}-" + uuid.uuid4().hex[:12]
     raw = history / prefix
@@ -380,6 +491,8 @@ def run(args):
                 } or a[1:] == ("pm", "list", "packages", c.APP) or a[1:] == (grant_probe,)), "Non-read-only ADB operation")
                 if a[:2] == ("shell", "run-as"):
                     c.need(a[2] == c.APP and a[3] in {"ls", "stat", "head", "cat", "sha256sum"}, "Non-read-only private command")
+                kw.setdefault("timeout", 25)
+            if importing and (a[:2] == ("shell", "sha256sum") or a[:4] == ("shell", "run-as", c.APP, "sha256sum")):
                 kw.setdefault("timeout", 25)
             return runner.command([ns["ADB"], "-s", runner.serial, *a], **kw)
 
@@ -431,7 +544,12 @@ def run(args):
             if grant_loss or foreground:
                 preserve_isolated(settled_manifest, settled_folder, settled_proof)
             if foreground:
-                preserve_isolated(loss_manifest if readback_only else manifest, loss_folder, loss_proof, loss_proof["refusedOperation"])
+                preserve_isolated(loss_manifest if readback_only or importing else manifest, loss_folder, loss_proof, loss_proof["refusedOperation"])
+            if importing:
+                preserved = verify_selected_edits(runner, adb, private, readback_folder, [foreground_proof["edits"][0]["operation"]],
+                    synthetic, original_files, retained=(manifest.parent / f"{manifest.parent.name}-settled-catalog-1.sqlite",),
+                    foreground_inventory=foreground_inventory)
+                c.need(preserved == foreground_proof, "The prior foreground archive changed")
             return verify_prior_settings_recovery(adb, original_files, synthetic, recovery_attempt, recovery_readback)
 
         def starting_pointer():
@@ -439,7 +557,7 @@ def run(args):
             origin = c.read_selected_history_record(private, f"{settings}/default-origin", 320)
             if not advanced:
                 c.need(sha256(pointer.encode("ascii")).hexdigest() == prior_boundary["pointer"]["sha256"], "The returned Default pointer changed")
-            default_id = c.require_returned_settings_pointer(pointer, origin, 12 if readback_only else 9 if advanced else 6)
+            default_id = c.require_returned_settings_pointer(pointer, origin, 12 if readback_only or importing else 9 if advanced else 6)
             # Return uses the same original Default identity at either activation; authenticate it against the older exact pointer as well.
             if advanced:
                 body = f"pristinepage-active-library-v1\n{default_id}\n6\n-\n-\n"
@@ -491,7 +609,10 @@ def run(args):
         if isolated_editor:
             scope = f"library-selected-editor-{new_operation}"
             c.need(scope not in private("ls", "-A", "-1", "files").splitlines(), "The isolated two-edit scope already exists")
-        if foreground:
+        if importing:
+            c.need("library-selected-merge-v1" not in private("ls", "-A", "-1", "files").splitlines(),
+                   "An earlier ordinary Import attempt was retained")
+        elif foreground:
             def names(leaf, optional=False):
                 if optional and leaf not in private("ls", "-A", "-1", "files").splitlines():
                     return set()
@@ -523,7 +644,19 @@ def run(args):
             c.require_cold_backup_app(adb)
             c.need(starting_pointer() == default and c.read_app_persisted_grants(adb) == before, "Installation changed the baseline")
             c.need(require_guest_documents(adb) == parent, "The guest-local Documents parent changed")
-            if isolated_editor:
+            if importing:
+                with TemporaryDirectory(prefix="pristinepage-settings-import-", dir=Path(os.environ["LOCALAPPDATA"]) / "Temp/opencode") as temporary:
+                    host_incoming = Path(temporary) / "incoming"
+                    received = make_fixture(host_incoming, with_scan=True, alternate_scan=True, conversion=fixture["conversion"])
+                    incoming_marker, = (n for n in received if n.startswith("generations/"))
+                    source = (host_incoming / incoming_marker).read_text(encoding="ascii")
+                    source_history = import_recipe_history(host_incoming / f"catalogs/{source.splitlines()[2]}.sqlite")
+                    c.stage_independent_fixture_pair(adb, new_destination, folder, ((synthetic, original_files), (host_incoming, received)),
+                        lambda: c.recheck_target(runner, ns))
+                c.need(not Path(temporary).exists(), "The owned Import fixture did not clean up")
+                case = IMPORT_CASE
+                options = ("-e", "librarySettingsPriorFolder", protected["folder"])
+            elif isolated_editor:
                 c.stage_independent_fixture_pair(adb, new_destination, folder, ((synthetic, original_files),) * 2,
                     lambda: c.recheck_target(runner, ns))
                 case = GRANT_LOSS_CASE if grant_loss else SETTLED_CASE
@@ -550,7 +683,7 @@ def run(args):
                 testSha256=lambda: runner.installed_hash(c.TEST),
                 pointer=lambda: c.read_selected_history_record(private, pointer_path, 320).splitlines()[2],
                 generationMarkers=lambda: adb("shell", "ls", "-A", "-1", f"{new_destination}/{c.independent_fixture_children(folder)[0]}/generations"
-                    if isolated_editor else f"{new_destination}/generations").splitlines(),
+                    if isolated_editor or importing else f"{new_destination}/generations").splitlines(),
                 priorUnchanged=preserve,
                 grantUnchanged=lambda: c.read_app_persisted_grants(adb) == before)
             observed = c.collect_settings_apply_boundary(terminated, {
@@ -562,7 +695,9 @@ def run(args):
                    and observed["appSha256"] == pair[c.APP] and observed["testSha256"] == pair[c.TEST],
                    "The Reconnect case did not preserve the exact starting grant and fixtures")
             c.recheck_target(runner, ns)
-            if isolated_editor:
+            if importing:
+                verify_settings_import(runner, adb, private, folder, synthetic, original_files, source, source_history, received, default)
+            elif isolated_editor:
                 c.need(starting_pointer() == default, "The isolated witness changed the ordinary selection")
                 verify_selected_edits(runner, adb, private, folder, operations[:1] if grant_loss else operations,
                                       synthetic, original_files, refused=operations[1] if grant_loss else None)
@@ -590,6 +725,8 @@ if __name__ == "__main__":
     parser.add_argument("--grant-loss-after", type=Path, help="Exact released two-edit witness for the distinct write-grant loss case")
     parser.add_argument("--foreground-after", type=Path, help="Exact released grant-loss witness for fresh ordinary foreground Apply")
     parser.add_argument("--readback-after", type=Path, help="Read only after the exact completed foreground instrumentation and timed-out host check")
+    parser.add_argument("--import-after", type=Path, help="Exact released ordinary Apply readback before a distinct selected Import")
+    parser.add_argument("--ordinary-apply-evidence", type=Path, help="Exact completed foreground Apply runtime for the Import successor")
     parser.add_argument("--settled-evidence", type=Path, help="Prior two-edit evidence protected by the ordinary foreground case")
     parser.add_argument("--reconnect-evidence", type=Path, help="Prior Reconnect evidence protected by the grant-loss case")
     parser.add_argument("--bridge-sha", help="Exact built debug bridge source identity for the two-edit case")

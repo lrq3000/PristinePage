@@ -31,6 +31,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.ui.test.ComposeTimeoutException
 import androidx.compose.ui.test.assertIsEnabled
 import androidx.compose.ui.test.assertIsNotEnabled
+import androidx.compose.ui.test.assertTextEquals
 import androidx.compose.ui.test.hasAnyAncestor
 import androidx.compose.ui.test.hasClickAction
 import androidx.compose.ui.test.hasContentDescription
@@ -276,6 +277,80 @@ class LibraryFolderFilesJourneyTest {
     @Test fun mainSettingsAppliesAndSettlesASelectedEditWithoutTestEnablement() =
         mainSettingsJourney(applyEdit = true, ordinaryApply = true)
 
+    @Test fun settingsCopiesAndMergesAReadOnlyFilesLibrary() {
+        val args = InstrumentationRegistry.getArguments()
+        val parent = settingsFixtureFolder()
+        val (target, source) = LibraryIndependentRootGrants.paths(parent)
+        val protectedFolder = checkNotNull(args.getString("librarySettingsPriorFolder"))
+        check(protectedFolder != parent && protectedFolder.matches(Regex("PristinePage-tree-[0-9a-f]{12}")))
+        val instrumentation = InstrumentationRegistry.getInstrumentation()
+        val app = instrumentation.targetContext.applicationContext as PristinePageApplication
+        val witness = LibraryIndependentRootGrants
+        val baseline = witness.inventory(app)
+        val protected = baseline.keys.map(Uri::parse).single { it in witness.spellings(protectedFolder) }
+        assertEquals(mapOf(protected.toString() to (true to true)), baseline)
+        witness.refuseEffectiveWrite(app, witness.spellings(target) + witness.spellings(source))
+        witness.refuseParentAccess(app, parent)
+        val initial = runBlocking { app.services.imports() }.activation
+        assertEquals(12L, initial.number)
+        val album = DocumentId("aaaaaaaa-aaaa-4aaa-8aaa-000000000001")
+        val owner = compose.runOnUiThread { ViewModelProvider(compose.activity)[LibraryStorageViewModel::class.java] }
+        val manifest = File(app.filesDir.canonicalFile, "library-settings/active-library")
+        fun enabled(tag: String) = compose.onAllNodes(hasTestTag(tag) and isEnabled()).fetchSemanticsNodes().size == 1
+        compose.onNodeWithTag("atelier-settings").performClick()
+        compose.onNodeWithTag("settings-open-library_storage").performClick()
+        selectHintedSettingsFiles(instrumentation, app, owner, initial, target, select = true)
+        compose.waitUntil(20_000) { owner.state.value.review != null }
+        assertEquals(initial, runBlocking { app.services.storageLocation() }.activation)
+        compose.onNodeWithTag("library-storage-open").performClick()
+        compose.waitUntil(20_000) { owner.state.value.location?.activation?.number == 13L && enabled("library-storage-import") }
+        val selected = checkNotNull(owner.state.value.location).activation
+        val targetGrant = (witness.inventory(app).keys - baseline.keys).single()
+        assertTrue(Uri.parse(targetGrant) in witness.spellings(target))
+        val withTarget = baseline + (targetGrant to (true to true))
+        assertEquals(withTarget, witness.inventory(app))
+        val beforeCopy = manifest.readBytes()
+        try {
+            selectHintedSettingsFiles(instrumentation, app, owner, selected, source, select = true, action = LibraryStorageViewModel.Action.IMPORT)
+            compose.waitUntil(30_000) { owner.state.value.review != null || owner.state.value.error }
+            val review = checkNotNull(owner.state.value.review)
+            val prepared = review.prepared as LibraryStorageViewModel.Prepared.ImportFolder
+            assertTrue(prepared.preview.hasAlbums)
+            assertEquals(selected, review.issuing)
+            assertArrayEquals(beforeCopy, manifest.readBytes())
+            val readGrant = (witness.inventory(app).keys - withTarget.keys).single()
+            assertTrue(Uri.parse(readGrant) in witness.spellings(source))
+            assertEquals(withTarget + (readGrant to (true to false)), witness.inventory(app))
+            // API 28 DocumentsUI may offer transient write even for a read-only request. Require persisted read only and independently compare every source byte.
+            compose.onNodeWithText(app.getString(R.string.library_copy_confirm, checkNotNull(review.active), review.picked)).assertIsDisplayed()
+            compose.onNodeWithTag("library-storage-open").assertTextEquals(app.getString(R.string.library_copy_and_merge)).performClick()
+            compose.waitUntil(50_000) { !owner.state.value.busy && (owner.state.value.location?.activation?.number == 14L || owner.state.value.error) }
+            assertFalse(owner.state.value.error)
+            val adopted = checkNotNull(owner.state.value.location).activation
+            assertEquals(selected.copy(number = 14), adopted)
+            assertEquals(withTarget, witness.inventory(app))
+            Files.write(File(app.filesDir.canonicalFile, "library-settings-import-pointer-$parent").toPath(), manifest.readBytes(), CREATE_NEW)
+            val pages = runBlocking { app.services.loadLibraryAlbum(adopted, album).pages }
+            assertEquals(listOf(0, 1), pages.map { it.ordinal })
+            for (page in pages) {
+                val opened = runBlocking { app.services.loadLibraryEditorPage(EditorIdentity(album, page.pageId, adopted)) }
+                assertEquals(2L, opened.recipeRevision)
+                assertEquals(1, opened.recipe.geometry.outputQuarterTurns)
+            }
+            compose.waitUntil(15_000) { enabled("library-storage-use-default") }
+            compose.onNodeWithTag("library-storage-use-default").performScrollTo().performClick()
+            compose.onNode(hasTestTag("library-storage-use-default").not() and hasText(app.getString(R.string.library_use_default)) and hasClickAction())
+                .performClick()
+            compose.waitUntil(20_000) { owner.state.value.location?.activation == initial.copy(number = 15) && !owner.state.value.busy }
+            assertTrue(runBlocking { app.services.imports().store.catalog.list(null, 2) }.isEmpty())
+        } finally {
+            app.contentResolver.releasePersistableUriPermission(Uri.parse(targetGrant),
+                Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION)
+        }
+        assertEquals(baseline, witness.inventory(app))
+        witness.refuseParentAccess(app, parent)
+    }
+
     @Test fun mainSettingsReconnectsAnInterruptedEditWithoutRepublishingIt() =
         mainSettingsJourney(applyEdit = false, reconnectEdit = true)
 
@@ -306,7 +381,7 @@ class LibraryFolderFilesJourneyTest {
         activation: LibraryActivation, folder: String, select: Boolean,
         action: LibraryStorageViewModel.Action = LibraryStorageViewModel.Action.CHANGE,
     ) {
-        val expected = LibraryFolderPickerContract(writable = true).createIntent(app, Unit)
+        val expected = LibraryFolderPickerContract(writable = action != LibraryStorageViewModel.Action.IMPORT).createIntent(app, Unit)
         val component = checkNotNull(expected.component)
         val initial = DocumentsContract.buildDocumentUri("com.android.externalstorage.documents", "primary:Documents/$folder")
         val hinted = AtomicBoolean()
@@ -327,7 +402,7 @@ class LibraryFolderFilesJourneyTest {
                 return null
             }
         }
-        val button = "library-storage-folder"
+        val button = if (action == LibraryStorageViewModel.Action.IMPORT) "library-storage-import" else "library-storage-folder"
         compose.waitUntil(10_000) { compose.onAllNodes(hasTestTag(button) and isEnabled()).fetchSemanticsNodes().size == 1 }
         instrumentation.addMonitor(monitor)
         try {
@@ -350,7 +425,7 @@ class LibraryFolderFilesJourneyTest {
                 assertEquals(activation, pending.ticket.issuedAt)
             }
             if (select) requirePendingAction()
-            selectSettingsDestination(instrumentation, component.packageName, folder, selectFolder = select,
+            selectSettingsDestination(instrumentation, component.packageName, folder.substringAfterLast('/'), selectFolder = select,
                 navigateFromRoot = false, allowExactWindowTitle = true)
             if (!select) {
                 requirePendingAction()
