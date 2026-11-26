@@ -14,12 +14,34 @@ from run_library_folder_picker_ldplayer import (
     check_fixture_root, read_backup_delivery_death, recheck_target, require_independent_manifests, select_backup_case, select_backup_death_picker_case, select_independent_roots, select_provider_capacity, select_settings_picker_case, select_settings_recovery_case, select_tree_ancestry, settings_completed_destination, spend_settings_retry, verify_released_independent_guest,
     finish_pre_marker_outcome, independent_fixture_children, read_independent_grant_record, retry_pre_marker_checksum, verify_ancestry_cold_handoff, verify_ancestry_grant_refusal, verify_backup_death_control, verify_backup_death_intent, verify_backup_receipt_only, verify_pre_marker_handoff, verify_pre_marker_read_refusal, verify_settings_catalog, verify_settings_ocr, verify_settings_retry_evidence,
     verify_independent_derived_installed, verify_derived_receipt, verify_selected_append_catalog, verify_released_append_guest,
-    stage_independent_fixture_pair, verify_selected_append_host_refusal,
+    stage_independent_fixture_pair, verify_selected_append_host_refusal, verify_selected_append_records,
 )
 from run_local_ocr_guest import read_boot_serial
 
 
 class LibraryFolderPickerRunnerTest(unittest.TestCase):
+    def test_repeat_receipt_requires_the_exact_intent_and_all_three_markers(self):
+        def marker(suffix, predecessor):
+            return (f"pristinepage-library-v1\n{self._uuid(99)}\n{self._uuid(suffix)}\n{predecessor}\n"
+                    f"8\n512\n{'c' * 64}\n")
+
+        # Distinguish input markers solely by exact generation and predecessor fields.
+        baseline, incoming, child = marker(1, "-"), marker(2, "-"), marker(3, self._uuid(1))
+        intent = "pristinepage-library-copy-intent-v1\n" + "a" * 64 + "\n" + "b" * 64 + "\n" + baseline + incoming + child
+        receipt = "pristinepage-selected-merge-complete-v1\n" + intent
+        self.assertEqual(("a" * 64, "b" * 64), verify_selected_append_records(intent, receipt, baseline, incoming, child))
+        for wrong_intent, wrong_receipt, wrong_child in (
+            (intent + "\n", receipt, child),
+            (intent, receipt.replace("b" * 64, "d" * 64), child),
+            (intent, receipt, marker(4, self._uuid(1))),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "selected append"):
+                verify_selected_append_records(wrong_intent, wrong_receipt, baseline, incoming, wrong_child)
+
+    @staticmethod
+    def _uuid(suffix):
+        return f"10000000-0000-4000-8000-{suffix:012d}"
+
     def test_derived_roots_admits_only_the_two_selection_witness(self):
         case = "app.pristinepage.LibraryFolderFilesJourneyTest#separatesIndependentlySelectedRootsWithoutAParentGrant"
         self.assertEqual((case,), select_independent_roots(True, False, derived=True))

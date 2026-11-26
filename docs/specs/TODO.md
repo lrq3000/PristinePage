@@ -518,6 +518,8 @@ After the review corrections, strict offline recorded 2,014 JVM cases with no fa
 
 The two-append instrumentation case compiled. The second dry run requires one shared original and zero missing bytes; the final independent catalog oracle checks the exact two scans in order, the four imported-page revisions and both parent relationships rather than accepting duplicate slots or a missing revision. The absent repeated-oracle entry reproduced before implementation; 278 host storage tests passed. The run is not yet admitted: connect the exact successful predecessor, protected legacy bytes, and both new receipts to a standalone immutable runner mode before installing or writing.
 
+The host marker/receipt oracle now rejects mismatched intent bytes, either root identity or any of the three marker records. For an ordinary new append, pull and verify the private stage digest independently of the external catalog and retain separate exact intent and completion fingerprints. The missing oracle reproduced at host import before implementation; 279 host storage tests passed. The same proof must cover both stages in the dedicated repeat runner. Exact retained-guest admission is next; no guest has been launched or changed.
+
 ### Current coordination: transition to `main`
 
 - [x] Operator approved the local fast-forward and `main`-based PR/handoff cadence; see [operational authority](OPERATIONAL_PLAN.md) and [queue rules](PARALLEL_EXECUTION_PLAN.md#coordination). Earlier branch/base references below describe their historical claims.

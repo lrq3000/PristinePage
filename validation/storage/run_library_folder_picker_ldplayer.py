@@ -597,7 +597,8 @@ def exercise_selected_append(run, adb, ns, raw, guest_root, folder, files, recei
             marker_path = f"generations/{operation}.complete"
             catalog_path = f"catalogs/{operation}.sqlite"
             baseline_path, = (name for name in files if name.startswith("generations/"))
-            baseline = adb("shell", "cat", f"{left}/{baseline_path}").splitlines()
+            baseline_text = adb("shell", "cat", f"{left}/{baseline_path}")
+            baseline = baseline_text.splitlines()
             marker_text = adb("shell", "cat", f"{left}/{marker_path}")
             marker = marker_text.splitlines()
             need(len(baseline) == 7 and len(marker) == 7 and
@@ -615,9 +616,19 @@ def exercise_selected_append(run, adb, ns, raw, guest_root, folder, files, recei
             adb("pull", f"{left}/{catalog_path}", catalog, timeout=20)
             need(catalog.stat().st_size == int(marker[5]) and sha(catalog) == marker[6], "The pulled selected append catalog changed")
             verify_selected_append_catalog(catalog, synthetic_scan()[0], missing)
+            incoming_marker, = (name for name in received if name.startswith("generations/"))
+            source_text = adb("shell", "cat", f"{right}/{incoming_marker}")
+            stage = f"files/library-selected-merge-v1/merge-stages/{operation}"
+            intent = adb("shell", "run-as", APP, "cat", f"{stage}/merge.intent")
+            completion = adb("shell", "run-as", APP, "cat", f"{stage}/selected-merge.complete")
+            verify_selected_append_records(intent, completion, baseline_text, source_text, marker_text)
+            need(adb("shell", "run-as", APP, "sha256sum", f"{stage}/catalog.sqlite").split() ==
+                 [marker[6], f"{stage}/catalog.sqlite"], "The private selected append stage differs from the external catalog")
             run.save(run.path("selected-append-readback.json"), {
                 "generation": operation, "predecessor": baseline[2], "catalogSha256": marker[6],
                 "catalogBytes": int(marker[5]), "missingBytes": missing_bytes, "copiedObjectSha256": missing,
+                "privateIntentSha256": sha256(intent.encode("ascii")).hexdigest(),
+                "privateCompletionSha256": sha256(completion.encode("ascii")).hexdigest(),
             }, durable=True)
             run.save(status, {"fixture": folder, "state": "prior-inventory-restored"}, durable=True)
         return {"passed": passed, "failed": failed, "installedSha256": hashes}
@@ -631,6 +642,19 @@ def exercise_selected_append(run, adb, ns, raw, guest_root, folder, files, recei
             leaf = f"{left}/{relative}"
             need(adb("shell", "sha256sum", leaf).split() == [digest, leaf],
                  "The selected append changed predecessor or unreferenced fixture bytes")
+
+
+def verify_selected_append_records(intent, completion, baseline_marker, incoming_marker, successor_marker):
+    expected_markers = baseline_marker + incoming_marker + successor_marker
+    header = "pristinepage-library-copy-intent-v1\n"
+    fields = re.fullmatch(r"([a-f0-9]{64})\n([a-f0-9]{64})\n",
+                          intent[len(header):-len(expected_markers)] if expected_markers else "")
+    need(intent.startswith(header) and intent.endswith(expected_markers) and fields is not None and fields[1] != fields[2],
+         "The private selected append intent does not bind both roots and all three exact markers")
+    if completion is not None:
+        need(completion == "pristinepage-selected-merge-complete-v1\n" + intent,
+             "The private selected append completion does not match its exact intent")
+    return fields.groups()
 
 
 def verify_selected_append_catalog(catalog, destination_digest, incoming_digest, *, repeated=False):
