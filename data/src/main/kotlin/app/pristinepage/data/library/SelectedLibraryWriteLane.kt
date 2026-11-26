@@ -20,7 +20,7 @@ internal class SelectedLibraryWriteLease(private val owner: Path, private val ch
     }
 }
 
-/** Both selected append and edit use the exact canonical app-files owner. Refuse same-process contention before opening another lock descriptor. */
+/** Selected publication and settings-pointer mutations share the exact canonical app-files owner. Refuse same-process contention before opening another lock descriptor. */
 internal inline fun <T> withSelectedLibraryWriteLane(files: Path, block: (SelectedLibraryWriteLease) -> T): T {
     if (!selectedLibraryProcessLane.tryLock()) throw IOException("Another selected library publication owns the write lane")
     try {

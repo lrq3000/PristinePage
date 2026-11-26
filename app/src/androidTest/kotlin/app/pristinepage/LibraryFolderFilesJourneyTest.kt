@@ -117,7 +117,8 @@ class LibraryFolderFilesJourneyTest {
         val rule = if (description.methodName in setOf("endsProcessAfterPayloadBeforeTheCompletionMarker", "persistsIndependentFilesRootsAndAnchor",
                  "separatesIndependentlySelectedRootsWithoutAParentGrant", "selectedFilesMergeAppendsOnlyTheMissingOriginalAndKeepsItsPredecessor",
                  "selectedFilesMergeCanAppendTwiceWithoutReusingAnOlderStage", "endsProcessAfterSelectedAppendCompletionBeforeDelivery",
-                 "oneFilesSelectionPublishesOnlyAClosedEditedCatalog", "selectedRecipeReceiptBindsTheExactIssuingActivation"))
+                 "oneFilesSelectionPublishesOnlyAClosedEditedCatalog", "selectedRecipeReceiptBindsTheExactIssuingActivation",
+                 "selectedRecipeAdvancesOnlyTheVerifiedDirectSuccessor"))
             interruptionCompose else compose
         rule.apply(next, description)
     }
@@ -882,6 +883,41 @@ class LibraryFolderFilesJourneyTest {
                 val staged = File(files, "catalog-recipe-attempts-v1/$operation")
                 assertTrue(File(staged, "recipe-edit.intent").isFile)
                 assertTrue(File(staged, "recipe-edit.complete").isFile)
+                assertEquals(before + (tree.toString() to (true to true)), LibraryIndependentRootGrants.inventory(app))
+                LibraryIndependentRootGrants.refuseParentAccess(app, folder)
+            }
+        }
+    }
+
+    @Test fun selectedRecipeAdvancesOnlyTheVerifiedDirectSuccessor() {
+        val operation = requireNotNull(InstrumentationRegistry.getArguments().getString("librarySelectedAppendOperation"))
+        require(UUID.fromString(operation).toString() == operation)
+        withIndependentFilesSelections(chooseAnchor = false, writableDestination = true, singleDestination = true) { app, folder, selections, before ->
+            val tree = selections.single()
+            val files = File(app.filesDir.canonicalFile, "library-selected-editor-$operation").apply { check(mkdir()) }
+            val isolated = object : ContextWrapper(app) {
+                override fun getApplicationContext(): Context = this
+                override fun getFilesDir(): File = files
+            }
+            val scratch = File(files, "scratch").apply { check(mkdir()) }
+            val witness = LibraryDescriptorAncestryWitness
+            val album = DocumentId("aaaaaaaa-aaaa-4aaa-8aaa-000000000001")
+            runBlocking {
+                val old = witness.seedRecipeEditBinding(isolated, scratch, tree)
+                val startup = AndroidLibraryStartup(isolated)
+                val page = startup.useSelectedCatalog(scratch) { _, catalog -> catalog.load(album).pages.single() }
+                val (advanced, saved) = witness.saveAndAdvanceSelectedRecipe(isolated, scratch, old, operation, album, page.pageId, 2, 2)
+                assertEquals(old.copy(number = old.number + 1), advanced)
+                assertEquals(page.pageId, saved.pageId)
+                assertEquals(3L, saved.recipeRevision)
+                val reopened = AndroidLibraryStartup(isolated)
+                assertEquals(advanced, reopened.useSelectedCatalog(scratch) { activation, _ -> activation })
+                val exact = reopened.loadSelectedEditablePage(scratch, advanced, album, page.pageId)
+                assertEquals(saved.recipeRevision, exact.recipeRevision)
+                assertEquals(saved.recipeHash, exact.recipeHash)
+                assertEquals(2, exact.recipe.geometry.outputQuarterTurns)
+                val obsolete = runCatching { reopened.loadSelectedEditablePage(scratch, old, album, page.pageId) }.exceptionOrNull()
+                assertEquals("library_activation_changed", (obsolete as RepositoryFailure).error.safeMessageKey)
                 assertEquals(before + (tree.toString() to (true to true)), LibraryIndependentRootGrants.inventory(app))
                 LibraryIndependentRootGrants.refuseParentAccess(app, folder)
             }

@@ -53,13 +53,9 @@ internal class LocalSelectedLibraryAuthority(root: File, sync: DirectorySync = P
     fun advanceVerifiedFolderGeneration(
         expected: Selected.Folder, successor: LibraryGeneration, requireCurrent: () -> Unit,
     ): Selected.Folder {
-        val previous = expected.expectedGeneration
-        val identity = expected.selection.identity
-        if (expected.grant.returnedModes != 3 || successor.libraryId != previous.libraryId ||
-            successor.predecessorId != previous.id || successor.catalogSchema != previous.catalogSchema ||
-            identity.activation == Long.MAX_VALUE || read() != expected
-        ) throw IOException("The edited generation is not a successor to the active writable folder")
-        val next = Selection(Location.Folder(expected.grant.grantId, successor.id), identity.copy(activation = identity.activation + 1))
+        val next = advancedFolderSelection(expected, successor)
+            ?: throw IOException("The edited generation is not a successor to the active writable folder")
+        if (read() != expected) throw IOException("The expected folder generation is no longer active")
         val bound = chooseFolder(expected.selection, next, expected.grant, successor) {
             if (read() != expected) throw IOException("The active folder binding changed before publication")
             // A disk barrier may outlast provider access; keep the live check last, immediately before the pointer move.
@@ -68,6 +64,32 @@ internal class LocalSelectedLibraryAuthority(root: File, sync: DirectorySync = P
         val admitted = Selected.Folder(bound, expected.grant, successor)
         if (read() != admitted) throw IOException("The advanced folder binding could not be acknowledged")
         return admitted
+    }
+
+    /** Observe a possibly acknowledged atomically published pointer. This never advances the pointer or inspects the provider. */
+    fun readAdvancedFolderGeneration(expected: Selected.Folder, successor: LibraryGeneration): Selected.Folder? {
+        val next = advancedFolderSelection(expected, successor) ?: return null
+        val bound = boundSelection(next, expected.grant, successor)
+        return (read() as? Selected.Folder)?.takeIf { it == Selected.Folder(bound, expected.grant, successor) }
+    }
+
+    fun advanceOrReadVerifiedFolderGeneration(
+        expected: Selected.Folder, successor: LibraryGeneration, requireCurrent: () -> Unit,
+    ): Selected.Folder = try {
+        advanceVerifiedFolderGeneration(expected, successor, requireCurrent)
+    } catch (failure: IOException) {
+        // The atomic replacement may have occurred before its final force/readback failed. Never repeat the swap or the provider write.
+        readAdvancedFolderGeneration(expected, successor) ?: throw failure
+    }
+
+    private fun advancedFolderSelection(expected: Selected.Folder, successor: LibraryGeneration): Selection? {
+        val previous = expected.expectedGeneration
+        val identity = expected.selection.identity
+        if (expected.grant.returnedModes != 3 || successor.libraryId != previous.libraryId ||
+            successor.predecessorId != previous.id || successor.id == previous.predecessorId ||
+            successor.catalogSchema != previous.catalogSchema || identity.activation == Long.MAX_VALUE
+        ) return null
+        return Selection(Location.Folder(expected.grant.grantId, successor.id), identity.copy(activation = identity.activation + 1))
     }
 
     /** Called only after verifying the exact next folder and candidate graph. Stage records before publishing the pointer; never delete an old binding on refusal. */

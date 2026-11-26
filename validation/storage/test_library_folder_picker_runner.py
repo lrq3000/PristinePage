@@ -35,6 +35,12 @@ class LibraryFolderPickerRunnerTest(unittest.TestCase):
         intent = f"pristinepage-recipe-edit-intent-v1\n2\n{grant_id}\n{grant_hash}\n{'d' * 64}\n{old_marker}{new_marker}"
         completion = f"pristinepage-recipe-edit-complete-v1\n{sha256(intent.encode('ascii')).hexdigest()}\n"
         verify_bound_recipe_receipt(intent, completion, old_marker, new_marker, pointer, grant)
+        activated_hash = sha256((grant + new_marker).encode("ascii")).hexdigest()
+        activated = signed(f"pristinepage-active-library-v2\n{library}\n3\n{grant_id}\n{child}\n{activated_hash}\n")
+        verify_bound_recipe_receipt(intent, completion, old_marker, new_marker, activated, grant, advanced=True)
+        for wrong in (pointer, activated.replace(f"\n{child}\n", f"\n{prior}\n"), activated.replace("\n3\n", "\n4\n")):
+            with self.assertRaisesRegex(RuntimeError, "bound recipe receipt"):
+                verify_bound_recipe_receipt(intent, completion, old_marker, new_marker, wrong, grant, advanced=True)
         for bad in (intent.replace("\n2\n", "\n3\n", 1), intent.replace("b" * 64, "c" * 64)):
             forged = f"pristinepage-recipe-edit-complete-v1\n{sha256(bad.encode('ascii')).hexdigest()}\n"
             with self.assertRaisesRegex(RuntimeError, "bound recipe receipt"):
@@ -145,6 +151,30 @@ class LibraryFolderPickerRunnerTest(unittest.TestCase):
             verify_released_selected_repeat_guest(original, stopped)
         with self.assertRaises(RuntimeError):
             verify_bound_recipe_release(original, stopped, manifest, snapshot | {"consumers": ["live"]})
+
+    def test_advanced_edit_only_accepts_the_named_intervening_release_and_pinned_bound_history(self):
+        from run_library_folder_picker_ldplayer import verify_advanced_recipe_release
+        original = dict(name="synthetic", installation="installed", index=3, created="creation", worktree="owned",
+                        purpose="library", api=28, created_by_agent=True, generation=self._uuid(1), runtime_processes=[[15, 42], [17, 47]])
+        snapshot = original | dict(state="shutdown_ready", claim_generation=original["generation"], shutdown_verified=False,
+                                  shutdown_ready=True, evidence_saved=True, owner="other", reservedKiB=0,
+                                  keep_running=False, handoff_to=None, shutdown_processes=original["runtime_processes"],
+                                  cleanup_attempt={"generation": original["generation"], "state": "running", "token": "exact"})
+        stopped = snapshot | dict(state="stopped-released", owner=None, stopped="done", shutdown_verified=True,
+                                  cleanup_attempt=snapshot["cleanup_attempt"] | {"state": "completed", "finished": "done"})
+        prior = {k: stopped[k] for k in ("generation", "owner", "state", "worktree", "purpose", "shutdown_processes", "stopped", "cleanup_attempt")}
+        generation = self._uuid(2)
+        processes = [[25, 52], [27, 57]]
+        later = stopped | dict(generation=generation, claim_generation=generation, worktree="other", consumers=[],
+                               runtime_processes=processes, shutdown_processes=processes, ownership_history=[prior],
+                               cleanup_attempt={"generation": generation, "state": "completed"})
+        manifest = Path("retained-advance-predecessor.json").resolve()
+        verify_advanced_recipe_release(original, later, manifest, snapshot, generation)
+        for named, record in ((self._uuid(3), later), (generation, later | {"consumers": ["live"]}),
+                              (generation, later | {"ownership_history": [prior | {"shutdown_processes": processes}]}),
+                              (generation, later | {"ownership_history": [prior | {"cleanup_attempt": prior["cleanup_attempt"] | {"token": "other"}}]})):
+            with self.subTest(named=named, record=record), self.assertRaises(RuntimeError):
+                verify_advanced_recipe_release(original, record, manifest, snapshot, named)
 
     def test_repeat_refuses_grant_mode_drift_before_the_new_fixture_is_written(self):
         from run_library_folder_picker_ldplayer import APP, URI_PERMISSIONS_HEADER

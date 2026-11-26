@@ -50,8 +50,16 @@ internal class LocalLibraryRecipeEditJournal(
 
     enum class Phase { INTENT_ONLY, COMPLETED }
 
-    sealed interface Receipt { val intent: Intent }
-    private data class Completed(override val intent: Intent) : Receipt
+    sealed interface Receipt {
+        val intent: Intent
+        fun requireCurrent()
+    }
+
+    private inner class Completed(override val intent: Intent, private val proof: Evidence) : Receipt {
+        override fun requireCurrent() {
+            if (inspectOwned(intent, null) != proof) invalid()
+        }
+    }
 
     sealed interface LiveCompletion {
         fun recordAfterProviderClosure(published: LibraryGeneration): Receipt
@@ -112,7 +120,7 @@ internal class LocalLibraryRecipeEditJournal(
             val complete = inspectOwned(intent, null)?.takeIf { it.phase == Phase.COMPLETED } ?: invalid()
             if (complete.nodes - RecipeEditRecord.COMPLETED.leaf != pending.nodes) invalid()
             requireOwner()
-            return Completed(intent)
+            return Completed(intent, complete)
         }
     }
 

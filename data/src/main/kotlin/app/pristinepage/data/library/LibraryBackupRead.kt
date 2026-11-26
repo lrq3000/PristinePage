@@ -29,11 +29,11 @@ internal class LibraryBackupRead(
     data class Verified<T>(val generation: LibraryGeneration, val value: T)
 
     /** Recheck identity of an already admitted tip and catalog without reopening every original. */
-    fun requireCurrent(generation: LibraryGeneration) {
+    fun requireCurrent(generation: LibraryGeneration, retainedPredecessor: LibraryGeneration? = null) {
         verifyScratch()
-        checkTip(generation)
+        checkTip(generation, retainedPredecessor)
         openCatalog(generation).use { generation.verifyCatalog(it, checkpoint) }
-        checkTip(generation)
+        checkTip(generation, retainedPredecessor)
         checkpoint()
     }
 
@@ -54,10 +54,11 @@ internal class LibraryBackupRead(
         checkpoint()
     }
 
-    private fun checkTip(generation: LibraryGeneration) {
+    private fun checkTip(generation: LibraryGeneration, retainedPredecessor: LibraryGeneration? = null) {
         checkpoint()
         val inventory = store.generationInventory(checkpoint)
         inventory.requireExact(generation)
+        retainedPredecessor?.let(inventory::requireExact)
         if (inventory.tip != generation) throw UnexpectedLibraryTip()
     }
 

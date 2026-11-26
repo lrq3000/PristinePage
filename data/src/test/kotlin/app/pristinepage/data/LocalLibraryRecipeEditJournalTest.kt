@@ -13,6 +13,7 @@ import java.io.File
 import java.io.IOException
 import java.nio.file.Files
 import java.nio.file.StandardCopyOption.REPLACE_EXISTING
+import java.nio.file.attribute.FileTime
 import java.security.MessageDigest
 import kotlin.test.Test
 import kotlin.test.assertEquals
@@ -45,6 +46,25 @@ class LocalLibraryRecipeEditJournalTest {
         assertFailsWith<IOException> { live.recordAfterProviderClosure(next) }
         assertFailsWith<IOException> { cold.inspect(intent.copy(rootSha256 = "b".repeat(64))) }
         assertFailsWith<IOException> { cold.inspect(intent.copy(binding = binding(4))) }
+    }
+
+    @Test fun liveReceiptCannotAuthorizeAdoptionAfterByteIdenticalCompletionReplacement() {
+        val (attempt, intent) = fixture()
+        val writer = LocalLibraryRecipeEditJournal(attempt, sync, nodeIdentity = { _, attrs ->
+            // This fixture gives the substitute an explicit synthetic node identity on Windows, where fileKey can be null.
+            attrs.fileKey() ?: (attrs.creationTime() to attrs.lastModifiedTime().takeIf { attrs.isRegularFile })
+        })
+        val receipt = writer.start(intent) {}.recordAfterProviderClosure(next)
+        receipt.requireCurrent()
+
+        val leaf = attempt.resolve("recipe-edit.complete").toPath()
+        val replacement = Files.createTempFile(checkNotNull(attempt.parentFile).toPath(), "replacement-", ".record")
+        Files.write(replacement, intent.completion())
+        Files.setLastModifiedTime(replacement, FileTime.fromMillis(1_600_000_000_000))
+        Files.move(replacement, leaf, REPLACE_EXISTING)
+
+        assertEquals(LocalLibraryRecipeEditJournal.Phase.COMPLETED, writer.inspect(intent))
+        assertFailsWith<IOException> { receipt.requireCurrent() }
     }
 
     @Test fun revokedOwnerCannotMintCompletionAndItsAttemptCannotBeReplayed() {

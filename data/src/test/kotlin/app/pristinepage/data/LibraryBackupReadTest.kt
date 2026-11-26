@@ -250,6 +250,20 @@ class LibraryBackupReadTest {
         }
     }
 
+    @Test fun exactSuccessorCheckCannotAcceptASameIdReplacementOfItsPredecessor() {
+        val fixture = fixture()
+        val predecessor = fixture.generation
+        val successor = predecessor.copy(id = "1bbb6a89-836f-4858-811d-e73237b95422", predecessorId = predecessor.id)
+        fixture.store.createCatalog(successor) { it.write(fixture.catalog) }
+        fixture.store.createMarker(successor, successor.encode())
+        fixture.reader.requireCurrent(successor, predecessor)
+
+        val changed = predecessor.copy(catalog = predecessor.catalog.copy(sha256 = "b".repeat(64)))
+        File(fixture.backup, "generations/${predecessor.id}.complete").writeBytes(changed.encode())
+        fixture.reader.requireCurrent(successor)
+        assertThrows(IOException::class.java) { fixture.reader.requireCurrent(successor, predecessor) }
+    }
+
     @Test fun changingTheRetainedMarkerDuringProjectionCannotBeAcknowledgedEvenWhenTheTipStaysExact() {
         val fixture = fixture()
         val original = fixture.generation

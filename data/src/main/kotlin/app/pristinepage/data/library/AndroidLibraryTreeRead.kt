@@ -170,7 +170,15 @@ class AndroidLibraryTreeRead(context: Context, private val scratchDirectory: Fil
         /** The detached successor is verified. There is no active-pointer change or user-visible save receipt. */
         data class Published(val generation: LibraryGeneration) : SelectedRecipeEdit
         /** Private proof and projection only. Do not deliver the ordinary Room save before activation. */
-        data class Completed(val receipt: LocalLibraryRecipeEditJournal.Receipt, val projection: SaveRecipeResult.Saved) : SelectedRecipeEdit
+        class Completed(
+            val receipt: LocalLibraryRecipeEditJournal.Receipt, val projection: SaveRecipeResult.Saved,
+            private val issuer: SelectedLibraryWriteLease,
+        ) : SelectedRecipeEdit {
+            fun requireIssuingLease(lease: SelectedLibraryWriteLease, files: Path) {
+                if (lease !== issuer) throw IOException("The live edit receipt belongs to a different writer")
+                issuer.requireCurrent(files)
+            }
+        }
     }
 
     private data class PendingRecipeCompletion(
@@ -198,10 +206,11 @@ class AndroidLibraryTreeRead(context: Context, private val scratchDirectory: Fil
         }
     }
 
-    internal suspend fun appendBoundRecipeEdit(
+    internal suspend fun <T : Any> appendBoundRecipeEdit(
         binding: LocalSelectedLibraryAuthority.Selected.Folder, operation: String, document: DocumentId, page: PageId,
         expectedRevision: Long, admission: RecipeAdmission, requireAuthority: () -> Unit, edit: (Recipe) -> Recipe,
-    ): SelectedRecipeEdit = withContext(Dispatchers.IO) {
+        consume: suspend (SelectedRecipeEdit, SelectedLibraryWriteLease) -> T,
+    ): T = withContext(Dispatchers.IO) {
         requireOpaqueId(operation)
         requireAuthority()
         val files = app.filesDir.toPath().toRealPath()
@@ -215,10 +224,66 @@ class AndroidLibraryTreeRead(context: Context, private val scratchDirectory: Fil
             requireSelection()
             requireUnusedRecipeOperation(files, operation)
             val verified = verifyRecipeEditTarget(Uri.parse(binding.grant.exactUri), binding.expectedGeneration, ::requireSelection)
-            appendRecipeUnderLease(files, lease, verified, operation, document, page, expectedRevision, admission,
+            val result = appendRecipeUnderLease(files, lease, verified, operation, document, page, expectedRevision, admission,
                 ::requireSelection, checkpoint, binding, edit)
+            consume(result, lease)
         }
     }
+
+    /** Only the still-owned writer may offer its live receipt. Reopen the full successor, then keep the exact grant, stage and tip checked at the private pointer swap. */
+    internal suspend fun <T : Any> withBoundRecipeAdoption(
+        edit: SelectedRecipeEdit.Completed, lease: SelectedLibraryWriteLease, requirePredecessor: () -> Unit,
+        advance: (() -> Unit) -> T, requireAdvanced: (T) -> Unit,
+    ): T = withContext(Dispatchers.IO) {
+        val files = app.filesDir.toPath().toRealPath()
+        val receipt = edit.receipt
+        val intent = receipt.intent
+        val tree = Uri.parse(intent.binding.grant.exactUri)
+        fun requireWriter() {
+            coroutineContext.ensureActive()
+            edit.requireIssuingLease(lease, files)
+            requirePredecessor()
+        }
+        requireWriter()
+        receipt.requireCurrent()
+        withReadBackend(tree, scratchDirectory, ::requireWriter) { backend, read, checkpoint ->
+            backend.requireWritableAccess()
+            val activated = backend.openRootDirectory().use { held ->
+                val root = AndroidLibraryDescriptorAncestry.observe(held)
+                if (recipeRootKey(tree.toString(), root) != intent.rootSha256) {
+                    throw LibraryTreeUnavailable("The edited folder no longer matches the live receipt")
+                }
+                readCatalog(read, intent.successor, checkpoint) { _, _ -> Unit }
+                fun requireDestination() {
+                    checkpoint()
+                    edit.requireIssuingLease(lease, files)
+                    receipt.requireCurrent()
+                    backend.requireWritableAccess()
+                    backend.rebindRoot(root)
+                    read.requireCurrent(intent.successor, intent.binding.expectedGeneration)
+                    backend.rebindRoot(root)
+                    backend.requireWritableAccess()
+                    checkpoint()
+                }
+                fun beforeAdvance() {
+                    requireWriter()
+                    requireDestination()
+                }
+                beforeAdvance()
+                val result = advance(::beforeAdvance)
+                // The predecessor is no longer active. Never rerun the provider write to confirm delivery.
+                requireAdvanced(result)
+                requireDestination()
+                result
+            }
+            backend.requireWritableAccess()
+            checkpoint()
+            activated
+        }
+    }
+
+    private fun recipeRootKey(tree: String, root: AndroidLibraryDescriptorAncestry.Observation) =
+        backupSha256("pristinepage-selected-root-v1\n$tree\n$root".toByteArray(Charsets.UTF_8))
 
     private suspend fun appendRecipeUnderLease(
         files: Path, lease: SelectedLibraryWriteLease, verified: Verified, operation: String, document: DocumentId,
@@ -281,7 +346,7 @@ class AndroidLibraryTreeRead(context: Context, private val scratchDirectory: Fil
                 requireAttempt()
                 val successor = LibraryGeneration(selection.generation.libraryId, operation, selection.generation.id, candidate.schema, candidate.catalog)
                 if (binding != null) {
-                    val rootKey = backupSha256("pristinepage-selected-root-v1\n${selection.tree}\n$identity".toByteArray(Charsets.UTF_8))
+                    val rootKey = recipeRootKey(selection.tree, identity)
                     val intent = LocalLibraryRecipeEditJournal.Intent(binding, rootKey, successor)
                     val receiptJournal = androidRecipeEditJournal(attempt.toFile(), checkpoint)
                     val live = receiptJournal.start(intent) {
@@ -309,7 +374,7 @@ class AndroidLibraryTreeRead(context: Context, private val scratchDirectory: Fil
             }
             requirePrivateOwner()
             revisionWriter(selection, CancellationSignal(), checkpoint).requireExactAccess()
-            SelectedRecipeEdit.Completed(receipt, completion.projection)
+            SelectedRecipeEdit.Completed(receipt, completion.projection, lease)
         }
     }
 

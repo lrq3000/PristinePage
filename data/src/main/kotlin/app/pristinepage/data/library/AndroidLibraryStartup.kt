@@ -9,6 +9,7 @@ import app.pristinepage.data.model.OperationError
 import app.pristinepage.data.model.OperationErrorCode
 import app.pristinepage.data.model.PageId
 import app.pristinepage.data.model.RepositoryFailure
+import app.pristinepage.data.model.SaveRecipeResult
 import app.pristinepage.data.model.requireOpaqueId
 import app.pristinepage.data.repository.DocumentCatalog
 import app.pristinepage.data.repository.EditablePages
@@ -72,7 +73,39 @@ class AndroidLibraryStartup(context: Context) {
     internal suspend fun publishSelectedRecipeEdit(
         scratchDirectory: File, issuedAt: LibraryActivation, operation: String, document: DocumentId, page: PageId,
         expectedRevision: Long, admission: RecipeAdmission, edit: (Recipe) -> Recipe,
-    ): AndroidLibraryTreeRead.SelectedRecipeEdit {
+    ): AndroidLibraryTreeRead.SelectedRecipeEdit = withSelectedRecipePublication(scratchDirectory, issuedAt, operation, document, page,
+        expectedRevision, admission, edit) { _, _, result, _, _ -> result }
+
+    sealed interface SelectedRecipeSave {
+        data class Activated(val activation: LibraryActivation, val saved: SaveRecipeResult.Saved) : SelectedRecipeSave
+        data class Refused(val result: SaveRecipeResult) : SelectedRecipeSave
+    }
+
+    /** A verified persistence result, not user-visible delivery. The foreground must accept it under its adopted activation after dispatch. */
+    suspend fun advanceSelectedRecipeEdit(
+        scratchDirectory: File, issuedAt: LibraryActivation, operation: String, document: DocumentId, page: PageId,
+        expectedRevision: Long, admission: RecipeAdmission, edit: (Recipe) -> Recipe,
+    ): SelectedRecipeSave = withSelectedRecipePublication(scratchDirectory, issuedAt, operation, document, page,
+        expectedRevision, admission, edit) { reader, authority, result, lease, requirePredecessor ->
+        when (result) {
+            is AndroidLibraryTreeRead.SelectedRecipeEdit.Refused -> SelectedRecipeSave.Refused(result.result)
+            is AndroidLibraryTreeRead.SelectedRecipeEdit.Published -> throw IOException("The active edit has no live receipt")
+            is AndroidLibraryTreeRead.SelectedRecipeEdit.Completed -> {
+                val (binding, _, successor) = result.receipt.intent
+                val next = reader.withBoundRecipeAdoption(result, lease, requirePredecessor,
+                    advance = { beforeSwap -> authority.advanceOrReadVerifiedFolderGeneration(binding, successor, beforeSwap) },
+                    requireAdvanced = { if (authority.read() != it) reconnect() })
+                SelectedRecipeSave.Activated(next.activation(), result.projection)
+            }
+        }
+    }
+
+    private suspend fun <T : Any> withSelectedRecipePublication(
+        scratchDirectory: File, issuedAt: LibraryActivation, operation: String, document: DocumentId, page: PageId,
+        expectedRevision: Long, admission: RecipeAdmission, edit: (Recipe) -> Recipe,
+        consume: suspend (AndroidLibraryTreeRead, LocalSelectedLibraryAuthority, AndroidLibraryTreeRead.SelectedRecipeEdit,
+            SelectedLibraryWriteLease, () -> Unit) -> T,
+    ): T {
         val (authority, loaded) = readSelection(allowBootstrap = false) ?: folderNotSelected()
         if (loaded.activation() != issuedAt) {
             throw RepositoryFailure(OperationError(OperationErrorCode.SOURCE_UNAVAILABLE, false, "library_activation_changed", null))
@@ -88,7 +121,9 @@ class AndroidLibraryStartup(context: Context) {
         }
         val reader = AndroidLibraryTreeRead(app, scratchDirectory)
         return try {
-            reader.appendBoundRecipeEdit(selected, operation, document, page, expectedRevision, admission, ::requireSelected, edit)
+            reader.appendBoundRecipeEdit(selected, operation, document, page, expectedRevision, admission, ::requireSelected, edit) { result, lease ->
+                consume(reader, authority, result, lease, ::requireSelected)
+            }
         } catch (_: LibraryTreeUnavailable) { reconnect() }
         catch (_: ExactLibraryWriteAccessUnavailable) { reconnect() }
     }

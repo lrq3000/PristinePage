@@ -103,6 +103,39 @@ class LocalSelectedLibraryAuthorityTest {
         assertEquals(selected, good.read())
     }
 
+    @Test fun exactSuccessorReadbackNeverChangesAnUnadvancedPointer() {
+        val writer = LocalSelectedLibraryAuthority(roots.newFolder().canonicalFile, sync)
+        val selected = select(writer, writable = true)
+        assertEquals(null, writer.readAdvancedFolderGeneration(selected, successor))
+        assertEquals(selected, writer.read())
+
+        val advanced = writer.advanceVerifiedFolderGeneration(selected, successor) {}
+        assertEquals(advanced, writer.readAdvancedFolderGeneration(selected, successor))
+        assertEquals(null, writer.readAdvancedFolderGeneration(selected, successor.copy(catalogSchema = 7)))
+        assertEquals(null, writer.readAdvancedFolderGeneration(selected, successor.copy(catalog = ObjectId("d".repeat(64), 621))))
+    }
+
+    @Test fun aLostPointerAcknowledgmentReadsBackTheExactSuccessorWithoutReenteringPublication() {
+        val root = roots.newFolder().canonicalFile
+        val pointer = root.resolve("active-library")
+        val stable = LocalSelectedLibraryAuthority(root, sync)
+        val before = select(stable, writable = true)
+        val original = pointer.readBytes().toList()
+        var lost = false
+        var writerChecks = 0
+        val flaky = LocalSelectedLibraryAuthority(root, DirectorySync {
+            if (!lost && pointer.readBytes().toList() != original) { lost = true; false } else true
+        })
+        val advanced = flaky.advanceOrReadVerifiedFolderGeneration(before, successor) {
+            check(!lost) { "Cannot repeat live writer activity after the uncertain replacement" }
+            writerChecks++
+        }
+        assertEquals(true, lost)
+        assertEquals(2, writerChecks)
+        assertEquals(successor, advanced.expectedGeneration)
+        assertEquals(advanced, stable.read())
+    }
+
     private fun select(writer: LocalSelectedLibraryAuthority, writable: Boolean): LocalSelectedLibraryAuthority.Selected.Folder {
         writer.initializeDefault(initial)
         val exact = grant.copy(returnedModes = if (writable) 3 else 1)

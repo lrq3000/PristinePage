@@ -5,6 +5,7 @@ import android.net.Uri
 import android.os.ParcelFileDescriptor
 import app.pristinepage.data.model.DocumentId
 import app.pristinepage.data.model.PageId
+import app.pristinepage.data.model.SaveRecipeResult
 import app.pristinepage.data.repository.RecipeAdmission
 import java.io.File
 import java.util.UUID
@@ -119,6 +120,17 @@ object LibraryDescriptorAncestryWitness {
         val identity = intent.binding.selection.identity
         return BoundRecipeReceipt(intent.successor.id, LibraryActivation(identity.libraryId, identity.activation),
             result.projection.pageId, result.projection.recipeRevision, intent)
+    }
+
+    suspend fun saveAndAdvanceSelectedRecipe(
+        context: Context, scratch: File, issuedAt: LibraryActivation, operation: String, document: DocumentId, page: PageId,
+        expectedRevision: Long, turns: Int,
+    ): Pair<LibraryActivation, SaveRecipeResult.Saved> {
+        val result = AndroidLibraryStartup(context).advanceSelectedRecipeEdit(scratch, issuedAt, operation, document, page, expectedRevision,
+            RecipeAdmission { _, _ -> null }) { previous ->
+            previous.copy(geometry = previous.geometry.withOutputQuarterTurns(turns))
+        } as AndroidLibraryStartup.SelectedRecipeSave.Activated
+        return result.activation to result.saved
     }
 
     suspend fun appendSelectedRecipeEdit(
