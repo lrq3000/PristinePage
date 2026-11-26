@@ -180,12 +180,14 @@ class AndroidLibraryStartup(context: Context) {
     }
 
     /** Select the existing root without moving, copying or altering it. The foreground caller must drain the previous graph. */
-    suspend fun openVerifiedExistingFolder(scratchDirectory: File, preview: ExistingFolderPreview): LibraryActivation = withContext(Dispatchers.IO) {
-        selectVerifiedFolder(scratchDirectory, preview.issuing, preview.tree) { _, _ -> preview.verified }
-    }
+    suspend fun openVerifiedExistingFolder(scratchDirectory: File, preview: ExistingFolderPreview,
+        beforePointerReplace: () -> Unit = {},
+    ): LibraryActivation = selectVerifiedFolder(scratchDirectory, preview.issuing, preview.tree, beforePointerReplace) { _, _ -> preview.verified }
 
-    suspend fun startVerifiedEmptyFolder(scratchDirectory: File, preview: FolderPreview.Empty): LibraryActivation = withContext(Dispatchers.IO) {
-        selectVerifiedFolder(scratchDirectory, preview.issuing, preview.tree) { before, requireCurrent ->
+    suspend fun startVerifiedEmptyFolder(scratchDirectory: File, preview: FolderPreview.Empty,
+        beforePointerReplace: () -> Unit = {},
+    ): LibraryActivation =
+        selectVerifiedFolder(scratchDirectory, preview.issuing, preview.tree, beforePointerReplace) { before, requireCurrent ->
             val previous = when (before) {
                 is LocalSelectedLibraryAuthority.Selected.Default -> null
                 is LocalSelectedLibraryAuthority.Selected.Folder -> Uri.parse(before.grant.exactUri)
@@ -196,9 +198,9 @@ class AndroidLibraryStartup(context: Context) {
             val reader = AndroidLibraryTreeRead(app, scratchDirectory)
             reader.verifyRecipeEditTarget(preview.tree, generation, requireCurrent).also { reader.requireConfirmedRoot(it, preview.root) }
         }
-    }
 
     private suspend fun selectVerifiedFolder(scratchDirectory: File, issuing: LibraryActivation, tree: Uri,
+        beforePointerReplace: () -> Unit,
         admit: suspend (LocalSelectedLibraryAuthority.Selected, () -> Unit) -> AndroidLibraryTreeRead.Verified,
     ): LibraryActivation = withContext(Dispatchers.IO) {
         val (authority, before) = readSelection(allowBootstrap = false) ?: folderNotSelected()
@@ -221,7 +223,7 @@ class AndroidLibraryStartup(context: Context) {
                 val offered = ActiveLibraryFence.Selection(ActiveLibraryFence.Location.Folder(grant.grantId, generation.id), identity)
                 val exact = LocalSelectedLibraryAuthority.boundSelection(offered, grant, generation)
                 try {
-                    authority.chooseFolder(before.selection, exact, grant, generation, checkDestination)
+                    authority.chooseFolder(before.selection, exact, grant, generation, beforePointerReplace, checkDestination)
                 } catch (failure: IOException) {
                     if (authority.read()?.selection != exact) throw failure
                 }

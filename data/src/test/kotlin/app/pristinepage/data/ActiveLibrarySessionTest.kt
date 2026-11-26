@@ -79,6 +79,59 @@ class ActiveLibrarySessionTest {
         assertEquals("default", owner.use(activation) { it.name })
     }
 
+    @Test fun canceledCutoverAfterDurablePublicationStillClosesAndRetiresTheIssuingGraph() = runTest {
+        val activation = LibraryActivation(default.identity.libraryId, default.identity.activation)
+        val graph = Graph("default")
+        val owner = DefaultLibraryOperations(activation, graph)
+        val pointerChanged = CompletableDeferred<Unit>()
+        val pending = launch {
+            owner.cutoverAndRetire(activation, hasLeft = { pointerChanged.isCompleted }) {
+                pointerChanged.complete(Unit)
+                kotlinx.coroutines.awaitCancellation()
+            }
+        }
+        pointerChanged.await()
+        pending.cancelAndJoin()
+        assertEquals(1, graph.closes)
+        assertNull(owner.use(activation) { error("A stale borrower reopened the closed graph"); it.name })
+    }
+
+    @Test fun refusedCutoverPreservesTheOldGraphButAnUnacknowledgedCloseFencesIt() = runTest {
+        val activation = LibraryActivation(default.identity.libraryId, default.identity.activation)
+        val graph = Graph("default", canClose = false)
+        val owner = DefaultLibraryOperations(activation, graph)
+        val refused = runCatching {
+            owner.cutoverAndRetire(activation, hasLeft = { false }) { throw IOException("Not published") }
+        }.exceptionOrNull()
+        assertEquals("Not published", refused?.message)
+        assertEquals("default", owner.use(activation) { it.name })
+        assertEquals(0, graph.closes)
+        val closeFailure = runCatching { owner.cutoverAndRetire(activation, hasLeft = { true }) { "Published" } }.exceptionOrNull()
+        assertEquals("Synthetic teardown failure", closeFailure?.message)
+        assertNull(owner.use(activation) { error("An uncertain close cannot reopen the old graph"); it.name })
+        assertTrue(owner.hasPendingGraphClose())
+    }
+
+    @Test fun proofErrorRetiresTheIssuingGraphRatherThanReopeningAdmission() = runTest {
+        val activation = LibraryActivation(default.identity.libraryId, default.identity.activation)
+        val graph = Graph("default")
+        val owner = DefaultLibraryOperations(activation, graph)
+        val proofError = AssertionError("Synthetic proof failure")
+        val result = runCatching { owner.cutoverAndRetire(activation, { throw proofError }) { "Published" } }
+        assertEquals(1, graph.closes)
+        assertNull(owner.use(activation) { it.name })
+        assertNull(owner.exclusiveCutover(activation) { error("An unverified predecessor reopened admission") })
+        assertEquals(proofError.message, result.exceptionOrNull()?.message)
+        assertTrue(result.exceptionOrNull() is AssertionError)
+    }
+
+    @Test fun aDefaultBorrowCannotReturnTheGraphItself() = runTest {
+        val activation = LibraryActivation(default.identity.libraryId, default.identity.activation)
+        val owner = DefaultLibraryOperations(activation, Graph("default"))
+        assertTrue(runCatching { owner.use(activation) { it } }.exceptionOrNull() is IllegalStateException)
+        assertEquals("default", owner.use(activation) { it.name })
+    }
+
     @Test fun uncertainPointerNeverExposesEitherGraphBeforeAnExactReopen() = runTest {
         val old = Graph("old")
         val candidate = Graph("candidate")

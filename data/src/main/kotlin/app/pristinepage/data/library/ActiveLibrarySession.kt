@@ -4,9 +4,12 @@ import app.pristinepage.data.library.ActiveLibraryFence.Identity
 import app.pristinepage.data.library.ActiveLibraryFence.Selection
 import app.pristinepage.data.library.ActiveLibraryFence.State
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.withContext
 
 /** Pairs one verified graph with the activation fence. The graph is borrowed only inside a structured operation; this class never deletes a library. */
 internal class ActiveLibrarySession<G : AutoCloseable>(initial: Selection, graph: G) {
@@ -103,17 +106,64 @@ internal class ActiveLibrarySession<G : AutoCloseable>(initial: Selection, graph
 }
 
 /** Structured operation boundary for the initialized default graph. Opening and validating the durable default selection remain the caller's responsibility. */
-class DefaultLibraryOperations<G : AutoCloseable>(activation: LibraryActivation, graph: G) {
+class DefaultLibraryOperations<G : AutoCloseable>(activation: LibraryActivation, private val graph: G) {
     private val session = ActiveLibrarySession(Selection(ActiveLibraryFence.Location.Default, activation.identity()), graph)
+    @Volatile private var retired = false
+    @Volatile private var closePending = false
+
+    fun isRetired(): Boolean = retired
+    fun hasPendingGraphClose(): Boolean = closePending
 
     /** Return detached data only; the graph and its ports are lent for this structured callback, not returned to another owner. */
     suspend fun <T : Any> use(
         expected: LibraryActivation, operation: suspend CoroutineScope.(G) -> T,
-    ): T? = session.use(expected.identity(), operation)
+    ): T? = if (retired) null else session.use(expected.identity()) { borrowed ->
+        Value(if (retired) null else operation(borrowed).also { check(it !== borrowed) })
+    }?.value
 
     /** Refuse a busy cutover without invoking its mutation. No new default borrow may cross the confirmed switch. */
     suspend fun <T : Any> exclusiveCutover(expected: LibraryActivation, operation: suspend () -> T): T? =
-        session.exclusiveCutover(expected.identity(), operation)
+        if (retired) null else session.exclusiveCutover(expected.identity()) {
+            Value(if (retired) null else operation())
+        }?.value
 
+    /** After the pointer leaves this graph, close it before releasing admission even when publication acknowledgment was canceled. */
+    suspend fun <T : Any> cutoverAndRetire(
+        expected: LibraryActivation, hasLeft: suspend () -> Boolean, operation: suspend () -> T,
+    ): T? = exclusiveCutover(expected) {
+        var primary: Throwable? = null
+        try { operation() }
+        catch (failure: Throwable) {
+            primary = failure
+            throw failure
+        } finally {
+            withContext(NonCancellable + Dispatchers.IO) {
+                val proofFailure = try {
+                    if (hasLeft()) retired = true
+                    null
+                } catch (failure: Throwable) {
+                    // Unknown durable state is not permission to keep lending the old graph.
+                    retired = true
+                    failure
+                }
+                var terminal = proofFailure
+                if (retired) {
+                    closePending = true
+                    try { graph.close(); closePending = false }
+                    catch (failure: Throwable) {
+                        if (terminal == null) terminal = failure
+                        else if (terminal !== failure) terminal.addSuppressed(failure)
+                    }
+                }
+                terminal?.let { failure ->
+                    val original = primary
+                    if (original == null) throw failure
+                    if (original !== failure) original.addSuppressed(failure)
+                }
+            }
+        }
+    }
+
+    private data class Value<T>(val value: T?)
     private fun LibraryActivation.identity() = Identity(libraryId, number)
 }

@@ -137,7 +137,7 @@ class ApplicationServices(context: Context, internal val budget: ImageAllocation
         val report = RecoveryReport(0, 0, 0, 0, 0, emptyList())
         if (location.needsReconnect) return LibraryStartup(report, activation, selectedFolder = true, reconnect = true)
         return try {
-            selectedLibraryTransition.withLock {
+            withSelectedLibraryLane {
                 libraryStartup.useIssuedSelectedCatalog(selectedLibraryScratch(), activation) { _, _ ->
                     LibraryStartup(report, activation, selectedFolder = true)
                 }
@@ -149,43 +149,49 @@ class ApplicationServices(context: Context, internal val budget: ImageAllocation
     }
 
     internal suspend fun inspectLibraryFolder(activation: LibraryActivation, tree: Uri): AndroidLibraryStartup.FolderPreview =
-        libraryStartup.prepareFolder(selectedLibraryScratch(), activation, tree)
+        withSelectedLibraryLane { libraryStartup.prepareFolder(selectedLibraryScratch(), activation, tree) }
 
     internal suspend fun reconnectLibrary(activation: LibraryActivation, tree: Uri): LibraryActivation =
-        selectedLibraryTransition.withLock { libraryStartup.reconnectSelectedFolder(selectedLibraryScratch(), activation, tree) }
+        withSelectedLibraryLane { libraryStartup.reconnectSelectedFolder(selectedLibraryScratch(), activation, tree) }
 
     internal suspend fun returnToDefaultLibrary(activation: LibraryActivation): LibraryActivation =
-        selectedLibraryTransition.withLock { libraryStartup.returnToDefault(activation) }
+        withSelectedLibraryLane { libraryStartup.returnToDefault(activation) }
 
     internal suspend fun inspectSelectedImport(activation: LibraryActivation, source: Uri): AndroidLibraryStartup.SelectedImportPreview =
-        libraryStartup.prepareSelectedImport(selectedLibraryScratch(), activation, source)
+        withSelectedLibraryLane { libraryStartup.prepareSelectedImport(selectedLibraryScratch(), activation, source) }
 
     internal suspend fun importIntoSelected(preview: AndroidLibraryStartup.SelectedImportPreview): LibraryActivation =
-        selectedLibraryTransition.withLock { libraryStartup.importIntoSelected(selectedLibraryScratch(), preview) }
+        withSelectedLibraryLane { libraryStartup.importIntoSelected(selectedLibraryScratch(), preview) }
 
-    internal suspend fun selectLibraryFolder(activation: LibraryActivation, preview: AndroidLibraryStartup.FolderPreview): LibraryActivation =
-        selectedLibraryTransition.withLock {
+    internal suspend fun selectLibraryFolder(activation: LibraryActivation, preview: AndroidLibraryStartup.FolderPreview,
+        beforePointerReplace: () -> Unit,
+    ): LibraryActivation =
+        withSelectedLibraryLane {
             val old = storageLocation()
             if (old.activation != activation) activationChanged()
             val scratch = selectedLibraryScratch()
             suspend fun adopt() = when (preview) {
-                is AndroidLibraryStartup.FolderPreview.Existing -> libraryStartup.openVerifiedExistingFolder(scratch, preview.token)
-                is AndroidLibraryStartup.FolderPreview.Empty -> libraryStartup.startVerifiedEmptyFolder(scratch, preview)
+                is AndroidLibraryStartup.FolderPreview.Existing -> libraryStartup.openVerifiedExistingFolder(scratch, preview.token, beforePointerReplace)
+                is AndroidLibraryStartup.FolderPreview.Empty -> libraryStartup.startVerifiedEmptyFolder(scratch, preview, beforePointerReplace)
             }
-            if (old.folderLabel != null) return@withLock adopt()
+            if (old.folderLabel != null) return@withSelectedLibraryLane adopt()
             initialization.withLock {
                 requireSameDefault(activation)
+                requireDefaultGraphReady()
                 val graph = initialized ?: openDefault(activation)
                 val oldOperations = checkNotNull(defaultOperations)
-                oldOperations.exclusiveCutover(activation) {
-                    graph.store.requireNoUnfinishedLibraryWork()
-                    adopt().also {
-                        // Default-only entry points check the pointer even when a previous UI holds the cached graph.
+                try {
+                    oldOperations.cutoverAndRetire(activation, hasLeft = { libraryStartup.recordedDefaultActivation() != activation }) {
+                        graph.store.requireNoUnfinishedLibraryWork()
+                        adopt()
+                    } ?: throw RepositoryFailure(OperationError(OperationErrorCode.STORAGE_FAILED, true, "library_busy", null))
+                } finally {
+                    if (oldOperations.isRetired() && !oldOperations.hasPendingGraphClose()) {
                         initialized = null
                         defaultOperations = null
-                        withContext(Dispatchers.IO) { graph.close() }
                     }
-                } ?: throw RepositoryFailure(OperationError(OperationErrorCode.STORAGE_FAILED, true, "library_busy", null))
+                    // An unacknowledged close retains its old owner and blocks another ordinary graph in this process.
+                }
             }
         }
 
@@ -193,7 +199,7 @@ class ApplicationServices(context: Context, internal val budget: ImageAllocation
         val active = storageLocation()
         if (active.activation != issuedAt) activationChanged()
         if (active.folderLabel == null) return loadDefaultAlbum(issuedAt, document)
-        return selectedLibraryTransition.withLock {
+        return withSelectedLibraryLane {
             libraryStartup.useIssuedSelectedCatalog(selectedLibraryScratch(), issuedAt) { catalog, _ -> catalog.load(document) }
         }
     }
@@ -204,7 +210,7 @@ class ApplicationServices(context: Context, internal val budget: ImageAllocation
         val active = storageLocation()
         if (active.activation != issuedAt) activationChanged()
         if (active.folderLabel == null) return readDefaultHomeAlbums(issuedAt, query, order, locale, after, limit)
-        return selectedLibraryTransition.withLock {
+        return withSelectedLibraryLane {
             libraryStartup.useIssuedSelectedCatalog(selectedLibraryScratch(), active.activation) { _, albums ->
                 if (query == null) albums.listAlbums(order, locale, after, limit)
                 else albums.searchAlbums(query, order, locale, after, limit)
@@ -225,7 +231,7 @@ class ApplicationServices(context: Context, internal val budget: ImageAllocation
         val active = storageLocation()
         if (active.activation != identity.issuedAt) activationChanged()
         if (active.folderLabel == null) return loadDefaultEditorPage(identity)
-        return selectedLibraryTransition.withLock {
+        return withSelectedLibraryLane {
             libraryStartup.loadSelectedEditablePage(selectedLibraryScratch(), identity.issuedAt, identity.documentId, identity.pageId)
         }
     }
@@ -261,7 +267,7 @@ class ApplicationServices(context: Context, internal val budget: ImageAllocation
     ): T {
         var provisional: T? = null
         try {
-            selectedLibraryTransition.withLock {
+            withSelectedLibraryLane {
                 libraryStartup.useIssuedSelectedPageSources(selectedLibraryScratch(), issuedAt) { catalog, pages, originals ->
                     val decoder = SourceDecoder(originals, AndroidSourceInspector(budget))
                     provisional = produce(catalog, pages, decoder)
@@ -276,7 +282,7 @@ class ApplicationServices(context: Context, internal val budget: ImageAllocation
         val active = storageLocation()
         if (active.activation != identity.issuedAt) activationChanged()
         if (active.folderLabel == null) return identity.issuedAt to saveDefaultEditorPage(identity, revision, recipe)
-        return selectedLibraryTransition.withLock {
+        return withSelectedLibraryLane {
             when (val result = libraryStartup.advanceSelectedRecipeEdit(selectedLibraryScratch(), identity.issuedAt,
                 java.util.UUID.randomUUID().toString(), identity.documentId, identity.pageId, revision, ClassicalRecipeAdmission()) { recipe }) {
                 is AndroidLibraryStartup.SelectedRecipeSave.Refused -> identity.issuedAt to result.result
@@ -364,7 +370,20 @@ class ApplicationServices(context: Context, internal val budget: ImageAllocation
 
     suspend fun imports(): ApplicationImports = initialization.withLock {
         val expected = libraryStartup.requireDefaultActivation()
+        requireDefaultGraphReady()
         initialized?.takeIf { it.activation == expected } ?: openDefault(expected)
+    }
+
+    private fun requireDefaultGraphReady() {
+        if (defaultOperations?.hasPendingGraphClose() == true) {
+            throw RepositoryFailure(OperationError(OperationErrorCode.STORAGE_FAILED, false, "library_graph_close_unconfirmed", null))
+        }
+    }
+
+    /** One lock order for folder operations: transition, then inspect the Default owner. An uncertain close fences every successor, not only Default imports. */
+    private suspend fun <T> withSelectedLibraryLane(operation: suspend () -> T): T = selectedLibraryTransition.withLock {
+        initialization.withLock { requireDefaultGraphReady() }
+        operation()
     }
 
     internal suspend fun reconcileDefaultOcrBatch(
@@ -613,6 +632,7 @@ class ApplicationServices(context: Context, internal val budget: ImageAllocation
         val expected = issuedAt ?: activationChanged()
         val issuingStore = initialization.withLock {
             requireSameDefault(expected)
+            requireDefaultGraphReady()
             initialized?.takeIf { it.activation == expected }?.store?.savedOcr ?: activationChanged()
         }
         observe(issuingStore).collect {
@@ -843,6 +863,7 @@ class ApplicationServices(context: Context, internal val budget: ImageAllocation
         issuedAt: LibraryActivation, operation: suspend CoroutineScope.(ApplicationImports) -> T,
     ): T? {
         val operations = initialization.withLock {
+            requireDefaultGraphReady()
             val graph = initialized ?: run {
                 if (libraryStartup.recordedDefaultActivation() != issuedAt) return null
                 openDefault(issuedAt)

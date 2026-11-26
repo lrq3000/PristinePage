@@ -30,6 +30,7 @@ import app.pristinepage.R
 import app.pristinepage.data.library.AndroidLibraryStartup
 import app.pristinepage.data.library.LibraryActivation
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -49,6 +50,7 @@ internal class LibraryStorageViewModel(context: Context, private val services: A
     class Review(val issuing: LibraryActivation, val active: String?, val picked: String, val prepared: Prepared,
         private val grant: LibraryFolderGrantHandoff.PreviewGrant) : AutoCloseable {
         fun retainGrant() = grant.retain()
+        fun dispose() = grant.dispose()
         override fun close() = grant.close()
     }
     data class Change(val old: LibraryActivation, val current: LibraryActivation)
@@ -128,8 +130,9 @@ internal class LibraryStorageViewModel(context: Context, private val services: A
     fun cancelReview() {
         val review = current.value.review ?: return
         current.value = current.value.copy(review = null, busy = true)
-        viewModelScope.launch {
-            try { withContext(Dispatchers.IO) { review.close() } }
+        viewModelScope.launch(start = CoroutineStart.UNDISPATCHED) {
+            try { withContext(NonCancellable + Dispatchers.IO) { review.close() } }
+            catch (canceled: CancellationException) { throw canceled }
             catch (_: Exception) { current.value = current.value.copy(error = true) }
             finally { current.value = current.value.copy(busy = false) }
         }
@@ -138,14 +141,11 @@ internal class LibraryStorageViewModel(context: Context, private val services: A
     fun confirm() {
         val review = current.value.review ?: return
         current.value = current.value.copy(review = null, busy = true, error = false)
-        viewModelScope.launch {
+        viewModelScope.launch(start = CoroutineStart.UNDISPATCHED) {
             try {
                 val next = when (val prepared = review.prepared) {
-                    is Prepared.ChangeFolder -> {
-                        // Once a swap is attempted, preserve the new exact grant even if its acknowledgment is interrupted.
-                        review.retainGrant()
-                        services.selectLibraryFolder(review.issuing, prepared.preview)
-                    }
+                    // The data writer retains the exact grant only at the pointer replacement boundary.
+                    is Prepared.ChangeFolder -> services.selectLibraryFolder(review.issuing, prepared.preview, review::retainGrant)
                     is Prepared.ImportFolder -> services.importIntoSelected(prepared.preview)
                 }
                 current.value = current.value.copy(location = services.storageLocation(), change = Change(review.issuing, next))
@@ -194,7 +194,7 @@ internal class LibraryStorageViewModel(context: Context, private val services: A
 
     override fun onCleared() {
         current.value.picker?.let { it.gate.cancel(it.ticket) }
-        // Process termination cannot manufacture a new swap or delete a retained grant. Reopen the durable selection on return.
+        current.value.review?.dispose()
     }
 }
 

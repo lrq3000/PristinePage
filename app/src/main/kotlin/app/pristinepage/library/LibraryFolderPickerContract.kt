@@ -13,6 +13,10 @@ import androidx.activity.result.contract.ActivityResultContract
 import app.pristinepage.data.library.AndroidLibraryTreeRead
 import com.anggrayudi.storage.extension.fromTreeUri
 import java.io.IOException
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.launch
 
 /** Direct Android tree result: SimpleStorage resolves the admitted root but never launches the picker or cleans other grants. */
 internal class LibraryFolderPickerContract(private val writable: Boolean = false) : ActivityResultContract<Unit, LibraryFolderPickerContract.Selection>() {
@@ -66,29 +70,47 @@ internal class LibraryFolderGrantHandoff(context: Context) {
     /** Settings owns this one preview. Cancel returns only modes introduced by this preview, never an earlier grant. */
     fun previewGrant(picked: LibraryFolderPickerContract.Picked, writable: Boolean): PreviewGrant {
         val exact = picked.uri
-        val previous = held().singleOrNull { it.exactUri == exact.toString() }
-        val added = (if (previous?.read == true) 0 else Intent.FLAG_GRANT_READ_URI_PERMISSION) or
-            (if (!writable || previous?.write == true) 0 else Intent.FLAG_GRANT_WRITE_URI_PERMISSION)
-        val owner = PreviewGrant(exact, added)
-        try { if (writable) persistWrite(picked) else persistRead(picked) }
-        catch (failure: Exception) {
-            try { owner.close() } catch (cleanup: Exception) { failure.addSuppressed(cleanup) }
+        val claim = previews.claim(exact.toString())
+        var owner: PreviewGrant? = null
+        try {
+            val previous = held().singleOrNull { it.exactUri == exact.toString() }
+            val added = (if (previous?.read == true) 0 else Intent.FLAG_GRANT_READ_URI_PERMISSION) or
+                (if (!writable || previous?.write == true) 0 else Intent.FLAG_GRANT_WRITE_URI_PERMISSION)
+            return PreviewGrant(exact, added, claim).also {
+                owner = it
+                if (writable) persistWrite(picked) else persistRead(picked)
+            }
+        } catch (failure: Throwable) {
+            try { owner?.close() ?: claim.finish {} }
+            catch (cleanup: Throwable) { if (failure !== cleanup) failure.addSuppressed(cleanup) }
             throw failure
         }
-        return owner
     }
 
-    internal inner class PreviewGrant(val tree: Uri, private val introduced: Int) : AutoCloseable {
-        private val finished = java.util.concurrent.atomic.AtomicBoolean()
-        fun retain() { finished.set(true) }
-        override fun close() {
-            if (!finished.compareAndSet(false, true) || introduced == 0) return
-            val current = held().singleOrNull { it.exactUri == tree.toString() } ?: return
+    internal inner class PreviewGrant(val tree: Uri, private val introduced: Int,
+        private val claim: ProvisionalFolderGrants.Claim,
+    ) : AutoCloseable {
+        fun retain() = claim.finish {}
+        override fun close() = claim.finish {
+            if (introduced == 0) return@finish
+            val current = held().singleOrNull { it.exactUri == tree.toString() } ?: return@finish
             val present = (if (current.read) Intent.FLAG_GRANT_READ_URI_PERMISSION else 0) or
                 (if (current.write) Intent.FLAG_GRANT_WRITE_URI_PERMISSION else 0)
             val release = introduced and present
             if (release != 0) resolver.releasePersistableUriPermission(tree, release)
         }
+
+        /** No Activity or canceled ViewModel Job owns a permission cleanup after final disposal. */
+        fun dispose() {
+            grantCleanup.launch {
+                try { close() } catch (_: Exception) { /* Leave uncertain modes untouched; never retry a release blindly. */ }
+            }
+        }
+    }
+
+    private companion object {
+        val previews = ProvisionalFolderGrants()
+        val grantCleanup = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     }
 
     /** One-shot export uses only the live picker capability. The provider writer verifies actual platform access at each boundary. */

@@ -8,6 +8,22 @@ import org.junit.Test
 import java.io.IOException
 
 class LibraryTreeGrantTest {
+    @Test fun anotherPreviewCannotAdoptModesWhileTheirFirstOwnerCanStillRevokeThem() {
+        val grants = ProvisionalFolderGrants()
+        val first = grants.claim("tree-A")
+        assertThrows(IOException::class.java) { grants.claim("tree-A") }
+        grants.claim("tree-B").finish {}
+        first.finish {
+            assertThrows(IOException::class.java) { grants.claim("tree-A") }
+        }
+        var releases = 0
+        val next = grants.claim("tree-A")
+        first.finish { releases++ }
+        assertEquals(0, releases)
+        assertThrows(IOException::class.java) { grants.claim("tree-A") }
+        next.finish {}
+    }
+
     @Test fun cancellationAfterPermissionPreflightNeverTakesThePlatformGrant() {
         val uri = "content://com.android.externalstorage.documents/tree/primary%3ADocuments%2FBackup"
         val grant = LibraryTreeGrant.inspect(uri, returnedRead = true, returnedWrite = true, persistable = true)

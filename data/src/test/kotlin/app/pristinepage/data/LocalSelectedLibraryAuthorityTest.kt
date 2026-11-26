@@ -176,6 +176,43 @@ class LocalSelectedLibraryAuthorityTest {
         reopened.requireExact(uri, generation)
     }
 
+    @Test fun aFinalDestinationRefusalDoesNotRetainTheProvisionalFolderGrant() {
+        val root = roots.newFolder().canonicalFile
+        val writer = LocalSelectedLibraryAuthority(root, sync)
+        assertEquals(true, writer.initializeDefault(initial))
+        val next = Selection(Location.Folder(grant.grantId, generation.id), Identity(generation.libraryId, 2))
+        var retained = false
+        assertFailsWith<IOException> {
+            writer.chooseFolder(initial, next, grant, generation, beforePointerReplace = { retained = true }) {
+                if (root.list().orEmpty().any { it.startsWith(".active-library-") && it.endsWith(".pending") }) {
+                    throw IOException("The destination changed during pointer staging")
+                }
+            }
+        }
+        assertEquals(false, retained)
+        assertEquals(initial, writer.read()?.selection)
+    }
+
+    @Test fun grantRetentionPrecedesTheSinglePointerReplacementEvenIfTheResultCannotBeAcknowledged() {
+        val root = roots.newFolder().canonicalFile
+        val stable = LocalSelectedLibraryAuthority(root, sync)
+        assertEquals(true, stable.initializeDefault(initial))
+        var retained = 0
+        val next = Selection(Location.Folder(grant.grantId, generation.id), Identity(generation.libraryId, 2))
+        val writer = LocalSelectedLibraryAuthority(root, DirectorySync {
+            // The first post-replacement barrier fails, leaving the exact selected pointer visible but unacknowledged.
+            !root.resolve("active-library").readBytes().toString(Charsets.US_ASCII).contains("\n2\n")
+        })
+        assertFailsWith<IOException> {
+            writer.chooseFolder(initial, next, grant, generation, beforePointerReplace = {
+                assertEquals(initial, stable.read()?.selection)
+                retained++
+            })
+        }
+        assertEquals(1, retained)
+        assertEquals(next.identity, stable.read()?.selection?.identity)
+    }
+
     @Test fun refusingANewerFolderBindingCannotReplaceTheAuthoritativeDefault() {
         val root = roots.newFolder().canonicalFile
         val writer = LocalSelectedLibraryAuthority(root, sync)

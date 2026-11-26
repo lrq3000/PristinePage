@@ -120,6 +120,7 @@ internal class LocalSelectedLibraryAuthority(root: File, sync: DirectorySync = P
 
     /** Called only after verifying the exact next folder and candidate graph. Stage records before publishing the pointer; never delete an old binding on refusal. */
     fun chooseFolder(expected: Selection, next: Selection, grant: LibraryFolderGrantRecord, generation: LibraryGeneration,
+        beforePointerReplace: () -> Unit = {},
         checkpoint: () -> Unit = {},
     ): Selection {
         val location = next.location as? Location.Folder ?: throw IOException("Expected a verified folder selection")
@@ -144,7 +145,11 @@ internal class LocalSelectedLibraryAuthority(root: File, sync: DirectorySync = P
             catch (_: FileAlreadyExistsException) { /* Require an exact durable immutable match below. */ }
         }
         if (readVerifiedGeneration(location) != generation) throw IOException("The folder generation verification conflicts")
-        if (!pointer.replace(expected, bound, checkpoint)) throw IOException("The selected folder was not published")
+        if (!pointer.replace(expected, bound) {
+                checkpoint()
+                // No provider work or cancellation point may separate the grant handoff from attempting the atomic pointer move.
+                beforePointerReplace()
+            }) throw IOException("The selected folder was not published")
         return bound
     }
 
