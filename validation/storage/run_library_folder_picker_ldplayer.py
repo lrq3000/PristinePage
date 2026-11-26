@@ -604,10 +604,11 @@ def exercise_selected_append(run, adb, ns, raw, guest_root, folder, files, recei
                  marker[:5] == [baseline[0], baseline[1], operation, baseline[2], baseline[4]] and
                  marker[5].isdigit() and 0 < int(marker[5]) <= 2 * 1024 * 1024 and re.fullmatch(r"[a-f0-9]{64}", marker[6]),
                  "The selected append did not publish one exact successor")
+            stage_name = f"merge-staging-{operation}"
             verify_unchanged_settings_destination(adb, left, files | {
                 marker_path: sha256(marker_text.encode("ascii")).hexdigest(), catalog_path: marker[6], f"objects/{missing}": missing,
-            }, backup_name="merge-staging")
-            need(not adb("shell", "ls", "-A", "-1", f"{left}/merge-staging").strip(), "The selected append retained a staged provider file")
+            }, backup_name=stage_name)
+            need(not adb("shell", "ls", "-A", "-1", f"{left}/{stage_name}").strip(), "The selected append retained a staged provider file")
             need(adb("shell", "stat", "-c", "%s", f"{left}/{catalog_path}").strip() == marker[5],
                  "The selected append catalog extent differs from its marker")
             catalog = raw / "selected-append-catalog.sqlite"

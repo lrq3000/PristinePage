@@ -14,6 +14,42 @@ import org.junit.runner.RunWith
 /** Real Android directories and descriptors, but no Files provider grant or mutation. */
 @RunWith(AndroidJUnit4::class)
 class LibraryDescriptorAncestryTest {
+    @Test fun literalStageNameRejectsAnotherDirectChildAndSymlinkAliases() {
+        val root = freshStageRoot()
+        val prior = File(root, "prior").apply { check(mkdir()) }
+        val next = File(root, "next").apply { check(mkdir()) }
+        val alias = File(root, "alias")
+        android.system.Os.symlink(prior.path, alias.path)
+        openStage(root) { parent ->
+            openStage(prior) { retained ->
+                openStage(next) { candidate ->
+                    AndroidLibraryDescriptorAncestry.requireNamedDirectory(parent, "next", candidate)
+                    assertThrows(IOException::class.java) {
+                        AndroidLibraryDescriptorAncestry.requireNamedDirectory(parent, "next", retained)
+                    }
+                    assertThrows(IOException::class.java) {
+                        AndroidLibraryDescriptorAncestry.requireNamedDirectory(parent, "prior", candidate)
+                    }
+                    assertThrows(IOException::class.java) {
+                        AndroidLibraryDescriptorAncestry.requireNamedDirectory(parent, "alias", retained)
+                    }
+                    AndroidLibraryDescriptorAncestry.requireVacantName(parent, "fresh")
+                    assertThrows(IOException::class.java) { AndroidLibraryDescriptorAncestry.requireVacantName(parent, "alias") }
+                }
+            }
+        }
+    }
+
+    @Test fun physicalStageListingCannotIgnoreAnOmittedDotFile() {
+        val stage = File(freshStageRoot(), "stage").apply { check(mkdir()) }
+        openStage(stage) { held ->
+            AndroidLibraryDescriptorAncestry.requirePhysicallyEmpty(held)
+            val leftover = File(stage, ".unreported").apply { writeText("preserve") }
+            assertThrows(IOException::class.java) { AndroidLibraryDescriptorAncestry.requirePhysicallyEmpty(held) }
+            check(leftover.readText() == "preserve")
+        }
+    }
+
     @Test fun exactRootDescriptorsAcquireTheirSharedAnchorWithoutAParentLocator() {
         val context = InstrumentationRegistry.getInstrumentation().targetContext
         val anchor = File(context.cacheDir, "library-ancestry-${UUID.randomUUID()}").apply { check(mkdir()) }
@@ -74,4 +110,10 @@ class LibraryDescriptorAncestryTest {
             }
         }
     }
+
+    private fun freshStageRoot(): File =
+        File(InstrumentationRegistry.getInstrumentation().targetContext.cacheDir, "library-stage-proof-${UUID.randomUUID()}").apply { check(mkdir()) }
+
+    private fun <T> openStage(file: File, use: (ParcelFileDescriptor) -> T): T =
+        ParcelFileDescriptor.open(file, ParcelFileDescriptor.MODE_READ_ONLY).use(use)
 }

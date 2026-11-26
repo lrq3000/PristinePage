@@ -8,6 +8,9 @@ import app.pristinepage.data.library.LibraryRootSeparation.Identity
 import app.pristinepage.data.library.LibraryRootSeparation.Companion.MAX_CHAIN
 import java.io.File
 import java.io.IOException
+import java.nio.file.DirectoryIteratorException
+import java.nio.file.Files
+import java.nio.file.Paths
 
 /** Read-only observation, not a write permit. Callers keep all three descriptors open and undetached and separately bind provider locators to them. Sequential walks do not exclude a concurrent rename; a writer must also hold stable, cooperative topology ownership through its operation. */
 internal object AndroidLibraryDescriptorAncestry {
@@ -104,6 +107,47 @@ internal object AndroidLibraryDescriptorAncestry {
         withParent(child) { if (observe(it) != expected || observe(parent) != expected) unavailable() }
     }
 
+    /** Bind a literal child name without following a final symlink, independently of the provider's reported ID. */
+    fun requireNamedDirectory(parent: ParcelFileDescriptor, name: String, held: ParcelFileDescriptor) = descriptorIo {
+        val root = observe(parent)
+        val seen = observe(held)
+        if (root == seen || !root.sameFilesystem(seen)) unavailable()
+        val path = childPath(parent, name)
+        if (!OsConstants.S_ISDIR(Os.lstat(path).st_mode)) unavailable()
+        // Android's public OsConstants lacks O_DIRECTORY; observe requires a directory after the no-follow open. Nonblocking prevents a replaced FIFO from hanging the check.
+        val opened = Os.open(path, OsConstants.O_RDONLY or OsConstants.O_NONBLOCK or OsConstants.O_NOFOLLOW or OsConstants.O_CLOEXEC, 0)
+        try {
+            ParcelFileDescriptor.dup(opened).use {
+                if (observe(it) != seen || observe(parent) != root || observe(held) != seen) unavailable()
+            }
+        } finally { Os.close(opened) }
+    }
+
+    fun requireVacantName(parent: ParcelFileDescriptor, name: String) = descriptorIo {
+        val root = observe(parent)
+        try {
+            Os.lstat(childPath(parent, name))
+            unavailable()
+        } catch (failure: ErrnoException) {
+            if (failure.errno != OsConstants.ENOENT) throw failure
+        }
+        if (observe(parent) != root) unavailable()
+    }
+
+    /** A single physical entry is enough to refuse. A provider cursor alone cannot establish that none exist. */
+    fun requirePhysicallyEmpty(directory: ParcelFileDescriptor) = descriptorIo {
+        val seen = observe(directory)
+        Files.newDirectoryStream(Paths.get("/proc/self/fd/${directory.fd}")).use {
+            if (it.iterator().hasNext()) unavailable()
+        }
+        if (observe(directory) != seen) unavailable()
+    }
+
+    private fun childPath(parent: ParcelFileDescriptor, name: String): String {
+        if (name.isEmpty() || name == "." || name == ".." || name.any { it == '/' || it == '\\' || it == '\u0000' }) unavailable()
+        return "/proc/self/fd/${parent.fd}/$name"
+    }
+
     private fun Observation.sameFilesystem(other: Observation) = mount == other.mount && identity.device == other.identity.device
 
     // Follow only the live directory descriptor, subject to normal OS permissions; never resolve a URI or enumerate the observed ancestor.
@@ -144,6 +188,8 @@ internal object AndroidLibraryDescriptorAncestry {
     } catch (_: IllegalStateException) {
         unavailable()
     } catch (_: IOException) {
+        unavailable()
+    } catch (_: DirectoryIteratorException) {
         unavailable()
     }
 

@@ -11,6 +11,7 @@ internal class LibraryGenerationInventory(markers: List<LibraryGeneration>, priv
     }
 
     private val markers = markers.toList()
+    fun generationIds(): Set<String> = markers.mapTo(HashSet(), LibraryGeneration::id)
     val tip = LibraryGenerationChain.tip(this.markers)
 
     fun requireExact(generation: LibraryGeneration) {
