@@ -61,6 +61,9 @@ import app.pristinepage.data.model.SourceBlobId
 import app.pristinepage.data.repository.ScopedCommittedOriginals
 import app.pristinepage.data.repository.SavedOcrWork
 import app.pristinepage.editor.EditorIdentity
+import app.pristinepage.editor.EditorViewModel
+import app.pristinepage.editor.EditorView
+import app.pristinepage.editor.PageEditorScreen
 import app.pristinepage.design.AtelierPreferences
 import app.pristinepage.image.decode.AndroidSourceInspector
 import app.pristinepage.image.decode.SourceDecoder
@@ -141,7 +144,8 @@ class LibraryFolderFilesJourneyTest {
                  "selectedFilesMergeCanAppendTwiceWithoutReusingAnOlderStage", "endsProcessAfterSelectedAppendCompletionBeforeDelivery",
                  "oneFilesSelectionPublishesOnlyAClosedEditedCatalog", "selectedRecipeReceiptBindsTheExactIssuingActivation",
                  "selectedRecipeAdvancesOnlyTheVerifiedDirectSuccessor", "opensSelectedAlbumGridAndVerifiedOriginalWhileBrowsing",
-                 "startEmptyRefusesANestedStageOfTheCurrentFilesLibrary", "unconfirmedDefaultGraphCloseFencesBothSuccessorAndReturn"))
+                 "startEmptyRefusesANestedStageOfTheCurrentFilesLibrary", "unconfirmedDefaultGraphCloseFencesBothSuccessorAndReturn",
+                 "selectedEditorDisplaysActualOriginalAndFrameWithoutWrite"))
             interruptionCompose else compose
         rule.apply(next, description)
     }
@@ -1127,6 +1131,80 @@ class LibraryFolderFilesJourneyTest {
                 } finally {
                     observer.cancelAndJoin()
                     graph.close()
+                }
+            }
+        }
+    }
+
+    @Test fun selectedEditorDisplaysActualOriginalAndFrameWithoutWrite() {
+        withIndependentFilesSelections(chooseAnchor = false, writableDestination = true, singleDestination = true) { app, _, selections, _ ->
+            val tree = selections.single()
+            val files = File(app.filesDir.canonicalFile, "library-editor-controls-${UUID.randomUUID()}").apply { check(mkdir()) }
+            val isolated = object : ContextWrapper(app) {
+                override fun getApplicationContext(): Context = this
+                override fun getFilesDir(): File = files
+            }
+            val services = ApplicationServices(isolated)
+            runBlocking {
+                val startup = AndroidLibraryStartup(isolated)
+                val previous = startup.requireDefaultActivation()
+                val scratch = File(files, "scratch").apply { check(mkdir()) }
+                val preview = startup.prepareOpenExistingFolder(scratch, previous, tree)
+                val selected = startup.openVerifiedExistingFolder(scratch, preview)
+                val album = startup.useSelectedCatalog(scratch) { _, catalog -> catalog.list(null, 10).single() }
+                val page = services.loadLibraryAlbum(selected, album.documentId).pages.single()
+                val identity = EditorIdentity(album.documentId, page.pageId, selected)
+                val framePixel = AtomicReference<Int?>(null)
+                val exited = java.util.concurrent.atomic.AtomicBoolean()
+                val model = interruptionCompose.runOnUiThread {
+                    val factory = object : ViewModelProvider.Factory {
+                        @Suppress("UNCHECKED_CAST")
+                        override fun <T : androidx.lifecycle.ViewModel> create(modelClass: Class<T>): T =
+                            EditorViewModel(services) { _, _, _ -> error("A preview-only route cannot publish a saved edit") } as T
+                    }
+                    val editor = ViewModelProvider(interruptionCompose.activity, factory)[EditorViewModel::class.java]
+                    editor.open(identity)
+                    interruptionCompose.activity.setContent {
+                        val session by editor.session.collectAsStateWithLifecycle()
+                        MaterialTheme {
+                            session?.let {
+                                PageEditorScreen(allowSave = false, loadOriginal = { source ->
+                                    services.originalLibraryEditor(identity, source).also { preview ->
+                                        framePixel.set(preview.bitmap.getPixel(0, 0))
+                                    }
+                                }).Content(it) { exited.set(true) }
+                            }
+                        }
+                    }
+                    editor
+                }
+                try {
+                    interruptionCompose.waitUntil(25_000) { model.session.value?.preview?.value?.display != null }
+                    assertEquals(identity, model.state.value.identity)
+                    interruptionCompose.onNodeWithTag("editor-tool-original").performClick()
+                    interruptionCompose.waitUntil(25_000) {
+                        model.session.value?.preview?.value?.let { it.view == EditorView.ORIGINAL && !it.previous && it.display != null } == true
+                    }
+                    interruptionCompose.runOnUiThread {
+                        val bitmap = checkNotNull(model.session.value?.preview?.value?.display).bitmap
+                        assertEquals(3, bitmap.width)
+                        assertEquals(2, bitmap.height)
+                        assertEquals(0xff637b89.toInt(), bitmap.getPixel(2, 1))
+                    }
+                    interruptionCompose.onNodeWithTag("editor-tool-shape").performClick()
+                    interruptionCompose.onNodeWithTag("editor-shape-perspective").performScrollTo().performClick()
+                    interruptionCompose.waitUntil(25_000) { framePixel.get() == 0xff132b47.toInt() }
+                    interruptionCompose.onNodeWithTag("atelier-frame-canvas").assertExists()
+                    interruptionCompose.onNodeWithTag("editor-apply").assertIsNotEnabled()
+                    interruptionCompose.onNodeWithTag("editor-back").performClick()
+                    interruptionCompose.onNodeWithTag("editor-apply-exit").assertDoesNotExist()
+                    interruptionCompose.onNodeWithTag("editor-discard-exit").performClick()
+                    interruptionCompose.waitUntil(15_000) { exited.get() }
+                    assertEquals(2L, services.loadLibraryEditorPage(identity).recipeRevision)
+                    assertEquals(selected, services.storageLocation().activation)
+                } finally {
+                    interruptionCompose.runOnUiThread { model.closeEditor() }
+                    interruptionCompose.waitUntil(15_000) { services.budget.usedBytes == 0L }
                 }
             }
         }

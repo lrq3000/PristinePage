@@ -22,6 +22,21 @@ from run_local_ocr_guest import read_boot_serial
 
 
 class LibraryFolderPickerRunnerTest(unittest.TestCase):
+    def test_read_only_preview_batch_refuses_a_spent_or_incomplete_predecessor(self):
+        from run_selected_folder_open_ldplayer import CASE, TEARDOWN_STOP_SHA, verify_preview_pass
+        pair = {"app.pristinepage.debug": "a" * 64, "app.pristinepage.debug.test": "b" * 64}
+        record = {"predecessor": TEARDOWN_STOP_SHA, "guest": "test-guest", "reusedReadFixture": True}
+        outcome = {"passed": [CASE], "failed": [], "installedSha256": pair}
+        preservation = dict(externalFixturesUnchanged=True, advancedReceiptUnchanged=True,
+                            persistedGrantCount=0, ordinaryPointerAbsent=True)
+        trace = [{"argv": ["adb", "-s", "emulator-5556", "shell", "am", "instrument", "-e", "class", CASE]}]
+        verify_preview_pass(record, "test-guest", pair, outcome, preservation, trace)
+        for incompatible in (outcome | {"failed": [CASE]}, outcome | {"installedSha256": {}}, outcome | {"passed": []}):
+            with self.assertRaisesRegex(RuntimeError, "selected preview predecessor"):
+                verify_preview_pass(record, "test-guest", pair, incompatible, preservation, trace)
+        with self.assertRaisesRegex(RuntimeError, "selected preview predecessor"):
+            verify_preview_pass(record, "test-guest", pair, outcome, preservation, trace + [{"argv": ["adb", "push", "x", "y"]}])
+
     def test_selected_open_teardown_retry_requires_exact_read_only_predecessor(self):
         from run_selected_folder_open_ldplayer import CASE, STAGING_STOP_SHA, verify_teardown_failure
         folder = "PristinePage-tree-1234567890ab"

@@ -21,8 +21,12 @@ STAGING_STOP = "picker-adapter-selected-open-cdcd541e5823"
 STAGING_STOP_SHA = "bba85bee569bc935edc8ddffa78630f663b0a5402e7fd01060fe44ceb428cb78"
 TEARDOWN_STOP = "picker-adapter-selected-open-8f4e46542f1e"
 TEARDOWN_STOP_SHA = "6c28baa2732db0ecc835481d744820daed50aff77ca04b6159b4ee496a7b09ca"
+PREVIEW_PASS = "picker-adapter-selected-open-3282172e6e63"
+PREVIEW_PASS_SHA = "caaa401ed4963a2788fa189cb487a1ca1ac0e2f2a173b836daae79f7f39b45b8"
 FIRST_CASE = "app.pristinepage.LibraryFolderFilesJourneyTest#confirmedOpenSwitchesToTheSelectedFilesCatalogAndRevocationDoesNotFallBack"
 CASE = "app.pristinepage.LibraryFolderFilesJourneyTest#opensSelectedAlbumGridAndVerifiedOriginalWhileBrowsing"
+CONTROLS_CASE = "app.pristinepage.LibraryFolderFilesJourneyTest#selectedEditorDisplaysActualOriginalAndFrameWithoutWrite"
+CUTOVER_CASE = "app.pristinepage.LibraryFolderFilesJourneyTest#unconfirmedDefaultGraphCloseFencesBothSuccessorAndReturn"
 
 
 def verify_teardown_failure(record, claim, prior_generation, folder, pair, outcome, preservation, transcript, trace):
@@ -42,7 +46,18 @@ def verify_teardown_failure(record, claim, prior_generation, folder, pair, outco
                 "The exact read-only teardown predecessor is not verified")
 
 
-def run_open(commit, app_sha, test_sha, build_receipt, *, after_contention=False, reuse_read_fixture=False, after_teardown=False):
+def verify_preview_pass(record, guest, pair, outcome, preservation, trace):
+    launches = [row["argv"] for row in trace if "instrument" in row["argv"]]
+    checks.need(record["predecessor"] == TEARDOWN_STOP_SHA and record["guest"] == guest and record["reusedReadFixture"] is True and
+                outcome == dict(passed=[CASE], failed=[], installedSha256=pair) and
+                preservation == dict(externalFixturesUnchanged=True, advancedReceiptUnchanged=True,
+                                     persistedGrantCount=0, ordinaryPointerAbsent=True) and
+                len(launches) == 1 and CASE in launches[0] and not any("push" in row["argv"] for row in trace),
+                "The exact selected preview predecessor is not a preserved read-only pass")
+
+
+def run_open(commit, app_sha, test_sha, build_receipt, *, after_contention=False, reuse_read_fixture=False, after_teardown=False,
+             after_preview=False):
     root = checks.ROOT
     checks.need(__debug__ and Path.cwd().resolve() == root and not any(os.environ.get(key) for key in checks.LOCAL_ADB_OVERRIDES),
                 "Use the exact worktree and the ordinary scoped transport")
@@ -80,7 +95,7 @@ def run_open(commit, app_sha, test_sha, build_receipt, *, after_contention=False
     failed_fixture = None
     untouched_pending = None
     predecessor = BASELINE_SHA
-    if after_contention or reuse_read_fixture or after_teardown:
+    if after_contention or reuse_read_fixture or after_teardown or after_preview:
         failed = history / CONTENTION
         latest_manifest = failed / f"{CONTENTION}-final-manifest.json"
         latest = checks.settings_run_anchors(failed, CONTENTION_SHA)
@@ -101,7 +116,7 @@ def run_open(commit, app_sha, test_sha, build_receipt, *, after_contention=False
         manifest, claim = latest_manifest, latest_claim
         snapshot = json.loads(manifest.read_bytes())["recordSnapshot"]
         predecessor = CONTENTION_SHA
-    if reuse_read_fixture or after_teardown:
+    if reuse_read_fixture or after_teardown or after_preview:
         stopped = history / STAGING_STOP
         staged = checks.settings_run_anchors(stopped, STAGING_STOP_SHA)
         record = json.loads(staged("artifacts.json"))
@@ -113,7 +128,7 @@ def run_open(commit, app_sha, test_sha, build_receipt, *, after_contention=False
         trace = [json.loads(line) for line in staged("commands.jsonl").splitlines()]
         pushes = [row for row in trace if "push" in row["argv"]]
         first_file = f"/sdcard/Documents/{folder}/{left}/" + next(path for path in pending["files"] if path.startswith("catalogs/"))
-        checks.need((after_teardown or (commit == record["source"] and {checks.APP: app_sha, checks.TEST: test_sha} == stopped_pair)) and
+        checks.need((after_teardown or after_preview or (commit == record["source"] and {checks.APP: app_sha, checks.TEST: test_sha} == stopped_pair)) and
                     record["predecessor"] == CONTENTION_SHA and record["previous"] == previous and
                     record["guest"] == guest == stopped_claim["name"] and
                     stopped_claim["ownership_history"][-1]["generation"] == claim["generation"] and
@@ -127,7 +142,7 @@ def run_open(commit, app_sha, test_sha, build_receipt, *, after_contention=False
         claim = stopped_claim
         snapshot = json.loads(manifest.read_bytes())["recordSnapshot"]
         predecessor = STAGING_STOP_SHA
-    if after_teardown:
+    if after_teardown or after_preview:
         stopped = history / TEARDOWN_STOP
         failed = checks.settings_run_anchors(stopped, TEARDOWN_STOP_SHA)
         record = json.loads(failed("artifacts.json"))
@@ -144,6 +159,26 @@ def run_open(commit, app_sha, test_sha, build_receipt, *, after_contention=False
         claim = released
         snapshot = json.loads(manifest.read_bytes())["recordSnapshot"]
         predecessor = TEARDOWN_STOP_SHA
+    if after_preview:
+        stopped = history / PREVIEW_PASS
+        passed = checks.settings_run_anchors(stopped, PREVIEW_PASS_SHA)
+        record = json.loads(passed("artifacts.json"))
+        released = json.loads(passed("claim.json"))
+        installed = {package: record["proof"][package]["sha256"] for package in previous}
+        checks.need(released["name"] == guest and released["ownership_history"][-1]["generation"] == claim["generation"] and
+                    record["previous"] == previous and
+                    json.loads(passed("selected-open-attempt.json")) == failed_fixture | {"siblingFiles": failed_fixture["files"]} and
+                    checks.read_results(passed("instrumentation.txt"), (CASE,)) == ([CASE], []) and
+                    all(checks.sha(stopped / f"{package}.apk") == digest for package, digest in installed.items()),
+                    "The selected preview predecessor changed its fixture, result, installed bytes or release chain")
+        verify_preview_pass(record, guest, installed, json.loads(passed("outcomes.json")), json.loads(passed("preservation.json")),
+                            [json.loads(line) for line in passed("commands.jsonl").splitlines()])
+        previous = installed
+        manifest = stopped / f"{PREVIEW_PASS}-final-manifest.json"
+        claim = released
+        snapshot = json.loads(manifest.read_bytes())["recordSnapshot"]
+        predecessor = PREVIEW_PASS_SHA
+    reuse_folders = reuse_read_fixture or after_teardown or after_preview
 
     paths = {checks.APP: root / "app/build/outputs/apk/debug/app-debug.apk",
              checks.TEST: root / "app/build/outputs/apk/androidTest/debug/app-debug-androidTest.apk"}
@@ -168,7 +203,7 @@ def run_open(commit, app_sha, test_sha, build_receipt, *, after_contention=False
         checks.need(checks.sha(saved[package]) == pair[package], "Candidate changed during evidence retention")
     (raw / f"{prefix}-artifacts.json").write_text(
         json.dumps(dict(source=commit, proof=proof, previous=previous,
-                         predecessor=predecessor, guest=guest, reusedReadFixture=reuse_read_fixture or after_teardown)), encoding="ascii")
+                         predecessor=predecessor, guest=guest, reusedReadFixture=reuse_folders)), encoding="ascii")
     ns = checks.load_allocator(root, guest, raw, "pristinepage-tree-" + os.environ["OPENCODE_SESSION_ID"])
     base = checks.run_type(ns, purpose="pristinepage-library-app-tree", operation="PristinePage selected catalog and frame",
                            admit_released=lambda record: checks.verify_bound_recipe_release(claim, record, manifest, snapshot))
@@ -219,7 +254,8 @@ def run_open(commit, app_sha, test_sha, build_receipt, *, after_contention=False
                         "The retained partial fixture directory is unavailable")
         try:
             passed, failed = exercise(runner, adb, ns, raw, saved, pair, previous, installed,
-                                      failed_fixture if reuse_read_fixture or after_teardown else None)
+                                      failed_fixture if reuse_folders else None,
+                                      (CONTROLS_CASE, CUTOVER_CASE) if after_preview else (CASE,))
         finally:
             check_protected()
             if untouched_pending:
@@ -234,7 +270,7 @@ def run_open(commit, app_sha, test_sha, build_receipt, *, after_contention=False
             checks.close_owned(runner)
 
 
-def exercise(runner, adb, ns, raw, saved, pair, previous, installed, read_fixture):
+def exercise(runner, adb, ns, raw, saved, pair, previous, installed, read_fixture, cases):
     for package, path in saved.items():
         flags = checks.install_flags(package, installed[package], pair[package], previous[checks.TEST], previous[checks.APP])
         if flags is not None:
@@ -267,11 +303,18 @@ def exercise(runner, adb, ns, raw, saved, pair, previous, installed, read_fixtur
     if not read_fixture:
         checks.stage_independent_fixture_pair(adb, parent, folder, ((fixture, files), (sibling, sibling_files)), admit_fixture)
     try:
-        admit_fixture()
-        output = adb("shell", "am", "instrument", "-w", "-r", "-e", "class", CASE,
-                     "-e", "libraryFixtureFolder", folder, checks.RUNNER, timeout=190)
-        runner.path("instrumentation.txt").write_text(output, encoding="utf-8")
-        passed, failed = checks.read_results(output, (CASE,))
+        passed, failed = [], []
+        for index, case in enumerate(cases):
+            admit_fixture()
+            output = adb("shell", "am", "instrument", "-w", "-r", "-e", "class", case,
+                         "-e", "libraryFixtureFolder", folder, checks.RUNNER, timeout=190)
+            suffix = "instrumentation.txt" if index == 0 else f"instrumentation-{index + 1}.txt"
+            runner.path(suffix).write_text(output, encoding="utf-8")
+            successful, unsuccessful = checks.read_results(output, (case,))
+            passed.extend(successful)
+            failed.extend(unsuccessful)
+            if failed:
+                break
         runner.save(runner.path("outcomes.json"), dict(passed=passed, failed=failed, installedSha256=pair), durable=True)
     finally:
         checks.recheck_target(runner, ns)
@@ -293,6 +336,8 @@ if __name__ == "__main__":
     resume.add_argument("--after-contention", action="store_true", help="Require the exact stopped no-write contention predecessor")
     resume.add_argument("--reuse-read-fixture", action="store_true", help="Use the installed pair from the exact staging timeout and read the earlier complete fixture without reinstalling or staging new files")
     resume.add_argument("--after-teardown", action="store_true", help="Use the exact teardown failure as the immediate predecessor without staging new files")
+    resume.add_argument("--after-preview", action="store_true", help="Verify the editor controls and cutover observer on the unchanged fixture after the exact preview pass")
     args = parser.parse_args()
     raise SystemExit(run_open(args.commit, args.app_sha, args.test_sha, args.build_receipt,
-                              after_contention=args.after_contention, reuse_read_fixture=args.reuse_read_fixture, after_teardown=args.after_teardown))
+                              after_contention=args.after_contention, reuse_read_fixture=args.reuse_read_fixture,
+                              after_teardown=args.after_teardown, after_preview=args.after_preview))
