@@ -24,7 +24,7 @@ class SavedOcrApplicationTest {
     private val wake = ActivationBoundOcrWake(activation, target)
     private val factory = SavedOcrPreparer.SessionFactory { _, _, _ -> error("Test does not open the native engine") }
     private val session = object : SavedOcrScheduling.QualifiedSession {
-        override val activation = this@SavedOcrApplicationTest.activation
+        override val activation = (this@SavedOcrApplicationTest).activation
         override val canCreateJobs = true
         override suspend fun reconcilePage(document: DocumentId, page: PageId): SavedOcrWork.Target? = null
         override fun pendingPages() = emptyFlow<SavedOcrWork.Target>()
@@ -71,7 +71,7 @@ class SavedOcrApplicationTest {
         val runtime = SavedOcrApplication.Runtime(factory) { _, _ -> error("Restart must not consult defaults") }
         val expectedTarget = target
         val graph = object : SavedOcrApplication.Graph {
-            override val activation = this@SavedOcrApplicationTest.activation
+            override val activation = (this@SavedOcrApplicationTest).activation
             override fun reconcile(defaults: OcrConfiguration?): SavedOcrScheduling.QualifiedSession = error("Worker must not discover unrelated pages")
             override suspend fun execute(target: SavedOcrWork.Target, sessions: SavedOcrPreparer.SessionFactory): SavedOcrWork.Outcome {
                 assertEquals(expectedTarget, target)

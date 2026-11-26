@@ -217,7 +217,7 @@ class LocalLibraryMergeCommitTest {
         val backup = LocalLibraryDirectory(backupRoot, DirectorySync { true })
         private val journal = LocalLibraryMergeJournal(work, checkNotNull(work.parentFile).toPath(), DirectorySync { true })
         private val ancestorIds = List(predecessors) { id(1_000 + it) }
-        val baseline = this@LocalLibraryMergeCommitTest.baseline.copy(predecessorId = ancestorIds.lastOrNull())
+        val baseline = (this@LocalLibraryMergeCommitTest).baseline.copy(predecessorId = ancestorIds.lastOrNull())
         private val next = intent.candidate.copy(id = if (reuseOldAncestor) ancestorIds.first() else intent.candidate.id)
 
         init {

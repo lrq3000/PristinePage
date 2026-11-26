@@ -93,6 +93,10 @@ class PublicHistoryTest(unittest.TestCase):
         result = self.push_check("51b972d7c69494f7be2b92448bedababebcda319")
         self.assertEqual(result.returncode, 0, result.stderr)
 
+    def test_accepts_the_reviewed_portability_labels_in_their_exact_history(self):
+        result = self.push_check("35e5519c1ca84ad95f8e46771bf108442311bbd0")
+        self.assertEqual(result.returncode, 0, result.stderr)
+
     def test_does_not_generalize_the_kotlin_label_exception(self):
         label = "this@" + "SavedOcrApplicationTest.target"
         tip = self.commit(self.base, self.add_file("Fixture.kt", f'val contact = "{label}"\n'), "Synthetic fixture")
