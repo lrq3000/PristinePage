@@ -84,6 +84,8 @@ BACKUP_CASE = "app.pristinepage.LibraryFolderFilesJourneyTest#defaultLibraryExpo
 SETTINGS_BACKUP_CASE = "app.pristinepage.LibraryFolderFilesJourneyTest#settingsPublishesOneBackupOfTheSyntheticDefaultLibrary"
 SETTINGS_PICKER_CASE = "app.pristinepage.LibraryFolderFilesJourneyTest#settingsOpensAndCancelsFilesWithoutStartingABackup"
 MAIN_SETTINGS_OPEN_CASE = "app.pristinepage.LibraryFolderFilesJourneyTest#mainSettingsOpensAnExistingLibraryAndReturnsToTheUnchangedDefault"
+SETTINGS_OPEN_CANCELED_GUEST = "agent-pristinepage-tree-d5eac64d59bd"
+SETTINGS_OPEN_CANCELED_RUN = "picker-adapter-library-tree-14e34a5f3966"
 SETTINGS_RECOVERY_CASE = "app.pristinepage.LibraryFolderFilesJourneyTest#coldSettingsRecoversTheExactCompletedBackupWithoutWriting"
 BACKUP_DEATH_CASE = "app.pristinepage.LibraryFolderFilesJourneyTest#endsProcessAfterBackupCommitBeforeDelivery"
 BACKUP_DEATH_RECOVERY_CASE = "app.pristinepage.LibraryBackupDeathRecoveryTest#coldProcessInspectsInterruptedDeliveryWithoutReplay"
@@ -235,12 +237,31 @@ def select_settings_picker_case(args):
 
 
 def select_main_settings_open(args):
+    reuse = getattr(args, "settings_open_reuse", False)
+    error = "MainActivity Settings Open requires a standalone fresh synthetic app graph"
     if not args.settings_open:
+        need(not reuse, error)
         return None
-    identity = {"settings_open", "fresh", "commit", "app_sha", "test_sha", "guest"}
-    need(args.fresh and not any(value for name, value in vars(args).items() if name not in identity),
-         "MainActivity Settings Open requires a standalone fresh synthetic app graph")
+    identity = {"settings_open", "settings_open_reuse", "fresh", "commit", "app_sha", "test_sha", "guest"}
+    need(args.fresh != reuse and (not reuse or args.guest == SETTINGS_OPEN_CANCELED_GUEST) and
+         not any(value for name, value in vars(args).items() if name not in identity), error)
     return MAIN_SETTINGS_OPEN_CASE
+
+
+def verify_canceled_settings_open_release(record, previous):
+    archive = previous / f"{previous.name}-canceled-release.json"
+    observed = json.loads(archive.read_bytes())
+    trace = previous / f"{previous.name}-commands.jsonl"
+    blocker = previous / f"{previous.name}-canceled-cleanup-blocker.json"
+    need(record["name"] == observed["guest"] == SETTINGS_OPEN_CANCELED_GUEST and
+         record["generation"] == observed["generation"] == "8f251e03-368e-49cb-98b0-3ab356ece420" and
+         record["index"] == observed["index"] and record["shutdown_processes"] == [observed["originalProcess"]] and
+         record["runtime_evidence"] == str(archive.resolve()) and observed["shutdownVerified"] is True and
+         observed["noRuntimeConsumer"] is True and observed["testLaunched"] is False and observed["storageDeleted"] is False and
+         sha(trace) == observed["commandsSha256"] and sha(blocker) == observed["anchoredBlockerSha256"] and
+         not any({"install", "instrument", "push"}.intersection(json.loads(row)["argv"])
+                 for row in trace.read_text(encoding="utf-8").splitlines()),
+         "The exact canceled guest release does not establish an unspent Settings run")
 
 
 def select_settings_recovery_case(args):
@@ -2013,8 +2034,10 @@ def run(args):
          not subprocess.check_output(["git", "ls-files", "--others", "--exclude-standard", "--", *INPUTS]),
          "The checked-out production/test build inputs do not match the admitted source")
     need(re.fullmatch(r"agent-pristinepage-tree-[a-f0-9]{12}", args.guest), "Require a dedicated library app-test guest name")
-    need(args.fresh != bool(args.previous), "Choose first admission or an exact retained predecessor pair")
     settings_open = select_main_settings_open(args)
+    reuse_empty_settings = args.settings_open_reuse
+    absent_before_install = args.fresh or reuse_empty_settings
+    need(absent_before_install != bool(args.previous), "Choose first admission or an exact retained predecessor pair")
     picker_case = select_settings_picker_case(args)
     recovery_case = select_settings_recovery_case(args)
     backup_case = select_backup_case(args)
@@ -2547,7 +2570,9 @@ def run(args):
     ns = load_allocator(ROOT, args.guest, raw, "pristinepage-tree-" + os.environ["OPENCODE_SESSION_ID"])
 
     def admit_independent(record):
-        if advanced_recipe and bound_release:
+        if reuse_empty_settings:
+            verify_canceled_settings_open_release(record, raw.parent / SETTINGS_OPEN_CANCELED_RUN)
+        elif advanced_recipe and bound_release:
             verify_advanced_recipe_release(recipe_baseline, record, *bound_release, advanced_release)
         elif bound_release:
             verify_bound_recipe_release(recipe_baseline, record, *bound_release)
@@ -2562,7 +2587,7 @@ def run(args):
 
     class FolderRun(run_type(ns, purpose="pristinepage-library-app-tree", operation="PristinePage Files tree",
                              fresh_disk_floor_gib=16, add_statuses=(0, 1, 2, 3),
-                              admit_released=admit_independent if independent_claim or recipe_baseline else None,
+                               admit_released=admit_independent if independent_claim or recipe_baseline or reuse_empty_settings else None,
                               reassign_released=bool(append_release or advanced_release))):
         def process(self, pid):
             return inspect_prior_pid(super().process, pid)
@@ -2622,14 +2647,14 @@ def run(args):
             verify_closed_backup(adb, path, prior_generation, marker)
 
         present = set(adb("shell", "pm", "list", "packages", APP).splitlines())
-        expected = set() if args.fresh else {f"package:{p}" for p in built}
+        expected = set() if absent_before_install else {f"package:{p}" for p in built}
         need(present == expected, "The exact expected package set did not match; nothing was replaced")
         installed = {p: run.installed_hash(p) if f"package:{p}" in present else None for p in built}
         if recipe_baseline:
             need(installed == previous, "The selected edit predecessor APK pair was not installed")
         elif independent_derived:
             verify_independent_derived_installed(installed, previous)
-        elif not args.fresh:
+        elif not absent_before_install:
             check_installed_pair(installed, previous, hashes)
         run.save(run.path("installed-before.json"), installed, durable=True)
         if bound_baseline:
@@ -3134,6 +3159,7 @@ if __name__ == "__main__":
     parser.add_argument("--settings-backup", action="store_true", help="Exercise real Settings publication on an admitted synthetic guest")
     parser.add_argument("--settings-picker-only", action="store_true", help="Open and cancel Files from Settings on the retained synthetic guest; never select a destination")
     parser.add_argument("--settings-open", action="store_true", help="Open a complete synthetic library from the real MainActivity Settings and return to Default on a fresh app guest")
+    parser.add_argument("--settings-open-reuse", action="store_true", help="Reclaim only the canceled Settings guest that stopped before its first APK install")
     parser.add_argument("--settings-recover", metavar="COMPLETED_MANIFEST_SHA", help="Read the existing Settings receipt after a cold launch; never open a picker")
     parser.add_argument("--backup-delivery-death", action="store_true", help="One isolated native process death after commit but before delivery; never replay")
     parser.add_argument("--backup-pre-marker", action="store_true",

@@ -31,6 +31,16 @@ class LibraryFolderPickerRunnerTest(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "standalone fresh"):
                 select_main_settings_open(Namespace(**(vars(exact) | changed)))
 
+    def test_main_settings_open_can_use_the_exact_canceled_guest_before_first_install(self):
+        from run_library_folder_picker_ldplayer import MAIN_SETTINGS_OPEN_CASE, SETTINGS_OPEN_CANCELED_GUEST, select_main_settings_open
+        exact = Namespace(settings_open=True, settings_open_reuse=True, guest=SETTINGS_OPEN_CANCELED_GUEST,
+                          fresh=False, previous=None)
+        self.assertEqual(MAIN_SETTINGS_OPEN_CASE, select_main_settings_open(exact))
+        for changed in ({"guest": "different"}, {"fresh": True}, {"previous": ["earlier.apk"]},
+                        {"settings_open": False}, {"probe_write": True}):
+            with self.assertRaisesRegex(RuntimeError, "standalone fresh"):
+                select_main_settings_open(Namespace(**(vars(exact) | changed)))
+
     def test_cutover_continuation_accepts_only_an_unlaunched_observer_on_the_exact_installed_pair(self):
         from run_selected_folder_open_ldplayer import CONTROLS_CASE, CUTOVER_CASE, PREVIEW_PASS_SHA, verify_unlaunched_cutover
         pair = {"app.pristinepage.debug": "a" * 64, "app.pristinepage.debug.test": "b" * 64}
