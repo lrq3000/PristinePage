@@ -119,13 +119,19 @@ internal class RoomLibraryCatalogStage(private val application: Context) {
             val metadata = RoomMetadataAccess(stage)
             val catalog = RoomDocumentCatalog(metadata, stage.catalog())
             val editable = RoomEditablePages(metadata, stage.catalog())
-            val scoped = object : DocumentCatalog {
+            val scoped = object : DocumentCatalog, app.pristinepage.data.repository.SearchableAlbumCatalog {
                 override suspend fun list(after: DocumentId?, limit: Int) =
                     access.read { catalog.list(after, limit) }
                 override suspend fun load(documentId: DocumentId) =
                     access.read { catalog.load(documentId) }
                 override suspend fun activeImport(documentId: DocumentId) =
                     access.read { catalog.activeImport(documentId) }
+                override suspend fun listAlbums(order: app.pristinepage.data.model.AlbumOrder, locale: java.util.Locale,
+                    after: app.pristinepage.data.model.AlbumPosition?, limit: Int) =
+                    access.read { catalog.listAlbums(order, locale, after, limit) }
+                override suspend fun searchAlbums(query: app.pristinepage.data.repository.AlbumSearchQuery, order: app.pristinepage.data.model.AlbumOrder,
+                    locale: java.util.Locale, after: app.pristinepage.data.model.AlbumPosition?, limit: Int) =
+                    access.read { catalog.searchAlbums(query, order, locale, after, limit) }
             }
             val scopedEditable = object : EditablePages {
                 override suspend fun load(documentId: DocumentId, pageId: PageId) =

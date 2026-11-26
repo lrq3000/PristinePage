@@ -20,6 +20,7 @@ import app.pristinepage.data.library.RoomLibraryFolderExport
 import app.pristinepage.data.library.LibraryActivation
 import app.pristinepage.data.library.LibraryFolderExportRequest
 import app.pristinepage.data.library.LibraryFolderExportState
+import app.pristinepage.data.library.LibrarySnapshotAdmission
 import app.pristinepage.data.model.ExportSnapshot
 import app.pristinepage.data.model.JobId
 import app.pristinepage.data.model.OperationError
@@ -58,6 +59,14 @@ class PrivateImportStore private constructor(
     val sourceMetadata: RoomSourceMetadataSearch by lazy { SourceMetadataComposition.bind(this) }
 
     override fun close() = exportLifetime.close()
+
+    /** Refuse an unfinished draft/import under the old graph's cutover fence. This reads existing rows and does not retire anything. */
+    suspend fun requireNoUnfinishedLibraryWork() = withContext(Dispatchers.IO) {
+        val checkpoint = { coroutineContext.ensureActive() }
+        RoomMetadataAccess(database).transaction {
+            LibrarySnapshotAdmission.verifyInTransaction(database.openHelper.readableDatabase, checkpoint)
+        }
+    }
 
     /** Caller must have obtained the exact writable Files capability for an explicit backup. Does not change the active location. */
     suspend fun exportLibraryTo(request: LibraryFolderExportRequest): LibraryFolderExportReceipt =

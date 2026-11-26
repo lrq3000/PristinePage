@@ -118,7 +118,7 @@ class LibraryFolderFilesJourneyTest {
                  "separatesIndependentlySelectedRootsWithoutAParentGrant", "selectedFilesMergeAppendsOnlyTheMissingOriginalAndKeepsItsPredecessor",
                  "selectedFilesMergeCanAppendTwiceWithoutReusingAnOlderStage", "endsProcessAfterSelectedAppendCompletionBeforeDelivery",
                  "oneFilesSelectionPublishesOnlyAClosedEditedCatalog", "selectedRecipeReceiptBindsTheExactIssuingActivation",
-                 "selectedRecipeAdvancesOnlyTheVerifiedDirectSuccessor"))
+                 "selectedRecipeAdvancesOnlyTheVerifiedDirectSuccessor", "confirmedOpenSwitchesToTheSelectedFilesCatalogAndRevocationDoesNotFallBack"))
             interruptionCompose else compose
         rule.apply(next, description)
     }
@@ -920,6 +920,42 @@ class LibraryFolderFilesJourneyTest {
                 assertEquals("library_activation_changed", (obsolete as RepositoryFailure).error.safeMessageKey)
                 assertEquals(before + (tree.toString() to (true to true)), LibraryIndependentRootGrants.inventory(app))
                 LibraryIndependentRootGrants.refuseParentAccess(app, folder)
+            }
+        }
+    }
+
+    @Test fun confirmedOpenSwitchesToTheSelectedFilesCatalogAndRevocationDoesNotFallBack() {
+        withIndependentFilesSelections(chooseAnchor = false, writableDestination = true, singleDestination = true) { app, _, selections, _ ->
+            val tree = selections.single()
+            val files = File(app.filesDir.canonicalFile, "library-open-fixture-${UUID.randomUUID()}").apply { check(mkdir()) }
+            val isolated = object : ContextWrapper(app) {
+                override fun getApplicationContext(): Context = this
+                override fun getFilesDir(): File = files
+            }
+            val scratch = File(files, "scratch").apply { check(mkdir()) }
+            val start = AndroidLibraryStartup(isolated)
+            runBlocking {
+                val previous = start.requireDefaultActivation()
+                val preview = start.prepareOpenExistingFolder(scratch, previous, tree)
+                assertEquals(previous, start.recordedDefaultActivation())
+                assertEquals(1, preview.albums)
+                val selected = start.openVerifiedExistingFolder(scratch, preview)
+                assertEquals(previous.number + 1, selected.number)
+                assertEquals(null, start.recordedDefaultActivation())
+                val catalog = AndroidLibraryStartup(isolated).useSelectedCatalog(scratch) { active, current ->
+                    assertEquals(selected, active)
+                    current.list(null, 10)
+                }
+                assertEquals(1, catalog.single().pageCount)
+                val repeated = runCatching { start.openVerifiedExistingFolder(scratch, preview) }.exceptionOrNull() as RepositoryFailure
+                assertEquals("library_activation_changed", repeated.error.safeMessageKey)
+                app.contentResolver.releasePersistableUriPermission(tree, Intent.FLAG_GRANT_WRITE_URI_PERMISSION)
+                app.contentResolver.releasePersistableUriPermission(tree, Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                val unavailable = runCatching {
+                    AndroidLibraryStartup(isolated).useSelectedCatalog(scratch) { _, _ -> error("A removed grant cannot open the catalog") }
+                }.exceptionOrNull() as RepositoryFailure
+                assertEquals("library_reconnect_required", unavailable.error.safeMessageKey)
+                assertEquals(null, start.recordedDefaultActivation())
             }
         }
     }

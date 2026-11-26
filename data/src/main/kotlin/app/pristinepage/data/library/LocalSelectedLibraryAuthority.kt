@@ -49,6 +49,21 @@ internal class LocalSelectedLibraryAuthority(root: File, sync: DirectorySync = P
 
     fun initializeDefault(next: Selection): Boolean = pointer.replace(null, next)
 
+    /** Explicit return only. A missing or inconsistent private origin can never mint a new default library. */
+    fun returnToDefault(expected: Selection, requireCurrent: () -> Unit): Selected.Default {
+        if (expected.location !is Location.Folder || read()?.selection != expected) throw IOException("The folder is no longer selected")
+        val origin = pointer.readDefaultOrigin() ?: throw IOException("The original default library identity is unavailable")
+        val next = origin.copy(identity = origin.identity.copy(activation = Math.addExact(expected.identity.activation, 1L)))
+        val confirmed = Selected.Default(next)
+        try {
+            if (!pointer.replace(expected, next, requireCurrent)) throw IOException("The default library was not selected")
+        } catch (failure: IOException) {
+            if (read() != confirmed) throw failure
+        }
+        if (read() != confirmed || pointer.readDefaultOrigin() != origin) throw IOException("The default selection could not be acknowledged")
+        return confirmed
+    }
+
     /** Advance the exact current writable binding, without switching folders. The settings owner must hold its lane and supply a verified live publication; this private swap does not authenticate or replay a provider write. */
     fun advanceVerifiedFolderGeneration(
         expected: Selected.Folder, successor: LibraryGeneration, requireCurrent: () -> Unit,
@@ -104,6 +119,14 @@ internal class LocalSelectedLibraryAuthority(root: File, sync: DirectorySync = P
         val bound = boundSelection(next, grant, generation)
         if (pointer.readVerified() != expected) throw IOException("The expected selection is no longer active")
         checkpoint()
+        if (expected.location == Location.Default) {
+            val origin = expected.copy(identity = expected.identity.copy(activation = 1L))
+            if (pointer.readDefaultOrigin() == null && expected.identity.activation == 1L) {
+                try { verifications.createDefaultOrigin(pointer.encodeDefaultOrigin(origin)) }
+                catch (_: FileAlreadyExistsException) { /* Require exact durable readback below. */ }
+            }
+            if (pointer.readDefaultOrigin() != origin) throw IOException("The default library origin cannot be retained")
+        }
         grants.writeVerified(grant)
         if (readVerifiedGeneration(location) == null) {
             try { verifications.createFolderVerification(grant.grantId, generation) }

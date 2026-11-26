@@ -85,6 +85,41 @@ class AndroidLibraryTreeRead(context: Context, private val scratchDirectory: Fil
         return selection.generation
     }
 
+    internal fun requireConfirmedRoot(verified: Verified, expected: AndroidLibraryDescriptorAncestry.Observation) {
+        if (requireVerifiedTree(verified).editRoot != expected) throw LibraryTreeUnavailable("The published library folder changed")
+    }
+
+    internal suspend fun <T : Any> openConfirmedFolder(
+        verified: Verified, requireCurrent: () -> Unit, choose: (LibraryGeneration, () -> Unit) -> T,
+    ): T {
+        val candidate = requireVerifiedTree(verified)
+        val rootIdentity = candidate.editRoot ?: throw IOException("Folder confirmation requires a writable, verified tree")
+        val tree = Uri.parse(candidate.tree)
+        return withReadBackend(tree, scratchDirectory, requireCurrent) { backend, read, checkpoint ->
+            backend.requireWritableAccess()
+            backend.openRootDirectory().use { held ->
+                if (AndroidLibraryDescriptorAncestry.observe(held) != rootIdentity) {
+                    throw LibraryTreeUnavailable("The confirmed library folder changed")
+                }
+                readCatalog(read, candidate.generation, checkpoint) { _, _ -> Unit }
+                fun requireDestination() {
+                    checkpoint()
+                    requireCurrent()
+                    backend.requireWritableAccess()
+                    backend.rebindRoot(rootIdentity)
+                    read.requireCurrent(candidate.generation)
+                    backend.rebindRoot(rootIdentity)
+                    backend.requireWritableAccess()
+                }
+                requireDestination()
+                choose(candidate.generation, ::requireDestination)
+            }.also {
+                backend.requireWritableAccess()
+                checkpoint()
+            }
+        }
+    }
+
     /** Fail before Files on a repeated bound request; the writer rechecks under its exclusive lane before creating any stage. */
     private fun requireUnusedRecipeOperation(files: Path, operation: String) {
         requireOpaqueId(operation)
@@ -118,7 +153,8 @@ class AndroidLibraryTreeRead(context: Context, private val scratchDirectory: Fil
         }
     }
 
-    internal data class PairInput(val tree: Uri, val expected: LibraryGeneration? = null)
+    internal data class PairInput(val tree: Uri, val expected: LibraryGeneration? = null,
+        val root: AndroidLibraryDescriptorAncestry.Observation? = null)
     internal data class PairMember(val tree: Uri, val generation: LibraryGeneration, val snapshot: RoomLibrarySavedCatalog.Snapshot)
     internal data class MergePlan(val destination: PairInput, val incoming: PairInput, val candidate: LibraryCatalogMerge.Candidate)
 
@@ -136,7 +172,8 @@ class AndroidLibraryTreeRead(context: Context, private val scratchDirectory: Fil
         val candidate = LibraryCatalogMerge.plan(operationId, left.snapshot, right.snapshot, originals.checkpoint)
         LibraryBackupRead.admitOriginals(candidate.catalog.originals.map { ObjectId(it.byteSha256, it.byteCount) },
             MAX_TREE_ORIGINAL_BYTES, originals.checkpoint)
-        MergePlan(PairInput(left.tree, left.generation), PairInput(right.tree, right.generation), candidate)
+        MergePlan(PairInput(left.tree, left.generation, originals.destinationIdentity),
+            PairInput(right.tree, right.generation, originals.incomingIdentity), candidate)
     }
 
     /** Compare both current inventories and measure capacity on the held destination. This neither reserves space nor grants a write. */
@@ -544,6 +581,9 @@ class AndroidLibraryTreeRead(context: Context, private val scratchDirectory: Fil
                         second.openRootDirectory().use { heldRight ->
                             val leftIdentity = AndroidLibraryDescriptorAncestry.observe(heldLeft)
                             val rightIdentity = AndroidLibraryDescriptorAncestry.observe(heldRight)
+                            if (left.root?.let { it != leftIdentity } == true || right.root?.let { it != rightIdentity } == true) {
+                                throw LibraryTreeUnavailable("A confirmed library folder changed")
+                            }
                             AndroidLibraryDescriptorAncestry.withDerivedAnchor(heldLeft, heldRight, hints, checkpoint) { requireAncestry ->
                                 fun requireCurrent() {
                                     requireIssuingAuthority()

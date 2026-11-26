@@ -4,6 +4,8 @@ import app.pristinepage.data.library.ActiveLibraryFence.Identity
 import app.pristinepage.data.library.ActiveLibraryFence.Location
 import app.pristinepage.data.library.ActiveLibraryFence.Selection
 import app.pristinepage.data.library.ActiveLibrarySession
+import app.pristinepage.data.library.DefaultLibraryOperations
+import app.pristinepage.data.library.LibraryActivation
 import java.io.IOException
 import java.util.UUID
 import kotlinx.coroutines.CompletableDeferred
@@ -56,6 +58,25 @@ class ActiveLibrarySessionTest {
         assertNull(session.use(default.identity) { fail("Old token opened the new library"); it.name })
         assertEquals("new", session.use(selected.identity) { it.name })
         assertEquals(1, old.closes)
+    }
+
+    @Test fun folderCutoverCannotStartUntilTheDefaultGraphDrainsAndBlocksNewBorrowsDuringTheSwap() = runTest {
+        val activation = LibraryActivation(default.identity.libraryId, default.identity.activation)
+        val graph = Graph("default")
+        val owner = DefaultLibraryOperations(activation, graph)
+        val entered = CompletableDeferred<Unit>()
+        val release = CompletableDeferred<Unit>()
+        val borrow = async { owner.use(activation) { entered.complete(Unit); release.await(); it.name } }
+        entered.await()
+        assertNull(owner.exclusiveCutover(activation) { error("An old borrower still owns the graph") })
+        release.complete(Unit)
+        assertEquals("default", borrow.await())
+        assertEquals("verified", owner.exclusiveCutover(activation) {
+            assertNull(owner.use(activation) { error("An old token reopened the graph during cutover") })
+            assertNull(owner.exclusiveCutover(activation) { error("Two switch operations entered") })
+            "verified"
+        })
+        assertEquals("default", owner.use(activation) { it.name })
     }
 
     @Test fun uncertainPointerNeverExposesEitherGraphBeforeAnExactReopen() = runTest {

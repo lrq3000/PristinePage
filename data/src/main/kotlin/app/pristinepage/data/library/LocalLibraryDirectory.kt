@@ -258,6 +258,9 @@ internal class LocalLibraryDirectory(root: File, private val directorySync: Dire
         recordIdentity = recordIdentity, verifyRecordLink = requireOwner) { it.write(bytes) }
 
     /** Private grant records never cross a library export or accept a destination path from a provider. */
+    fun createDefaultOrigin(bytes: ByteArray) =
+        create("default-origin", privateSupport = true) { it.write(bytes) }
+
     fun createFolderGrant(record: LibraryFolderGrantRecord) =
         create(folderGrantPath(record.grantId), privateSupport = true) { it.write(record.encode()) }
 

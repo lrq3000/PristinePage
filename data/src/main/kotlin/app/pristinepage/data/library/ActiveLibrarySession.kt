@@ -29,6 +29,9 @@ internal class ActiveLibrarySession<G : AutoCloseable>(initial: Selection, graph
             operation(bound.graph).also { check(it !== bound.graph) }
         }
 
+    suspend fun <T : Any> exclusiveCutover(expected: Identity, operation: suspend () -> T): T? =
+        fence.exclusiveCutover(expected, operation)
+
     /** Open an independent candidate before publishing. Hand off the graph synchronously at allocation, before dispatcher return can lose it to cancellation, and only return normally once verified. */
     suspend fun change(expected: Identity, next: Selection, openVerified: suspend (Selection, (G) -> Unit) -> Unit,
         publishVerified: suspend (Selection, Selection) -> Boolean,
@@ -107,6 +110,10 @@ class DefaultLibraryOperations<G : AutoCloseable>(activation: LibraryActivation,
     suspend fun <T : Any> use(
         expected: LibraryActivation, operation: suspend CoroutineScope.(G) -> T,
     ): T? = session.use(expected.identity(), operation)
+
+    /** Refuse a busy cutover without invoking its mutation. No new default borrow may cross the confirmed switch. */
+    suspend fun <T : Any> exclusiveCutover(expected: LibraryActivation, operation: suspend () -> T): T? =
+        session.exclusiveCutover(expected.identity(), operation)
 
     private fun LibraryActivation.identity() = Identity(libraryId, number)
 }

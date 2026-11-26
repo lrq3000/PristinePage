@@ -115,6 +115,20 @@ class LocalSelectedLibraryAuthorityTest {
         assertEquals(null, writer.readAdvancedFolderGeneration(selected, successor.copy(catalog = ObjectId("d".repeat(64), 621))))
     }
 
+    @Test fun aDeliberateReturnToDefaultReadsOnlyTheOriginalPrivateLibraryIdentity() {
+        val root = roots.newFolder().canonicalFile
+        val writer = LocalSelectedLibraryAuthority(root, sync)
+        val folder = select(writer, writable = true)
+        val switched = writer.returnToDefault(folder.selection) {}
+        assertEquals(Selection(Location.Default, initial.identity.copy(activation = 3)), switched.selection)
+        assertEquals(switched, LocalSelectedLibraryAuthority(root, sync).read())
+        assertFailsWith<IOException> { writer.returnToDefault(folder.selection) { error("Stale switch offered another mutation") } }
+        val next = folder.selection.copy(identity = folder.selection.identity.copy(activation = 4))
+        writer.chooseFolder(switched.selection, next, folder.grant, folder.expectedGeneration)
+        val reread = assertIs<LocalSelectedLibraryAuthority.Selected.Folder>(writer.read())
+        assertEquals(initial.identity.copy(activation = 5), writer.returnToDefault(reread.selection) {}.selection.identity)
+    }
+
     @Test fun aLostPointerAcknowledgmentReadsBackTheExactSuccessorWithoutReenteringPublication() {
         val root = roots.newFolder().canonicalFile
         val pointer = root.resolve("active-library")

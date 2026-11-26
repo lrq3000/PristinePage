@@ -24,21 +24,32 @@ internal class RoomSelectedLibraryMerge(context: Context, private val scratchDir
         requireAuthority: () -> Unit,
         beforeDelivery: (suspend (LibraryGeneration) -> Nothing)? = null,
     ): LibraryGeneration = withContext(Dispatchers.IO) {
+        val published = appendAndAdopt(operationId, destination, incoming, requireAuthority) { generation, _ -> generation }
+        // A per-invocation instrumentation observation only. Never arm this from a chooser, disk state, or a recovered intent.
+        beforeDelivery?.invoke(published)
+        published
+    }
+
+    /** An active merge consumes the one live result under the exact lane. No cold inspection can enter this continuation. */
+    suspend fun <T> appendAndAdopt(operationId: String, destination: AndroidLibraryTreeRead.PairInput, incoming: AndroidLibraryTreeRead.PairInput,
+        requireAuthority: () -> Unit, adopt: suspend (LibraryGeneration, () -> Unit) -> T,
+    ): T = withContext(Dispatchers.IO) {
         requireOpaqueId(operationId)
         if (destination.expected == null || incoming.expected == null) throw IOException("The selected write needs both exact input generations")
         val checkpoint = { coroutineContext.ensureActive() }
         val files = app.filesDir.toPath().toRealPath()
         checkpoint()
         requireAuthority()
-        val published = withSelectedLibraryWriteLane(files) { lane ->
-            appendOwned(operationId, destination, incoming, files, checkpoint) {
+        withSelectedLibraryWriteLane(files) { lane ->
+            fun requireLane() {
+                checkpoint()
                 lane.requireCurrent(files)
                 requireAuthority()
             }
+            val published = appendOwned(operationId, destination, incoming, files, checkpoint, ::requireLane)
+            requireLane()
+            adopt(published) { checkpoint(); lane.requireCurrent(files) }
         }
-        // A per-invocation instrumentation observation only. Never arm this from a chooser, disk state, or a recovered intent.
-        beforeDelivery?.invoke(published)
-        published
     }
 
     private suspend fun appendOwned(operationId: String, destination: AndroidLibraryTreeRead.PairInput, incoming: AndroidLibraryTreeRead.PairInput,
