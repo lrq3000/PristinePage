@@ -150,6 +150,17 @@ class LibraryFolderPickerRunnerTest(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "process absence"):
                 require_selected_cold_process(result(reply), "2345")
 
+    def test_retained_append_death_refuses_any_unexpected_replay_or_cold_launch(self):
+        from run_library_folder_picker_ldplayer import verify_selected_death_handoff_trace, SELECTED_DEATH_CASE, SELECTED_DEATH_RECOVERY_CASE
+        writer = {"argv": ["adb", "shell", "am", "instrument", "-w", "-r", "-e", "class", SELECTED_DEATH_CASE], "exit": 0}
+        refused = {"argv": ["adb", "shell", "rows=$(ps -A -o PID,NAME 2>&1)"], "exit": 71, "stdout": "", "stderr": ""}
+        verify_selected_death_handoff_trace([writer, refused])
+        for trace in ([writer, writer, refused], [writer, refused | {"exit": 0}], [refused, writer],
+                      [writer, refused, writer | {"argv": writer["argv"][:-1] + [SELECTED_DEATH_RECOVERY_CASE]}],
+                      [writer, refused, {"argv": ["adb", "shell", "am", "force-stop", "app.pristinepage.debug"]}]):
+            with self.assertRaisesRegex(RuntimeError, "exact interrupted selected append"):
+                verify_selected_death_handoff_trace(trace)
+
     def test_selected_death_prior_evidence_refuses_already_changed_spend_bytes_and_grants(self):
         from run_library_folder_picker_ldplayer import require_selected_death_prior_evidence
         records = [{"operation": "one"}, {"operation": "two"}]

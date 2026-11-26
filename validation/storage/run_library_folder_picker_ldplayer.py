@@ -108,6 +108,7 @@ INDEPENDENT_CLOSED_DRY_RUN_PASSED = "8730d1669c0f61f82d07eb2ee8d4bcd3d3bd762fed8
 SELECTED_APPEND_HOST_REFUSAL = "ea076b07261c53b5d5f3aea812717dc5f974dec05675c5ff8065c0802fd986f4"
 SELECTED_APPEND_PASSED = "3498e3282d00a523ed7257524afbe2d357c10bec999e617244bead1a2f1e16a7"
 SELECTED_REPEAT_PASSED = "0857432a8308f790866e60559db02729f92bfdacca4a20fc144278c1e1a86200"
+SELECTED_DEATH_COLD_REFUSED = "659fbf69c85ca0c8e22a271b57a065706aae28a3b898a54e927d500219fe67fe"
 UUID_TEXT = r"[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}"
 URI_PERMISSIONS_HEADER = "ACTIVITY MANAGER URI PERMISSIONS (dumpsys activity permissions)"
 BACKUP_ORIGINAL = "ebd602840377a3b3cf763cb6828fee67861ff77c444e8fe5894457ef6d99a24d"
@@ -745,7 +746,13 @@ def exercise_selected_delivery_death(run, adb, ns, raw, guest_root, folder, file
     output = adb("shell", "am", "instrument", "-w", "-r", "-e", "class", SELECTED_DEATH_CASE,
                  "-e", "libraryFixtureFolder", folder, "-e", "librarySelectedAppendOperation", operation, RUNNER, timeout=180, allowed=(0, 1))
     run.path("selected-death-instrumentation.txt").write_text(output, encoding="utf-8")
-    old_pid, fingerprint = read_selected_delivery_death(output, operation)
+    checkpoint = read_selected_delivery_death(output, operation)
+    return complete_selected_delivery_death(run, adb, ns, raw, folder, files, incoming, hashes, operation, grants, checkpoint)
+
+
+def complete_selected_delivery_death(run, adb, ns, raw, folder, files, incoming, hashes, operation, grants, checkpoint):
+    old_pid, fingerprint = checkpoint
+    scope = f"library-selected-death-{operation}"
     recheck_target(run, ns)
     require_selected_cold_process(adb, old_pid)
     require_same_repeat_grants(grants, read_app_persisted_grants(adb))
@@ -968,6 +975,44 @@ def pinned_selected_death_predecessor(raw, guest, installed):
     spends = pinned_selected_repeat_spends(anchor("commands.jsonl"), operations)
     expected = dict(legacy=legacy, grants=grant_record, spends=spends)
     return claim, (grants["fixture"], artifact["fixture"], artifact["incomingFixture"], readings, expected), artifact["previous"]
+
+
+def verify_selected_death_handoff_trace(trace):
+    instrumentation = [(index, record) for index, record in enumerate(trace) if "instrument" in record["argv"]]
+    proof = [(index, record) for index, record in enumerate(trace)
+             if any(arg.startswith("rows=$(ps -A -o PID,NAME 2>&1)") for arg in record["argv"])]
+    need(len(instrumentation) == len(proof) == 1 and instrumentation[0][0] < proof[0][0] and
+         SELECTED_DEATH_CASE in instrumentation[0][1]["argv"] and instrumentation[0][1].get("exit") == 0 and
+         proof[0][1].get("exit") == 71 and not proof[0][1].get("stdout") and not proof[0][1].get("stderr") and
+         not any("force-stop" in record["argv"] for record in trace),
+         "The exact interrupted selected append did not stop at cold admission")
+    return instrumentation[0][1]
+
+
+def pinned_selected_death_handoff(raw, guest, pair):
+    anchor = settings_run_anchors(raw, SELECTED_DEATH_COLD_REFUSED)
+    artifacts = json.loads(anchor("artifacts.json"))
+    claim = json.loads(anchor("claim.json"))
+    attempt = json.loads(anchor("selected-death-attempt.json"))
+    shutdown = json.loads(anchor("shutdown.json"))
+    transcript = [json.loads(row) for row in anchor("commands.jsonl").splitlines()]
+    writer = verify_selected_death_handoff_trace(transcript)
+    operation, folder = attempt["operation"], attempt["fixture"]
+    independent_fixture_children(folder)
+    need(re.fullmatch(UUID_TEXT, operation) and raw.name == "picker-adapter-library-tree-0f3bb6abf393" and
+         artifacts["selectedDeath"] is True and artifacts["selectedRootAppend"] == operation and
+         artifacts["guest"] == claim["name"] == guest and attempt["state"] == "armed" and
+         writer["argv"][-7:] == ["-e", "libraryFixtureFolder", folder, "-e", "librarySelectedAppendOperation", operation, RUNNER] and
+         shutdown["generation"] == claim["generation"] and shutdown["stage"] == "verified-before-release" and
+         shutdown["ownedShutdownVerified"] is True and shutdown["usageReleased"] is False and
+         all(node["running"] is False for node in shutdown["after"]) and
+         pair == {package: sha(raw / f"{package}.apk") for package in (APP, TEST)},
+         "The interrupted selected append does not bind the exact released guest, attempt and installed pair")
+    spent = json.loads((raw.parent / f"settings-retry-spent-{SELECTED_REPEAT_PASSED}.json").read_bytes())
+    need(spent == dict(operation=operation, destination=folder, kind="selected-delivery-death"),
+         "The interrupted selected append admission is not the exact spent attempt")
+    checkpoint = read_selected_delivery_death(anchor("selected-death-instrumentation.txt"), operation)
+    return claim, (folder, operation, artifacts["fixture"], artifacts["incomingFixture"], checkpoint), artifacts["previous"]
 
 
 def pinned_selected_repeat_spends(transcript, operations):
@@ -1321,17 +1366,20 @@ def require_selected_cold_process(adb, writer_pid):
     need(re.fullmatch(r"[1-9][0-9]{0,8}", writer_pid), "Invalid selected writer process identity")
     # Prove a successful guest process inventory that includes its own shell, and return only the package-scoped result.
     script = (
-        'rows=$(ps -A -o PID,NAME 2>&1) || exit 71; '
-        'printf "%s\\n" "$rows" | (read -r first second && [ "$first $second" = "PID NAME" ] || exit 71; '
+        'refuse() { printf "selected-processes-refused:%s\\n" "$1"; exit 71; }; '
+        'rows=$(ps -A -o PID,NAME 2>&1) || refuse unavailable; '
+        'printf "%s\\n" "$rows" | (read -r first second && [ "$first $second" = "PID NAME" ] || refuse header; '
         'observer=0; while read -r pid name; do '
-        'case "$pid" in ""|*[!0-9]*) exit 71 ;; esac; '
-        f'case "$name" in ""|{APP}|{APP}:*|{TEST}|{TEST}:*) exit 71 ;; esac; '
-        f'[ "$pid" != "{writer_pid}" ] || exit 71; '
+        'case "$pid" in ""|*[!0-9]*) refuse row ;; esac; '
+        f'case "$name" in "") refuse row ;; {APP}|{APP}:*|{TEST}|{TEST}:*) refuse package-present ;; esac; '
+        f'[ "$pid" != "{writer_pid}" ] || refuse writer-pid-present; '
         '[ "$pid" != "$$" ] || observer=1; done; '
-        f'[ "$observer" = 1 ] || exit 71; printf "selected-processes-absent:{writer_pid}\\n")'
+        f'[ "$observer" = 1 ] || refuse observer; printf "selected-processes-absent:{writer_pid}\\n")'
     )
-    need(adb("shell", script, allowed=(0, 71)) == f"selected-processes-absent:{writer_pid}\n",
-         "Could not establish exact selected app and writer process absence")
+    reply = adb("shell", script, allowed=(0, 71))
+    diagnostic = re.fullmatch(r"selected-processes-refused:(unavailable|header|row|package-present|writer-pid-present|observer)\n", reply)
+    detail = f" ({diagnostic[1]})" if diagnostic else ""
+    need(reply == f"selected-processes-absent:{writer_pid}\n", "Could not establish exact selected app and writer process absence" + detail)
 
 
 def finish_pre_marker_outcome(outcome, preservation_checks, record, *, label="Pre-marker backup"):
@@ -1620,7 +1668,9 @@ def run(args):
     append_host_recovery = args.selected_append_host_recovery
     selected_repeat = select_selected_repeat(args.selected_append_repeat, selected_append=selected_append,
                                             reassigned=append_release, failed_host=append_host_recovery)
-    selected_death = select_selected_death(args.selected_append_death, selected_append=selected_append,
+    selected_death_recovery = args.selected_append_death_recover
+    need(not (args.selected_append_death and selected_death_recovery), "Select either a fresh write or read-only inspection, never both")
+    selected_death = select_selected_death(args.selected_append_death or selected_death_recovery, selected_append=selected_append,
                                           repeat=selected_repeat, reassigned=append_release, failed_host=append_host_recovery)
     need(append_release is None or (selected_append and re.fullmatch(UUID_TEXT, append_release)),
          "Reassignment is valid only for a standalone selected append and one exact released generation")
@@ -1682,12 +1732,13 @@ def run(args):
     failed_append_fixture = None
     prior_successful_append = None
     prior_successful_repeat = None
+    selected_death_retained = None
     protect_interrupted = None
     death_authority = CAPACITY_PASSED if before_marker else args.backup_death_retry or SETTINGS_COLD_MANIFEST
     death_operation = str(uuid.uuid4()) if args.backup_delivery_death or before_marker else None
     append_operation = str(uuid.uuid4()) if selected_append else None
     repeat_operation = str(uuid.uuid4()) if selected_repeat else None
-    need(not selected_death or not (raw.parent / f"settings-retry-spent-{SELECTED_REPEAT_PASSED}.json").exists(),
+    need(not selected_death or selected_death_recovery or not (raw.parent / f"settings-retry-spent-{SELECTED_REPEAT_PASSED}.json").exists(),
          "The selected delivery-death authorization was already spent; do not launch another writer")
     need(args.backup_death_retry is None or (death_operation and args.backup_death_retry == BACKUP_DIRECT_CONTROL_PASS),
          "Retry requires the exact new no-write batch receipt")
@@ -1713,7 +1764,15 @@ def run(args):
                     dry_pair = previous
                     legacy_pair = previous
                     if selected_death:
-                        independent_claim, prior_successful_repeat, legacy_pair = pinned_selected_death_predecessor(root, args.guest, previous)
+                        repeat_pair = previous
+                        if selected_death_recovery:
+                            need(previous == hashes, "Read-only selected recovery requires the exact already-installed APK pair")
+                            independent_claim, selected_death_retained, repeat_pair = pinned_selected_death_handoff(root, args.guest, previous)
+                            append_operation = selected_death_retained[1]
+                            root = raw.parent / "picker-adapter-library-tree-23f912ee54cb"
+                        repeat_claim, prior_successful_repeat, legacy_pair = pinned_selected_death_predecessor(root, args.guest, repeat_pair)
+                        if not selected_death_recovery:
+                            independent_claim = repeat_claim
                         root = raw.parent / "picker-adapter-library-tree-6a2d8a67bc65"
                     if selected_repeat or selected_death:
                         legacy_claim, prior_successful_append, recovered_pair = pinned_selected_repeat_predecessor(root, args.guest, legacy_pair)
@@ -1960,13 +2019,13 @@ def run(args):
         need(sha(saved) == hashes[package], "Retained candidate APK changed")
         retained[package] = saved
     fixture = raw / "synthetic-library"
-    files = (independent_retained[1] if independent_retained else retained_pre_marker[1] if pre_marker_handoff else retained_ancestry[1] if ancestry_resume else {} if args.ocr_activation or recovery_case or death_receipt
+    files = (selected_death_retained[2] if selected_death_retained else independent_retained[1] if independent_retained else retained_pre_marker[1] if pre_marker_handoff else retained_ancestry[1] if ancestry_resume else {} if args.ocr_activation or recovery_case or death_receipt
              else make_fixture(fixture, with_scan=True))
     original = None if args.ocr_activation or recovery_case or death_receipt else synthetic_scan()[0]
     if original:
         need(files.get(f"objects/{original}") == original, "The populated Files fixture lacks its exact original")
     alternate_fixture = raw / "synthetic-incoming"
-    received = make_fixture(alternate_fixture, with_scan=True, alternate_scan=True) if selected_append else None
+    received = selected_death_retained[3] if selected_death_retained else make_fixture(alternate_fixture, with_scan=True, alternate_scan=True) if selected_append else None
     missing, missing_bytes = (None, None)
     if selected_append:
         missing, payload, _ = synthetic_scan(alternate=True)
@@ -1982,7 +2041,7 @@ def run(args):
                         backupPreMarkerHandoff=pre_marker_handoff, independentRoots=bool(independent_cases),
                         independentRootsRetry=args.independent_roots_retry, independentRootsHandoff=independent_handoff,
                          independentRootsDerived=independent_derived, selectedRootAppend=append_operation, selectedRepeat=repeat_operation,
-                         selectedDeath=selected_death,
+                         selectedDeath=selected_death, selectedDeathReadOnly=bool(selected_death_retained),
                          appendInterveningRelease=append_release, appendHostRecovery=append_host_recovery, incomingFixture=received)),
         encoding="utf-8",
     )
@@ -2055,7 +2114,7 @@ def run(args):
         elif not args.fresh:
             check_installed_pair(installed, previous, hashes)
         run.save(run.path("installed-before.json"), installed, durable=True)
-        if independent_cases:
+        if independent_cases and not selected_death_retained:
             require_cold_backup_app(adb)
         def require_fresh_append_scope():
             private = adb("shell", "run-as", APP, "ls", "-A", "-1", "files").splitlines()
@@ -2063,11 +2122,14 @@ def run(args):
                     f"library-selected-repeat-{append_operation}" if selected_repeat else "library-selected-merge-v1")
             need(name not in private, "A retained selected append must never be repeated")
 
-        if selected_append:
+        if selected_append and not selected_death_retained:
             require_fresh_append_scope()
         if completed:
             verify_completed_guest(publication_claim, run.owned())
-            require_cold_backup_app(adb)
+            if selected_death_retained:
+                require_selected_cold_process(adb, selected_death_retained[4][0])
+            else:
+                require_cold_backup_app(adb)
             verify_completed_destination(adb, *completed)
             baseline = settings_private_baseline(adb)
             need(not (death_operation or death_receipt or independent_cases) or baseline == pinned_cold_baseline,
@@ -2193,7 +2255,7 @@ def run(args):
             else:
                 pre_marker_preservation = checks
         for p, path in retained.items():
-            flags = install_flags(p, installed[p], hashes[p], previous.get(TEST), previous.get(APP))
+            flags = None if selected_death_retained else install_flags(p, installed[p], hashes[p], previous.get(TEST), previous.get(APP))
             if flags is not None:
                 need(sha(path) == hashes[p], "Candidate changed before installation")
                 result = adb("install", *flags, "--no-streaming", path, timeout=130)
@@ -2252,6 +2314,11 @@ def run(args):
             need(not (raw.parent / f"settings-retry-spent-{death_authority}.json").exists(),
                  "This isolated backup death authorization became spent before fixture staging")
         if independent_cases:
+            if selected_death_retained:
+                folder, operation, _, _, checkpoint = selected_death_retained
+                independent_outcome = complete_selected_delivery_death(run, adb, ns, raw, folder, files, received,
+                                                                      hashes, operation, grants_before, checkpoint)
+                return bool(independent_outcome["failed"])
             folder = independent_retained[0] if independent_retained else "PristinePage-tree-" + uuid.uuid4().hex[:12]
             guest_root = f"/sdcard/Documents/{folder}"
             if not independent_retained:
@@ -2500,6 +2567,8 @@ if __name__ == "__main__":
                         help="Run two new selected appends in one isolated synthetic scope after the exact successful release")
     parser.add_argument("--selected-append-death", action="store_true",
                         help="Run one selected append, end its process after the private receipt, then inspect without replay")
+    parser.add_argument("--selected-append-death-recover", action="store_true",
+                        help="Read back the exact retained interruption using its already-installed pair; never launch a writer")
     parser.add_argument("--selected-append-host-recovery", action="store_true",
                         help="Use the pinned failure before Files launch; verify both previous fixture trees before a new test-only attempt")
     parser.add_argument("--provider-capacity", action="store_true",
