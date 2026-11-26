@@ -43,8 +43,9 @@ internal class LocalLibraryBackupAttempts(
         return files.resolve(name(id))
     }
 
-    /** The active inbox survives loss of UI state. Only an exact verified intent identifies its issuing activation. */
-    fun discoverActive(issuedAt: LibraryActivation): LibraryBackupDiscovery {
+    /** A backed-up library and its private receipt are separate. Admit older receipts only for a verified return to the same default store. */
+    fun discoverActive(issuedAt: LibraryActivation, verifiedOrigin: LibraryActivation? = null): LibraryBackupDiscovery {
+        val admits = backupReceiptOwner(issuedAt, verifiedOrigin)
         requireRoot()
         val ids = try {
             Files.newDirectoryStream(files, "$ATTEMPT_PREFIX*").use { entries ->
@@ -67,7 +68,7 @@ internal class LocalLibraryBackupAttempts(
                     if (!directoryPresent(root)) throw IOException("The active backup attempt could not be confirmed")
                     val journal = LocalLibraryFolderExportJournal(root.toFile(), sync, checkpoint)
                     val owner = journal.observeIntentOwner(id)
-                    if (owner != null && owner != issuedAt) continue
+                    if (owner != null && !admits(owner)) continue
                     if (find(id) != root) throw IOException("The active backup attempt could not be confirmed")
                     val observed = journal.reopen(id)
                     if (observed?.intent?.issuedAt != owner) throw IOException("The backup intent changed during discovery")
@@ -80,11 +81,12 @@ internal class LocalLibraryBackupAttempts(
     }
 
     /** A refusal here is private retention only, not a failed or retryable backup. */
-    fun archiveAcknowledged(id: String, issuedAt: LibraryActivation): Boolean {
+    fun archiveAcknowledged(id: String, issuedAt: LibraryActivation, verifiedOrigin: LibraryActivation? = null): Boolean {
+        val admits = backupReceiptOwner(issuedAt, verifiedOrigin)
         val current = find(id) ?: return false
         val journal = LocalLibraryFolderExportJournal(current.toFile(), sync, checkpoint)
         val observed = journal.reopen(id) ?: return false
-        if (observed.intent.issuedAt != issuedAt) throw IOException("The backup belongs to another activation")
+        if (!admits(observed.intent.issuedAt)) throw IOException("The backup belongs to another activation")
         if (observed.phase != LocalLibraryFolderExportJournal.Phase.ACKNOWLEDGED) return false
         if (current.parent == archive) {
             requireArchiveInventory(current, beforeReclamation = false)
@@ -165,5 +167,16 @@ internal class LocalLibraryBackupAttempts(
         val SPEND_NAME = Regex("[a-f0-9]{64}\\.spent")
         val catalogNames = setOf("catalog.sqlite", "export.catalog.owner")
         val journalNames = LocalLibraryDirectory.ExportRecord.entries.map { it.nameOnDisk }.toSet()
+    }
+}
+
+/** This policy is for private history only; no write path accepts a historical issuing activation. */
+internal fun backupReceiptOwner(current: LibraryActivation, verifiedOrigin: LibraryActivation?): (LibraryActivation) -> Boolean {
+    if (verifiedOrigin != null && (verifiedOrigin.number != 1L || verifiedOrigin.libraryId != current.libraryId || current.number <= 1L)) {
+        throw IOException("The default library history is not bound to its verified origin")
+    }
+    return { owner ->
+        owner == current || (verifiedOrigin != null && owner.libraryId == verifiedOrigin.libraryId &&
+            owner.number in verifiedOrigin.number until current.number)
     }
 }

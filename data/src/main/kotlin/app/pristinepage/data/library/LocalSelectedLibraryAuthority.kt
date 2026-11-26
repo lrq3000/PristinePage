@@ -49,6 +49,17 @@ internal class LocalSelectedLibraryAuthority(root: File, sync: DirectorySync = P
 
     fun initializeDefault(next: Selection): Boolean = pointer.replace(null, next)
 
+    /** Historical private receipts may be shown only after proving continuity of the same default library. */
+    fun verifiedDefaultOrigin(current: Selected.Default): LibraryActivation? {
+        if (read() != current) throw IOException("The default library is no longer active")
+        val origin = if (current.selection.identity.activation == 1L) null else {
+            pointer.readDefaultOrigin()?.takeIf { it.identity.libraryId == current.selection.identity.libraryId }
+                ?: throw IOException("The original default library identity is unavailable")
+        }
+        if (read() != current) throw IOException("The default library changed during history admission")
+        return origin?.identity?.let { LibraryActivation(it.libraryId, it.activation) }
+    }
+
     /** Explicit return only. A missing or inconsistent private origin can never mint a new default library. */
     fun returnToDefault(expected: Selection, requireCurrent: () -> Unit): Selected.Default {
         if (expected.location !is Location.Folder || read()?.selection != expected) throw IOException("The folder is no longer selected")

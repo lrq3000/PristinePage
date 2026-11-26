@@ -4,6 +4,7 @@ import app.pristinepage.data.files.DirectorySync
 import app.pristinepage.data.library.ActiveLibraryFence.Identity
 import app.pristinepage.data.library.ActiveLibraryFence.Location
 import app.pristinepage.data.library.ActiveLibraryFence.Selection
+import app.pristinepage.data.library.LibraryActivation
 import app.pristinepage.data.library.LibraryFolderGrantRecord
 import app.pristinepage.data.library.LibraryGeneration
 import app.pristinepage.data.library.LibraryObjectTransfer.ObjectId
@@ -122,10 +123,12 @@ class LocalSelectedLibraryAuthorityTest {
         val switched = writer.returnToDefault(folder.selection) {}
         assertEquals(Selection(Location.Default, initial.identity.copy(activation = 3)), switched.selection)
         assertEquals(switched, LocalSelectedLibraryAuthority(root, sync).read())
+        assertEquals(LibraryActivation(initial.identity.libraryId, 1), writer.verifiedDefaultOrigin(switched))
         assertFailsWith<IOException> { writer.returnToDefault(folder.selection) { error("Stale switch offered another mutation") } }
         val next = folder.selection.copy(identity = folder.selection.identity.copy(activation = 4))
         writer.chooseFolder(switched.selection, next, folder.grant, folder.expectedGeneration)
         val reread = assertIs<LocalSelectedLibraryAuthority.Selected.Folder>(writer.read())
+        assertFailsWith<IOException> { writer.verifiedDefaultOrigin(switched) }
         assertEquals(initial.identity.copy(activation = 5), writer.returnToDefault(reread.selection) {}.selection.identity)
     }
 

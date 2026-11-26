@@ -36,41 +36,52 @@ class AndroidLibraryBackupHistory(context: Context) {
 
     /** Enumerate at most the ordinary active quota. An unresolved row is not confirmation of a finished provider write. */
     suspend fun discoverActive(issuedAt: LibraryActivation): LibraryBackupDiscovery = withLane { files ->
-        requireSelection(files, issuedAt)
-        val active = LocalLibraryBackupAttempts(files) { coroutineContext.ensureActive() }.discoverActive(issuedAt)
-        requireSelection(files, issuedAt)
+        val origin = historyOrigin(files, issuedAt)
+        val active = LocalLibraryBackupAttempts(files) { coroutineContext.ensureActive() }.discoverActive(issuedAt, origin)
+        if (historyOrigin(files, issuedAt) != origin) throw IOException("The default library backup history changed")
         active
     }
 
     suspend fun acknowledge(receipt: LibraryFolderExportReceipt, issuedAt: LibraryActivation): Unit = withLane { files ->
-        requireSelection(files, issuedAt)
+        val origin = historyOrigin(files, issuedAt)
         val attempt = LocalLibraryBackupAttempts(files) { coroutineContext.ensureActive() }.find(receipt.operationId)
             ?: throw IOException("This backup has no retained receipt")
         val journal = openJournal(files, attempt) { coroutineContext.ensureActive() }
         val observed = journal.reopen(receipt.operationId) ?: throw IOException("This backup has no retained receipt")
-        if (observed.intent.issuedAt != issuedAt || observed.intent.backupReceipt() != receipt) {
+        if (!backupReceiptOwner(issuedAt, origin)(observed.intent.issuedAt) || observed.intent.backupReceipt() != receipt) {
             throw IOException("The observed backup receipt does not match the requested acknowledgment")
         }
-        requireSelection(files, issuedAt)
+        if (historyOrigin(files, issuedAt) != origin) throw IOException("The default library backup history changed")
         journal.acknowledge(observed.intent)
-        requireSelection(files, issuedAt)
+        if (historyOrigin(files, issuedAt) != origin) throw IOException("The default library backup history changed")
     }
 
     /** Explicit private housekeeping after acknowledgment; leaves the external folder and all replay evidence untouched. */
     suspend fun archiveAcknowledged(operationId: String, issuedAt: LibraryActivation): Boolean = withLane { files ->
-        requireSelection(files, issuedAt)
-        val archived = LocalLibraryBackupAttempts(files) { coroutineContext.ensureActive() }.archiveAcknowledged(operationId, issuedAt)
-        requireSelection(files, issuedAt)
+        val origin = historyOrigin(files, issuedAt)
+        val archived = LocalLibraryBackupAttempts(files) { coroutineContext.ensureActive() }.archiveAcknowledged(operationId, issuedAt, origin)
+        if (historyOrigin(files, issuedAt) != origin) throw IOException("The default library backup history changed")
         archived
     }
 
-    internal fun requireSelection(files: Path, issuedAt: LibraryActivation) {
+    private fun historyOrigin(files: Path, issuedAt: LibraryActivation): LibraryActivation? =
+        withDefaultSelection(files, issuedAt) { authority, selected -> authority.verifiedDefaultOrigin(selected) }
+
+    internal fun requireSelection(files: Path, issuedAt: LibraryActivation) =
+        withDefaultSelection(files, issuedAt) { _, _ -> }
+
+    private fun <T> withDefaultSelection(files: Path, issuedAt: LibraryActivation,
+        read: (LocalSelectedLibraryAuthority, LocalSelectedLibraryAuthority.Selected.Default) -> T,
+    ): T {
         val authority = LocalLibrarySettingsBootstrap(files.toFile()).openExisting()
             ?: throw IOException("The default library selection is unavailable")
-        val identity = (authority.read() as? LocalSelectedLibraryAuthority.Selected.Default)?.selection?.identity
-        if (identity?.libraryId != issuedAt.libraryId || identity.activation != issuedAt.number) {
+        val selected = authority.read() as? LocalSelectedLibraryAuthority.Selected.Default
+            ?: throw IOException("The default library selection is unavailable")
+        val identity = selected.selection.identity
+        if (identity.libraryId != issuedAt.libraryId || identity.activation != issuedAt.number) {
             throw IOException("The backup no longer belongs to the selected default library")
         }
+        return read(authority, selected)
     }
 
     private fun openJournal(files: Path, attempt: Path, checkpoint: () -> Unit): LocalLibraryFolderExportJournal =
