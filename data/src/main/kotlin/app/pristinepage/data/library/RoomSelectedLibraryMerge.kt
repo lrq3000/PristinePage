@@ -6,18 +6,13 @@ import android.system.Os
 import app.pristinepage.data.model.requireOpaqueId
 import java.io.File
 import java.io.IOException
-import java.nio.channels.FileChannel
-import java.nio.channels.OverlappingFileLockException
 import java.nio.file.Files
 import java.nio.file.LinkOption.NOFOLLOW_LINKS
 import java.nio.file.NoSuchFileException
 import java.nio.file.Path
-import java.nio.file.StandardOpenOption.CREATE
-import java.nio.file.StandardOpenOption.WRITE
 import java.nio.file.attribute.BasicFileAttributes
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ensureActive
-import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.withContext
 
 /** Detached selected-folder append qualification. No activation switch, retired source, or new write following an uncertain result. */
@@ -35,7 +30,12 @@ internal class RoomSelectedLibraryMerge(context: Context, private val scratchDir
         val files = app.filesDir.toPath().toRealPath()
         checkpoint()
         requireAuthority()
-        val published = withWriteLane(files) { appendOwned(operationId, destination, incoming, files, checkpoint, requireAuthority) }
+        val published = withSelectedLibraryWriteLane(files) { requireLane ->
+            appendOwned(operationId, destination, incoming, files, checkpoint) {
+                requireLane()
+                requireAuthority()
+            }
+        }
         // A per-invocation instrumentation observation only. Never arm this from a chooser, disk state, or a recovered intent.
         beforeDelivery?.invoke(published)
         published
@@ -87,23 +87,8 @@ internal class RoomSelectedLibraryMerge(context: Context, private val scratchDir
         return published.generation
     }
 
-    private suspend fun <T> withWriteLane(files: Path, block: suspend () -> T): T {
-        if (!writeLane.tryLock()) throw IOException("Another selected library merge owns private storage")
-        try {
-            // The same app-private lock covers allocation, staging, provider unwind and the completion barrier.
-            FileChannel.open(files.resolve("$STORAGE.lock"), CREATE, WRITE, NOFOLLOW_LINKS).use { channel ->
-                val lock = try { channel.tryLock() } catch (_: OverlappingFileLockException) { null }
-                if (lock == null) throw IOException("Another process owns the selected library merge")
-                lock.use { return block() }
-            }
-        } finally {
-            writeLane.unlock()
-        }
-    }
-
     companion object {
         private const val STORAGE = "library-selected-merge-v1"
-        private val writeLane = Mutex()
 
         private fun journal(root: Path, files: Path) = LocalLibraryMergeJournal(root.toFile(), files, nodeIdentity = { path, _ ->
             try { Os.lstat(path.toString()).let { it.st_dev to it.st_ino } }

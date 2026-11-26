@@ -39,6 +39,11 @@ internal class AndroidSelectedLibraryDestination private constructor(
         requireRoots()
     }
 
+    override fun requireIndependentRevisionJournal(path: Path) {
+        provider.requirePrivateJournal(path)
+        requireRoots()
+    }
+
     override fun generationInventory(checkpoint: () -> Unit): LibraryGenerationInventory {
         val items = listing(generations, MAX_GENERATION_ENTRIES, requireFiles = false)
         val markers = items.filter { it.name.endsWith(".complete") }.map { entry ->
@@ -100,7 +105,11 @@ internal class AndroidSelectedLibraryDestination private constructor(
     }
 
     override fun createCatalog(generation: LibraryGeneration, write: (OutputStream) -> Unit) {
-        publish(catalogs, "${generation.id}.sqlite", generation.catalog, requireRoots, requireRoots, write)
+        createGuardedCatalog(generation, requireRoots, write)
+    }
+
+    override fun createGuardedCatalog(generation: LibraryGeneration, requireCurrent: () -> Unit, write: (OutputStream) -> Unit) {
+        publish(catalogs, "${generation.id}.sqlite", generation.catalog, requireCurrent, requireCurrent, write)
     }
 
     override fun createMarker(generation: LibraryGeneration, bytes: ByteArray): Nothing =

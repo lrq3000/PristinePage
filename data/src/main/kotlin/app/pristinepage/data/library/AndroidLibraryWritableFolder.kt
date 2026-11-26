@@ -14,6 +14,7 @@ import android.system.Os
 import android.system.OsConstants
 import java.io.FileNotFoundException
 import java.io.IOException
+import java.nio.file.Path
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.withContext
@@ -133,6 +134,10 @@ class AndroidLibraryWritableFolder(context: Context) {
             val stat = Os.fstat(directory.fileDescriptor)
             if (!OsConstants.S_ISDIR(stat.st_mode) || stat.st_ino <= 0) throw IOException("The writable library root has no directory identity")
             return stat.st_dev to stat.st_ino
+        }
+
+        fun requirePrivateJournal(path: Path) {
+            if (app.filesDir.toPath().toRealPath() != path) throw IOException("The selected library revision requires its exact private journal")
         }
 
         fun requireExactAccess() {

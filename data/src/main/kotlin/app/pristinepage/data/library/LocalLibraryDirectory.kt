@@ -20,6 +20,8 @@ import java.nio.file.StandardOpenOption.READ
 import java.nio.file.StandardOpenOption.WRITE
 import java.nio.file.attribute.BasicFileAttributes
 
+private const val CATALOG_REVISION_SPEND_HEADER = "pristinepage-catalog-revision-spent-v1\n"
+
 /** Local filesystem only. The caller owns a stable, exclusively controlled app-managed directory; provider URIs cannot be translated into this capability. */
 internal class LocalLibraryDirectory(root: File, private val directorySync: DirectorySync = PlatformDirectorySync) :
     LibraryObjectTransfer.Store, LibraryMergePublication.Destination {
@@ -38,13 +40,35 @@ internal class LocalLibraryDirectory(root: File, private val directorySync: Dire
         }
     }
 
+    override fun requireIndependentRevisionJournal(path: Path) = requireIndependentScratch(path)
+
     override fun open(id: LibraryObjectTransfer.ObjectId) = open(objectPath(id))
     override fun create(id: LibraryObjectTransfer.ObjectId, write: (OutputStream) -> Unit) = create(objectPath(id), write = write)
     override fun create(id: LibraryObjectTransfer.ObjectId, requireCurrent: () -> Unit, write: (OutputStream) -> Unit) =
         create(objectPath(id), beforeStage = requireCurrent, beforeLink = requireCurrent, write = write)
     override fun openCatalog(generation: LibraryGeneration) = open(generation.catalogPath)
     override fun createCatalog(generation: LibraryGeneration, write: (OutputStream) -> Unit) = create(generation.catalogPath, write = write)
+    override fun createGuardedCatalog(generation: LibraryGeneration, requireCurrent: () -> Unit, write: (OutputStream) -> Unit) =
+        create(generation.catalogPath, beforeStage = requireCurrent, beforeLink = requireCurrent, write = write)
     override fun openMarker(generation: LibraryGeneration) = open(markerPath(generation))
+
+    fun requireUnspentCatalogRevision(generation: LibraryGeneration) {
+        open(catalogRevisionSpend(generation))?.use { throw IOException("The catalog revision attempt is already spent") }
+    }
+
+    /** A one-use admission record, not completion. It must be durable before any writable destination stage is opened. */
+    fun spendCatalogRevision(predecessor: LibraryGeneration, successor: LibraryGeneration, requireOwner: () -> Unit) =
+        create(catalogRevisionSpend(successor), privateSupport = true, beforeStage = requireOwner, beforeLink = requireOwner) {
+            it.write(catalogRevisionSpendBytes(predecessor, successor))
+        }
+
+    fun catalogRevisionSpendByteCount(predecessor: LibraryGeneration, successor: LibraryGeneration): Int =
+        catalogRevisionSpendBytes(predecessor, successor).size
+
+    private fun catalogRevisionSpendBytes(predecessor: LibraryGeneration, successor: LibraryGeneration): ByteArray =
+        CATALOG_REVISION_SPEND_HEADER.toByteArray(Charsets.US_ASCII) + predecessor.encode() + successor.encode()
+
+    private fun catalogRevisionSpend(generation: LibraryGeneration) = "catalog-revision-spends/${generation.id}.spent"
 
     /** Private merge-journal use only. An operation ID is never supplied by SQLite rows or a display label. */
     fun openMergeIntent(generation: String) = open(mergeStagePath(generation) + "/merge.intent")
