@@ -49,6 +49,27 @@ internal class LocalSelectedLibraryAuthority(root: File, sync: DirectorySync = P
 
     fun initializeDefault(next: Selection): Boolean = pointer.replace(null, next)
 
+    /** Advance the exact current writable binding, without switching folders. The settings owner must hold its lane and supply a verified live publication; this private swap does not authenticate or replay a provider write. */
+    fun advanceVerifiedFolderGeneration(
+        expected: Selected.Folder, successor: LibraryGeneration, requireCurrent: () -> Unit,
+    ): Selected.Folder {
+        val previous = expected.expectedGeneration
+        val identity = expected.selection.identity
+        if (expected.grant.returnedModes != 3 || successor.libraryId != previous.libraryId ||
+            successor.predecessorId != previous.id || successor.catalogSchema != previous.catalogSchema ||
+            identity.activation == Long.MAX_VALUE || read() != expected
+        ) throw IOException("The edited generation is not a successor to the active writable folder")
+        val next = Selection(Location.Folder(expected.grant.grantId, successor.id), identity.copy(activation = identity.activation + 1))
+        val bound = chooseFolder(expected.selection, next, expected.grant, successor) {
+            if (read() != expected) throw IOException("The active folder binding changed before publication")
+            // A disk barrier may outlast provider access; keep the live check last, immediately before the pointer move.
+            requireCurrent()
+        }
+        val admitted = Selected.Folder(bound, expected.grant, successor)
+        if (read() != admitted) throw IOException("The advanced folder binding could not be acknowledged")
+        return admitted
+    }
+
     /** Called only after verifying the exact next folder and candidate graph. Stage records before publishing the pointer; never delete an old binding on refusal. */
     fun chooseFolder(expected: Selection, next: Selection, grant: LibraryFolderGrantRecord, generation: LibraryGeneration,
         checkpoint: () -> Unit = {},
