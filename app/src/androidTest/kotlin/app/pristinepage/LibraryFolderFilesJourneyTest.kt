@@ -88,7 +88,9 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.awaitCancellation
+import kotlinx.coroutines.async
 import kotlinx.coroutines.cancelAndJoin
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
@@ -133,7 +135,7 @@ class LibraryFolderFilesJourneyTest {
                  "separatesIndependentlySelectedRootsWithoutAParentGrant", "selectedFilesMergeAppendsOnlyTheMissingOriginalAndKeepsItsPredecessor",
                  "selectedFilesMergeCanAppendTwiceWithoutReusingAnOlderStage", "endsProcessAfterSelectedAppendCompletionBeforeDelivery",
                  "oneFilesSelectionPublishesOnlyAClosedEditedCatalog", "selectedRecipeReceiptBindsTheExactIssuingActivation",
-                 "selectedRecipeAdvancesOnlyTheVerifiedDirectSuccessor", "confirmedOpenSwitchesToTheSelectedFilesCatalogAndRevocationDoesNotFallBack",
+                 "selectedRecipeAdvancesOnlyTheVerifiedDirectSuccessor", "opensSelectedAlbumGridAndVerifiedOriginalWhileBrowsing",
                  "startEmptyRefusesANestedStageOfTheCurrentFilesLibrary"))
             interruptionCompose else compose
         rule.apply(next, description)
@@ -940,7 +942,7 @@ class LibraryFolderFilesJourneyTest {
         }
     }
 
-    @Test fun confirmedOpenSwitchesToTheSelectedFilesCatalogAndRevocationDoesNotFallBack() {
+    @Test fun opensSelectedAlbumGridAndVerifiedOriginalWhileBrowsing() {
         withIndependentFilesSelections(chooseAnchor = false, writableDestination = true, singleDestination = true) { app, _, selections, _ ->
             val tree = selections.single()
             val files = File(app.filesDir.canonicalFile, "library-open-fixture-${UUID.randomUUID()}").apply { check(mkdir()) }
@@ -967,6 +969,12 @@ class LibraryFolderFilesJourneyTest {
                 val document = catalog.single().documentId
                 val page = services.loadLibraryAlbum(selected, document).pages.single()
                 val editor = EditorIdentity(document, page.pageId, selected)
+                coroutineScope {
+                    val originals = async { services.originalLibraryEditor(editor, page.sourceId.value).use { it.bitmap.getPixel(0, 0) } }
+                    val metadata = async { services.loadLibraryEditorPage(editor) }
+                    assertEquals(page.pageId, metadata.await().pageId)
+                    assertEquals(0xff132b47.toInt(), originals.await())
+                }
                 val owner = SupervisorJob()
                 val clicked = AtomicReference<EditorIdentity?>()
                 try {
@@ -1018,6 +1026,9 @@ class LibraryFolderFilesJourneyTest {
                 val repeated = runCatching { start.openVerifiedExistingFolder(scratch, preview) }.exceptionOrNull() as RepositoryFailure
                 assertEquals("library_activation_changed", repeated.error.safeMessageKey)
                 app.contentResolver.releasePersistableUriPermission(tree, Intent.FLAG_GRANT_WRITE_URI_PERMISSION)
+                val writeRevoked = runCatching { services.originalLibraryEditor(editor, page.sourceId.value).close() }.exceptionOrNull()
+                assertEquals("library_reconnect_required", (writeRevoked as RepositoryFailure).error.safeMessageKey)
+                assertTrue(start.location().needsReconnect)
                 app.contentResolver.releasePersistableUriPermission(tree, Intent.FLAG_GRANT_READ_URI_PERMISSION)
                 val unavailable = runCatching {
                     AndroidLibraryStartup(isolated).useSelectedCatalog(scratch) { _, _ -> error("A removed grant cannot open the catalog") }

@@ -65,6 +65,7 @@ class PageEditorScreen(
     private val nextPage: (() -> Unit)? = null,
     private val savedOcr: SavedPageOcrReader? = null,
     private val showOcrDiagnostics: Boolean = false,
+    private val allowSave: Boolean = true,
 ) : EditorContent {
     @Composable override fun Content(session: EditorSession, onExit: () -> Unit) {
         val state by session.state.collectAsStateWithLifecycle()
@@ -221,10 +222,11 @@ class PageEditorScreen(
                 Text(stringResource(R.string.editor_heading), Modifier.weight(1f), style = MaterialTheme.typography.titleMedium)
                 Button(onClick = {
                     if (state.dirty) {
+                        if (!allowSave) return@Button
                         if (guidedStep == null) applyRevision = state.page?.recipeRevision
                         session.apply()
                     } else chosenPanel = ""
-                }, enabled = editable && !shapeBlocksApply && (state.dirty || (guidedStep == null && panel.isNotEmpty())),
+                }, enabled = editable && !shapeBlocksApply && (if (state.dirty) allowSave else guidedStep == null && panel.isNotEmpty()),
                     modifier = Modifier.heightIn(min = 48.dp).testTag("editor-apply")) { Text(stringResource(R.string.editor_apply)) }
             }
             val screenHeight = androidx.compose.ui.platform.LocalConfiguration.current.screenHeightDp
@@ -237,6 +239,7 @@ class PageEditorScreen(
             }
             Column(Modifier.weight(1f).fillMaxWidth().verticalScroll(rememberScrollState()).padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             if (state.loading) CircularProgressIndicator()
+            if (!allowSave) Text(stringResource(R.string.editor_selected_preview_only), style = MaterialTheme.typography.bodySmall)
             state.error?.let {
                 Text(if (it.safeMessageKey == "editor_save_delivery_unconfirmed") stringResource(R.string.editor_save_delivery_unconfirmed)
                     else errorText(it.code), color = MaterialTheme.colorScheme.error)
@@ -416,7 +419,7 @@ class PageEditorScreen(
             onDismissRequest = session::keepEditing,
             title = { Text(stringResource(R.string.editor_exit_title)) },
             text = { if (shapeBlocksApply) ShapeSaveNotice(state, preview) else Text(stringResource(R.string.editor_exit_notice)) },
-            confirmButton = { TextButton(onClick = session::applyAndBack, enabled = editable && !shapeBlocksApply, modifier = Modifier.heightIn(min = 48.dp).testTag("editor-apply-exit")) { Text(stringResource(R.string.editor_apply)) } },
+            confirmButton = { if (allowSave) TextButton(onClick = session::applyAndBack, enabled = editable && !shapeBlocksApply, modifier = Modifier.heightIn(min = 48.dp).testTag("editor-apply-exit")) { Text(stringResource(R.string.editor_apply)) } },
             dismissButton = { Column {
                 TextButton(onClick = session::keepEditing, modifier = Modifier.heightIn(min = 48.dp).testTag("editor-keep-editing")) { Text(stringResource(R.string.editor_keep_editing)) }
                 TextButton(onClick = session::discardAndBack, modifier = Modifier.heightIn(min = 48.dp).testTag("editor-discard-exit")) { Text(stringResource(R.string.editor_discard_exit)) }

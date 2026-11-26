@@ -63,11 +63,7 @@ class AndroidLibraryStartup(context: Context) {
             is LocalSelectedLibraryAuthority.Selected.Folder -> {
                 val tree = Uri.parse(state.grant.exactUri)
                 val leaf = AndroidLibraryTreeRead.localTreeDocumentId(tree)?.substringAfter(':') ?: ""
-                val granted = withContext(Dispatchers.IO) {
-                    AndroidLibraryTreeRead.hasTrustedLocalProvider(app) && app.contentResolver.persistedUriPermissions.any {
-                        it.uri.toString() == state.grant.exactUri && it.isReadPermission && (state.grant.returnedModes != 3 || it.isWritePermission)
-                    }
-                }
+                val granted = withContext(Dispatchers.IO) { canUseRecordedGrant(state.grant) }
                 Location(state.activation(), leaf, !granted)
             }
         }
@@ -347,7 +343,7 @@ class AndroidLibraryStartup(context: Context) {
             val current = try { authority.read() }
             catch (_: IOException) { reconnect() }
             catch (_: DirectoryIteratorException) { reconnect() }
-            if (current != selected) reconnect()
+            if (current != selected || !canUseRecordedGrant(selected.grant)) reconnect()
         }
         return try {
             reader.useSelectedWorkingLibrary(Uri.parse(selected.grant.exactUri), selected.expectedGeneration, ::confirmSelection) { catalog, originals, editable ->
@@ -355,6 +351,11 @@ class AndroidLibraryStartup(context: Context) {
             }
         } catch (_: LibraryTreeUnavailable) { reconnect() }
     }
+
+    private fun canUseRecordedGrant(grant: LibraryFolderGrantRecord): Boolean =
+        AndroidLibraryTreeRead.hasTrustedLocalProvider(app) && app.contentResolver.persistedUriPermissions.any {
+            it.uri.toString() == grant.exactUri && it.isReadPermission && (grant.returnedModes != 3 || it.isWritePermission)
+        }
 
     private suspend fun readSelection(allowBootstrap: Boolean): LoadedSelection? = withContext(Dispatchers.IO) {
         coroutineContext.ensureActive()

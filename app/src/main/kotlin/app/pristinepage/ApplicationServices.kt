@@ -108,6 +108,7 @@ class ApplicationServices(context: Context, internal val budget: ImageAllocation
     private data class AtelierPhoto(val draftId: String, val generation: Long, val request: PhotoImportRequest)
     private var atelierPhoto: AtelierPhoto? = null // One reservation in the sole unfinished Atelier draft; never restored from picker data.
     private val libraryStartup = AndroidLibraryStartup(this.context)
+    // The selected reader rebuilds one bounded working graph at a time. Queue metadata and pixels before that lease, together with generation transitions.
     private val selectedLibraryTransition = Mutex()
     private val selectedDecodeQueue = Mutex()
     private var initialized: ApplicationImports? = null
@@ -136,8 +137,10 @@ class ApplicationServices(context: Context, internal val budget: ImageAllocation
         val report = RecoveryReport(0, 0, 0, 0, 0, emptyList())
         if (location.needsReconnect) return LibraryStartup(report, activation, selectedFolder = true, reconnect = true)
         return try {
-            libraryStartup.useIssuedSelectedCatalog(selectedLibraryScratch(), activation) { _, _ ->
-                LibraryStartup(report, activation, selectedFolder = true)
+            selectedLibraryTransition.withLock {
+                libraryStartup.useIssuedSelectedCatalog(selectedLibraryScratch(), activation) { _, _ ->
+                    LibraryStartup(report, activation, selectedFolder = true)
+                }
             }
         } catch (failure: RepositoryFailure) {
             if (failure.error.safeMessageKey != "library_reconnect_required") throw failure
@@ -190,7 +193,9 @@ class ApplicationServices(context: Context, internal val budget: ImageAllocation
         val active = storageLocation()
         if (active.activation != issuedAt) activationChanged()
         if (active.folderLabel == null) return loadDefaultAlbum(issuedAt, document)
-        return libraryStartup.useIssuedSelectedCatalog(selectedLibraryScratch(), issuedAt) { catalog, _ -> catalog.load(document) }
+        return selectedLibraryTransition.withLock {
+            libraryStartup.useIssuedSelectedCatalog(selectedLibraryScratch(), issuedAt) { catalog, _ -> catalog.load(document) }
+        }
     }
 
     internal suspend fun readLibraryHomeAlbums(issuedAt: LibraryActivation?, query: AlbumSearchQuery?, order: AlbumOrder,
@@ -199,9 +204,11 @@ class ApplicationServices(context: Context, internal val budget: ImageAllocation
         val active = storageLocation()
         if (active.activation != issuedAt) activationChanged()
         if (active.folderLabel == null) return readDefaultHomeAlbums(issuedAt, query, order, locale, after, limit)
-        return libraryStartup.useIssuedSelectedCatalog(selectedLibraryScratch(), active.activation) { _, albums ->
-            if (query == null) albums.listAlbums(order, locale, after, limit)
-            else albums.searchAlbums(query, order, locale, after, limit)
+        return selectedLibraryTransition.withLock {
+            libraryStartup.useIssuedSelectedCatalog(selectedLibraryScratch(), active.activation) { _, albums ->
+                if (query == null) albums.listAlbums(order, locale, after, limit)
+                else albums.searchAlbums(query, order, locale, after, limit)
+            }
         }
     }
 
@@ -218,7 +225,9 @@ class ApplicationServices(context: Context, internal val budget: ImageAllocation
         val active = storageLocation()
         if (active.activation != identity.issuedAt) activationChanged()
         if (active.folderLabel == null) return loadDefaultEditorPage(identity)
-        return libraryStartup.loadSelectedEditablePage(selectedLibraryScratch(), identity.issuedAt, identity.documentId, identity.pageId)
+        return selectedLibraryTransition.withLock {
+            libraryStartup.loadSelectedEditablePage(selectedLibraryScratch(), identity.issuedAt, identity.documentId, identity.pageId)
+        }
     }
 
     internal suspend fun renderLibraryEditor(identity: EditorIdentity, request: RenderRequest): RenderResult {
@@ -238,7 +247,7 @@ class ApplicationServices(context: Context, internal val budget: ImageAllocation
         if (active.activation != identity.issuedAt) activationChanged()
         if (active.folderLabel == null) return originalDefaultEditor(identity, sourceId)
         return selectedLibraryPixels(identity.issuedAt) { catalog, _, decoder ->
-            // An unsupported saved recipe can still show its original; admission checks the saved slot, not recipe executability.
+            // Once the portable catalog opens, frame admission uses the saved slot rather than exercising the accepted recipe.
             if (editorPage(catalog, identity).sourceId.value != sourceId) editorPageUnavailable(identity)
             selectedDecodeQueue.withLock { OriginalPreviewBitmapLoader(OriginalPreviewLoader(decoder, budget), budget).load(sourceId) }
         }
@@ -252,9 +261,11 @@ class ApplicationServices(context: Context, internal val budget: ImageAllocation
     ): T {
         var provisional: T? = null
         try {
-            libraryStartup.useIssuedSelectedPageSources(selectedLibraryScratch(), issuedAt) { catalog, pages, originals ->
-                val decoder = SourceDecoder(originals, AndroidSourceInspector(budget))
-                provisional = produce(catalog, pages, decoder)
+            selectedLibraryTransition.withLock {
+                libraryStartup.useIssuedSelectedPageSources(selectedLibraryScratch(), issuedAt) { catalog, pages, originals ->
+                    val decoder = SourceDecoder(originals, AndroidSourceInspector(budget))
+                    provisional = produce(catalog, pages, decoder)
+                }
             }
             currentCoroutineContext().ensureActive()
             return checkNotNull(provisional).also { provisional = null }

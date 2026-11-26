@@ -338,8 +338,9 @@ class MainActivity : ComponentActivity() {
                 }
                 if (selected != null) key(identity) {
                      val issuing = checkNotNull(identity)
-                     val savedOcr = remember(app, issuing) {
-                         SavedPageOcrReader(
+                      val defaultEditor = library.activation == issuing.issuedAt && !library.selectedFolder
+                      val savedOcr = remember(app, issuing, defaultEditor) {
+                          if (!defaultEditor) null else SavedPageOcrReader(
                              readStatus = { page -> services.readDefaultEditorOcrStatus(issuing, page.recipeRevision) },
                              readText = { page -> services.readDefaultEditorOcrText(issuing, page.recipeRevision) },
                             rerunInFlight = app.savedOcrSignals.rerunInFlight,
@@ -353,7 +354,8 @@ class MainActivity : ComponentActivity() {
                              requestSave = { textSave.save(issuing.issuedAt, it) },
                         )
                     }
-                      PageEditorScreen(loadOriginal = loadEditorOriginal, savedOcr = savedOcr, showOcrDiagnostics = settings.ocrDiagnostics,
+                       PageEditorScreen(loadOriginal = loadEditorOriginal, savedOcr = savedOcr, showOcrDiagnostics = settings.ocrDiagnostics,
+                         allowSave = defaultEditor,
                         pageNumber = fallback?.ordinal?.plus(1), albumPageCount = orderedPages.size,
                         previousPage = destination(-1), nextPage = destination(1), originalOnLoadFailure = {
                             if (fallback != null) key(fallback) {
