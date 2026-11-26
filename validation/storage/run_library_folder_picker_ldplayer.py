@@ -39,6 +39,7 @@ SELECTED_DEATH_RECOVERY_CASE = "app.pristinepage.LibrarySelectedAppendDeathRecov
 SELECTED_RECIPE_CASE = "app.pristinepage.LibraryFolderFilesJourneyTest#oneFilesSelectionPublishesOnlyAClosedEditedCatalog"
 SELECTED_RECIPE_BASELINE = "6e8a2b6c8dfdc36c323c548667045688a0f7a5024386e610c5616892708ff794"
 SELECTED_RECIPE_BOOT_REFUSAL = "3eebda9fc80c090ec377221082f6e715af1c232066bf425daf1cb4108474e7e9"
+SELECTED_RECIPE_FRESH_GUEST_KEY = "824a07547898a7b9bc91be9de2c5c25de8131ab7f49b8abfc48d90855a54d2dc"
 INDEPENDENT_COLD_CASE = "app.pristinepage.LibraryProviderAncestryColdTest#twoIndependentFilesRootsRequireDisjointPhysicalAncestry"
 INDEPENDENT_CHILDREN = ("Library-Left", "Library-Right")
 WORKING_CASE = "app.pristinepage.LibraryFolderFilesJourneyTest#populatingAWorkingRoomCatalogDoesNotMaterializeTheOriginal"
@@ -1256,7 +1257,19 @@ def selected_recipe_boot_retry_owner(root, original, previous, candidate):
     return snapshot
 
 
-def exercise_selected_recipe_edit(run, adb, ns, raw, fixture, files, hashes):
+def verify_fresh_recipe_scope(before, after, scope, *, expect_created=True):
+    expected = before | {scope}
+    need(scope not in before and "library-settings" not in before and
+         (after == expected or (not expect_created and after == before)),
+         "The fresh selected edit changed private library state outside its exact attempt")
+
+
+def recipe_private_scopes(adb):
+    text = adb("shell", f"run-as {APP} sh -c 'if [ -d files ]; then ls -A -1 files; fi'")
+    return {leaf for leaf in text.splitlines() if leaf.startswith("library-")}
+
+
+def exercise_selected_recipe_edit(run, adb, ns, raw, fixture, files, hashes, *, fresh=False):
     """One picker and one new operation; preserve an ambiguous result rather than rerunning it."""
     folder = "PristinePage-tree-" + uuid.uuid4().hex[:12]
     operation = str(uuid.uuid4())
@@ -1264,6 +1277,8 @@ def exercise_selected_recipe_edit(run, adb, ns, raw, fixture, files, hashes):
     children = independent_fixture_children(folder)
     left, right = (f"{parent}/{name}" for name in children)
     private = f"files/library-selected-editor-{operation}"
+    scope = private.rsplit("/", 1)[1]
+    initial_private = recipe_private_scopes(adb)
     def identify(path):
         value = adb("shell", "stat", "-c", "%d:%i:%s", path).strip()
         need(re.fullmatch(r"[0-9]+:[1-9][0-9]*:[0-9]+", value), "The selected edit fixture node identity is unavailable")
@@ -1272,8 +1287,12 @@ def exercise_selected_recipe_edit(run, adb, ns, raw, fixture, files, hashes):
         recheck_target(run, ns)
         require_cold_backup_app(adb)
         need({package: run.installed_hash(package) for package in hashes} == hashes and
-             private.rsplit("/", 1)[1] not in adb("shell", "run-as", APP, "ls", "-A", "-1", "files").splitlines(),
+             scope not in recipe_private_scopes(adb),
              "The selected edit does not have an exact installed pair and fresh private scope")
+    if fresh:
+        admit()
+        need(not initial_private and not read_app_persisted_grants(adb), "Fresh selected edit needs no prior library or grants")
+        adb("shell", "mkdir", "-p", "/sdcard/Documents")
     stage_independent_fixture_pair(adb, parent, folder, ((fixture, files), (fixture, files)), admit)
     before = {leaf: identify(f"{left}/{leaf}") for leaf in (*files, "catalogs", "generations", "objects")}
     # For directories compare identity, not extent: new catalog and marker legitimately change directory sizes.
@@ -1285,12 +1304,15 @@ def exercise_selected_recipe_edit(run, adb, ns, raw, fixture, files, hashes):
     run.save(run.path("selected-recipe-attempt.json"), {"folder": folder, "operation": operation, "before": before}, durable=True)
     try:
         admit()
-        spend_settings_retry(raw.parent, SELECTED_RECIPE_BASELINE, dict(operation=operation, destination=folder, kind="selected-recipe-edit"))
+        authority = sha256(f"selected-recipe-fresh-v1:{ns['NAME']}".encode("ascii")).hexdigest() if fresh else SELECTED_RECIPE_BASELINE
+        spend_settings_retry(raw.parent, authority, dict(operation=operation, destination=folder, kind="selected-recipe-edit"))
         output = adb("shell", "am", "instrument", "-w", "-r", "-e", "class", SELECTED_RECIPE_CASE,
                      "-e", "libraryFixtureFolder", folder, "-e", "librarySelectedAppendOperation", operation, RUNNER, timeout=190)
         run.path("selected-recipe-instrumentation.txt").write_text(output, encoding="utf-8")
         passed, failed = read_results(output, (SELECTED_RECIPE_CASE,))
         if not failed:
+            if fresh:
+                verify_fresh_recipe_scope(initial_private, recipe_private_scopes(adb), scope)
             marker_leaf, catalog_leaf = f"generations/{operation}.complete", f"catalogs/{operation}.sqlite"
             marker = read_selected_history_record(lambda *args: adb("shell", *args), f"{left}/{marker_leaf}", 256)
             prior, fields = initial.splitlines(), marker.splitlines()
@@ -1322,6 +1344,8 @@ def exercise_selected_recipe_edit(run, adb, ns, raw, fixture, files, hashes):
         return {"passed": passed, "failed": failed, "installedSha256": hashes}
     finally:
         recheck_target(run, ns)
+        if fresh:
+            verify_fresh_recipe_scope(initial_private, recipe_private_scopes(adb), scope, expect_created=False)
         verify_unchanged_settings_destination(adb, right, files)
         need(adb("shell", "ls", "-A", "-1", parent).splitlines() == sorted(children),
              "The single-root edit affected the synthetic parent")
@@ -1857,7 +1881,10 @@ def run(args):
     independent_derived = args.independent_roots_derived
     selected_append = args.selected_root_append
     selected_recipe = args.selected_recipe_edit
-    need(not args.selected_recipe_boot_retry or selected_recipe, "Boot-only retry requires selected recipe mode")
+    if selected_recipe and args.fresh:
+        need(sha256(args.guest.encode("ascii")).hexdigest() == SELECTED_RECIPE_FRESH_GUEST_KEY,
+             "Fresh selected edit requires its exact admitted guest name")
+    need(not args.selected_recipe_boot_retry or (selected_recipe and not args.fresh), "Boot-only retry requires retained selected recipe mode")
     append_release = args.selected_append_released_generation
     append_host_recovery = args.selected_append_host_recovery
     selected_repeat = select_selected_repeat(args.selected_append_repeat, selected_append=selected_append,
@@ -1883,11 +1910,11 @@ def run(args):
          "The independent-roots handoff requires the exact standalone grant receipt")
     need(not independent_derived or not (args.independent_roots_retry or independent_handoff),
          "Derived independent roots may not repeat or continue a previous selection")
-    need(not selected_recipe or not any((args.fresh, before_marker, args.backup_delivery_death, args.backup_death_retry,
+    need(not selected_recipe or not any((before_marker, args.backup_delivery_death, args.backup_death_retry,
              death_receipt, death_picker_case, ancestry_cases, capacity_case, picker_case, recovery_case, backup_case,
              args.probe_write, args.ocr_activation, args.working_catalog, args.probe_directory, args.activation,
              args.selected_catalog, args.activation_compatibility, args.expect_home, args.settings_retry,
-             args.settings_prior_failure, independent_cases)), "Selected recipe edit requires a standalone retained guest")
+             args.settings_prior_failure, independent_cases)), "Selected recipe edit requires a standalone app guest")
     need(bool(args.settings_retry) == bool(args.settings_prior_failure), "A retained retry requires the exact first failure receipt")
     if args.ocr_activation:
         need(not any((args.fresh, args.expect_home, args.probe_directory, args.working_catalog, args.activation, args.selected_catalog,
@@ -2267,7 +2294,7 @@ def run(args):
                         independentRootsRetry=args.independent_roots_retry, independentRootsHandoff=independent_handoff,
                          independentRootsDerived=independent_derived, selectedRootAppend=append_operation, selectedRepeat=repeat_operation,
                           selectedDeath=selected_death, selectedDeathReadOnly=bool(selected_death_retained), selectedRecipe=selected_recipe,
-                          selectedRecipeBootRetry=bool(recipe_boot_retry),
+                          selectedRecipeBootRetry=bool(recipe_boot_retry), selectedRecipeFresh=selected_recipe and args.fresh,
                          appendInterveningRelease=append_release, appendHostRecovery=append_host_recovery, incomingFixture=received)),
         encoding="utf-8",
     )
@@ -2300,6 +2327,8 @@ def run(args):
     try:
         wait_for_allocator(run, lambda: run.prepare(args.fresh, None, args.fresh), before_claim=True)
         recheck_target(run, ns)
+        if selected_recipe:
+            need(run.owned()["api"] == 28, "The selected Files witness requires API 28")
         if recipe_baseline:
             current = run.owned()
             verify_completed_guest(recipe_baseline, current)
@@ -2344,14 +2373,14 @@ def run(args):
         expected = set() if args.fresh else {f"package:{p}" for p in built}
         need(present == expected, "The exact expected package set did not match; nothing was replaced")
         installed = {p: run.installed_hash(p) if f"package:{p}" in present else None for p in built}
-        if selected_recipe:
+        if recipe_baseline:
             need(installed == previous, "The selected edit predecessor APK pair was not installed")
         elif independent_derived:
             verify_independent_derived_installed(installed, previous)
         elif not args.fresh:
             check_installed_pair(installed, previous, hashes)
         run.save(run.path("installed-before.json"), installed, durable=True)
-        if selected_recipe:
+        if recipe_baseline:
             old_folder, old_operation, old_files, old_incoming, _ = recipe_interrupted
             require_cold_backup_app(adb)
             repeat, legacy, expected = recipe_retained
@@ -2524,7 +2553,13 @@ def run(args):
         need(adb("shell", "pm", "list", "instrumentation", APP).splitlines() ==
              [f"instrumentation:{RUNNER} (target={APP})"], "The instrumentation registry differs")
         if selected_recipe:
-            recipe_outcome = exercise_selected_recipe_edit(run, adb, ns, raw, fixture, files, hashes)
+            if args.fresh:
+                def check_fresh_recipe_grants():
+                    recheck_target(run, ns)
+                    need(not read_app_persisted_grants(adb), "The fresh selected edit left a persisted grant")
+                check_fresh_recipe_grants()
+                recipe_preservation = (check_fresh_recipe_grants,)
+            recipe_outcome = exercise_selected_recipe_edit(run, adb, ns, raw, fixture, files, hashes, fresh=args.fresh)
             return bool(recipe_outcome["failed"])
         if death_receipt:
             recheck_target(run, ns)
@@ -2840,7 +2875,7 @@ if __name__ == "__main__":
     parser.add_argument("--selected-append-host-recovery", action="store_true",
                         help="Use the pinned failure before Files launch; verify both previous fixture trees before a new test-only attempt")
     parser.add_argument("--selected-recipe-edit", action="store_true",
-                        help="Publish one closed catalog-only edit through a single Files grant on the pinned released app guest")
+                        help="Publish one closed catalog-only edit through a single Files grant on an admitted app guest")
     parser.add_argument("--selected-recipe-boot-retry", action="store_true",
                         help="Permit one retry on the exact released guest after its pinned boot-only refusal")
     parser.add_argument("--provider-capacity", action="store_true",

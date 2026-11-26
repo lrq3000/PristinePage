@@ -21,6 +21,20 @@ from run_local_ocr_guest import read_boot_serial
 
 
 class LibraryFolderPickerRunnerTest(unittest.TestCase):
+    def test_fresh_recipe_witness_requires_only_its_own_new_private_scope(self):
+        from run_library_folder_picker_ldplayer import verify_fresh_recipe_scope
+        scope = "library-selected-editor-7bde9de8-6e8e-4a84-9ec3-25a58670daeb"
+        before = {"existing-synthetic-control"}
+        verify_fresh_recipe_scope(before, before | {scope}, scope)
+        verify_fresh_recipe_scope(before, before, scope, expect_created=False)
+        verify_fresh_recipe_scope(before, before | {scope}, scope, expect_created=False)
+        with self.assertRaisesRegex(RuntimeError, "fresh selected edit"):
+            verify_fresh_recipe_scope(before, before | {"library-settings"}, scope, expect_created=False)
+        for prior, actual in ((before, before), (before, {scope}), (before, before | {scope, "library-settings"}),
+                              (before | {scope}, before | {scope})):
+            with self.subTest(prior=prior, actual=actual), self.assertRaisesRegex(RuntimeError, "fresh selected edit"):
+                verify_fresh_recipe_scope(prior, actual, scope)
+
     def test_recipe_boot_retry_requires_no_android_command_and_no_usable_serial(self):
         from run_library_folder_picker_ldplayer import verify_selected_recipe_boot_only_trace
         trace = [
