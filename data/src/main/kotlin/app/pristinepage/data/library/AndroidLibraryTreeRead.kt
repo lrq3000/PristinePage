@@ -7,6 +7,8 @@ import android.os.CancellationSignal
 import android.os.OperationCanceledException
 import android.os.ParcelFileDescriptor
 import android.provider.DocumentsContract
+import android.system.ErrnoException
+import android.system.Os
 import app.pristinepage.core.io.transferExactBytes
 import app.pristinepage.core.pipeline.PixelSize
 import app.pristinepage.data.library.LibraryObjectTransfer.ObjectId
@@ -75,31 +77,39 @@ class AndroidLibraryTreeRead(context: Context, private val scratchDirectory: Fil
 
     internal data class PairInput(val tree: Uri, val expected: LibraryGeneration? = null)
     internal data class PairMember(val tree: Uri, val generation: LibraryGeneration, val snapshot: RoomLibrarySavedCatalog.Snapshot)
-    internal data class MergeEstimate(val destination: PairInput, val incoming: PairInput,
-        val candidate: LibraryCatalogMerge.Candidate, val missingBytes: Long)
+    internal data class MergePlan(val destination: PairInput, val incoming: PairInput, val candidate: LibraryCatalogMerge.Candidate)
 
     private class PairedOriginals(val destination: LibraryTreeReadSource, val incoming: LibraryTreeReadSource,
-        val requireCurrent: () -> Unit, val checkpoint: () -> Unit)
+        val requireCurrent: () -> Unit, val checkpoint: () -> Unit, val availableDestinationBytes: () -> Long)
 
-    /** Compare both inventories and compute missing original bytes only. Catalog space and final destination capacity are separate checks. */
-    internal suspend fun estimateMerge(operationId: String, destination: PairInput, incoming: PairInput,
+    /** Produce only a detached plan. Check byte equivalence and missing objects in the final admitted pair after private staging. */
+    internal suspend fun planMerge(operationId: String, destination: PairInput, incoming: PairInput,
         requireAuthority: () -> Unit,
-    ): MergeEstimate = withVerifiedPairOriginals(destination, incoming, requireAuthority) { left, right, originals ->
+    ): MergePlan = withVerifiedPairOriginals(destination, incoming, requireAuthority) { left, right, originals ->
         val candidate = LibraryCatalogMerge.plan(operationId, left.snapshot, right.snapshot, originals.checkpoint)
         LibraryBackupRead.admitOriginals(candidate.catalog.originals.map { ObjectId(it.byteSha256, it.byteCount) },
             MAX_TREE_ORIGINAL_BYTES, originals.checkpoint)
-        // Each input already used its own ordinary verification budget. Charge a separate bounded allowance for comparison reopens.
-        var remaining = 2 * MAX_TREE_ORIGINAL_BYTES
-        fun open(source: LibraryTreeReadSource, id: ObjectId): InputStream? {
-            if (id.byteCount > remaining) throw IOException("The library merge exceeds the original comparison budget")
-            remaining -= id.byteCount
-            return source.open(id)
-        }
-        val estimate = LibraryMergePayloads.estimate(candidate, left.snapshot.originals, right.snapshot.originals,
-            { open(originals.destination, it) }, { open(originals.incoming, it) },
-            originals.requireCurrent, 0, Long.MAX_VALUE, originals.checkpoint)
-        MergeEstimate(PairInput(left.tree, left.generation), PairInput(right.tree, right.generation), candidate, estimate.missingBytes)
+        MergePlan(PairInput(left.tree, left.generation), PairInput(right.tree, right.generation), candidate)
     }
+
+    /** Compare both current inventories and measure capacity on the held destination. This neither reserves space nor grants a write. */
+    internal suspend fun estimateMerge(plan: MergePlan, metadataBytes: Long, requireAuthority: () -> Unit): LibraryMergePayloads.Estimate =
+        withVerifiedPairOriginals(plan.destination, plan.incoming, requireAuthority) { left, right, originals ->
+            // Each input already used its own ordinary verification budget. Charge comparison reopens separately.
+            var remaining = 2 * MAX_TREE_ORIGINAL_BYTES
+            fun open(source: LibraryTreeReadSource, id: ObjectId): InputStream? {
+                if (id.byteCount > remaining) throw IOException("The library merge exceeds the original comparison budget")
+                remaining -= id.byteCount
+                return source.open(id)
+            }
+            val estimate = LibraryMergePayloads.estimate(plan.candidate, left.snapshot.originals, right.snapshot.originals,
+                { open(originals.destination, it) }, { open(originals.incoming, it) },
+                originals.requireCurrent, metadataBytes, originals.availableDestinationBytes(), originals.checkpoint)
+            if (originals.availableDestinationBytes() < estimate.requiredBytes) {
+                throw IOException("Not enough space for the library transfer")
+            }
+            estimate
+        }
 
     /** Prepare a detached, resource-free result without delivering it or causing visible side effects from the projection. Not publication or activation authority. */
     internal suspend fun <T : Any> withVerifiedPair(left: PairInput, right: PairInput, requireAuthority: () -> Unit,
@@ -152,7 +162,8 @@ class AndroidLibraryTreeRead(context: Context, private val scratchDirectory: Fil
                                     requireCurrent()
                                 }
                                 requireBothTips()
-                                val projected = project(verifiedLeft, verifiedRight, PairedOriginals(leftObjects, rightObjects, ::requireCurrent, checkpoint))
+                                val projected = project(verifiedLeft, verifiedRight, PairedOriginals(leftObjects, rightObjects, ::requireCurrent,
+                                    checkpoint, { availableBytes(heldLeft) }))
                                 requireBothTips()
                                 projected
                             }
@@ -168,6 +179,16 @@ class AndroidLibraryTreeRead(context: Context, private val scratchDirectory: Fil
     private fun bindScratch(path: Path): () -> Unit {
         val key = localLibraryRootKey(path)
         return { if (localLibraryRootKey(path) != key) throw IOException("The library verification attempt changed") }
+    }
+
+    private fun availableBytes(directory: ParcelFileDescriptor): Long = try {
+        val volume = Os.fstatvfs(directory.fileDescriptor)
+        if (volume.f_frsize <= 0L || volume.f_bavail < 0L) throw ArithmeticException()
+        Math.multiplyExact(volume.f_frsize, volume.f_bavail)
+    } catch (_: ErrnoException) {
+        throw IOException("The selected library capacity is unavailable")
+    } catch (_: ArithmeticException) {
+        throw IOException("The selected library capacity is unavailable")
     }
 
     private fun <T : Any> readCatalog(read: LibraryBackupRead, expected: LibraryGeneration?, checkpoint: () -> Unit,

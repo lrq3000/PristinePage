@@ -11,12 +11,13 @@ internal object LibraryPairScratch {
     private const val PREFIX = "library-pair-"
     private const val MAX_ATTEMPTS = 4
 
-    fun <T> use(root: Path, bind: (Path) -> (() -> Unit) = { { } }, block: (Path) -> T): T {
-        fun requireDirectory(path: Path) {
-            if (!Files.isDirectory(path, NOFOLLOW_LINKS) || path.toRealPath() != path) {
-                throw IOException("The library verification scratch directory changed")
-            }
+    private fun requireDirectory(path: Path) {
+        if (!Files.isDirectory(path, NOFOLLOW_LINKS) || path.toRealPath() != path) {
+            throw IOException("The library verification scratch directory changed")
         }
+    }
+
+    inline fun <T> use(root: Path, bind: (Path) -> (() -> Unit) = { { } }, block: (Path) -> T): T {
         val attempt = synchronized(this) {
             requireDirectory(root)
             try {

@@ -40,14 +40,17 @@ object LibraryDescriptorAncestryWitness {
             }
         }
 
-    data class MergePreview(val albums: Int, val names: List<String>, val matchedOriginals: Int, val missingBytes: Long)
+    data class MergePreview(val albums: Int, val names: List<String>, val matchedOriginals: Int, val missingBytes: Long,
+        val closedCatalogBytes: Long, val requiredDestinationBytes: Long, val retainedRevisions: Int)
 
     suspend fun estimateMerge(context: Context, scratch: File, destination: Catalog, incoming: Catalog, requireAuthority: () -> Unit): MergePreview {
-        val estimate = AndroidLibraryTreeRead(context, scratch).estimateMerge(UUID.randomUUID().toString(),
+        val preflight = RoomLibraryTreeMergePreflight(context, scratch).verify(UUID.randomUUID().toString(),
             destination.input, incoming.input, requireAuthority)
-        val albums = estimate.candidate.catalog.albums
+        val estimate = preflight.estimate
+        val albums = preflight.plan.candidate.catalog.albums
         return MergePreview(albums.size, albums.flatMap { album -> album.pages.map { it.filename } },
-            estimate.candidate.requiredMatches.size, estimate.missingBytes)
+            preflight.plan.candidate.requiredMatches.size, estimate.missingBytes, preflight.closedCatalog.byteCount,
+            estimate.requiredBytes, albums.sumOf { album -> album.pages.sumOf { it.revisionCount } })
     }
 
     fun requireSameIdentity(held: ParcelFileDescriptor, reopened: ParcelFileDescriptor) {

@@ -87,6 +87,19 @@ class LibraryMergePayloadsTest {
         assertThrows(IOException::class.java) { LibraryBackupRead.admitOriginals(listOf(abc, abc.copy(byteCount = 2)), 8) }
     }
 
+    @Test fun anUnreferencedDestinationObjectThatDisappearsMustBeBudgetedAtTheFinalComparison() {
+        val previouslyPresent = folder("previously-present", hello to "hello")
+        val nowAbsent = folder("now-absent")
+        val incoming = folder("incoming", hello to "hello")
+        val appended = blob(2, hello)
+        val plan = candidate(listOf(appended), incoming = mapOf(id(2) to id(2)))
+        fun compare(destination: LocalLibraryDirectory, free: Long) =
+            LibraryMergePayloads.estimate(plan, emptyList(), listOf(appended), destination::open, incoming::open, {}, 12, free)
+        assertEquals(0L, compare(previouslyPresent, 12).missingBytes)
+        assertThrows(IOException::class.java) { compare(nowAbsent, 12) }
+        assertEquals(5L, compare(nowAbsent, 17).missingBytes)
+    }
+
     @Test fun onlyTheExactReferencedSnapshotsCanSatisfyThePlan() {
         val prior = blob(1, abc)
         val local = folder("destination", abc to "abc", hello to "hello")

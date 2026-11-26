@@ -612,6 +612,22 @@ class LibraryFolderFilesJourneyTest {
             assertEquals(listOf("Synthetic.png"), preview.names)
             assertEquals(1, preview.matchedOriginals)
             assertEquals(0L, preview.missingBytes)
+            assertTrue(preview.closedCatalogBytes > 0)
+            assertTrue(preview.requiredDestinationBytes >= preview.closedCatalogBytes)
+            assertEquals(4, preview.retainedRevisions)
+            assertEquals(emptyList<String>(), scratch.list()?.toList())
+
+            val canceled = assertThrows(CancellationException::class.java) {
+                runBlocking {
+                    val caller = checkNotNull(coroutineContext[Job])
+                    LibraryDescriptorAncestryWitness.estimateMerge(app, scratch, catalogs[0], catalogs[1]) {
+                        requireNoParentAccess()
+                        val stageClosed = scratch.listFiles().orEmpty().any { File(it, "candidate.sqlite").isFile }
+                        if (stageClosed) caller.cancel(CancellationException("Cancel the closed synthetic candidate"))
+                    }
+                }
+            }
+            assertEquals("Cancel the closed synthetic candidate", canceled.message)
             assertEquals(emptyList<String>(), scratch.list()?.toList())
             requireNoParentAccess()
         }

@@ -99,6 +99,7 @@ INDEPENDENT_FIRST_PICKER_REFUSAL = "2bf9bd0595719b47826ce3f9d0460791599ddbdaf11a
 INDEPENDENT_GRANTS_RETAINED = "f8d8e889ef209c4aaba178c9737d16881ee3afb362cd67ec621ce59793886084"
 INDEPENDENT_COLD_PASSED = "10354effa50ebdf210c7d4d8b5d1fd2709a9388b779414518c2674ffc309095b"
 INDEPENDENT_DERIVED_PASSED = "550461e2206a8f887853ded659da4a494215144c64ba53f14f22a5212d3ccdd9"
+INDEPENDENT_SHARED_READER_PASSED = "8fbc16be139aa19e4e81d73e2c48ebf0e41199ba42500cfcbcf0df5a47b15081"
 UUID_TEXT = r"[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}"
 BACKUP_ORIGINAL = "ebd602840377a3b3cf763cb6828fee67861ff77c444e8fe5894457ef6d99a24d"
 OCR_ACTIVATION_CASES = tuple(f"app.pristinepage.ocr.OcrWorkManagerIntegrationTest#{method}" for method in (
@@ -1088,7 +1089,7 @@ def run(args):
     independent_prior = None
     independent_retained = None
     independent_protected = None
-    prior_derived = None
+    prior_derived = []
     protect_interrupted = None
     death_authority = CAPACITY_PASSED if before_marker else args.backup_death_retry or SETTINGS_COLD_MANIFEST
     death_operation = str(uuid.uuid4()) if args.backup_delivery_death or before_marker else None
@@ -1113,12 +1114,15 @@ def run(args):
             recovery_pair = previous
             if args.independent_roots_retry or independent_handoff or independent_derived:
                 if independent_derived:
-                    latest = settings_run_anchors(root, INDEPENDENT_DERIVED_PASSED)
+                    latest = settings_run_anchors(root, INDEPENDENT_SHARED_READER_PASSED)
                     folder, contents, prior_pair = verify_derived_receipt(latest, args.guest, previous)
                     need(read_results(latest("independent-roots-derived-instrumentation.txt"), (INDEPENDENT_DERIVED_CASE,)) ==
                          ([INDEPENDENT_DERIVED_CASE], []), "The exact derived predecessor did not pass its instrumented case")
-                    prior_derived = folder, contents
+                    prior_derived.append((folder, contents))
                     independent_claim = json.loads(latest("claim.json"))
+                    derived = settings_run_anchors(raw.parent / "picker-adapter-library-tree-c402147a3b32", INDEPENDENT_DERIVED_PASSED)
+                    folder, contents, prior_pair = verify_derived_receipt(derived, args.guest, prior_pair)
+                    prior_derived.append((folder, contents))
                     cold = settings_run_anchors(raw.parent / "picker-adapter-library-tree-2cb71680ebd0", INDEPENDENT_COLD_PASSED)
                     granted = settings_run_anchors(raw.parent / "picker-adapter-library-tree-185be1bd3f81",
                                                   INDEPENDENT_GRANTS_RETAINED)
@@ -1476,16 +1480,16 @@ def run(args):
                 if prior_derived:
                     def check_prior_derived():
                         recheck_target(run, ns)
-                        prior_folder, inventory = prior_derived
-                        root = f"/sdcard/Documents/{prior_folder}"
-                        children = independent_fixture_children(prior_folder)
-                        need(adb("shell", "ls", "-A", "-1", root).splitlines() == sorted(children),
-                             "The previous derived roots fixture changed")
-                        for name in children:
-                            verify_unchanged_settings_destination(adb, f"{root}/{name}", inventory)
-                        need(f"independent-ancestry-grants-{prior_folder}" not in
-                             adb("shell", "run-as", APP, "ls", "-A", "-1", "files").splitlines(),
-                             "The previous derived roots unexpectedly retained a grant handoff")
+                        private = adb("shell", "run-as", APP, "ls", "-A", "-1", "files").splitlines()
+                        for prior_folder, inventory in prior_derived:
+                            root = f"/sdcard/Documents/{prior_folder}"
+                            children = independent_fixture_children(prior_folder)
+                            need(adb("shell", "ls", "-A", "-1", root).splitlines() == sorted(children),
+                                 "A previous derived roots fixture changed")
+                            for name in children:
+                                verify_unchanged_settings_destination(adb, f"{root}/{name}", inventory)
+                            need(f"independent-ancestry-grants-{prior_folder}" not in private,
+                                 "A previous derived roots fixture unexpectedly retained a grant handoff")
                     check_prior_derived()
                     independent_preservation = (*independent_preservation, check_prior_derived)
             else:
