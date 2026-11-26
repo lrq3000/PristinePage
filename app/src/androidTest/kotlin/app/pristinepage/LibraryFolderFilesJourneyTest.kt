@@ -18,6 +18,7 @@ import android.os.Bundle
 import android.os.Process
 import android.os.SystemClock
 import android.provider.DocumentsContract
+import android.system.Os
 import android.view.InputDevice
 import android.view.KeyEvent
 import android.view.MotionEvent
@@ -269,6 +270,9 @@ class LibraryFolderFilesJourneyTest {
 
     @Test fun mainSettingsAppliesOneSelectedEditAndReopensTheSamePage() = mainSettingsJourney(applyEdit = true)
 
+    @Test fun mainSettingsReconnectsAnInterruptedEditWithoutRepublishingIt() =
+        mainSettingsJourney(applyEdit = false, reconnectEdit = true)
+
     @Test fun mainSettingsCancelsTheExactHintedFilesLocationWithoutChangingTheLibrary() {
         val instrumentation = InstrumentationRegistry.getInstrumentation()
         val app = instrumentation.targetContext.applicationContext as PristinePageApplication
@@ -294,6 +298,7 @@ class LibraryFolderFilesJourneyTest {
 
     private fun selectHintedSettingsFiles(instrumentation: Instrumentation, app: Context, storage: LibraryStorageViewModel,
         activation: LibraryActivation, folder: String, select: Boolean,
+        action: LibraryStorageViewModel.Action = LibraryStorageViewModel.Action.CHANGE,
     ) {
         val expected = LibraryFolderPickerContract(writable = true).createIntent(app, Unit)
         val component = checkNotNull(expected.component)
@@ -333,16 +338,16 @@ class LibraryFolderFilesJourneyTest {
             check(unexpected.get() == null) { checkNotNull(unexpected.get()) }
             assertTrue("The real Settings launch did not receive the test hint", hinted.get())
             assertFalse("Settings rejected the chooser launch", storage.state.value.error)
-            fun requirePendingChange() {
+            fun requirePendingAction() {
                 val pending = checkNotNull(storage.state.value.picker) { "Settings settled before the real Files action" }
-                assertEquals(LibraryStorageViewModel.Action.CHANGE, pending.action)
+                assertEquals(action, pending.action)
                 assertEquals(activation, pending.ticket.issuedAt)
             }
-            if (select) requirePendingChange()
+            if (select) requirePendingAction()
             selectSettingsDestination(instrumentation, component.packageName, folder, selectFolder = select,
                 navigateFromRoot = false, allowExactWindowTitle = true)
             if (!select) {
-                requirePendingChange()
+                requirePendingAction()
                 assertTrue("The Files chooser did not receive Back", cancelExactFiles(instrumentation, component.packageName, app.packageName) > 0)
             }
             check(unexpected.get() == null) { checkNotNull(unexpected.get()) }
@@ -351,8 +356,27 @@ class LibraryFolderFilesJourneyTest {
         }
     }
 
-    private fun mainSettingsJourney(applyEdit: Boolean) {
-        check(InstrumentationRegistry.getArguments().getString("librarySettingsOpenFixture") == if (applyEdit) "apply" else "fresh") {
+    private fun reconnectPublication(resolver: ContentResolver, tree: Uri, operation: String): List<Triple<Long, Long, String>> {
+        val root = DocumentsContract.getTreeDocumentId(tree)
+        return listOf("generations/$operation.complete" to 256L, "catalogs/$operation.sqlite" to 2L * 1024 * 1024).map { (leaf, cap) ->
+            val uri = DocumentsContract.buildDocumentUriUsingTree(tree, "$root/$leaf")
+            android.os.ParcelFileDescriptor.AutoCloseInputStream(checkNotNull(resolver.openFileDescriptor(uri, "r"))).use { input ->
+                val node = Os.fstat(input.fd)
+                check(node.st_size in 1..cap)
+                val bytes = ByteArray(node.st_size.toInt())
+                val reader = java.io.DataInputStream(input)
+                reader.readFully(bytes)
+                check(reader.read() == -1)
+                Triple(node.st_dev, node.st_ino, sha256(bytes))
+            }
+        }
+    }
+
+    private fun mainSettingsJourney(applyEdit: Boolean, reconnectEdit: Boolean = false) {
+        val args = InstrumentationRegistry.getArguments()
+        check(!(applyEdit && reconnectEdit))
+        val mode = if (reconnectEdit) "reconnect-edit" else if (applyEdit) "apply" else "fresh"
+        check(args.getString("librarySettingsOpenFixture") == mode) {
             "This journey requires an independently admitted synthetic app graph"
         }
         val instrumentation = InstrumentationRegistry.getInstrumentation()
@@ -360,17 +384,25 @@ class LibraryFolderFilesJourneyTest {
         val folder = settingsFixtureFolder()
         val graph = runBlocking { app.services.imports() }
         val initial = graph.activation
-        assertEquals(if (applyEdit) 3L else 1L, initial.number)
+        assertEquals(if (reconnectEdit) 6L else if (applyEdit) 3L else 1L, initial.number)
         assertTrue(runBlocking { graph.store.catalog.list(null, 2) }.isEmpty())
         val witness = LibraryIndependentRootGrants
         val before = witness.inventory(app)
-        if (applyEdit) {
-            val priorFolder = InstrumentationRegistry.getArguments().getString("librarySettingsPriorFolder")
+        if (applyEdit || reconnectEdit) {
+            val priorFolder = args.getString("librarySettingsPriorFolder")
                 ?.takeIf { it != folder && it.matches(Regex("PristinePage-tree-[0-9a-f]{12}")) }
                 ?: error("No distinct retained Files grant baseline")
-            val previous = Uri.parse(before.keys.single())
-            assertTrue(previous in witness.spellings(priorFolder))
-            assertEquals(true to true, before.getValue(previous.toString()))
+            val retainedFolders = setOf(priorFolder) + args.getString("librarySettingsSecondPriorFolder").let {
+                if (it == null) emptySet() else {
+                    check(reconnectEdit && it != folder && it != priorFolder && it.matches(Regex("PristinePage-tree-[0-9a-f]{12}")))
+                    setOf(it)
+                }
+            }
+            assertEquals(retainedFolders.size, before.size)
+            for (retainedFolder in retainedFolders) {
+                val previous = before.keys.map(Uri::parse).single { it in witness.spellings(retainedFolder) }
+                assertEquals(true to true, before.getValue(previous.toString()))
+            }
         } else assertTrue(before.isEmpty())
         val album = DocumentId("aaaaaaaa-aaaa-4aaa-8aaa-000000000001")
         val editor = compose.runOnUiThread { ViewModelProvider(compose.activity)[EditorViewModel::class.java] }
@@ -383,11 +415,12 @@ class LibraryFolderFilesJourneyTest {
         fun enabled(tag: String) = compose.onAllNodes(hasTestTag(tag) and isEnabled()).fetchSemanticsNodes().size == 1
         openStorage()
         val storage = compose.runOnUiThread { ViewModelProvider(compose.activity)[LibraryStorageViewModel::class.java] }
-        val restoreHidden = InstrumentationRegistry.getArguments().getString("librarySettingsRestoreHidden") == "true"
-        val hint = InstrumentationRegistry.getArguments().getString("librarySettingsExactHint") == "true"
+        val restoreHidden = args.getString("librarySettingsRestoreHidden") == "true"
+        val hint = args.getString("librarySettingsExactHint") == "true"
         check(!restoreHidden || applyEdit)
+        check(!reconnectEdit || hint)
         if (hint) {
-            check(applyEdit && !restoreHidden && Build.VERSION.SDK_INT == 28)
+            check((applyEdit || reconnectEdit) && !restoreHidden && Build.VERSION.SDK_INT == 28)
             selectHintedSettingsFiles(instrumentation, app, storage, initial, folder, select = true)
         } else {
             compose.waitUntil(10_000) { enabled(folderButton) }
@@ -417,6 +450,46 @@ class LibraryFolderFilesJourneyTest {
         compose.onNodeWithTag("settings-back").performClick()
         val albumTag = "atelier-album-${album.value}"
         compose.waitUntil(20_000) { enabled(albumTag) }
+        if (reconnectEdit) {
+            val operation = requireNotNull(args.getString("librarySelectedAppendOperation"))
+            check(UUID.fromString(operation).toString() == operation)
+            val pointer = File(app.filesDir.canonicalFile, "library-settings/active-library")
+            val issuingPointer = pointer.readBytes()
+            val issuingPage = runBlocking { app.services.loadLibraryAlbum(selected, album).pages.single().pageId }
+            // Set up one completed but unadopted edit. From here on only the real Home/Settings and picker may recover it.
+            val scratch = File(app.filesDir.canonicalFile, "recipe-reconnect-witness-$operation").apply { check(mkdir()) }
+            val receipt = runBlocking {
+                try {
+                    LibraryDescriptorAncestryWitness.publishBoundRecipeEdit(app, scratch, selected, operation, album, issuingPage, 2, 2)
+                } finally {
+                    // Nonrecursive: never sweep unexpected evidence left by a failed scratch operation.
+                    Files.delete(scratch.toPath())
+                    check(!scratch.exists())
+                }
+            }
+            assertEquals(operation, receipt.generationId)
+            assertEquals(3L, receipt.revision)
+            assertArrayEquals(issuingPointer, pointer.readBytes())
+            val published = reconnectPublication(app.contentResolver, exact, operation)
+            compose.onNodeWithTag(albumTag).performClick()
+            compose.waitUntil(20_000) { enabled("library-reconnect") }
+            assertArrayEquals(issuingPointer, pointer.readBytes())
+            compose.onNodeWithTag("library-reconnect").performClick()
+            selectHintedSettingsFiles(instrumentation, app, storage, selected, folder, select = true,
+                action = LibraryStorageViewModel.Action.RECONNECT)
+            val expected = selected.copy(number = selected.number + 1)
+            compose.waitUntil(20_000) { storage.state.value.let { it.location?.activation == expected && !it.busy } }
+            assertFalse(storage.state.value.error)
+            assertEquals(expected, runBlocking { app.services.storageLocation() }.activation)
+            assertEquals(retained, witness.inventory(app))
+            assertEquals(published, reconnectPublication(app.contentResolver, exact, operation))
+            Files.write(File(app.filesDir.canonicalFile, "library-settings-apply-pointer-$folder").toPath(),
+                pointer.readBytes(), CREATE_NEW)
+            selected = expected
+            compose.onNodeWithTag("settings-back").performClick()
+            compose.onNodeWithTag("settings-back").performClick()
+            compose.waitUntil(20_000) { enabled(albumTag) }
+        }
         compose.onNodeWithTag(albumTag).performClick()
         val page = runBlocking { app.services.loadLibraryAlbum(selected, album).pages.single() }
         val pageTag = "original-page-${page.pageId.value}"
@@ -437,7 +510,24 @@ class LibraryFolderFilesJourneyTest {
             }
         }
         openPage()
+        if (reconnectEdit) {
+            val pageState = checkNotNull(editor.session.value?.state?.value?.page)
+            assertEquals(3L, pageState.recipeRevision)
+            assertEquals(2, pageState.recipe.geometry.outputQuarterTurns)
+            val result = checkNotNull(editor.session.value?.preview?.value)
+            assertEquals(EditorView.RESULT, result.view)
+            assertFalse(result.previous)
+            val rendered = checkNotNull(result.display)
+            assertEquals(3L, rendered.request.recipeRevision)
+            assertEquals(pageState.recipe, rendered.request.recipe)
+        }
         checkOriginal()
+        if (reconnectEdit) {
+            compose.onNodeWithTag("editor-tool-rotate").performClick()
+            compose.onNodeWithTag("editor-rotate").performScrollTo().performClick()
+            assertTrue(checkNotNull(editor.session.value).state.value.dirty)
+            compose.onNodeWithTag("editor-apply").assertIsNotEnabled()
+        }
         if (applyEdit) {
             compose.onNodeWithTag("editor-tool-shape").performClick()
             compose.onNodeWithTag("editor-shape-perspective").performScrollTo().performClick()
@@ -484,6 +574,7 @@ class LibraryFolderFilesJourneyTest {
             checkOriginal()
         }
         compose.onNodeWithTag("editor-back").performClick()
+        if (reconnectEdit) compose.onNodeWithTag("editor-discard-exit").performClick()
         compose.waitUntil(15_000) { editor.state.value.identity == null && enabled(pageTag) }
         assertTrue(instrumentation.uiAutomation.performGlobalAction(AccessibilityService.GLOBAL_ACTION_BACK))
         compose.waitUntil(15_000) { enabled("atelier-settings") }

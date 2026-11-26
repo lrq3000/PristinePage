@@ -1464,7 +1464,7 @@ def verify_selected_recipe_catalog(catalog, predecessor, original_digest):
         return fingerprint
 
 
-def verify_settings_apply_destination(run, adb, destination, fixture, inventory, default_id):
+def verify_settings_apply_destination(run, adb, destination, fixture, inventory, default_id, *, issuing=4, expected_operation=None):
     """Independently reopen the actual closed successor; the instrumentation only qualifies the foreground acknowledgment."""
     baseline, = (leaf for leaf in inventory if leaf.startswith("generations/"))
     initial_text = (fixture / baseline).read_text(encoding="ascii")
@@ -1476,6 +1476,7 @@ def verify_settings_apply_destination(run, adb, destination, fixture, inventory,
     match = re.fullmatch(rf"({UUID_TEXT})\.complete", marker_name)
     need(match, "Apply published an invalid generation name")
     operation = match[1]
+    need(expected_operation is None or operation == expected_operation, "The closed catalog is not the known setup publication")
     marker_leaf, catalog_leaf = f"generations/{marker_name}", f"catalogs/{operation}.sqlite"
     marker = read_selected_history_record(lambda *args: adb("shell", *args), f"{destination}/{marker_leaf}", 256)
     fields = marker.splitlines()
@@ -1499,7 +1500,7 @@ def verify_settings_apply_destination(run, adb, destination, fixture, inventory,
     selected = read_selected_history_record(private, f"files/library-settings-apply-pointer-{destination.rsplit('/', 1)[1]}", 320)
     attempt = f"files/catalog-recipe-attempts-v1/{operation}"
     receipt = read_bound_recipe_evidence(adb, "files", attempt, destination, initial_text, marker, fields[6],
-                                         advanced=True, issuing=4, captured_pointer=selected)
+                                         advanced=True, issuing=issuing, captured_pointer=selected)
     spend = read_selected_history_record(private, f"files/catalog-revision-spends/{operation}.spent", 1024)
     need(spend == "pristinepage-catalog-revision-spent-v1\n" + initial_text + marker, "Apply lost the catalog revision spend")
     extras = {"catalog.sqlite", "recipe-edit.intent", "recipe-edit.complete", "recipe-edit.catalog-owner"}
@@ -1508,11 +1509,11 @@ def verify_settings_apply_destination(run, adb, destination, fixture, inventory,
         catalog_leaf: (int(fields[5]), fields[6]), marker_leaf: (len(marker.encode("ascii")), sha256(marker.encode("ascii")).hexdigest())})
     pointer = read_selected_history_record(private, f"{root}/active-library", 320)
     origin = read_selected_history_record(private, f"{root}/default-origin", 320)
-    need(require_returned_settings_pointer(pointer, origin, 6) == default_id, "Apply did not return to the same Default library")
+    need(require_returned_settings_pointer(pointer, origin, issuing + 2) == default_id, "The journey did not return to the same Default library")
     run.save(run.path("settings-apply-readback.json"), dict(generation=operation, predecessor=initial[2],
-             catalogSha256=fields[6], recipeSha256=recipe, originalInventoryUnchanged=True, selectedActivation=5,
+              catalogSha256=fields[6], recipeSha256=recipe, originalInventoryUnchanged=True, selectedActivation=issuing + 1,
              receiptSha256=receipt, revisionSpendSha256=sha256(spend.encode("ascii")).hexdigest(), moveSpends=moves,
-             returnedActivation=6), durable=True)
+              returnedActivation=issuing + 2), durable=True)
 
 
 def require_selected_recipe_predecessor(installed, expected_pair, ordinary, expected_ordinary, grants, expected_grants):

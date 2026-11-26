@@ -260,44 +260,52 @@ def run(app_sha, test_sha, manifest, predecessor_sha, *, qualify_pointer_recover
             checks.close_owned(runner)
 
 
+def verify_prior_settings_recovery(adb, inventory, predecessor_files, recovery_attempt, recovery_readback):
+    """Preserve the isolated witness's exact public and private evidence without invoking it again."""
+    def private(*args):
+        return adb("shell", "run-as", checks.APP, *args)
+
+    recovery_folder = recovery_attempt["folder"]
+    operation = recovery_attempt["operation"]
+    prior = f"/sdcard/Documents/{recovery_folder}"
+    children = checks.independent_fixture_children(recovery_folder)
+    left, right = (f"{prior}/{name}" for name in children)
+    marker_leaf, catalog_leaf = f"generations/{operation}.complete", f"catalogs/{operation}.sqlite"
+    initial_leaf, = (leaf for leaf in inventory if leaf.startswith("generations/"))
+    initial = (predecessor_files / initial_leaf).read_text(encoding="ascii")
+    marker = checks.read_selected_history_record(lambda *args: adb("shell", *args), f"{left}/{marker_leaf}", 256)
+    digest = recovery_readback["catalogSha256"]
+    stage = f"merge-staging-{operation}"
+    scope = f"files/library-selected-editor-{operation}"
+    attempt = f"{scope}/catalog-recipe-attempts-v1/{operation}"
+    checks.need(operation == recovery_readback["generation"] and marker.splitlines()[2:4] == [operation, recovery_readback["predecessor"]]
+                and marker.splitlines()[-2:] == [str(recovery_readback["catalogBytes"]), digest]
+                and adb("shell", "ls", "-A", "-1", prior).splitlines() == sorted(children),
+                "The earlier isolated recovery fixture changed")
+    checks.verify_unchanged_settings_destination(adb, right, inventory)
+    checks.verify_unchanged_settings_destination(adb, left, inventory | {
+        marker_leaf: sha256(marker.encode("ascii")).hexdigest(), catalog_leaf: digest}, backup_name=stage)
+    spend = checks.read_selected_history_record(private, f"{scope}/catalog-revision-spends/{operation}.spent", 1024)
+    extras = {"catalog.sqlite", "recipe-edit.intent", "recipe-edit.complete", "recipe-edit.catalog-owner"}
+    leaves = set(private("ls", "-A", "-1", attempt).splitlines())
+    checks.need(not adb("shell", "ls", "-A", "-1", f"{left}/{stage}").strip()
+                and sha256(spend.encode("ascii")).hexdigest() == recovery_readback["revisionSpendSha256"]
+                and checks.read_bound_recipe_evidence(adb, scope, attempt, left, initial, marker, digest, advanced=True)
+                == recovery_readback["boundReceiptSha256"]
+                and checks.verify_library_move_spends(adb, attempt, leaves - extras, {
+                    catalog_leaf: (recovery_readback["catalogBytes"], digest),
+                    marker_leaf: (len(marker.encode("ascii")), sha256(marker.encode("ascii")).hexdigest()),
+                }) == recovery_readback["moveSpends"], "The earlier isolated recovery receipt changed")
+    return True
+
+
 def prepare_hinted_apply(adb, fixture, predecessor_files, recovery_attempt, recovery_readback):
     folder, inventory = fixture["folder"], fixture["inventory"]
     def private(*args):
         return adb("shell", "run-as", checks.APP, *args)
 
     def require_prior_recovery():
-        recovery_folder = recovery_attempt["folder"]
-        operation = recovery_attempt["operation"]
-        prior = f"/sdcard/Documents/{recovery_folder}"
-        children = checks.independent_fixture_children(recovery_folder)
-        left, right = (f"{prior}/{name}" for name in children)
-        marker_leaf, catalog_leaf = f"generations/{operation}.complete", f"catalogs/{operation}.sqlite"
-        initial_leaf, = (leaf for leaf in inventory if leaf.startswith("generations/"))
-        initial = (predecessor_files / initial_leaf).read_text(encoding="ascii")
-        marker = checks.read_selected_history_record(lambda *args: adb("shell", *args), f"{left}/{marker_leaf}", 256)
-        digest = recovery_readback["catalogSha256"]
-        stage = f"merge-staging-{operation}"
-        scope = f"files/library-selected-editor-{operation}"
-        attempt = f"{scope}/catalog-recipe-attempts-v1/{operation}"
-        checks.need(operation == recovery_readback["generation"] and marker.splitlines()[2:4] == [operation, recovery_readback["predecessor"]]
-                    and marker.splitlines()[-2:] == [str(recovery_readback["catalogBytes"]), digest]
-                    and adb("shell", "ls", "-A", "-1", prior).splitlines() == sorted(children),
-                    "The earlier isolated recovery fixture changed")
-        checks.verify_unchanged_settings_destination(adb, right, inventory)
-        checks.verify_unchanged_settings_destination(adb, left, inventory | {
-            marker_leaf: sha256(marker.encode("ascii")).hexdigest(), catalog_leaf: digest}, backup_name=stage)
-        spend = checks.read_selected_history_record(private, f"{scope}/catalog-revision-spends/{operation}.spent", 1024)
-        extras = {"catalog.sqlite", "recipe-edit.intent", "recipe-edit.complete", "recipe-edit.catalog-owner"}
-        leaves = set(private("ls", "-A", "-1", attempt).splitlines())
-        checks.need(not adb("shell", "ls", "-A", "-1", f"{left}/{stage}").strip()
-                    and sha256(spend.encode("ascii")).hexdigest() == recovery_readback["revisionSpendSha256"]
-                    and checks.read_bound_recipe_evidence(adb, scope, attempt, left, initial, marker, digest, advanced=True)
-                    == recovery_readback["boundReceiptSha256"]
-                    and checks.verify_library_move_spends(adb, attempt, leaves - extras, {
-                        catalog_leaf: (recovery_readback["catalogBytes"], digest),
-                        marker_leaf: (len(marker.encode("ascii")), sha256(marker.encode("ascii")).hexdigest()),
-                    }) == recovery_readback["moveSpends"], "The earlier isolated recovery receipt changed")
-        return True
+        return verify_prior_settings_recovery(adb, inventory, predecessor_files, recovery_attempt, recovery_readback)
 
     settings = "files/library-settings"
     pointer_path = f"{settings}/active-library"
