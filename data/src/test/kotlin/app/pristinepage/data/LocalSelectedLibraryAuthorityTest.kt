@@ -104,6 +104,29 @@ class LocalSelectedLibraryAuthorityTest {
         assertEquals(selected, good.read())
     }
 
+    @Test fun reconnectGrantIsHandedOffOnlyAtTheActualPointerSwap() {
+        val root = roots.newFolder().canonicalFile
+        val stable = LocalSelectedLibraryAuthority(root, sync)
+        val selected = select(stable, writable = true)
+        val pointer = root.resolve("active-library")
+        val original = pointer.readBytes().toList()
+        val verification = root.resolve("folder-verifications").resolve("${grant.grantId}-${successor.id}")
+        var handoffs = 0
+        val unavailable = LocalSelectedLibraryAuthority(root, DirectorySync { !verification.exists() })
+        assertFailsWith<IOException> {
+            unavailable.advanceOrReadVerifiedFolderGeneration(selected, successor, beforePointerReplace = { handoffs++ }) {}
+        }
+        assertEquals(0, handoffs)
+        assertEquals(original, pointer.readBytes().toList())
+
+        val advanced = stable.advanceOrReadVerifiedFolderGeneration(selected, successor, beforePointerReplace = {
+            assertEquals(original, pointer.readBytes().toList())
+            handoffs++
+        }) {}
+        assertEquals(1, handoffs)
+        assertEquals(advanced, stable.read())
+    }
+
     @Test fun exactSuccessorReadbackNeverChangesAnUnadvancedPointer() {
         val writer = LocalSelectedLibraryAuthority(roots.newFolder().canonicalFile, sync)
         val selected = select(writer, writable = true)

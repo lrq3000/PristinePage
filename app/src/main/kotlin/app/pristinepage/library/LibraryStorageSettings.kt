@@ -29,6 +29,7 @@ import app.pristinepage.ApplicationServices
 import app.pristinepage.R
 import app.pristinepage.data.library.AndroidLibraryStartup
 import app.pristinepage.data.library.LibraryActivation
+import java.util.concurrent.atomic.AtomicBoolean
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
@@ -55,7 +56,8 @@ internal class LibraryStorageViewModel(context: Context, private val services: A
         fun dispose() = grant.dispose()
         override fun close() = grant.close()
     }
-    data class Change(val old: LibraryActivation, val current: LibraryActivation)
+    /** A null successor still fences the old presentation; reload must resolve the durable outcome. */
+    data class Change(val old: LibraryActivation, val current: LibraryActivation?)
     data class State(val location: AndroidLibraryStartup.Location? = null, val picker: Picker? = null,
         val review: Review? = null, val returnReview: Boolean = false, val busy: Boolean = false, val error: Boolean = false,
         val change: Change? = null)
@@ -103,6 +105,7 @@ internal class LibraryStorageViewModel(context: Context, private val services: A
         if (picked == null) { delivery.cancel(); return }
         viewModelScope.launch {
             var grant: LibraryFolderGrantHandoff.PreviewGrant? = null
+            val replacingPointer = AtomicBoolean()
             try {
                 val location = services.storageLocation()
                 if (!delivery.consume(location.activation)) return@launch
@@ -113,7 +116,11 @@ internal class LibraryStorageViewModel(context: Context, private val services: A
                 }
                 val acquired = checkNotNull(grant)
                 if (picker.action == Action.RECONNECT) {
-                    val verified = services.reconnectLibrary(location.activation, acquired.tree)
+                    val verified = services.reconnectLibrary(location.activation, acquired.tree) {
+                        // An uncertain pointer swap may already rely on the reintroduced exact grant.
+                        acquired.retain()
+                        replacingPointer.set(true)
+                    }
                     acquired.retain()
                     current.value = current.value.copy(location = services.storageLocation(), change = Change(location.activation, verified))
                 } else {
@@ -124,17 +131,31 @@ internal class LibraryStorageViewModel(context: Context, private val services: A
                     current.value = current.value.copy(review = Review(location.activation, location.folderLabel, destination, preview, acquired))
                     grant = null
                 }
-            } catch (canceled: CancellationException) { throw canceled }
-            catch (_: Exception) { current.value = current.value.copy(error = true) }
+            } catch (canceled: CancellationException) {
+                if (replacingPointer.get()) reportUnconfirmedReconnect(picker.ticket.issuedAt)
+                throw canceled
+            }
+            catch (_: Exception) {
+                if (replacingPointer.get()) reportUnconfirmedReconnect(picker.ticket.issuedAt)
+                else current.value = current.value.copy(error = true)
+            }
             finally {
-                withContext(NonCancellable + Dispatchers.IO) {
-                    try { grant?.close() }
-                    catch (_: Exception) { /* Retain uncertain permission; the pointer was not changed during preview. */ }
+                try {
+                    withContext(NonCancellable + Dispatchers.IO) {
+                        try { grant?.close() }
+                        catch (_: Exception) { /* Do not retry uncertain grant cleanup. */ }
+                    }
+                } finally {
+                    delivery.cancel()
+                    current.value = current.value.copy(busy = false)
                 }
-                delivery.cancel()
-                current.value = current.value.copy(busy = false)
             }
         }
+    }
+
+    private fun reportUnconfirmedReconnect(issuing: LibraryActivation) {
+        // Do not wait for a best-effort readback to invalidate the old graph. Its ordinary reopen checks the exact durable selection.
+        current.value = current.value.copy(location = null, error = true, change = Change(issuing, current = null))
     }
 
     fun cancelReview() {
@@ -266,7 +287,7 @@ internal fun AndroidLibraryStartup.Location.requiresLibraryReconnect(refusedActi
     val label = location?.folderLabel?.ifBlank { fallback } ?: default
     val selectable = location != null && location.activation == active && !state.busy && state.picker == null && state.review == null && !state.returnReview &&
         !backupState.busy && !backupState.reviewing && backupState.picker == null
-    LaunchedEffect(owner, active) { owner.refresh() }
+    LaunchedEffect(owner, active, state.busy) { if (!state.busy) owner.refresh() }
     Column {
         if (location?.folderLabel != null) Text(label, style = MaterialTheme.typography.titleMedium)
         Button(onClick = { owner.pick(if (reconnect) LibraryStorageViewModel.Action.RECONNECT

@@ -102,17 +102,22 @@ class AndroidLibraryStartup(context: Context) {
         return ExistingFolderPreview(issuedAt, tree, reader.verifyRecipeEditTarget(tree) { if (authority.read() != before) activationChanged() })
     }
 
-    /** Reconnect only the remembered exact tree and generation; a different folder is a separate Change action. */
-    suspend fun reconnectSelectedFolder(scratchDirectory: File, issuedAt: LibraryActivation, tree: Uri): LibraryActivation {
+    /** Reconnect only the exact tree, at the recorded generation or its verified interrupted edit. */
+    suspend fun reconnectSelectedFolder(
+        scratchDirectory: File, issuedAt: LibraryActivation, tree: Uri, beforePointerReplace: () -> Unit = {},
+    ): LibraryActivation {
         val (authority, current) = readSelection(allowBootstrap = false) ?: folderNotSelected()
         if (current.activation() != issuedAt) activationChanged()
         val selected = current as? LocalSelectedLibraryAuthority.Selected.Folder ?: reconnect()
         if (selected.grant.exactUri != tree.toString()) reconnect()
         val reader = AndroidLibraryTreeRead(app, scratchDirectory)
-        reader.verifyRecipeEditTarget(tree, selected.expectedGeneration) {
-            if (authority.read() != selected) activationChanged()
-        }
-        return issuedAt
+        return reconnectRecordedRecipe(issuedAt, verifyRemembered = {
+            reader.verifyRecipeEditTarget(tree, selected.expectedGeneration) {
+                if (authority.read() != selected) activationChanged()
+            }
+        }, recoverVerified = {
+            reader.recoverInterruptedRecipeSuccessor(issuedAt, selected, beforePointerReplace)
+        })
     }
 
     /** An explicit action, never a recovery fallback for interrupted selected-folder work. */
@@ -171,7 +176,7 @@ class AndroidLibraryStartup(context: Context) {
             val verified = reader.verifyRecipeEditTarget(preview.destination.tree, published, ::requireActive)
             reader.requireConfirmedRoot(verified, checkNotNull(preview.destination.root))
             val next = reader.openConfirmedFolder(verified, { requireLane(); requireActive() }) { generation, checkDestination ->
-                authority.advanceOrReadVerifiedFolderGeneration(selected, generation, checkDestination)
+                 authority.advanceOrReadVerifiedFolderGeneration(selected, generation, requireCurrent = checkDestination)
             }
             requireLane()
             if (authority.read() != next) reconnect()
@@ -293,7 +298,7 @@ class AndroidLibraryStartup(context: Context) {
             is AndroidLibraryTreeRead.SelectedRecipeEdit.Completed -> {
                 val (binding, _, successor) = result.receipt.intent
                 val next = reader.withBoundRecipeAdoption(result, lease, requirePredecessor,
-                    advance = { beforeSwap -> authority.advanceOrReadVerifiedFolderGeneration(binding, successor, beforeSwap) },
+                     advance = { beforeSwap -> authority.advanceOrReadVerifiedFolderGeneration(binding, successor, requireCurrent = beforeSwap) },
                     requireAdvanced = {
                         if (authority.read() != it) reconnect()
                         // Notify the caller while the exact pointer proof is still held, before later provider checks or dispatcher delivery.

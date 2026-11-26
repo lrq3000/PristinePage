@@ -273,18 +273,25 @@ class AndroidLibraryTreeRead(context: Context, private val scratchDirectory: Fil
         reconcileInterruptedRecipe(issuedAt, advancePointer = false)?.generation
 
     /** Recover only the private pointer under the current Files grant. Never reissue the write or deliver an editor Save result. */
-    internal suspend fun recoverInterruptedRecipeSuccessor(issuedAt: LibraryActivation): LibraryActivation? =
-        reconcileInterruptedRecipe(issuedAt, advancePointer = true)?.activation
+    internal suspend fun recoverInterruptedRecipeSuccessor(
+        issuedAt: LibraryActivation, expectedBinding: LocalSelectedLibraryAuthority.Selected.Folder? = null,
+        beforePointerReplace: () -> Unit = {},
+    ): LibraryActivation? = reconcileInterruptedRecipe(issuedAt, advancePointer = true, expectedBinding, beforePointerReplace)?.activation
 
     private data class RecipeReconciliation(val generation: LibraryGeneration, val activation: LibraryActivation?)
 
-    private suspend fun reconcileInterruptedRecipe(issuedAt: LibraryActivation, advancePointer: Boolean): RecipeReconciliation? = withContext(Dispatchers.IO) {
+    private suspend fun reconcileInterruptedRecipe(
+        issuedAt: LibraryActivation, advancePointer: Boolean,
+        expectedBinding: LocalSelectedLibraryAuthority.Selected.Folder? = null, beforePointerReplace: () -> Unit = {},
+    ): RecipeReconciliation? = withContext(Dispatchers.IO) {
         val files = app.filesDir.toPath().toRealPath()
         withSelectedLibraryWriteLane(files) { lane ->
             val authority = LocalLibrarySettingsBootstrap(files.toFile()).openExisting() ?: throw UnsettledSelectedRecipeEdit()
             val binding = authority.read() as? LocalSelectedLibraryAuthority.Selected.Folder ?: throw UnsettledSelectedRecipeEdit()
             val issuing = binding.selection.identity
-            if (LibraryActivation(issuing.libraryId, issuing.activation) != issuedAt || binding.grant.returnedModes != 3) {
+            if (LibraryActivation(issuing.libraryId, issuing.activation) != issuedAt || binding.grant.returnedModes != 3 ||
+                (expectedBinding != null && binding != expectedBinding)
+            ) {
                 throw UnsettledSelectedRecipeEdit()
             }
             var expected = binding
@@ -337,7 +344,7 @@ class AndroidLibraryTreeRead(context: Context, private val scratchDirectory: Fil
                     }
                     requireDestination(checkRetainedCatalog = true)
                     val activation = if (!advancePointer) null else {
-                        expected = authority.advanceOrReadVerifiedFolderGeneration(binding, observed) {
+                        expected = authority.advanceOrReadVerifiedFolderGeneration(binding, observed, beforePointerReplace) {
                             // Do not carry a detached observation across the pointer swap. Rebind the current grant, tip and private evidence.
                             requireDestination(checkRetainedCatalog = true)
                         }
@@ -740,7 +747,7 @@ class AndroidLibraryTreeRead(context: Context, private val scratchDirectory: Fil
                 LibraryBackupRead.Projection(project(generation, catalog), catalog.originals.map { ObjectId(it.byteSha256, it.byteCount) })
             }
         } } catch (_: UnexpectedLibraryTip) {
-            throw LibraryTreeUnavailable("Unexpected library tip during catalog admission")
+            throw SelectedLibraryTipChanged()
         }
 
     /** Stream one original into caller-owned disposable output. The caller must discard that output on any failure and verify closure before using it. */
@@ -1064,7 +1071,7 @@ class AndroidLibraryTreeRead(context: Context, private val scratchDirectory: Fil
 }
 
 /** Known loss of provider identity or access; private scratch and callback exceptions are not this state. */
-internal class LibraryTreeUnavailable(message: String) : IOException(message)
+internal open class LibraryTreeUnavailable(message: String) : IOException(message)
 
 /** An unverified interruption is not proof of lost platform access or permission to replay. */
 internal class UnsettledSelectedRecipeEdit(cause: Throwable? = null) : IOException("The selected edit could not be settled", cause)

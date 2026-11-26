@@ -153,8 +153,8 @@ class ApplicationServices(context: Context, internal val budget: ImageAllocation
     internal suspend fun inspectLibraryFolder(activation: LibraryActivation, tree: Uri): AndroidLibraryStartup.FolderPreview =
         withSelectedLibraryLane { libraryStartup.prepareFolder(selectedLibraryScratch(), activation, tree) }
 
-    internal suspend fun reconnectLibrary(activation: LibraryActivation, tree: Uri): LibraryActivation =
-        withSelectedLibraryLane { libraryStartup.reconnectSelectedFolder(selectedLibraryScratch(), activation, tree) }
+    internal suspend fun reconnectLibrary(activation: LibraryActivation, tree: Uri, beforePointerReplace: () -> Unit): LibraryActivation =
+        withSelectedLibraryLane { libraryStartup.reconnectSelectedFolder(selectedLibraryScratch(), activation, tree, beforePointerReplace) }
 
     internal suspend fun returnToDefaultLibrary(activation: LibraryActivation): LibraryActivation =
         withSelectedLibraryLane { libraryStartup.returnToDefault(activation) }

@@ -77,12 +77,12 @@ internal class LocalSelectedLibraryAuthority(root: File, sync: DirectorySync = P
 
     /** Advance the exact current writable binding, without switching folders. The settings owner must hold its lane and supply a verified live publication; this private swap does not authenticate or replay a provider write. */
     fun advanceVerifiedFolderGeneration(
-        expected: Selected.Folder, successor: LibraryGeneration, requireCurrent: () -> Unit,
+        expected: Selected.Folder, successor: LibraryGeneration, beforePointerReplace: () -> Unit = {}, requireCurrent: () -> Unit,
     ): Selected.Folder {
         val next = advancedFolderSelection(expected, successor)
             ?: throw IOException("The edited generation is not a successor to the active writable folder")
         if (read() != expected) throw IOException("The expected folder generation is no longer active")
-        val bound = chooseFolder(expected.selection, next, expected.grant, successor) {
+        val bound = chooseFolder(expected.selection, next, expected.grant, successor, beforePointerReplace) {
             if (read() != expected) throw IOException("The active folder binding changed before publication")
             // A disk barrier may outlast provider access; keep the live check last, immediately before the pointer move.
             requireCurrent()
@@ -100,9 +100,9 @@ internal class LocalSelectedLibraryAuthority(root: File, sync: DirectorySync = P
     }
 
     fun advanceOrReadVerifiedFolderGeneration(
-        expected: Selected.Folder, successor: LibraryGeneration, requireCurrent: () -> Unit,
+        expected: Selected.Folder, successor: LibraryGeneration, beforePointerReplace: () -> Unit = {}, requireCurrent: () -> Unit,
     ): Selected.Folder = try {
-        advanceVerifiedFolderGeneration(expected, successor, requireCurrent)
+        advanceVerifiedFolderGeneration(expected, successor, beforePointerReplace, requireCurrent)
     } catch (failure: IOException) {
         // The atomic replacement may have occurred before its final force/readback failed. Never repeat the swap or the provider write.
         readAdvancedFolderGeneration(expected, successor) ?: throw failure
